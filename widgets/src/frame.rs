@@ -2,8 +2,6 @@ use {
     std::collections::hash_map::HashMap,
     crate::{
         makepad_derive_widget::*,
-        makepad_image_formats::jpeg,
-        makepad_image_formats::png,
         makepad_draw::*,
         widget::*,
         scroll_bars::ScrollBars,
@@ -23,6 +21,13 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             return Pal::premul(self.get_color())
+        }
+    }}
+    
+    Debug = <Frame> {show_bg: true, draw_bg: {
+        color: #f00
+        fn pixel(self) -> vec4 {
+            return self.color
         }
     }}
     
@@ -291,26 +296,25 @@ live_design!{
             return Pal::premul(self.get_color())
         }
     }}
-    
-    Image = <Frame> {show_bg: true, draw_bg: {
+/*
+    // Legacy Image widget that is being replaced with the new Image widget
+    ImageFrame = <Frame> {show_bg: true, draw_bg: {
         texture image: texture2d
         instance image_scale: vec2(1.0, 1.0)
         instance image_pan: vec2(0.0, 0.0)
+        uniform image_alpha: 1.0
         fn get_color(self) -> vec4 {
             return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
         }
         
         fn pixel(self) -> vec4 {
-            return Pal::premul(self.get_color())
+            let color = self.get_color();
+            return Pal::premul(vec4(color.xyz, color.w * self.image_alpha))
         }
-        
-        shape: Solid,
-        fill: Image
-    }}
+    }}*/
     
     CachedFrame = <Frame> {
-        has_view: true,
-        use_cache: true,
+        optimize: Texture,
         draw_bg: {
             texture image: texture2d
             uniform marked: float,
@@ -327,18 +331,15 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
             }
-            
-            shape: Solid,
-            fill: Image
         }
     }
-    CachedScrollXY = <CachedFrame>{
+    CachedScrollXY = <CachedFrame> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
     }
-    CachedScrollX = <CachedFrame>{
+    CachedScrollX = <CachedFrame> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
     }
-    CachedScrollY = <CachedFrame>{
+    CachedScrollY = <CachedFrame> {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
@@ -347,6 +348,26 @@ live_design!{
 }
 
 // maybe we should put an enum on the bools like
+
+#[derive(Live, LiveHook)]
+#[live_ignore]
+pub enum FrameOptimize{
+    #[pick] None,
+    DrawList,
+    Texture    
+}
+
+impl FrameOptimize{
+    fn is_texture(&self)->bool{
+        if let Self::Texture = self{true} else{false}
+    }
+    fn is_draw_list(&self)->bool{
+        if let Self::DrawList = self{true} else{false}
+    }
+    fn needs_draw_list(&self)->bool{
+        return self.is_texture() ||self.is_draw_list()
+    }
+}
 
 #[derive(Live)]
 pub struct Frame { // draw info per UI element
@@ -358,14 +379,10 @@ pub struct Frame { // draw info per UI element
     
     #[live] walk: Walk,
     
-    #[live] image: LiveDependency,
-    #[live] image_texture: Option<Texture>,
-    #[live] image_scale: f64,
-    
-    #[live] use_cache: bool,
+    //#[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
     
-    #[live] has_view: bool,
+    #[live] optimize: FrameOptimize,
     
     #[live(true)] visible: bool,
     
@@ -376,18 +393,19 @@ pub struct Frame { // draw info per UI element
     
     #[rust] find_cache: HashMap<u64, WidgetSet>,
     
-    #[rust] scroll_bars_obj: Option<Box<ScrollBars>>,
-    
+    #[rust] scroll_bars_obj: Option<Box<ScrollBars >>,
     #[rust] view_size: Option<DVec2>,
     
     #[rust] area: Area,
-    #[rust] view: Option<View>,
+    #[rust] draw_list: Option<DrawList2d>,
     
     #[rust] texture_cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
-    #[rust] draw_order: Vec<LiveId>
+    #[rust] draw_order: Vec<LiveId>,
+    
+    #[state] state: LiveState,
 }
 
 struct FrameTextureCache {
@@ -401,69 +419,35 @@ impl LiveHook for Frame {
         register_widget!(cx, Frame)
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if self.has_view && self.view.is_none() {
-            self.view = Some(View::new(cx));
+    fn before_apply(&mut self,  _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = from{
+            //self.children.clear();
+            self.draw_order.clear();
+            self.find_cache.clear();
+        }
+    }
+    
+    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if self.optimize.needs_draw_list() && self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::new(cx));
         }
         if self.scroll_bars.is_some() {
             if self.scroll_bars_obj.is_none() {
                 self.scroll_bars_obj = Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
-        // lets load the image resource
-        let image_path = self.image.as_str();
-        if image_path.len()>0 {
-            let mut image_buffer = None;
-            match cx.get_dependency(image_path) {
-                Ok(data) => {
-                    if image_path.ends_with(".jpg") {
-                        match jpeg::decode(data) {
-                            Ok(image) => {
-                                if self.image_scale != 0.0 {
-                                    self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
-                                }
-                                image_buffer = Some(image);
-                            }
-                            Err(err) => {
-                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
-                            }
-                        }
+/*
+        if let Some(image_texture) = &mut self.image_texture {
+            if self.image_scale != 0.0 {
+                let texture_desc = image_texture.get_desc(cx);
+                self.walk = Walk::fixed_size(
+                    DVec2 {
+                        x: texture_desc.width.unwrap() as f64 * self.image_scale,
+                        y: texture_desc.height.unwrap() as f64 * self.image_scale
                     }
-                    else if image_path.ends_with(".png") {
-                        match png::decode(data) {
-                            Ok(image) => {
-                                if self.image_scale != 0.0 {
-                                    self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
-                                }
-                                image_buffer = Some(image);
-                            }
-                            Err(err) => {
-                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
-                            }
-                        }
-                    }
-                    else {
-                        cx.apply_image_type_not_supported(live_error_origin!(), index, nodes, image_path);
-                    }
-                }
-                Err(err) => {
-                    cx.apply_resource_not_loaded(live_error_origin!(), index, nodes, image_path, &err);
-                }
+                );
             }
-            if let Some(mut image_buffer) = image_buffer.take() {
-                if self.image_texture.is_none() {
-                    self.image_texture = Some(Texture::new(cx));
-                }
-                if let Some(image_texture) = &mut self.image_texture {
-                    image_texture.set_desc(cx, TextureDesc {
-                        format: TextureFormat::ImageBGRA,
-                        width: Some(image_buffer.width),
-                        height: Some(image_buffer.height),
-                    });
-                    image_texture.swap_image_u32(cx, &mut image_buffer.data);
-                }
-            }
-        }
+        */
     }
     
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -483,14 +467,7 @@ impl LiveHook for Frame {
                 }
             }
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
-                /*if !self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
-                    // lets store a pointer into our templates.
-                    let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                    self.templates.insert(id, (live_ptr, self.draw_order.len()));
-                    nodes.skip_node(index)
-                }
-                else */if nodes[index].origin.has_prop_type(LivePropType::Instance)
-                /*|| self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) */ {
+                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
                         .apply(cx, from, index, nodes);
@@ -514,18 +491,32 @@ pub struct FrameRef(WidgetRef);
 #[derive(Clone, WidgetSet)]
 pub struct FrameSet(WidgetSet);
 
+#[derive(Clone, WidgetAction)]
+pub enum FrameAction {
+    None,
+    FingerDown(FingerDownEvent),
+    FingerUp(FingerUpEvent),
+    FingerMove(FingerMoveEvent)
+}
+
 impl FrameRef {
-    /*
-    pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
-        self.0.handle_widget_event(cx, event)
+    pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.cut_state(cx, state);
+        }
     }
     
-    pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
-        if let Some(mut inner) = self.inner_mut() {
-            return inner.draw(cx)
+    pub fn animate_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animate_state(cx, state);
         }
-        WidgetDraw::done()
-    }*/
+    }
+    
+    pub fn toggle_state(&self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.toggle_state(cx, is_state_1, animate, state1, state2);
+        }
+    }
     
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -571,6 +562,25 @@ impl FrameRef {
 }
 
 impl FrameSet {
+    
+    pub fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+        for item in self.iter() {
+            item.cut_state(cx, state)
+        }
+    }
+    
+    pub fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+        for item in self.iter() {
+            item.animate_state(cx, state);
+        }
+    }
+    
+    pub fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+        for item in self.iter() {
+            item.toggle_state(cx, is_state_1, animate, state1, state2);
+        }
+    }
+
     pub fn set_visible(&self, visible: bool) {
         for item in self.iter() {
             item.set_visible(visible)
@@ -603,6 +613,9 @@ impl Widget for Frame {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
+        let uid = self.widget_uid();
+        self.state_handle_event(cx, event);
+        
         if self.block_signal_event {
             if let Event::Signal = event {
                 return
@@ -619,23 +632,37 @@ impl Widget for Frame {
             }
         }
         
-        // ok so if a child is not visible
-        for id in &self.draw_order {
+        for id in self.draw_order.iter().rev() {
             if let Some(child) = self.children.get_mut(id) {
-                // if a child is not visible, we should
                 if child.is_visible() || !event.requires_visibility() {
                     child.handle_widget_event_with(cx, event, dispatch_action);
                 }
             }
         }
-        
-        if let Some(cursor) = &self.cursor {
+        if self.cursor.is_some() || self.state.live_ptr.is_some(){
             match event.hits(cx, self.area()) {
-                Hit::FingerDown(_) => {
+                Hit::FingerDown(d) => {
                     cx.set_key_focus(Area::Empty);
+                    dispatch_action(cx, FrameAction::FingerDown(d).into_action(uid))
+                }
+                Hit::FingerMove(d) => {
+                    dispatch_action(cx, FrameAction::FingerMove(d).into_action(uid))
+                }
+                Hit::FingerUp(d) => {
+                    dispatch_action(cx, FrameAction::FingerUp(d).into_action(uid))
                 }
                 Hit::FingerHoverIn(_) => {
-                    cx.set_cursor(*cursor);
+                    if let Some(cursor) = &self.cursor{
+                        cx.set_cursor(*cursor);
+                    }
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(hover.on));
+                    }
+                }
+                Hit::FingerHoverOut(_)=>{
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(hover.off));
+                    }
                 }
                 _ => ()
             }
@@ -734,10 +761,6 @@ impl Frame {
         self.area
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d,) -> WidgetDraw {
-        self.draw_walk(cx, self.get_walk())
-    }
-    
     pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {
         let view_size = self.view_size.unwrap_or(DVec2::default());
         Walk {
@@ -758,18 +781,17 @@ impl Frame {
             
             self.defer_walks.clear();
             
-            if self.has_view {
-                // ok so.. how do we render this to texture
-                if self.use_cache {
+            match self.optimize{
+                FrameOptimize::Texture=>{
                     let walk = self.walk_from_previous_size(walk);
-                    if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
+                    if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
                             self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
                             let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
                             rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
-                            cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0/self.dpi_factor.unwrap_or(1.0));
+                            cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0 / self.dpi_factor.unwrap_or(1.0));
                         }
                         return WidgetDraw::done()
                     }
@@ -787,15 +809,16 @@ impl Frame {
                     let texture_cache = self.texture_cache.as_mut().unwrap();
                     cx.make_child_pass(&texture_cache.pass);
                     cx.begin_pass(&texture_cache.pass, self.dpi_factor);
-                    self.view.as_mut().unwrap().begin_always(cx)
+                    self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
-                else {
+                FrameOptimize::DrawList=>{
                     let walk = self.walk_from_previous_size(walk);
-                    if self.view.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
+                    if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
                         cx.walk_turtle_with_area(&mut self.area, walk);
                         return WidgetDraw::done()
-                    };
+                    }
                 }
+                _=>()
             }
             
             
@@ -809,13 +832,13 @@ impl Frame {
             };
             
             if self.show_bg {
-                if let Some(image_texture) = &self.image_texture {
+                /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
-                }
-                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0/self.dpi_factor.unwrap_or(2.0)));
+                }*/
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0/self.dpi_factor.unwrap_or(2.0)));
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
         }
         
@@ -859,8 +882,8 @@ impl Frame {
                 };
                 
                 if self.show_bg {
-                    if self.use_cache {
-                        panic!("dont use show_bg and use_cache at the same time");
+                    if self.optimize.is_texture() {
+                        panic!("dont use show_bg and texture cazching at the same time");
                     }
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
@@ -874,12 +897,12 @@ impl Frame {
                     scroll_bars.end_nav_area(cx);
                 };
                 
-                if self.has_view {
+                if self.optimize.needs_draw_list() {
                     let rect = self.area.get_rect(cx);
                     self.view_size = Some(rect.size);
-                    self.view.as_mut().unwrap().end(cx);
+                    self.draw_list.as_mut().unwrap().end(cx);
                     
-                    if self.use_cache {
+                    if self.optimize.is_texture() {
                         let texture_cache = self.texture_cache.as_mut().unwrap();
                         cx.end_pass(&texture_cache.pass);
                         /*if cache.pass.id_equals(4){
@@ -892,7 +915,7 @@ impl Frame {
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
-                        cx.set_pass_scaled_area(&texture_cache.pass, area, 2.0/self.dpi_factor.unwrap_or(1.0));
+                        cx.set_pass_scaled_area(&texture_cache.pass, area, 2.0 / self.dpi_factor.unwrap_or(1.0));
                     }
                 }
                 self.draw_state.end();
@@ -901,7 +924,7 @@ impl Frame {
         WidgetDraw::done()
     }
     
-     pub fn child_count(&self) -> usize {
+    pub fn child_count(&self) -> usize {
         self.draw_order.len()
     }
 }

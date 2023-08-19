@@ -34,9 +34,9 @@ pub struct TokenSpan {
     pub len: usize
 }
 
-impl Into<TokenSpan> for LiveTokenId{
-    fn into(self)->TokenSpan{
-        TokenSpan{token_id:self, len:1}
+impl From<LiveTokenId> for TokenSpan {
+    fn from(val: LiveTokenId) -> Self {
+        TokenSpan { token_id: val, len: 1 }
     }
 }
 

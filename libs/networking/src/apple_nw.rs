@@ -21,13 +21,10 @@ impl HttpsConnection {
             println!("{:?}", state);
             match state {
                 nw_connection_state::invalid => {
-                    
                 }
                 nw_connection_state::waiting => {
-                    
                 }
                 nw_connection_state::preparing => {
-                    
                 }
                 nw_connection_state::ready => {
                     

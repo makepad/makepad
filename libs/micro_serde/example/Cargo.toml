@@ -7,5 +7,5 @@ edition = "2018"
 
 [dependencies]
 
-[dependencies.makepad-microserde] 
+[dependencies.makepad-micro-serde] 
 path="../"

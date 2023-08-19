@@ -110,15 +110,26 @@ pub struct FromWasmHideTextIME {
 
 #[derive(FromWasm)]
 pub struct FromWasmWebSocketOpen {
-    pub web_socket_id: usize,
-    pub auto_reconnect: bool,
-    pub url: String
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub url: String,
+    pub method: String,
+    pub headers: String,
+    pub body: WasmDataU8,
 }
 
 #[derive(FromWasm)]
-pub struct FromWasmWebSocketSend{
-    pub web_socket_id: usize,
+pub struct FromWasmWebSocketSendBinary{
+    pub id_lo: u32,
+    pub id_hi: u32,
     pub data: WasmDataU8
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmWebSocketSendString{
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub data: String
 }
 
 #[derive(FromWasm)]
@@ -141,12 +152,19 @@ pub struct FromWasmCreateThread {
     pub context_ptr: u32,
 }
 
+#[derive(FromWasm)]
+pub struct FromWasmHTTPRequest {
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub url: String,
+    pub method: String,
+    pub headers: String,
+    pub body: WasmDataU8,
+}
+
 
 
 // WebGL API
-
-
-
 
 #[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {

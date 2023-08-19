@@ -154,7 +154,6 @@ pub struct DropDown {
     
     #[live] popup_shift: DVec2,
     
-    #[rust] last_rect: Option<Rect>,
     #[rust] is_open: bool,
    
     #[live] selected_item: usize,
@@ -213,7 +212,6 @@ impl DropDown {
         let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
         let node_id = LiveId(self.selected_item as u64).into();
         lb.init_select_item(node_id);
-        self.last_rect = Some(self.draw_bg.area().get_rect(cx));
         cx.sweep_lock(self.draw_bg.area());
     }
     
@@ -240,7 +238,7 @@ impl DropDown {
                     PopupMenuAction::WasSelected(node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                         self.selected_item = node_id.0.0 as usize;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.draw_bg.redraw(cx);
                         close = true;
                     }
@@ -337,7 +335,6 @@ impl DropDown {
         cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Margin::default());
         
         if self.is_open && self.popup_menu.is_some() {
-            let last_rect = self.last_rect.unwrap_or(Rect::default());
             //cx.set_sweep_lock(self.draw_bg.area());
             // ok so if self was not open, we need to
             // ok so how will we solve this one
@@ -359,7 +356,7 @@ impl DropDown {
             }
             
             // ok we shift the entire menu. however we shouldnt go outside the screen area
-            popup_menu.end(cx, last_rect.pos - item_pos.unwrap_or(dvec2(0.0,0.0))+self.popup_shift);
+            popup_menu.end(cx, self.draw_bg.area(), -item_pos.unwrap_or(dvec2(0.0,0.0)));
         }
     }
 }

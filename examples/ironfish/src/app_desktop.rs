@@ -5,7 +5,10 @@ live_design!{
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
     
+    import makepad_widgets::image::Image;
+    import makepad_widgets::scroll_bars::ScrollBars;
     import makepad_widgets::label::Label;
+    import makepad_widgets::link_label::LinkLabel;
     import makepad_widgets::drop_down::DropDown;
     import makepad_widgets::button::Button;
     import makepad_widgets::slider::Slider;
@@ -38,7 +41,7 @@ live_design!{
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
-    H2_TEXT_NORMAL = {
+    H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
@@ -203,12 +206,17 @@ live_design!{
         }
     }
     
+    FishPanelScrollY = <FishPanel> {
+        walk: {height: Fill}, 
+        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+    }
+    
     FishDropDown = <DropDown> {
         walk: {width: Fit}
         layout: {padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}}
         
         draw_label: {
-            text_style: <H2_TEXT_NORMAL> {},
+            text_style: <H2_TEXT_REGULAR> {},
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -630,7 +638,7 @@ live_design!{
         }
         
         draw_label: {
-            text_style: <H2_TEXT_NORMAL>{},
+            text_style: <H2_TEXT_REGULAR>{},
             fn get_color(self) -> vec4 {
                 return mix(
                     (COLOR_UP_4),
@@ -858,60 +866,14 @@ live_design!{
             }
         },
         draw_label: {
-            text_style:<H2_TEXT_NORMAL>{},
-        }
-    }
-    
-    PaginationButton = <Button> {
-        label: "1"
-        walk: {width: 30, height: 30, margin: {top: 5}}
-        layout: {align: {x: 0.5, y: 0.5}, padding: <SPACING_2> {}}
-        
-        draw_label: {
-            text_style: <H2_TEXT_BOLD>{},
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix((COLOR_UP_4), (COLOR_UP_6), self.hover),
-                    (COLOR_UP_4),
-                    self.pressed
-                )
-            }
-        }
-        
-        draw_bg: {
-            instance pressed: 0.0
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    2.0
-                )
-                
-                sdf.stroke_keep(
-                    mix(
-                        #x00000000,
-                        mix((COLOR_DOWN_5), (COLOR_UP_3), pow(self.pos.y, 4)),
-                        self.pressed
-                    ),
-                    1.0
-                )
-                
-                sdf.fill(mix(
-                    (COLOR_UP_0),
-                    (COLOR_DOWN_3),
-                    self.pressed
-                ));
-                
-                return sdf.result;
-            }
+            text_style:<H2_TEXT_REGULAR>{},
         }
     }
     
     PresetFavorite = <CheckBox> {
+        walk: {height: Fit, width: Fit, margin: 0.0}
+        layout: {padding: 0.0}
+
         draw_check: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -1062,8 +1024,7 @@ live_design!{
     
     SequencerControls = <Frame> {
         walk: {height: Fit, width: Fill, margin: <SPACING_1> {}}
-        layout: {flow: Down, padding: <SPACING_2> {}}
-        
+        layout: {flow: Down, padding: <SPACING_2> {}}    
         
         <Frame> {
             walk: {height: Fit, width: Fill}
@@ -1175,7 +1136,7 @@ live_design!{
         layout: {flow: Down}
         walk: {margin: <SPACING_0> {}}
         
-        <FishPanel> {
+        <FishPanelScrollY> {
             walk: {width: Fill, height: Fill}
             layout: {flow: Down, spacing: (SSPACING_0), padding: {top: (SSPACING_2)}}
             draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
@@ -1241,8 +1202,34 @@ live_design!{
                     walk: {height: Fit, width: Fill}
                     layout: {flow: Right, align: {x: 0.0, y: 0.5}, spacing: (SSPACING_4), padding: {top: (SSPACING_1), right: (SSPACING_3), bottom: (SSPACING_0), left: (SSPACING_0)}}
                     
-                    playpause = <PlayPause> {}
+                    // playpause = <PlayPause> {}
                     
+                    playpause = <CheckBox> {
+                        draw_check:{check_type:None}
+                        draw_icon: { svg_file: (ICO_PLAY) }
+                        icon_walk: {
+                            width: 25.0,
+                            height: Fit,
+                            margin: 0,
+                        }
+                        walk: {
+                            margin: {
+                                top: 0,
+                                right: -10,
+                                bottom: 0,
+                                left: 0,
+                            }
+                         }
+                        layout: {
+                            padding: {
+                                top: 2,
+                                right: 0,
+                                bottom: 0,
+                                left: 15,
+                            }
+                        }
+                    }
+
                     speed = <InstrumentSlider> {
                         walk: {width: Fill}
                         slider = {
@@ -1517,7 +1504,7 @@ live_design!{
                         values: [LowPass, HighPass, BandPass, BandReject]
                         
                         draw_label: {
-                            text_style: <H2_TEXT_NORMAL>{},
+                            text_style: <H2_TEXT_REGULAR>{},
                             fn get_color(self) -> vec4 {
                                 return mix(
                                     mix(
@@ -1786,7 +1773,7 @@ live_design!{
         walk: {width: Fill, height: Fill}
         layout: {padding: <SPACING_0> {}, spacing: (SSPACING_0), flow: Down}
         
-        <FishPanel> {
+        <FishPanelScrollY> {
             walk: {height: Fill}
             
             <FishHeader> {
@@ -1848,10 +1835,10 @@ live_design!{
                     
                     <Label> {
                         draw_label: {
-                            text_style: <H2_TEXT_NORMAL>{font_size: 18},
+                            text_style: <H2_TEXT_REGULAR>{font_size: 18},
                             color: (COLOR_UP_6)
                         }
-                        label: "Wide Strings"
+                        label: "Ironfish"
                     }
                 }
                 <Frame> {
@@ -1860,22 +1847,36 @@ live_design!{
                 }
                 
                 <Image> {
-                    image: dep("crate://self/resources/tinrs.png"),
+                    source: dep("crate://self/resources/tinrs.png"),
                     walk: {width: (1000 * 0.175), height: (175 * 0.175), margin: 0}
-                    layout: {padding: 0}
                 }
+
             }
             
             <FillerV> {}
             
             <Frame> {
-                walk: {width: Fill, height: 30}
+                walk: {width: Fill, height: 35}
                 layout: {spacing: (SSPACING_1)}
                 
-                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.5 } }
-                platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 17.5 } }
-                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 17.5 } }
-                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 17.5 } }
+
+                prev = <IconButton> { draw_icon: { svg_file: (ICO_PREV) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 3.25, right: -10.0, bottom: 0.0, left: 0.0}} }
+                presets = <IconButton> { draw_icon: { svg_file: (ICO_PRESET) } icon_walk: { width: Fit, height: 17.5 }, walk: { margin: 0.0 } }
+                next = <IconButton> { draw_icon: { svg_file: (ICO_NEXT) }, icon_walk: { width: Fit, height: 11.0 }, walk: { margin: { top: 3.25, right: 0.0, bottom: 0.0, left: -10.0 } } }
+
+                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.0 }, walk: {margin: {left: 5.0, right: -10.0}} }
+                platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 18.5 } }
+
+                gitlink = <Label> {
+                    draw_label: { text_style: <H2_TEXT_REGULAR> {}, color: (COLOR_UP_5) }
+                    label: "Made with Makepad\ngithub.com/makepad/makepad"
+                    walk: {margin: {top: 7.5, left: 5.0 }}
+                }
+                
+                <FillerH> {}
+
+                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 15.0 }, walk: {margin: {top: 3.25, right: -5.0, bottom: 0.0, left: 0.0}} }
+                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 15.0 }, walk: { margin: { top: 3.25, right: 0.0, bottom: 0.0, left: -5.0 } } }
             }
             
         }
@@ -1888,21 +1889,10 @@ live_design!{
         draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
         
         <Arp> {}
+        <ScrollX>{
         piano = <Piano> {walk: {height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_2); bottom: (SSPACING_3), left: (SSPACING_2)}}}
+        }
         <PianoSettings> {}
-    }
-    
-    Pagination = <Frame> {
-        walk: {width: Fill, height: Fit, margin: <SPACING_3> {}}
-        layout: {flow: Right, align: {x: 0.5, y: 0.0}, spacing: 0}
-        
-        <PaginationButton> {label: "<"}
-        <PaginationButton> {label: "4"}
-        <PaginationButton> {label: "5"}
-        <PaginationButton> {label: "6"}
-        <PaginationButton> {label: "7"}
-        <PaginationButton> {label: "8"}
-        <PaginationButton> {label: ">"}
     }
     
     
@@ -1911,8 +1901,7 @@ live_design!{
         walk: {width: Fill, height: Fill}
         layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
         
-        <FishPanel> {
-            walk: {height: Fill}
+        <FishPanelScrollY> {
             
             <FishHeader> {
                 title = {
@@ -1949,7 +1938,7 @@ live_design!{
         walk: {width: Fill, height: Fill}
         layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
         
-        <FishPanel> {
+        <FishPanelScrollY> {
             
             <FishHeader> {
                 title = {
@@ -1993,65 +1982,69 @@ live_design!{
     }
         
     PresetListEntry = <SwipeListEntry> {
-        layout: {flow: Down, padding: {top: 0, right: 5, bottom: 5, left: 5}}
+        layout: {flow: Down, padding: 0.0}
         walk: {width: Fill, height: Fit}
         
         center: <Frame> {
-            layout: {flow: Right, align: {x: 0.0, y: 0.5}}
+            layout: {flow: Down, padding: 0.0}
             walk: {width: Fill, height: Fit}
 
-            label = <Button> {
-                walk: {width: Fill, height: Fill}
-                layout: {align: {x: 0.0, y: 0.5}, padding: {left: 5}}
-                draw_label: {
-                    fn get_color(self) -> vec4 {
-                        return mix(
-                            mix((COLOR_UP_5), (COLOR_UP_6), self.hover),
-                            (COLOR_UP_4),
-                            self.pressed
-                        )
-                    }
-                    text_style: <H2_TEXT_NORMAL>{},
-                    color: (COLOR_UP_6)
-                }
-                draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        return sdf.result
-                    }
-                }
-                label: "Preset Name"
-            }
-            
             <Frame> {
-                walk: {width: Fit, height: Fit}
+                layout: {flow: Right, align: {x: 0.0, y: 0.5}, padding: 0.0 }
+                walk: {width: Fill, height: Fit, margin: { left: 5.0, top: 2.5 }}
                 
-                presetfavorite = <PresetFavorite> {
-                    walk: {width: 30, height: 30, margin: {top: 7.5}}
-                    label: " "
+                label = <Button> {
+                    walk: {width: Fill, height: Fill}
+                    layout: {align: {x: 0.0, y: 0.5}, padding: 0.0}
+                    draw_label: {
+                        fn get_color(self) -> vec4 {
+                            return mix(
+                                mix((COLOR_UP_5), (COLOR_UP_6), self.hover),
+                                (COLOR_UP_4),
+                                self.pressed
+                            )
+                        }
+                        text_style: <H2_TEXT_REGULAR>{},
+                        color: (COLOR_UP_6)
+                    }
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            return sdf.result
+                        }
+                    }
+                    label: "Preset Name"
                 }
                 
-                share = <IconButton> {
-                draw_icon: {
-                    svg_file: (ICO_SHARE),
-                    fn get_color(self) -> vec4 {
-                        return mix(
-                            mix(
-                                (COLOR_UP_3),
-                                (COLOR_UP_6),
-                                self.hover
-                            ),
-                            (COLOR_UP_3),
-                            self.pressed
-                        )
+                <Frame> {
+                    walk: {width: Fit, height: Fit, margin: 0.0}
+                    layout: { padding: 0.0 }
+                    
+                    presetfavorite = <PresetFavorite> {
+                        walk: {width: 30.0, height: 30.0, margin: {top: 10.0, right: -10.0, bottom: 0.0, left: 0.0} }
+                        layout: { padding: 0.0 }
+                        label: ""
                     }
-                } icon_walk: { width: 12.5, height: Fit } }
+                    
+                    share = <IconButton> {
+                        walk: { margin: {top: 3.0, right: 0.0, bottom: 0.0, left: 0.0 } }
+                        draw_icon: {
+                            svg_file: (ICO_SHARE),
+                            fn get_color(self) -> vec4 {
+                                return mix(
+                                    mix( (COLOR_UP_3), (COLOR_UP_6), self.hover),
+                                    (COLOR_UP_3),
+                                    self.pressed
+                                )
+                            }
+                        }
+                        icon_walk: { width: 12.5, height: Fit }
+                    }
+                }
             }
+
+            <Divider> { walk: {margin: {top: (SSPACING_1), right: (SSPACING_0), bottom: (SSPACING_0)}} }
         }
-        
-        /*<Divider> {
-            walk: {margin: {top: (SSPACING_1), right: (SSPACING_0), bottom: (SSPACING_0)}}
-        }*/
     }
     
     PresetList = <SwipeList> {
@@ -2155,16 +2148,13 @@ live_design!{
         <PresetSaver> {}
         <PresetHeader> {}
         preset_list = <PresetList> {}
-        <Pagination> {}
     }
     
     AppDesktop = <Frame> {
         layout:{flow:Right}
         walk: {width: Fill, height: Fill}
         // layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
-        
-        <Presets> {}
-        
+
         <Frame> {
             walk: {width: Fill, height: Fill}
             layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
@@ -2174,6 +2164,9 @@ live_design!{
                 draw_bg: {color: (COLOR_VIZ_1), color2: (COLOR_VIZ_2)}
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
+                    draw_wave:{
+                        fn vu_fill(self)->vec4{return #0000}
+                    }
                 }
             }
             
@@ -2183,31 +2176,15 @@ live_design!{
             <Frame> {
                 walk: {width: Fill, height: Fill}
                 layout: {flow: Right, spacing: (SSPACING_1), padding: <SPACING_3> {}}
-                
-                <ScrollY> {
-                    layout: {flow: Down, spacing: (SSPACING_1)}
-                    walk: {height: Fill, width: Fill}
-                    oscillators = <FishPanelSoundSources> {}
-                }
-                
-                <ScrollY> {
+                oscillators = <FishPanelSoundSources> {}
+                <Frame> {
                     layout: {flow: Down, spacing: (SSPACING_1)}
                     walk: {height: Fill, width: Fill}
                     envelopes = <FishPanelEnvelopes> {}
                     <FishPanelFilter> {}
                 }
-                
-                <ScrollY> {
-                    layout: {flow: Down, spacing: (SSPACING_1)}
-                    walk: {height: Fill, width: Fill}
-                    effects = <FishPanelEffects> {}
-                }
-                
-                <ScrollY> {
-                    layout: {flow: Down}
-                    walk: {height: Fill, width: Fill}
-                    <SequencerPanel> {walk: {height: Fill, width: Fill}}
-                }
+                effects = <FishPanelEffects> {}
+                <SequencerPanel> {walk: {height: Fill, width: Fill}}
             }
             
             <Play> {}

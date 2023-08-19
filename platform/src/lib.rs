@@ -34,6 +34,7 @@ mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
+pub mod network;
 
 pub mod audio_stream;
 
@@ -50,6 +51,7 @@ pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
 pub use makepad_windows as windows_crate;
+pub use makepad_futures;
  
 pub use {
     makepad_shader_compiler,
@@ -60,6 +62,7 @@ pub use {
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
     makepad_shader_compiler::makepad_error_log,
+    //makepad_image_formats::image,
     makepad_derive_live::*,
     makepad_error_log::*,
     makepad_math::*,
@@ -140,6 +143,11 @@ pub use {
         },
         thread::Signal,
         event::{
+            HttpRequest,
+            HttpResponse,
+            HttpMethod,
+            NetworkResponse,
+            NetworkResponseEvent,
             Margin,
             KeyCode,
             Event,
@@ -147,8 +155,6 @@ pub use {
             DragHit,
             Trigger,
             //MidiInputListEvent,
-            WebSocket,
-            WebSocketAutoReconnect,
             Timer,
             NextFrame,
             KeyModifiers,
@@ -170,7 +176,7 @@ pub use {
             KeyEvent,
             KeyFocusEvent,
             TextInputEvent,
-            TextCopyEvent,
+            TextClipboardEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,
             WindowDragQueryResponse,
@@ -181,8 +187,8 @@ pub use {
             DragEvent,
             DropEvent,
             DragState,
-            DragAction,
-            DraggedItem,
+            DragItem,
+            DragResponse,
             HitOptions,
             DragHitEvent,
             DropHitEvent,
@@ -226,7 +232,6 @@ pub use {
             LiveState,
             LiveStateImpl,
             StateAction,
-            StatePair
         },
         draw_vars::{
             shader_enum,

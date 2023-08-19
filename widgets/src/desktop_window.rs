@@ -23,6 +23,7 @@ live_design!{
             flow: Down
         },
         caption_bar = <Solid> {
+            visible: false,
             layout: {
                 flow: Right
             },
@@ -31,7 +32,7 @@ live_design!{
             caption_label = <Frame> {
                 walk: {width: Fill, height: Fill}
                 layout: {align: {x: 0.5, y: 0.5}},
-                <Label> {label: "Makepad", walk: {margin: {left: 100}}}
+                label = <Label> {label: "Makepad", walk: {margin: {left: 100}}}
             }
             windows_buttons = <Frame> {
                 visible: false,
@@ -91,14 +92,14 @@ pub struct DesktopWindow {
     #[live] last_mouse_pos: DVec2,
     #[live] mouse_cursor_size: DVec2,
     
-    #[live] cursor_view: View,
+    #[live] cursor_draw_list: DrawList2d,
     #[live] draw_cursor: DrawQuad,
     
     #[live] debug_view: DebugView,
     #[live] nav_control: NavControl,
     #[live] window: Window,
     #[live] overlay: Overlay,
-    #[live] main_view: View,
+    #[live] main_draw_list: DrawList2d,
     #[live] pass: Pass,
     #[live] depth_texture: Texture,
     
@@ -145,15 +146,15 @@ impl LiveHook for DesktopWindow {
                 self.frame.get_frame(id!(windows_buttons)).set_visible(true);
             }
             OsType::Macos => {
-                self.frame.get_frame(id!(caption_bar)).set_visible(false);
+               // self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
             OsType::LinuxDirect |
             OsType::Android(_) => {
-                self.frame.get_frame(id!(caption_bar)).set_visible(false);
+                //self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             OsType::Web(_) => {
-                self.frame.get_frame(id!(caption_bar)).set_visible(false);
+               // self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             _ => ()
         }
@@ -173,7 +174,7 @@ impl DesktopWindow {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowAction)) {
         
         self.debug_view.handle_event(cx, event);
-        self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());
+        self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
         
         let is_for_other_window = match event {
@@ -242,6 +243,7 @@ impl DesktopWindow {
         
         if let Event::Resume = event {
             Cx2d::reset_fonts_atlas(cx);
+            Cx2d::reset_icon_atlas(cx);
         }
         if let Event::MouseMove(ev) = event {
             if let OsType::LinuxDirect = cx.os_type() {
@@ -255,22 +257,20 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        if !cx.view_will_redraw(&mut self.main_view, Walk::default()) {
-            return ViewRedrawing::no()
+    pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
+        if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
+            return Redrawing::no()
         }
         
         cx.begin_pass(&self.pass, None);
         
-        self.main_view.begin_always(cx);
+        self.main_draw_list.begin_always(cx);
         
-        let pass_size = cx.current_pass_size();
-        
-        cx.begin_turtle(Walk::fixed_size(pass_size), Layout::flow_down());
+        cx.begin_pass_sized_turtle(Layout::flow_down());
         
         self.overlay.begin(cx);
         
-        ViewRedrawing::yes()
+        Redrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -279,18 +279,18 @@ impl DesktopWindow {
         
         // lets draw our cursor
         if let OsType::LinuxDirect = cx.os_type() {
-            self.cursor_view.begin_overlay_last(cx);
+            self.cursor_draw_list.begin_overlay_last(cx);
             self.draw_cursor.draw_abs(cx, Rect {
                 pos: self.last_mouse_pos,
                 size: self.mouse_cursor_size
             });
-            self.cursor_view.end(cx);
+            self.cursor_draw_list.end(cx);
         }
         
         self.overlay.end(cx);
-        cx.end_overlay_turtle();
-        
-        self.main_view.end(cx);
+        cx.end_pass_sized_turtle();
+
+        self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
     }
 }

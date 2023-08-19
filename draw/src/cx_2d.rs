@@ -22,8 +22,8 @@ use {
         font_atlas::{
             CxFontsAtlasRc,
         },
-        view::View,
-        turtle::{Turtle, TurtleWalk, Walk},
+        draw_list_2d::DrawList2d,
+        turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     }
 };
 
@@ -34,6 +34,7 @@ pub struct PassStackItem {
     turtles_len: usize
 }
 
+
 pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
     pub (crate) draw_event: &'a DrawEvent,
@@ -43,7 +44,8 @@ pub struct Cx2d<'a> {
     pub draw_list_stack: Vec<DrawListId>,
     pub (crate) turtles: Vec<Turtle>,
     pub (crate) turtle_walks: Vec<TurtleWalk>,
-    pub (crate) align_list: Vec<Area>,
+    pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
+    pub (crate) align_list: Vec<AlignEntry>,
     pub fonts_atlas_rc: CxFontsAtlasRc,
     pub icon_atlas_rc: CxIconAtlasRc,
     pub nav_tree_rc: CxNavTreeRc,
@@ -88,6 +90,7 @@ impl<'a> Cx2d<'a> {
             // overlay_sweep_lock: None,
             pass_stack: Vec::new(),
             draw_list_stack: Vec::new(),
+            turtle_clips: Vec::new(),
             turtle_walks: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
@@ -153,8 +156,6 @@ impl<'a> Cx2d<'a> {
         if self.turtles.len() != stack_item.turtles_len {
             panic!("Turtle stack disaligned, forgot an end_turtle()");
         }
-        
-        
     }
     
     pub fn set_pass_area(&mut self, pass: &Pass, area: Area) {
@@ -169,14 +170,14 @@ impl<'a> Cx2d<'a> {
         self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id, self.current_dpi_factor()).unwrap().size
     }
     
-    pub fn view_will_redraw(&self, view: &mut View, walk: Walk) -> bool {
+    pub fn will_redraw(&self, draw_list_2d: &mut DrawList2d, walk: Walk) -> bool {
         // ok so we need to check if our turtle position has changed since last time.
         // if it did, we redraw
         let rect = self.peek_walk_turtle(walk);
-        if view.dirty_check_rect != rect {
-            view.dirty_check_rect = rect;
+        if draw_list_2d.dirty_check_rect != rect {
+            draw_list_2d.dirty_check_rect = rect;
             return true;
         }
-        self.draw_event.draw_list_will_redraw(self, view.draw_list.id())
+        self.draw_event.draw_list_will_redraw(self, draw_list_2d.draw_list.id())
     }
 }

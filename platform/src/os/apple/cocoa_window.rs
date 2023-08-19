@@ -34,7 +34,7 @@ use {
             WindowCloseRequestedEvent,
             WindowClosedEvent,
             TextInputEvent,
-            DraggedItem,
+            DragItem,
         },
     }
 };
@@ -161,6 +161,9 @@ impl CocoaWindow {
     }
     
     pub fn start_live_resize(&mut self) {
+        if self.live_resize_timer != nil{
+            return;
+        }
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             let cocoa_app = get_cocoa_app_global();
@@ -185,8 +188,10 @@ impl CocoaWindow {
     
     pub fn end_live_resize(&mut self) {
         unsafe {
-            let () = msg_send![self.live_resize_timer, invalidate];
-            self.live_resize_timer = nil;
+            if self.live_resize_timer != nil{
+                let () = msg_send![self.live_resize_timer, invalidate];
+                self.live_resize_timer = nil;
+            }
         }
         self.do_callback(
             CocoaEvent::WindowResizeLoopStop(self.window_id)
@@ -414,39 +419,55 @@ impl CocoaWindow {
         }))
     }
     
-    pub fn start_dragging(&mut self, ns_event: ObjcId, dragged_item: DraggedItem) {
-        let dragging_items = dragged_item.file_urls.iter().map( | file_url | {
-            let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
-            let _: () = unsafe {
-                msg_send![
-                    pasteboard_item,
-                    setString: str_to_nsstring(file_url)
-                    forType: NSPasteboardTypeFileURL
-                ]
-            };
-            let dragging_item: ObjcId = unsafe {msg_send![class!(NSDraggingItem), alloc]};
-            let _: () = unsafe {msg_send![dragging_item, initWithPasteboardWriter: pasteboard_item]};
-            let bounds: NSRect = unsafe {msg_send![self.view, bounds]};
-            let _: () = unsafe {
-                msg_send![dragging_item, setDraggingFrame: bounds contents: self.view]
-            };
-            dragging_item
-        }).collect::<Vec<_ >> ();
+    pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DragItem>) {
+        let mut dragged_files = Vec::new();
+        for item in items{
+            match item{
+                DragItem::FilePath{path, internal_id}=>{
+                    let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
+                    let _: () = unsafe {
+                        msg_send![
+                            pasteboard_item,
+                            setString: str_to_nsstring(
+                                &if let Some(id) = internal_id{
+                                    format!("file://{}#makepad_internal_id={}", if path.len()==0{"makepad_internal_empty"}else {&path}, id.0)
+                                }
+                                else{
+                                    format!("file://{}",if path.len()==0{"makepad_internal_empty"}else {&path})
+                                }
+                            )
+                            forType: NSPasteboardTypeFileURL
+                        ]
+                    };
+                    let dragging_item: ObjcId = unsafe {msg_send![class!(NSDraggingItem), alloc]};
+                    let _: () = unsafe {msg_send![dragging_item, initWithPasteboardWriter: pasteboard_item]};
+                    let bounds: NSRect = unsafe {msg_send![self.view, bounds]};
+                    let _: () = unsafe {
+                        msg_send![dragging_item, setDraggingFrame: bounds contents: self.view]
+                    };
+                    dragged_files.push(dragging_item)
+                }
+                _=>{
+                    crate::error!("Dragging string not implemented on macos yet");
+                }
+            }
+        }
+        
         let dragging_items: ObjcId = unsafe {
             msg_send![
                 class!(NSArray),
-                arrayWithObjects: dragging_items.as_ptr()
-                count: dragging_items.len()
+                arrayWithObjects: dragged_files.as_ptr()
+                count: dragged_files.len()
             ]
         };
         
         unsafe {
-            msg_send![
+            let _: ObjcId  = msg_send![
                 self.view,
                 beginDraggingSessionWithItems: dragging_items
                 event: ns_event
                 source: self.view
-            ]
+            ];
         }
         
         /*

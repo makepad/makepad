@@ -66,7 +66,12 @@ impl<'a> LiveParser<'a> {
     
     fn skip_token(&mut self) {
         self.end = self.token_with_span.span.end;
-        self.token_with_span = self.tokens_with_span.next().unwrap();
+        if let Some(next) = self.tokens_with_span.next(){
+            self.token_with_span = next;
+        }
+        else {
+            self.token_with_span.token = LiveToken::Eof
+        }
         self.token_index += 1;
     }
     
@@ -119,7 +124,7 @@ impl<'a> LiveParser<'a> {
         match self.peek_token() {
             LiveToken::String(v) => {
                 self.skip_token();
-                Ok(v.clone())
+                Ok(v)
             }
             token => Err(self.error(format!("expected ident, unexpected token `{}`", token), live_error_origin!())),
         }
@@ -267,7 +272,7 @@ impl<'a> LiveParser<'a> {
             let edit_info_index = ld.edit_info.len();
             
             if edit_info_index > 0x3e0 {
-                return Err(self.error(format!("Used more than 64 .{{..}} edit info fields in a file, we dont have the bitspace for that in our u64."), live_error_origin!()))
+                return Err(self.error("Used more than 64 .{..} edit info fields in a file, we dont have the bitspace for that in our u64.".to_string(), live_error_origin!()))
             }
             
             ld.edit_info.push(LiveNode {
@@ -340,7 +345,7 @@ impl<'a> LiveParser<'a> {
                     other => return Err(self.error(format!("Unexpected token {} in edit_info", other), live_error_origin!()))
                 }
             }
-            return Err(self.error(format!("Eof in edit info"), live_error_origin!()))
+            return Err(self.error("Eof in edit info".to_string(), live_error_origin!()))
         }
         
         Ok(None)
@@ -387,7 +392,7 @@ impl<'a> LiveParser<'a> {
             self.accept_token(LiveToken::Punct(live_id!(,)));
             counter += 1;
         }
-        return Err(self.error(format!("Eof in array body"), live_error_origin!()))
+        Err(self.error("Eof in array body".to_string(), live_error_origin!()))
     }
     
     
@@ -411,7 +416,7 @@ impl<'a> LiveParser<'a> {
             self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless), ld) ?;
             self.accept_token(LiveToken::Punct(live_id!(,)));
         }
-        return Err(self.error(format!("Eof in object body"), live_error_origin!()))
+        Err(self.error("Eof in object body".to_string(), live_error_origin!()))
     }
     
     
@@ -440,7 +445,7 @@ impl<'a> LiveParser<'a> {
             self.expect_live_value(prop_id, LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info), ld) ?;
             self.accept_token(LiveToken::Punct(live_id!(,)));
         }
-        return Err(self.error(format!("Eof in named enum"), live_error_origin!()))
+        Err(self.error("Eof in named enum".to_string(), live_error_origin!()))
     }
     
     fn get_token_id(&self) -> LiveTokenId {
@@ -493,7 +498,7 @@ impl<'a> LiveParser<'a> {
                         origin,
                         id: prop_id,
                         value: LiveValue::Class {
-                            live_type: self.live_type_infos[val as usize].live_type,
+                            live_type: self.live_type_infos[val].live_type,
                             class_parent: None,
                         }
                     });
@@ -546,7 +551,7 @@ impl<'a> LiveParser<'a> {
                             value: LiveValue::Float64(-val)
                         });
                     },
-                    _=>return Err(self.error(format!("Expected int or float after -"), live_error_origin!()))
+                    _=>return Err(self.error("Expected int or float after -".to_string(), live_error_origin!()))
                 }
             }
             LiveToken::Int(val) => {
@@ -738,7 +743,7 @@ impl<'a> LiveParser<'a> {
             }
             self.skip_token();
         }
-        return Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token), live_error_origin!()));
+        Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token), live_error_origin!()))
     }
     /*
     fn expect_var_def_type(&mut self) -> Result<(), LiveError> {
@@ -762,7 +767,7 @@ impl<'a> LiveParser<'a> {
             LiveToken::Ident(live_id!(vec3)) => {todo!()}
             _ => ()
         }
-        Err(self.error(format!("Expected value literal"), live_error_origin!()))
+        Err(self.error("Expected value literal".to_string(), live_error_origin!()))
     }
     
     fn expect_live_class(&mut self, root: bool, prop_id: LiveId, ld: &mut LiveOriginal) -> Result<(), LiveError> {
@@ -771,7 +776,7 @@ impl<'a> LiveParser<'a> {
             match self.peek_token() {
                 LiveToken::Close(Delim::Brace) => {
                     if root {
-                        return Err(self.error(format!("Unexpected token }} in root"), live_error_origin!()))
+                        return Err(self.error("Unexpected token } in root".to_string(), live_error_origin!()))
                     }
                     let token_id = self.get_token_id();
                     self.skip_token();
@@ -847,7 +852,7 @@ impl<'a> LiveParser<'a> {
         if root {
             return Ok(())
         }
-        return Err(self.error(format!("Eof in class body"), live_error_origin!()))
+        Err(self.error("Eof in class body".to_string(), live_error_origin!()))
     }
     
     pub fn expect_prop_type(&mut self)->Result<LivePropType, LiveError>{
@@ -863,7 +868,7 @@ impl<'a> LiveParser<'a> {
             //}
         }
         else{
-            return Err(self.error(format!("Unexpected assign_type, expected = or :"), live_error_origin!()))
+            return Err(self.error("Unexpected assign_type, expected = or :".to_string(), live_error_origin!()))
         })
     }
     
@@ -904,7 +909,7 @@ impl<'a> LiveParser<'a> {
         let expr = self.expect_prim_expr() ?;
         
         ld.nodes.push(LiveNode {
-            origin: origin,
+            origin,
             id: prop_id,
             value: LiveValue::Expr {expand_index: None}
         });
@@ -1128,17 +1133,12 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_member_expr(&mut self) -> Result<Expr, LiveError> {
-        let mut acc = self.expect_prim_expr() ?;
-        loop {
-            if let LiveToken::Punct(live_id!(.)) = self.peek_token() {
-                self.skip_token();
-                let token_id = self.get_token_id();
-                let ident = self.expect_ident() ?;
-                acc = Expr::Member {token_id, ident, expr: Box::new(acc)}
-            }
-            else {
-                break
-            }
+        let mut acc = self.expect_prim_expr()?;
+        while let LiveToken::Punct(live_id!(.)) = self.peek_token() {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let ident = self.expect_ident()?;
+            acc = Expr::Member {token_id, ident, expr: Box::new(acc)}
         }
         Ok(acc)
     }

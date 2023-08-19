@@ -108,11 +108,11 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                         return Some(index)
                     }
                 }
-                return None
+                None
             }
             
             fn value_to_live_value(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<LiveEval, LiveError> {
-                return Ok(match &nodes[index].value {
+                Ok(match &nodes[index].value {
                     LiveValue::Float64(val) => LiveEval::Float64(*val),
                     LiveValue::Int64(val) => LiveEval::Int64(*val),
                     LiveValue::Bool(val) => LiveEval::Bool(*val),

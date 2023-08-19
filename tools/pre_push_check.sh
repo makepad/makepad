@@ -23,8 +23,7 @@ MAKEPAD=lines cargo +nightly check -q -p makepad-example-fractal-zoom --release 
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-numbers --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-simple --release --message-format=json
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-video-mixer --release --message-format=json
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-video-sender --release --message-format=json
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-chatgpt --release --message-format=json
 
 echo "Checking Windows GNU stable"
 cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu --message-format=json
