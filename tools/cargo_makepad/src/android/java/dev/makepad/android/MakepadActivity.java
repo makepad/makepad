@@ -404,11 +404,13 @@ Makepad.Callback{
         mDecoderHandler.post(runnable);
     }
 
-    public void decodeNextChunk(long videoId) {
+    public void decodeVideoChunk(long videoId, long startTimestampUs, long endTimestampUs) {
         VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
         if(runnable == null) {
             throw new IllegalStateException("No runnable initialized with ID: " + videoId);
         }
+        runnable.setTimestamps(startTimestampUs, endTimestampUs);
+
         mDecoderHandler.post(runnable);
     }
 
