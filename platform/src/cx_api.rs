@@ -78,7 +78,7 @@ pub enum CxOsOp {
     WebSocketSendString{socket_id: LiveId, data:String},
     WebSocketSendBinary{socket_id: LiveId, data:Vec<u8>},
     InitializeVideoDecoding(LiveId, Rc<Vec<u8>>, usize),
-    DecodeNextChunk(LiveId),
+    DecodeVideoChunk(LiveId, u64, u64),
 }
 
 impl Cx { 
@@ -417,8 +417,9 @@ impl Cx {
         self.platform_ops.push(CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size));
     }
 
-    pub fn decode_next_chunk(&mut self, video_id: LiveId) {
-        self.platform_ops.push(CxOsOp::DecodeNextChunk(video_id));
+    pub fn decode_video_chunk(&mut self, video_id: LiveId, start_timestamp: u64, end_timestamp: u64) {
+        makepad_error_log::log!("Decoding next chunk from {:?} to {:?}", start_timestamp, end_timestamp);
+        self.platform_ops.push(CxOsOp::DecodeVideoChunk(video_id, start_timestamp, end_timestamp));
     }
 }
 

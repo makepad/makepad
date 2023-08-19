@@ -7,6 +7,7 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import android.util.Log;
+import java.util.LinkedList;
 
 import android.app.Activity;
 import java.lang.ref.WeakReference;
@@ -79,11 +80,42 @@ public class VideoDecoder {
         return -1;
     }
 
-    public void decodeNextChunk() {
+    // Buffer pooling logic
+    private LinkedList<byte[]> bufferPool = new LinkedList<>();
+    private static final int MAX_POOL_SIZE = 10; 
+
+    private byte[] acquireBuffer(int size) {
+        synchronized(bufferPool) {
+            if (!bufferPool.isEmpty()) {
+                byte[] buffer = bufferPool.poll();
+                if (buffer.length == size) {
+                    return buffer;
+                } else {
+                    // Resize or just create a new buffer
+                    return new byte[size];
+                }
+            } else {
+                return new byte[size];
+            }
+        }
+    }
+
+    private void releaseBuffer(byte[] buffer) {
+        synchronized(bufferPool) {
+            if (bufferPool.size() < MAX_POOL_SIZE) {
+                bufferPool.offer(buffer);
+            }
+            // else let it get garbage collected
+        }
+    }
+
+    public void decodeVideoChunk(long startTimestampUs, long endTimestampUs) {
         if (mExtractor == null || mCodec == null) {
             throw new IllegalStateException("Decoding hasn't been initialized");
         }
-        
+
+        mExtractor.seekTo(startTimestampUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+
         long framesDecodedThisChunk = 0;
 
         while (!mOutputEos && framesDecodedThisChunk < mChunkSize) {
@@ -92,11 +124,13 @@ public class VideoDecoder {
                 if (inputBufferIndex >= 0) {
                     ByteBuffer inputBuffer = mCodec.getInputBuffer(inputBufferIndex);
                     int sampleSize = mExtractor.readSampleData(inputBuffer, 0);
-                    if (sampleSize < 0) {
+
+                    long presentationTimeUs = mExtractor.getSampleTime();
+                    
+                    if (sampleSize < 0 || presentationTimeUs > endTimestampUs) {
                         mCodec.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                         mInputEos = true;
                     } else {
-                        long presentationTimeUs = mExtractor.getSampleTime();
                         mCodec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
                         mExtractor.advance();
                     }
@@ -106,13 +140,13 @@ public class VideoDecoder {
             int outputBufferIndex = mCodec.dequeueOutputBuffer(mInfo, 2000);
             if (outputBufferIndex >= 0) {
                 ByteBuffer outputBuffer = mCodec.getOutputBuffer(outputBufferIndex);
-                byte[] pixelData = new byte[mInfo.size]; // TODO: might need to re-use buffers / object pooling, GC seemed a bit slow at claiming these byte arrays
+                byte[] pixelData = acquireBuffer(mInfo.size);
                 outputBuffer.get(pixelData);
                 mCodec.releaseOutputBuffer(outputBufferIndex, false);
 
                 if ((mInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                     mOutputEos = true;
-                    this.cleanup(); // TODO might call this from rust instead
+                    // this.cleanup();
                 }
 
                 Activity activity = mActivityReference.get();
@@ -122,6 +156,7 @@ public class VideoDecoder {
                     });
                 }
 
+                releaseBuffer(pixelData);
                 framesDecodedThisChunk++;
             }
         }
