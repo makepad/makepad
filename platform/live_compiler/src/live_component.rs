@@ -67,7 +67,7 @@ impl LiveComponentRegistries {
             | v |
             match v.entry(TypeId::of::<T>()) {
                 Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => v.insert(Box::new(T::default()))
+                Entry::Vacant(v) => v.insert(Box::<T>::default())
             }
             .cast_mut::<T>().unwrap()
         )

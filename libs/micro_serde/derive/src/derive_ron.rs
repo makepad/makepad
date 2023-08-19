@@ -132,7 +132,7 @@ pub fn derive_ser_ron_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
 
 pub fn derive_de_ron_impl(input: TokenStream) -> TokenStream {
@@ -208,7 +208,7 @@ pub fn derive_de_ron_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("DeRon for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{ fn de_ron ( s : & mut  DeRonState , i : & mut std :: str :: Chars )");
-            tb.add("-> std :: result :: Result < Self , makepad_microserde :: DeRonErr > { ");
+            tb.add("-> std :: result :: Result < Self , DeRonErr > { ");
             tb.add("s . ident ( i ) ? ;");
             tb.add("std :: result :: Result :: Ok ( match s . identbuf . as_ref ( ) {");
             
@@ -279,5 +279,5 @@ pub fn derive_de_ron_impl(input: TokenStream) -> TokenStream {
            return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }

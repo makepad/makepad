@@ -1,17 +1,18 @@
-pub use makepad_image_formats;
+//pub use makepad_image_formats;
 pub use makepad_platform;
 pub use makepad_platform::*;
 pub use makepad_vector;
 
 pub mod overlay;
 pub mod cx_2d;
-pub mod view;
+pub mod draw_list_2d;
 pub mod shader;
 pub mod turtle;
 pub mod font_atlas;
 pub mod geometry;
 pub mod nav;
 pub mod icon_atlas;
+mod owned_font_face;
  
 pub use crate::{
     font_atlas::Font,
@@ -35,11 +36,11 @@ pub use crate::{
         NavItem,
         NavScrollIndex
     },
-    view::{
-        View,
+    draw_list_2d::{
+        DrawList2d,
         ManyInstances,
-        ViewRedrawing,
-        ViewRedrawingApi,
+        Redrawing,
+        RedrawingApi,
     },
     cx_2d::{
         Cx2d

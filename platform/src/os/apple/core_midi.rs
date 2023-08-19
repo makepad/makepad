@@ -206,11 +206,15 @@ impl CoreMidiAccess {
         unsafe {
             for i in 0..MIDIGetNumberOfSources() {
                 let ep = MIDIGetSource(i);
-                self.ports.push(CoreMidiPort::new(MidiPortType::Input, ep).unwrap());
+                if let Ok(port) = CoreMidiPort::new(MidiPortType::Input, ep){
+                    self.ports.push(port);
+                }
             }
             for i in 0..MIDIGetNumberOfDestinations() {
                 let ep = MIDIGetDestination(i);
-                self.ports.push(CoreMidiPort::new(MidiPortType::Output, ep).unwrap());
+                if let Ok(port) = CoreMidiPort::new(MidiPortType::Output, ep){
+                    self.ports.push(port);
+                }
             }
         }
         let mut out = Vec::new();

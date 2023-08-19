@@ -331,8 +331,12 @@ impl<'a> BlockGenerator<'a> {
             }
 
             if self.backend_writer.enum_is_float(){
-                write!(self.string, "if(abs(").unwrap();
+                write!(self.string, "if(").unwrap();
+                self.backend_writer.write_builtin_call_ident(&mut self.string, Ident(live_id!(abs)),&[]);
+                write!(self.string, "(");
                 self.generate_expr(expr);
+                //write!(self.string, ")").unwrap();
+                //self.generate_expr(expr);
                 write!(self.string, " - {}.0)<0.5)", match_item.enum_value.get().unwrap()).unwrap();
             }
             else {

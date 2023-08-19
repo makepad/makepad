@@ -12,7 +12,8 @@ use {
     },
     crate::{
         makepad_live_compiler::{
-            LiveRegistry
+            LiveRegistry,
+            LiveFileChange
         },
         makepad_shader_compiler::{
             ShaderRegistry
@@ -28,7 +29,7 @@ use {
         event::{
             DrawEvent,
             CxFingers,
-            CxFingerDrag,
+            CxDragDrop,
             Event,
             Trigger,
             CxKeyboard,
@@ -92,12 +93,9 @@ pub struct Cx {
     pub (crate) timer_id: u64,
     pub (crate) next_frame_id: u64,
     
-    #[allow(dead_code)]
-    pub (crate) web_socket_id: u64,
-    
-    pub (crate) keyboard: CxKeyboard,
-    pub (crate) fingers: CxFingers,
-    pub (crate) finger_drag: CxFingerDrag,
+    pub keyboard: CxKeyboard,
+    pub fingers: CxFingers,
+    pub (crate) drag_drop: CxDragDrop,
     
     pub (crate) platform_ops: Vec<CxOsOp>,
     
@@ -108,6 +106,7 @@ pub struct Cx {
     pub (crate) triggers: HashMap<Area, Vec<Trigger >>,
     
     pub live_registry: Rc<RefCell<LiveRegistry >>,
+    pub live_file_changes: Option<std::sync::mpsc::Receiver<Vec<LiveFileChange>>>,
     pub shader_registry: ShaderRegistry,
     
     #[allow(dead_code)]
@@ -129,10 +128,10 @@ pub struct Cx {
 }
 
 #[derive(Clone)]
-pub struct CxRef(pub (crate) Rc<RefCell<Cx>>);
+pub struct CxRef(pub Rc<RefCell<Cx>>); //TODO: I probably shouldn't remove the (crate)
 
 pub struct CxDependency {
-    pub data: Option<Result<Vec<u8>, String >>
+    pub data: Option<Result<Rc<Vec<u8>>, String >>
 }
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
@@ -246,11 +245,10 @@ impl Cx {
             repaint_id: 1,
             timer_id: 1,
             next_frame_id: 1,
-            web_socket_id: 1,
             
             keyboard: Default::default(),
             fingers: Default::default(),
-            finger_drag: Default::default(),
+            drag_drop: Default::default(),
             
             platform_ops: Default::default(),
             
@@ -262,6 +260,7 @@ impl Cx {
             triggers: Default::default(),
             
             live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
+            live_file_changes: None,
             shader_registry: ShaderRegistry::new(),
             
             command_settings: HashMap::new(),
@@ -281,5 +280,3 @@ impl Cx {
         }
     }
 }
-
-

@@ -6,7 +6,7 @@ use malloc_buf::MallocBuffer;
 
 use runtime::{Class, Object, Sel};
 
-const QUALIFIERS: &'static [char] = &[
+const QUALIFIERS: &[char] = &[
     'r', // const
     'n', // in
     'N', // inout

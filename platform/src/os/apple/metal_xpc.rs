@@ -85,11 +85,11 @@ pub fn xpc_service_proxy() -> RcObjcId {
 pub fn fetch_xpc_service_texture(proxy: ObjcId, id: u64, uid:u64, f: Box<dyn Fn(RcObjcId, u64)>) {
     unsafe {
         let texture_out = objc_block!(move | texture: ObjcId, uid: u64 | {
+            //log!("FETCH RETUREND");
             f(RcObjcId::from_unowned(NonNull::new(texture).unwrap()), uid)
         });
         let completion_block = get_fetch_texture_completion_block(&texture_out as *const _ as u64);
         let () = msg_send![proxy, fetchTexture: id uid:uid with: completion_block];
-        //log!("FETCH SERVICE TEXTURE");
     } 
 }
 

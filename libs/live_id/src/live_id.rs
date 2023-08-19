@@ -2,12 +2,12 @@
 
 use {
     std::{
+        sync::atomic::{AtomicU64, Ordering},
         ops::{Index, IndexMut, Deref, DerefMut},
-        collections::{HashMap, HashSet},
-        collections::hash_map::Entry,
+        collections::{HashMap},
         sync::Once,
         fmt,
-        cmp::Ordering,
+        cmp,
     }
 };
 
@@ -29,7 +29,7 @@ impl LiveIdInterner {
         static ONCE: Once = Once::new();
         ONCE.call_once( || unsafe {
             let mut map = LiveIdInterner {
-                alloc: 0,
+                //alloc: 0,
                 id_to_string: HashMap::new()
             };
             // pre-seed list for debugging purposes
@@ -104,12 +104,20 @@ impl LiveIdInterner {
 #[derive(Clone, Default, Eq, Hash, Copy, PartialEq)]
 pub struct LiveId(pub u64);
 
-
 pub const LIVE_ID_SEED:u64 = 0xd6e8_feb8_6659_fd93;
 
 impl LiveId {
     pub fn empty() -> Self {
         Self (0)
+    }
+    pub fn from_lo_hi(lo:u32, hi:u32)->Self{
+        Self( (lo as u64) | ((hi as u64)<<32) )
+    }
+    pub fn lo(&self)->u32{
+        (self.0&0xffff_ffff) as u32
+    }
+    pub fn hi(&self)->u32{
+        (self.0>>32) as u32
     }
     
     pub fn seeded()->Self{
@@ -121,11 +129,15 @@ impl LiveId {
     }
     
     pub fn is_ident(&self) -> bool {
-        return !self.is_unique()
+        (self.0 & 0x8000_0000_0000_0000) != 0
     }
     
     pub fn is_empty(&self) -> bool {
         self.0 == 0
+    }
+
+    pub fn get_value(&self) -> u64 {
+        self.0
     }
     
     // from https://nullprogram.com/blog/2018/07/31/
@@ -143,7 +155,7 @@ impl LiveId {
             i += 1;
         }
         // mark high bit as meaning that this is a hash id
-        return Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
+        Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
     pub const fn from_str_unchecked(id_str: &str) -> Self {
@@ -187,7 +199,7 @@ impl LiveId {
             else {
                 idmap.id_to_string.insert(id, id_str.to_string());
             }
-            return Ok(id)
+            Ok(id)
         })
     }
     
@@ -196,7 +208,7 @@ impl LiveId {
         let id = Self::from_str_num_unchecked(id_str, num);
         LiveIdInterner::with( | idmap | {
             idmap.id_to_string.insert(id, format!("{}{}",id_str, num));
-            return Ok(id)
+            Ok(id)
         })
     }
     
@@ -205,36 +217,34 @@ impl LiveId {
     {
         LiveIdInterner::with( | idmap | {
             match idmap.id_to_string.get(self){
-                Some(v)=>f(Some(&v)),
+                Some(v)=>f(Some(v)),
                 None=>f(None)
             }
         })
     }
 
     pub fn unique() -> Self {
-        LiveIdInterner::with( | idmap | {
-            // cycle the hash
-            idmap.alloc += 1;//idmap.gen_hash.add_id(idmap.gen_hash);
-            LiveId(idmap.alloc)
-        })
+        LiveId(UNIQUE_LIVE_ID.fetch_add(1, Ordering::SeqCst))
     }
 }
 
+pub (crate) static UNIQUE_LIVE_ID: AtomicU64 = AtomicU64::new(1);
+
 impl Ord for LiveId {
-    fn cmp(&self, other: &LiveId) -> Ordering {
+    fn cmp(&self, other: &LiveId) -> cmp::Ordering {
         LiveIdInterner::with( | idmap | {
             if let Some(id1) = idmap.id_to_string.get(self) {
                 if let Some(id2) = idmap.id_to_string.get(other) {
                     return id1.cmp(id2)
                 }
             }
-            return Ordering::Equal
+            cmp::Ordering::Equal
         })
     }
 }
 
 impl PartialOrd for LiveId {
-    fn partial_cmp(&self, other: &LiveId) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &LiveId) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -274,7 +284,7 @@ impl fmt::LowerHex for LiveId {
 
 
 pub struct LiveIdInterner {
-    alloc: u64,
+    //alloc: u64,
     id_to_string: HashMap<LiveId, String>,
 }
 
@@ -345,7 +355,7 @@ impl std::hash::BuildHasher for LiveIdHasherBuilder {
 #[derive(Clone, Debug)]
 pub struct LiveIdMap<K, V> {
     map: HashMap<K, V, LiveIdHasherBuilder>,
-    alloc_set: HashSet<K, LiveIdHasherBuilder>
+    //alloc_set: HashSet<K, LiveIdHasherBuilder>
 }
 
 impl<K, V> Default for LiveIdMap<K, V>
@@ -353,11 +363,11 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug 
     fn default() -> Self {
         Self {
             map: HashMap::with_hasher(LiveIdHasherBuilder {}),
-            alloc_set: HashSet::with_hasher(LiveIdHasherBuilder {})
+            //alloc_set: HashSet::with_hasher(LiveIdHasherBuilder {})
         }
     }
 }
-
+/*
 impl<K, V> LiveIdMap<K, V>
 where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
 {
@@ -368,7 +378,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
             let new_id = LiveId::unique().into();
             if self.map.get(&new_id).is_none() && !self.alloc_set.contains(&new_id) {
                 self.alloc_set.insert(new_id);
-                return new_id.into()
+                return new_id
             }
         }
     }
@@ -399,7 +409,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
         };
     }
 }
-
+*/
 impl<K, V> Deref for LiveIdMap<K, V>
 where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {

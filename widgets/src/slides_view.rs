@@ -85,7 +85,6 @@ pub enum SlidesViewAction {
     None,
 }
 
-
 impl Widget for SlidesView {
     fn handle_widget_event_with(
         &mut self,
@@ -125,7 +124,8 @@ impl SlidesView {
     pub fn next_slide(&mut self, cx: &mut Cx) {
         self.goal_pos += 1.0;
         // lets cap goal pos on the # of slides
-        let max_goal_pos = (self.frame.child_count().max(1) - 1) as f64;
+        let max_goal_pos = (self.frame.child_count().max(2) - 2) as f64;
+        
         if self.goal_pos > max_goal_pos {
             self.goal_pos = max_goal_pos
         }

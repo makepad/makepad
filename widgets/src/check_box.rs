@@ -52,6 +52,9 @@ live_design!{
                     sdf.blend(self.selected)
                     sdf.fill(#f);
                 }
+                CheckType::None=>{
+                    return #0000
+                }
             }
             return sdf.result
         }
@@ -94,7 +97,7 @@ live_design!{
                         #c,
                         self.hover
                     ),
-                    #9,
+                    #f,
                     self.selected
                 )
             }
@@ -197,6 +200,7 @@ pub enum CheckType {
     #[pick] Check = shader_enum(1),
     Radio = shader_enum(2),
     Toggle = shader_enum(3),
+    None = shader_enum(4),
 }
 
 #[derive(Live)]
@@ -327,6 +331,12 @@ impl CheckBoxRef {
         if let Some(mut inner) = self.borrow_mut(){
             inner.label.clear();
             inner.label.push_str(text);
+        }
+    }
+
+    pub fn set_selected(&self, cx: &mut Cx, value:bool) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
         }
     }
 }

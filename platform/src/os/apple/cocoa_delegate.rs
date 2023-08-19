@@ -6,7 +6,7 @@ use {
         os::raw::{c_void}
     },
     crate::{
-        makepad_objc_sys::runtime::{ObjcId,nil},
+        makepad_objc_sys::runtime::{ObjcId, nil},
         makepad_live_id::LiveId,
         makepad_math::{
             DVec2,
@@ -34,162 +34,16 @@ use {
             MenuCommand
         },
         event::{
-            DragState,
             DragEvent,
             DropEvent,
-            DraggedItem,
-            DragAction
+            DragItem,
+            DragResponse
         },
     }
 };
 
 
-pub struct AvVideoCaptureCallback {
-    _callback: Box<Box<dyn Fn(CMSampleBufferRef) + Send + 'static>>,
-    pub delegate: RcObjcId,
-}
 
-impl AvVideoCaptureCallback {
-    pub fn new(callback: Box<dyn Fn(CMSampleBufferRef) + Send + 'static>) -> Self {
-        unsafe {
-            let double_box = Box::new(callback);
-            //let cocoa_app = get_cocoa_app_global();
-            let delegate = RcObjcId::from_owned(msg_send![get_cocoa_class_global().video_callback_delegate, alloc]);
-            (*delegate.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
-            Self {
-                _callback: double_box,
-                delegate
-            }
-        }
-        
-    }
-}
-
-pub fn define_av_video_callback_delegate() -> *const Class {
-    
-    extern fn capture_output_did_output_sample_buffer(
-        this: &Object,
-        _: Sel,
-        _: ObjcId,
-        sample_buffer: CMSampleBufferRef,
-        _: ObjcId,
-    ) {
-        unsafe {
-            let ptr: *const c_void = *this.get_ivar("callback");
-            if ptr == 0 as *const c_void { // owner gone
-                return
-            }
-            (*(ptr as *const Box<dyn Fn(CMSampleBufferRef)>))(sample_buffer);
-        }
-    }
-    extern "C" fn capture_output_did_drop_sample_buffer(
-        _: &Object,
-        _: Sel,
-        _: ObjcId,
-        _: ObjcId,
-        _: ObjcId,
-    ) {
-    }
-    
-    let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("AvVideoCaptureCallback", superclass).unwrap();
-    
-    // Add callback methods
-    unsafe {
-        decl.add_method(
-            sel!(captureOutput:didOutputSampleBuffer:fromConnection:),
-            capture_output_did_output_sample_buffer as extern fn(&Object, Sel, ObjcId, CMSampleBufferRef, ObjcId)
-        );
-        decl.add_method(
-            sel!(captureOutput:didDropSampleBuffer:fromConnection:),
-            capture_output_did_drop_sample_buffer as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId)
-        );
-        decl.add_protocol(
-            Protocol::get("AVCaptureVideoDataOutputSampleBufferDelegate").unwrap(),
-        );
-    }
-    // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("callback");
-    
-    return decl.register();
-}
-
-
-
-pub struct KeyValueObserver {
-    _callback: Box<Box<dyn Fn() >>,
-    observer: RcObjcId
-}
-unsafe impl Send for KeyValueObserver {}
-unsafe impl Sync for KeyValueObserver {}
-
-impl Drop for KeyValueObserver {
-    fn drop(&mut self) {
-        unsafe {
-            (*self.observer.as_id()).set_ivar("callback", 0 as *mut c_void);
-        }
-    }
-}
-
-impl KeyValueObserver {
-    pub fn new(target: ObjcId, name: ObjcId, callback: Box<dyn Fn()>) -> Self {
-        unsafe {
-            let double_box = Box::new(callback);
-            //let cocoa_app = get_cocoa_app_global();
-            let observer = RcObjcId::from_owned(msg_send![get_cocoa_class_global().key_value_observing_delegate, alloc]);
-            
-            (*observer.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
-            
-            let () = msg_send![
-                target,
-                addObserver: observer.as_id()
-                forKeyPath: name
-                options: 15u64 // if its not 1+2+4+8 it does nothing
-                context: nil
-            ];
-            Self {
-                _callback: double_box,
-                observer
-            }
-        }
-        
-    }
-}
-
-pub fn define_key_value_observing_delegate() -> *const Class {
-    
-    extern fn observe_value_for_key_path(
-        this: &Object,
-        _: Sel,
-        _key_path: ObjcId,
-        _of_object: ObjcId,
-        _change: ObjcId,
-        _data: *mut std::ffi::c_void
-    ) {
-        unsafe {
-            let ptr: *const c_void = *this.get_ivar("key_value_observer_callback");
-            if ptr == 0 as *const c_void { // owner gone
-                return
-            }
-            (*(ptr as *const Box<dyn Fn()>))();
-        }
-    }
-    
-    let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("KeyValueObservingDelegate", superclass).unwrap();
-    
-    // Add callback methods
-    unsafe {
-        decl.add_method(
-            sel!(observeValueForKeyPath: ofObject: change: context:),
-            observe_value_for_key_path as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId, *mut std::ffi::c_void)
-        );
-    }
-    // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("key_value_observer_callback");
-    
-    return decl.register();
-}
 
 
 pub fn define_cocoa_timer_delegate() -> *const Class {
@@ -217,6 +71,7 @@ pub fn define_cocoa_timer_delegate() -> *const Class {
     
     return decl.register();
 }
+
 
 pub fn define_app_delegate() -> *const Class {
     
@@ -512,6 +367,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_mouse_down(0, modifiers);
     }
     
+    
     extern fn mouse_up(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
@@ -789,24 +645,35 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
     
     fn dragging(this: &Object, sender: ObjcId) -> NSDragOperation {
+        
         let window = get_cocoa_window(this);
-        let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
+        let (items, pos) = get_drag_items_from_pasteboard(this, sender);
+        
+        /*let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
-        }));
-        let action = Rc::new(Cell::new(DragAction::None));
+        }));*/
+        
+        let response = Rc::new(Cell::new(DragResponse::None));
+        
+        let modifiers = unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let ns_event: ObjcId = msg_send![ns_app, currentEvent];
+            get_event_key_modifier(ns_event)
+        };
         
         window.do_callback(CocoaEvent::Drag(DragEvent {
+            modifiers,
             handled: Cell::new(false),
             abs: pos,
-            state: DragState::Over,
-            action: action.clone()
+            items,
+            response: response.clone()
         }));
         
-        match action.get(){
-            DragAction::None => NSDragOperation::None,
-            DragAction::Copy => NSDragOperation::Copy,
-            DragAction::Link => NSDragOperation::Link,
-            DragAction::Move => NSDragOperation::Move,
+        match response.get() {
+            DragResponse::None => NSDragOperation::None,
+            DragResponse::Copy => NSDragOperation::Copy,
+            DragResponse::Link => NSDragOperation::Link,
+            DragResponse::Move => NSDragOperation::Move,
         }
     }
     
@@ -815,11 +682,12 @@ pub fn define_cocoa_view_class() -> *const Class {
         window.end_live_resize();
     }
     
-    extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
-        let window = get_cocoa_window(this);
+    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DragItem >>, DVec2) {
+        //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
+        
         let pasteboard: ObjcId = unsafe {msg_send![sender, draggingPasteboard]};
         let class: ObjcId = unsafe {msg_send![class!(NSURL), class]};
         let classes: ObjcId = unsafe {
@@ -839,21 +707,60 @@ pub fn define_cocoa_view_class() -> *const Class {
             msg_send![pasteboard, readObjectsForClasses: classes options: options]
         };
         let count: usize = unsafe {msg_send![urls, count]};
-        let mut file_urls = Vec::with_capacity(count);
+        let mut items = Vec::with_capacity(count);
         for index in 0..count {
             let url: ObjcId = unsafe {msg_send![urls, objectAtIndex: index]};
             let url: ObjcId = unsafe {msg_send![url, filePathURL]};
+            if url == nil {
+                continue;
+            }
             let string: ObjcId = unsafe {msg_send![url, absoluteString]};
+            if string == nil {
+                continue;
+            }
             let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
-            file_urls.push(string.to_str().unwrap().to_string());
+            if let Ok(string) = string.to_str() {
+                // lets rip off file:// and #id
+                if let Some(string) = string.strip_prefix("file://") {
+                    let mut bits = string.split("#makepad_internal_id=");
+                    let path = bits.next().unwrap().to_string();
+                    let internal_id = if let Some(next) = bits.next() {
+                        if let Ok(id) = next.parse::<u64>() {
+                            Some(LiveId(id))
+                        }
+                        else {
+                            None
+                        }
+                    }
+                    else {
+                        None
+                    };
+                    items.push(DragItem::FilePath {
+                        internal_id,
+                        path: if path == "makepad_internal_empty" {"".to_string()}else {path}
+                    });
+                }
+            }
+            
         }
-
+        (Rc::new(items), pos)
+    }
+    
+    extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
+        //let window = get_cocoa_window(this);
+        //window.end_live_resize();
+        let modifiers = unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let ns_event: ObjcId = msg_send![ns_app, currentEvent];
+            get_event_key_modifier(ns_event)
+        };    
+        let window = get_cocoa_window(this);
+        let (items, pos) = get_drag_items_from_pasteboard(this, sender);
         window.do_callback(CocoaEvent::Drop(DropEvent {
+            modifiers,
             handled: Cell::new(false),
             abs: pos,
-            dragged_item: DraggedItem {
-                file_urls,
-            }
+            items
         }));
     }
     

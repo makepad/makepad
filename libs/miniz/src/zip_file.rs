@@ -178,7 +178,7 @@ fn read_u16(zip_data:&mut impl Read)->Result<u16, ZipError>{
         }
         return Ok(u16::from_le_bytes(bytes))
     }
-    return Err(ZipError::DataReadError)
+    Err(ZipError::DataReadError)
 }
 
 fn read_u32(zip_data:&mut impl Read)->Result<u32, ZipError>{
@@ -189,7 +189,7 @@ fn read_u32(zip_data:&mut impl Read)->Result<u32, ZipError>{
         }
         return Ok(u32::from_le_bytes(bytes))
     }
-    return Err(ZipError::DataReadError)
+    Err(ZipError::DataReadError)
 }
 
 fn read_string(zip_data:&mut impl Read, len:usize)->Result<String, ZipError>{
@@ -204,7 +204,7 @@ fn read_string(zip_data:&mut impl Read, len:usize)->Result<String, ZipError>{
         }
         return Err(ZipError::ReadStringError)
     }
-    return Err(ZipError::DataReadError)
+    Err(ZipError::DataReadError)
 }
 
 fn read_binary(zip_data:&mut impl Read, len:usize)->Result<Vec<u8>, ZipError>{
@@ -216,7 +216,7 @@ fn read_binary(zip_data:&mut impl Read, len:usize)->Result<Vec<u8>, ZipError>{
         }
         return Ok(data)
     }
-    return Err(ZipError::DataReadError)
+    Err(ZipError::DataReadError)
 }
 
 pub struct ZipCentralDirectory{
@@ -242,7 +242,7 @@ impl CentralDirectoryFileHeader{
                 return Err(ZipError::DecompressionError)
             }
         }
-        return Err(ZipError::UnsupportedCompressionMethod)
+        Err(ZipError::UnsupportedCompressionMethod)
     }
 }
 

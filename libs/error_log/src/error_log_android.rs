@@ -1,5 +1,5 @@
 use std::panic;
-use std::ffi::{c_char, c_int};
+use std::ffi::c_int;
     
 #[macro_export]
 macro_rules!log {
@@ -16,7 +16,7 @@ macro_rules!error {
 }
 
 extern "C" { 
-    pub fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
+    pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
 }
 
 pub fn console_log_impl(val: &str) {
@@ -38,4 +38,3 @@ pub fn init_panic_hook() {
     }
     panic::set_hook(Box::new(panic_hook));
 }
-

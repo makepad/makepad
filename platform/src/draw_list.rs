@@ -246,7 +246,7 @@ impl CxDrawItems{
         }
         else{
             // reuse an older one, keeping all GPU resources attached
-            let mut draw_item = &mut self.buffer[draw_item_id];
+            let draw_item = &mut self.buffer[draw_item_id];
             draw_item.instances.as_mut().unwrap().clear();
             draw_item.kind = kind;
             draw_item.redraw_id = redraw_id;

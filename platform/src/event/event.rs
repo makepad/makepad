@@ -3,7 +3,7 @@ use {
         collections::{HashSet, HashMap}
     },
     crate::{
-        makepad_live_compiler::LiveEditEvent,
+        //makepad_live_compiler::LiveEditEvent,
         makepad_live_id::LiveId,
         cx::Cx,
         area::Area,
@@ -14,6 +14,7 @@ use {
             window::*,
             xr::*,
             drag_drop::*,
+            network::*,
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
@@ -33,7 +34,7 @@ pub enum Event {
     Resume,
 
     Draw(DrawEvent),
-    LiveEdit(LiveEditEvent),
+    LiveEdit,
     AppGotFocus,
     AppLostFocus,
     NextFrame(NextFrameEvent),
@@ -60,22 +61,28 @@ pub enum Event {
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
-    TextCopy(TextCopyEvent),
-    TextCut(TextCutEvent),
+    TextCopy(TextClipboardEvent),
+    TextCut(TextClipboardEvent),
     
     Drag(DragEvent),
     Drop(DropEvent),
     DragEnd,
     
-    WebSocketClose(WebSocket),
-    WebSocketOpen(WebSocket),
+    WebSocketClose(LiveId),
+    WebSocketOpen(LiveId),
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
     
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
-    
+    NetworkResponses(Vec<NetworkResponseEvent>),
+    /*
+    HttpResponse(HttpResponseEvent),
+    HttpRequestError(HttpRequestErrorEvent),
+    HttpResponseProgress(HttpProgressEvent),
+    HttpUploadProgress(HttpProgressEvent),
+    */ 
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
@@ -87,8 +94,8 @@ pub enum Hit{
     KeyUp(KeyEvent),
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
-    TextCopy(TextCopyEvent),
-    TextCut(TextCutEvent),
+    TextCopy(TextClipboardEvent),
+    TextCut(TextClipboardEvent),
     
     FingerScroll(FingerScrollEvent),
     FingerDown(FingerDownEvent),
@@ -101,9 +108,10 @@ pub enum Hit{
     Nothing
 }
 
-pub enum DragHit<'a>{
-    Drag(DragHitEvent<'a>),
-    Drop(DropHitEvent<'a>),
+#[derive(Clone)]
+pub enum DragHit{
+    Drag(DragHitEvent),
+    Drop(DropHitEvent),
     DragEnd,
     NoHit
 }
@@ -195,23 +203,15 @@ pub struct Trigger{
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriggerHitEvent(pub Vec<Trigger>);
 
-pub enum WebSocketAutoReconnect{
-    Yes,
-    No
-}
-
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct WebSocket(pub u64);
-
 #[derive(Clone, Debug)]
 pub struct WebSocketErrorEvent {
-    pub web_socket: WebSocket,
+    pub socket_id: LiveId,
     pub error: String
 }
 
 #[derive(Clone, Debug)]
 pub struct WebSocketMessageEvent {
-    pub web_socket: WebSocket,
+    pub socket_id: LiveId,
     pub data: Vec<u8>
 }
 

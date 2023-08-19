@@ -48,15 +48,15 @@ pub struct TabBar {
     
     #[rust] view_area: Area,
 
-    #[rust] tab_order: Vec<TabId>,
+    #[rust] tab_order: Vec<LiveId>,
     
     #[rust] is_dragged: bool,
-    #[rust] tabs: ComponentMap<TabId, Tab>,
+    #[rust] tabs: ComponentMap<LiveId, Tab>,
     
     #[rust] selected_tab: Option<usize>,
     
-    #[rust] selected_tab_id: Option<TabId>,
-    #[rust] next_selected_tab_id: Option<TabId>,
+    #[rust] selected_tab_id: Option<LiveId>,
+    #[rust] next_selected_tab_id: Option<LiveId>,
 }
 
 
@@ -97,7 +97,7 @@ impl TabBar {
         self.scroll_bars.end(cx);
     }
     
-    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: TabId, name: &str) {
+    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str) {
         if let Some(selected_tab) = self.selected_tab {
             let tab_order_len = self.tab_order.len();
             let tab = self.get_or_create_tab(cx, tab_id);
@@ -120,18 +120,18 @@ impl TabBar {
         }
     }
     
-    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: TabId) -> &mut Tab {
+    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId) -> &mut Tab {
         let tab = self.tab;
         self.tabs.get_or_insert(cx, tab_id, | cx | {
             Tab::new_from_ptr(cx, tab)
         })
     }
     
-    pub fn selected_tab_id(&self) -> Option<TabId> {
+    pub fn selected_tab_id(&self) -> Option<LiveId> {
         self.selected_tab_id
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>, animate: Animate) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<LiveId>, animate: Animate) {
         if self.selected_tab_id == tab_id {
             return;
         }
@@ -148,7 +148,7 @@ impl TabBar {
     }
     
     
-    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, tab_id: TabId, animate: Animate) {
+    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, tab_id: LiveId, animate: Animate) {
         if let Some(index) = self.tab_order.iter().position( | id | *id == tab_id) {
             if self.selected_tab_id != Some(tab_id) {
                 self.next_selected_tab_id = self.selected_tab_id;
@@ -170,6 +170,31 @@ impl TabBar {
     }
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.view_area.redraw(cx)
+    }
+    
+    pub fn is_over_tab(&self, cx:&Cx, abs:DVec2)->Option<(LiveId,Rect)>{
+        for (tab_id, tab) in self.tabs.iter() {
+            let rect = tab.area().get_rect(cx);
+            if rect.contains(abs){
+                return Some((*tab_id, rect))
+            }
+        }
+        None
+    }
+    
+    pub fn is_over_tab_bar(&self, cx:&Cx, abs:DVec2)->Option<Rect>{
+        let rect = self.scroll_bars.area().get_rect(cx);
+        if rect.contains(abs){
+            return Some(rect)
+        }
+        None
+    }
+    
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<TabBarAction> {
+        let mut actions = Vec::new();
+        self.handle_event_with(cx, event, &mut | _, a | actions.push(a));
+        actions
     }
     
     pub fn handle_event_with(
@@ -194,11 +219,21 @@ impl TabBar {
                 TabAction::CloseWasPressed => {
                     dispatch_action(cx, TabBarAction::TabCloseWasPressed(*tab_id));
                 }
-                TabAction::ReceivedDraggedItem(item) => {
-                    dispatch_action(cx, TabBarAction::TabReceivedDraggedItem(*tab_id, item));
+                TabAction::ShouldTabStartDrag=>{
+                    dispatch_action(cx, TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
+                TabAction::ShouldTabStopDrag=>{
+                }/*
+                TabAction::DragHit(hit)=>{
+                    dispatch_action(cx, TabBarAction::DragHitTab(hit, *tab_id));
+                }*/
             });
         }
+        /*
+        match event.drag_hits(cx, self.scroll_bars.area()) {
+            DragHit::NoHit=>(),
+            hit=>dispatch_action(cx, TabBarAction::DragHitTabBar(hit))
+        }*/
         /*
         match event.drag_hits(cx, self.scroll_view.area()) {
             DragHit::Drag(f) => match f.state {
@@ -228,15 +263,11 @@ impl TabBar {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct TabId(pub LiveId);
-impl From<LiveId> for TabId {
-    fn from(live_id: LiveId) -> TabId {TabId(live_id)}
-}
 
 pub enum TabBarAction {
-    ReceivedDraggedItem(DraggedItem),
-    TabWasPressed(TabId),
-    TabCloseWasPressed(TabId),
-    TabReceivedDraggedItem(TabId, DraggedItem),
+    TabWasPressed(LiveId),
+    ShouldTabStartDrag(LiveId),
+    TabCloseWasPressed(LiveId),
+    //DragHitTab(DragHit, LiveId),
+    //DragHitTabBar(DragHit)
 }

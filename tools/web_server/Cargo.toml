@@ -11,7 +11,7 @@ metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 
 [dependencies]
 makepad-http = { path = "http", version = "0.3.0" }
-makepad-collab-server = {path = "../../studio/collab_server", version = "0.3.0"}
+#makepad-file-server = {path = "../../studio/file_server", version = "0.3.0"}
  
 [features]
 nightly=[]

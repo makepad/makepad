@@ -65,7 +65,7 @@ macro_rules! impl_ser_de_bin_for {
             fn de_bin(o:&mut usize, d:&[u8]) -> Result<$ty, DeBinErr> {
                 let l = std::mem::size_of::<$ty>();
                 if *o + l > d.len(){
-                    return Err(DeBinErr{o:*o, l:l, s:d.len(), msg:format!("{}", stringify!($ty))})
+                    return Err(DeBinErr{o:*o, l, s:d.len(), msg:format!("{}", stringify!($ty))})
                 }
                 let ret = $ty::from_le_bytes(d[*o..*o+l].try_into().unwrap());
                 *o += l;
@@ -94,7 +94,7 @@ impl DeBin for usize {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<usize, DeBinErr> {
         let l = std::mem::size_of::<u64>();
         if *o + l > d.len(){
-            return Err(DeBinErr{o:*o, l:l, s:d.len(), msg:format!("usize")})
+            return Err(DeBinErr{o:*o, l, s:d.len(), msg:"usize".to_string()})
         }
         let ret = u64::from_le_bytes(d[*o..*o+l].try_into().unwrap()) as usize;
         *o += l;
@@ -105,7 +105,7 @@ impl DeBin for usize {
 impl DeBin for u8 {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<u8,DeBinErr> {
         if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("u8")})
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"u8".to_string()})
         } 
         let m = d[*o];
         *o += 1;
@@ -128,7 +128,7 @@ impl SerBin for bool {
 impl DeBin for bool {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<bool, DeBinErr> {
         if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("bool")})
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"bool".to_string()})
         } 
         let m = d[*o];
         *o += 1;
@@ -148,7 +148,7 @@ impl DeBin for String {
     fn de_bin(o:&mut usize, d:&[u8])->Result<String, DeBinErr> {
         let len:u64 = DeBin::de_bin(o,d)?;
         if *o + (len as usize) > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("String")})
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"String".to_string()})
         } 
         let r = std::str::from_utf8(&d[*o..(*o+(len as usize))]).unwrap().to_string();
         *o += len as usize;
@@ -192,14 +192,14 @@ impl<T> SerBin for Option<T> where T: SerBin {
 impl<T> DeBin for Option<T> where T:DeBin{
     fn de_bin(o:&mut usize, d:&[u8])->Result<Option<T>, DeBinErr> {
         if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("Option<T>")})
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"Option<T>".to_string()})
         } 
         let m = d[*o];
         *o += 1;
         Ok(match m {
             0 => None,
             1 => Some(DeBin::de_bin(o,d)?),
-            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:format!("Option<T>")}),
+            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:"Option<T>".to_string()}),
         })
     }
 }
@@ -222,14 +222,14 @@ impl<T, E> SerBin for Result<T, E> where T: SerBin, E: SerBin {
 impl<T, E> DeBin for Result<T, E> where T: DeBin, E: DeBin {
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
         if *o + 1 > d.len() {
-            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("Result<T, E>")});
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"Result<T, E>".to_string()});
         }
         let m = d[*o];
         *o += 1;
         Ok(match m {
             0 => Ok(T::de_bin(o, d)?),
             1 => Err(E::de_bin(o, d)?),
-            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:format!("Result<T, E>")}),
+            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:"Result<T, E>".to_string()}),
         })
     }
 }
@@ -258,7 +258,7 @@ macro_rules!de_bin_array_impl {
             DeBinErr> {
                 unsafe{
                     let mut to = std::mem::MaybeUninit::<[T; $count]>::uninit();
-                    let top: *mut T = std::mem::transmute(&mut to);
+                    let top: *mut T = &mut to as *mut _ as *mut T;
                     de_bin_array_impl_inner(top, $count, o, d)?;
                     Ok(to.assume_init())
                 }
@@ -403,8 +403,8 @@ impl DeBin for char {
         let mut bytes = [0; 4];
         bytes[0] = u8::de_bin(o, d)?;
         let width = utf8_char_width(bytes[0]);
-        for index in 1..width {
-            bytes[index] = u8::de_bin(o, d)?;
+        for byte in &mut bytes[1..width] {
+            *byte = u8::de_bin(o, d)?;
         }
         Ok(str::from_utf8(&bytes[..width])
             .unwrap()

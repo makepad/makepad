@@ -962,7 +962,11 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     }
     
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
-        write!(string, "{}", ident).unwrap();
+         match ident {
+            _ => {
+                write!(string, "{}", ident).unwrap()
+            }
+        }
     }
     
 }

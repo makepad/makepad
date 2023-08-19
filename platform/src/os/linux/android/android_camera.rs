@@ -257,7 +257,7 @@ impl AndroidCameraAccess {
                 let camera_id = camera_ids[i];
                 let mut meta_data = std::ptr::null_mut();
                 ACameraManager_getCameraCharacteristics(self.manager, camera_id, &mut meta_data);
-                let camera_id_str = CStr::from_ptr(camera_id).clone();
+                let camera_id_str = CStr::from_ptr(camera_id);
 
                 let mut entry = std::mem::zeroed();
                 if ACameraMetadata_getConstEntry(meta_data, ACAMERA_LENS_FACING, &mut entry) != 0{

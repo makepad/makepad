@@ -16,9 +16,21 @@ pub fn derive_from_live_id_impl(input: TokenStream) -> TokenStream {
             tb.add("From<LiveId> for").ident(&struct_name).add("{");
             tb.add("    fn from(live_id:LiveId)->").ident(&struct_name).add("{").ident(&struct_name).add("(live_id)}");
             tb.add("}");
+            
+            tb.add("impl");
+            tb.add("From<&[LiveId;1]> for").ident(&struct_name).add("{");
+            tb.add("    fn from(live_id:&[LiveId;1])->").ident(&struct_name).add("{").ident(&struct_name).add("(live_id[0])}");
+            tb.add("}");
+
+            tb.add("impl");
+            tb.add("From<u64> for").ident(&struct_name).add("{");
+            tb.add("    fn from(live_id:u64)->").ident(&struct_name).add("{").ident(&struct_name).add("(LiveId(live_id))}");
+            tb.add("}");
+
+
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
 
