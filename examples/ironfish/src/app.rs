@@ -11,7 +11,7 @@ use crate::{
 
 //use std::fs::File;
 //use std::io::prelude::*;
-live_design!{
+live_design!{  
     import makepad_widgets::frame::*
     import makepad_widgets::button::Button;
     import makepad_example_ironfish::app_desktop::AppDesktop
@@ -42,13 +42,13 @@ live_design!{
             }
         }
         ui: <DesktopWindow> {
-            window: {inner_size: vec2(1280, 1000), dpi_override:2},
+            window: {inner_size: vec2(1280, 1000)},
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <AppDesktop> {}
         }
         
-        
+        /*
         ui= <MultiWindow> {
             mobile =<DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000), dpi_override:2},
@@ -69,7 +69,7 @@ live_design!{
                 block_signal_event: true; 
                 <AppMobile> {}
             }
-        }
+        }*/
 /*
         ui=<DesktopWindow> {
             window: {inner_size: vec2(1920, 1080)},
@@ -247,12 +247,12 @@ impl App {
     
     pub fn data_bind(&mut self, mut db: DataBindingMap) {
         // sequencer
-        db.bind(id!(sequencer.playing), ids!(playpause.checkbox));
+        db.bind(id!(sequencer.playing), ids!(playpause));
         db.bind(id!(sequencer.bpm), ids!(speed.slider));
         db.bind(id!(sequencer.rootnote), ids!(rootnote.dropdown));
         db.bind(id!(sequencer.scale), ids!(scaletype.dropdown));
         db.bind(id!(arp.enabled), ids!(arp.checkbox));
-        //db.bind(id!(arp.octaves), ids!(arp.octaves.slider));
+        db.bind(id!(arp.octaves), ids!(arpoctaves.slider));
         
         // Mixer panel
         db.bind(id!(osc_balance), ids!(balance.slider));
@@ -323,8 +323,8 @@ impl App {
         db.bind(id!(osc1.harmoniclfo), ids!(osc1.harmoniclfo.slider));
         
         // Osc2 panel
-        db.bind(id!(supersaw1.spread), ids!(osc2.supersaw.spread.slider));
-        db.bind(id!(supersaw1.diffuse), ids!(osc2.supersaw.diffuse.slider));
+        db.bind(id!(supersaw2.spread), ids!(osc2.supersaw.spread.slider));
+        db.bind(id!(supersaw2.diffuse), ids!(osc2.supersaw.diffuse.slider));
         db.bind(id!(supersaw2.spread), ids!(osc2.supersaw.spread.slider));
         db.bind(id!(supersaw2.diffuse), ids!(osc2.supersaw.diffuse.slider));
         db.bind(id!(supersaw2.spread), ids!(osc2.hypersaw.spread.slider));
@@ -440,7 +440,7 @@ impl AppMain for App {
         self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
             match action {
                 AudioGraphAction::DisplayAudio {buffer, voice, ..} => {
-                    display_audio.process_buffer(cx, None, voice, buffer);
+                    display_audio.process_buffer(cx, None, voice, buffer, 1.0);
                     buffers += 1;
                 }
                 AudioGraphAction::VoiceOff {voice} => {

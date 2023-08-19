@@ -103,7 +103,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
             let node = &nodes[index];
             
             if node.value.is_close() {
-                if stack.len() == 0 {
+                if stack.is_empty() {
                     return Err("Unmatched closed".into())
                 }
                 let item = stack.pop().unwrap();
@@ -148,9 +148,9 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.push(CBOR_U16);
                     out.extend_from_slice(&(v as u16).to_be_bytes());
                 }
-                else if v <= std::u32::MAX as u32 {
+                else {
                     out.push(CBOR_U32);
-                    out.extend_from_slice(&(v as u32).to_be_bytes());
+                    out.extend_from_slice(&v.to_be_bytes());
                 }
             }
             
@@ -219,7 +219,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 else {
                     id.as_string( | v | {
                         if let Some(v) = v {
-                            encode_str(&v, out);
+                            encode_str(v, out);
                         }
                         else {
                             encode_u64(id.0, out);
@@ -531,9 +531,10 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
             assert_len(*o, len, data) ?;
             if let Ok(val) = std::str::from_utf8(&data[*o..*o + len]) {
                 *o += len;
-                return Ok(Some(val))
+                Ok(Some(val))
+            } else {
+                Err(LiveNodeFromCborError::UTF8Error)
             }
-            return Err(LiveNodeFromCborError::UTF8Error);
         }
         
         fn decode_u64(data: &[u8], o: &mut usize) -> Result<Option<u64>, LiveNodeFromCborError> {
@@ -559,12 +560,12 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     }
                     CBOR_U64 => {
                         *o += 1;
-                        Some(read_u64(data, o) ? as u64)
+                        Some(read_u64(data, o)?)
                     }
                     _ => return Ok(None)
                 }
             };
-            return Ok(v)
+            Ok(v)
         }
         
         fn decode_i64(data: &[u8], o: &mut usize) -> Result<Option<i64>, LiveNodeFromCborError> {
@@ -590,14 +591,9 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     }
                     CBOR_NU64 => {
                         *o += 1;
-                        Some(-(read_i64(data, o) ? as i64 + 1))
+                        Some(-(read_i64(data, o)? + 1))
                     }
-                    _ => if let Some(data) = decode_u64(data, o) ? {
-                        Some(data as i64)
-                    }
-                    else {
-                        None
-                    }
+                    _ => decode_u64(data, o)?.map(|data| data as i64)
                 }
             };
             Ok(v)
@@ -712,7 +708,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                 self.push(LiveNode {id, origin, value: LiveValue::Int64(v)});
             }
             else if let Some(v) = decode_str(data, &mut o) ? {
-                let value = if let Some(inline_str) = InlineString::from_str(&v) {
+                let value = if let Some(inline_str) = InlineString::from_str(v) {
                     LiveValue::InlineString(inline_str)
                 }
                 else {

@@ -224,8 +224,8 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmWebSocketOpen(args) {
-        let auto_reconnect = args.auto_reconnect;
-        let web_socket_id = args.web_socket_id;
+        let id_lo = args.id_lo;
+        let id_hi = args.id_hi;
         let url = args.url;
         let web_socket = new WebSocket(args.url);
         web_socket.binaryType = "arraybuffer";
@@ -235,24 +235,25 @@ export class WasmWebBrowser extends WasmBridge {
             console.log("Auto reconnecting websocket");
             this.to_wasm.ToWasmWebSocketClose({web_socket_id})
             this.do_wasm_pump();
-            if (auto_reconnect) {
-                this.FromWasmWebSocketOpen({
-                    web_socket_id,
-                    auto_reconnect,
-                    url
-                });
-            }
         }
         web_socket.onerror = e => {
             console.error("Websocket error", e);
-            this.to_wasm.ToWasmWebSocketError({web_socket_id, error: "" + e})
+            this.to_wasm.ToWasmWebSocketError({id_lo,id_hi, error: "" + e})
             this.do_wasm_pump();
         }
         web_socket.onmessage = e => {
-            this.to_wasm.ToWasmWebSocketMessage({
-                web_socket_id,
-                data: e.data
-            })
+            if(typeof e.data == "string"){
+                this.to_wasm.ToWasmWebSocketString({
+                    id_lo,id_hi,
+                    data: e.data
+                })
+            }
+            else{
+                this.to_wasm.ToWasmWebSocketBinary({
+                    id_lo,id_hi,
+                    data: e.data
+                })
+            }
             this.do_wasm_pump();
         }
         web_socket.onopen = e => {
@@ -260,7 +261,7 @@ export class WasmWebBrowser extends WasmBridge {
                 web_socket.send(item);
             }
             web_socket._queue.length = 0;
-            this.to_wasm.ToWasmWebSocketOpen({web_socket_id});
+            this.to_wasm.ToWasmWebSocketOpen({id_lo,id_hi});
             this.do_wasm_pump();
         }
         web_socket._queue = []
@@ -290,6 +291,7 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         const start_worklet = async () => {
+
             await this.audio_context.audioWorklet.addModule("/makepad/platform/src/os/web/audio_worklet.js", {credentials: 'omit'});
             
             const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
@@ -345,6 +347,12 @@ export class WasmWebBrowser extends WasmBridge {
                     });
                 }
             }
+            // safari doesnt report any outputs
+            devices.push({
+                web_device_id: "",
+                label: "" ,
+                is_output: true
+            });
             this.to_wasm.ToWasmAudioDeviceList({devices});
             this.do_wasm_pump();
         })
@@ -479,6 +487,100 @@ export class WasmWebBrowser extends WasmBridge {
                 this.do_wasm_pump();
             }
         }, 0.016 * 1000.0);
+    }
+
+    parse_and_set_headers(request, headers_string) {
+        let lines = headers_string.split("\r\n");
+        for (let line of lines) {
+            let parts = line.split(": ");
+            if (parts.length == 2) {
+                request.setRequestHeader(parts[0], parts[1]);
+            }
+        }
+    }
+
+    FromWasmHTTPRequest(args) {
+        const req = new XMLHttpRequest();
+        req.open(args.method, args.url);
+        req.responseType = "arraybuffer";
+        this.parse_and_set_headers(req, args.headers);
+
+        // TODO decode in appropiate format
+        const decoder = new TextDecoder('UTF-8', { fatal: true });
+        let body = decoder.decode(this.clone_data_u8(args.body));
+
+        req.addEventListener("load", event => {
+            let responseEvent = event.target;
+
+            this.to_wasm.ToWasmHTTPResponse({
+                id_lo: args.id_lo,
+                id_hi: args.id_hi,
+                status: responseEvent.status,
+                body: responseEvent.response,
+                headers: responseEvent.getAllResponseHeaders()
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("error", event => {
+            let errorMessage = "An error occurred with the HTTP request.";
+            if (!navigator.onLine) {
+                errorMessage = "The browser is offline.";
+            }
+
+            this.to_wasm.ToWasmHttpRequestError({
+                id_lo: args.id_lo,
+                id_hi: args.id_hi,
+                error: errorMessage,
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("timeout", event => {
+            this.to_wasm.ToWasmHttpRequestError({
+                id_lo: args.id_lo,
+                id_hi: args.id_hi,
+                error: "The HTTP request timed out.",
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("abort", event => {
+            this.to_wasm.ToWasmHttpRequestError({
+                id_lo: args.id_lo,
+                id_hi: args.id_hi,
+                error: "The HTTP request was aborted.",
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("progress", event => {
+            console.log("progress", event);
+            if (event.lengthComputable) {
+                this.to_wasm.ToWasmHttpResponseProgress({
+                    id_lo: args.id_lo,
+                    id_hi: args.id_hi,
+                    loaded: event.loaded,
+                    total: event.total,
+                });
+                this.do_wasm_pump();
+            }
+        });
+
+        req.upload.addEventListener("progress", (event) => {
+            if (event.lengthComputable) {
+                this.to_wasm.ToWasmHttpUploadProgress({
+                    id_lo: args.id_lo,
+                    id_hi: args.id_hi,
+                    loaded: event.loaded,
+                    total: event.total,
+                });
+                this.do_wasm_pump();
+            }
+          });
+
+        req.send(body);
+        this.free_data_u8(args.body);
     }
     
     // calling into wasm

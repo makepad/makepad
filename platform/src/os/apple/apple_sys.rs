@@ -76,6 +76,7 @@ extern {
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub fn dispatch_queue_create(label: *const u8, attr: ObjcId,) -> ObjcId;
+    pub fn dispatch_get_global_queue(ident:u64, flags: u64) -> ObjcId;
     pub fn dispatch_release(object: ObjcId);
 
     pub static NSNotificationCenter: ObjcId;
@@ -114,6 +115,8 @@ extern {
     pub static NSTrackingArea: ObjcId;
     pub static NSStringPboardType: ObjcId;
     pub static NSPasteboardTypeFileURL: ObjcId;
+    pub static NSPasteboardTypeURL: ObjcId;
+    pub static NSPasteboardTypeString: ObjcId;
 }
 
 #[link(name = "Vision", kind = "framework")]

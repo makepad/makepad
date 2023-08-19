@@ -46,7 +46,7 @@ pub trait FromWasm {
         Self::from_wasm_js_body(&mut out, 0, false, &format!("args.{}", Self::type_name()), new_nest);
         
         for p in out.fns.iter().rev(){
-            if p.name == ""{
+            if p.name.is_empty(){
                 wrapper.push_str(&p.body);
             }
             else{
@@ -134,4 +134,10 @@ impl FromWasmMsg {
         from_wasm.write_from_wasm(self);
     }
 
+}
+
+impl Default for FromWasmMsg {
+    fn default() -> Self {
+        Self::new()
+    }
 }

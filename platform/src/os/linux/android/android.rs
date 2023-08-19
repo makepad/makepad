@@ -18,19 +18,20 @@ use {
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
         thread::Signal,
+        live_id::LiveId,
         event::{
+            NetworkResponseEvent,
+            NetworkResponse,
+            HttpResponse,
             TouchPoint,
             TouchUpdateEvent,
             WindowGeomChangeEvent,
             TimerEvent,
             TextInputEvent,
-            TextCopyEvent,
-            TextCutEvent,
+            TextClipboardEvent,
             KeyEvent,
             KeyModifiers,
             KeyCode,
-            WebSocket,
-            WebSocketAutoReconnect,
             Event,
             WindowGeom,
         },
@@ -123,11 +124,11 @@ impl Cx {
     pub fn android_load_dependencies(&mut self, to_java: &AndroidToJava) {
         for (path, dep) in &mut self.dependencies {
             if let Some(data) = to_java.read_asset(path) {
-                dep.data = Some(Ok(data))
+                dep.data = Some(Ok(Rc::new(data)))
             }
             else {
                 let message = format!("cannot load dependency {}", path);
-                //crate::makepad_error_log::error!("Android asset failed: {}", message);
+                crate::makepad_error_log::error!("Android asset failed: {}", message);
                 dep.data = Some(Err(message));
             }
         }
@@ -250,7 +251,7 @@ impl Cx {
                     } else if is_shortcut {
                         if key_code == KeyCode::KeyC {  
                             let response = Rc::new(RefCell::new(None));
-                            e = Event::TextCopy(TextCopyEvent {
+                            e = Event::TextCopy(TextClipboardEvent {
                                 response: response.clone()
                             });
                             self.call_event_handler(&e);
@@ -260,7 +261,7 @@ impl Cx {
                             }
                         } else if key_code == KeyCode::KeyX {
                             let response = Rc::new(RefCell::new(None));
-                            let e = Event::TextCut(TextCutEvent {
+                            let e = Event::TextCut(TextClipboardEvent {
                                 response: response.clone()
                             });
                             self.call_event_handler(&e);
@@ -343,10 +344,36 @@ impl Cx {
 
     pub fn from_java_on_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
         let e = Event::TextCut(
-            TextCutEvent {
+            TextClipboardEvent {
                 response: Rc::new(RefCell::new(None))
             }
         );
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_on_http_response(&mut self, id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
+        let e = Event::NetworkResponses(vec![
+            NetworkResponseEvent{
+                id: LiveId(id),
+                response: NetworkResponse::HttpResponse(HttpResponse::new(
+                    status_code,
+                    headers,
+                    Some(body)
+                ))
+            }
+        ]);
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_on_http_request_error(&mut self, id: u64, error: String, to_java: AndroidToJava) {
+        let e = Event::NetworkResponses(vec![
+            NetworkResponseEvent{
+                id: LiveId(id),
+                response: NetworkResponse::HttpRequestError(error)
+            }
+        ]);
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
@@ -491,6 +518,9 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(selected) => {
                     to_java.show_clipboard_actions(selected.as_str());
                 },
+                CxOsOp::HttpRequest{id, request} => {
+                    to_java.http_request(id, request)
+                },
                 _ => ()
             }
         }  
@@ -507,14 +537,6 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
-    }
-    
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
-        todo!()
-    }
-    
-    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
-        todo!()
     }
 }
 

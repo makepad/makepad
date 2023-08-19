@@ -17,12 +17,14 @@ public class Makepad {
         void showClipboardActions(String selected);
         void copyToClipboard(String selected);
         void pasteFromClipboard();
+        void requestHttp(long id, String url, String method, String headers, byte[] body);
     }
 
     static {
         System.loadLibrary("makepad");
     }
     // Event calls from Java to Rust
+    static native void onHookPanic();
     static native long onNewCx();
     static native void onDropCx(long cx);
     static native long onPause(long cx, Callback callback);
@@ -41,4 +43,6 @@ public class Makepad {
     static native void onCopyToClipboard(long cx, Callback callback);
     static native void onPasteFromClipboard(long cx, String content, Callback callback);
     static native void onCutToClipboard(long cx, Callback callback);
+    static native void onHttpResponse(long cx, long id, int statusCode, String headers, byte[] body, Callback callback);
+    static native void onHttpRequestError(long cx, long id, String error, Callback callback);
 }

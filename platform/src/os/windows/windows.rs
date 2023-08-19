@@ -298,8 +298,20 @@ impl Cx {
                     win32_app.stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
-                }
+                },
                 CxOsOp::UpdateMenu(_menu) => {
+                },
+                CxOsOp::HttpRequest{id:_, request:_} => {
+                    todo!()
+                },
+                CxOsOp::WebSocketOpen{id:_, request:_,}=>{
+                    todo!()
+                }
+                CxOsOp::WebSocketSendBinary{id:_, data:_}=>{
+                    todo!()
+                }
+                CxOsOp::WebSocketSendString{id:_, data:_}=>{
+                    todo!()
                 }
             }
         }
@@ -316,14 +328,6 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
-    }
-    
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
-        todo!()
-    }
-    
-    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
-        todo!()
     }
 }
 

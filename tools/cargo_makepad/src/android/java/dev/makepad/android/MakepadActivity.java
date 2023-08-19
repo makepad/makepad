@@ -45,6 +45,9 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+
 public class MakepadActivity extends Activity implements 
 MidiManager.OnDeviceOpenedListener,
 View.OnCreateContextMenuListener,
@@ -54,10 +57,18 @@ Makepad.Callback{
         // this causes a pause/resume cycle.
         if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
             checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED){
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.CAMERA}, 123);
+            requestPermissions(
+                new String[]{
+                    Manifest.permission.BLUETOOTH_CONNECT, 
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.INTERNET
+                    }, 
+                123
+            );
         }
 
         super.onCreate(savedInstanceState);
+        Makepad.onHookPanic();
         mCx = Makepad.onNewCx();
 
         mHandler = new Handler(Looper.getMainLooper());
@@ -323,6 +334,23 @@ Makepad.Callback{
                 
             default:
                 return super.onContextItemSelected(item);
+        }
+    }
+
+    public void requestHttp(long id, String url, String method, String headers, byte[] body) {
+        try {
+            MakepadNetwork network = new MakepadNetwork();
+
+            CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
+
+            future.thenAccept(response -> {
+                runOnUiThread(() -> Makepad.onHttpResponse(mCx, id, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
+            }).exceptionally(ex -> {
+                runOnUiThread(() -> Makepad.onHttpRequestError(mCx, id, ex.toString(), (Makepad.Callback) mView.getContext()));
+                return null;
+            });
+        } catch (Exception e) {
+            Makepad.onHttpRequestError(mCx, id, e.toString(), (Makepad.Callback) mView.getContext());
         }
     }
 

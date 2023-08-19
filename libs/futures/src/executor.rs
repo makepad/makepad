@@ -35,12 +35,12 @@ pub struct Spawner {
 
 impl Spawner {
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
-        if let Err(_) = self.task_sender.send(Arc::new(Task {
+        if self.task_sender.send(Arc::new(Task {
             inner: Mutex::new(TaskInner {
                 future: Some(Box::pin(future)),
                 task_sender: self.task_sender.clone(),
             }),
-        })) {
+        })).is_err() {
             return Err(SpawnError::shutdown());
         }
         Ok(())

@@ -69,7 +69,7 @@ impl LiveOriginal {
     }*/
     
     pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TextSpan {
-        self.tokens[token_id.token_index() as usize].span
+        self.tokens[token_id.token_index()].span
     }
 }
 

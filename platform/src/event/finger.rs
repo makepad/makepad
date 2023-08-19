@@ -31,7 +31,7 @@ use {
 // Mouse events
 
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
@@ -39,7 +39,7 @@ pub struct KeyModifiers {
     pub logo: bool
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MouseDownEvent {
     pub abs: DVec2,
     pub button: usize,
@@ -48,6 +48,7 @@ pub struct MouseDownEvent {
     pub handled: Cell<Area>,
     pub time: f64
 }
+
 
 #[derive(Clone, Debug)]
 pub struct MouseMoveEvent {
@@ -579,7 +580,7 @@ impl Event {
     pub fn hits(&self, cx: &mut Cx, area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::default())
     }
-    
+
     pub fn hits_with_sweep_area(&self, cx: &mut Cx, area: Area, sweep_area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::new().with_sweep_area(sweep_area))
     }

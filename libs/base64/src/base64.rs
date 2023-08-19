@@ -9,31 +9,31 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
     let mut o = 0;
     while i + 2 < inp.len() { // hop over in chunks of 3 bytes outputting 4 chars
         let out = &mut out[o..o + 4]; // this causes a single boundscheck per 4 items
-        out[0] = table[(inp[i + 0] >> 2) as usize];
-        out[1] = table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize];
+        out[0] = table[(inp[i] >> 2) as usize];
+        out[1] = table[((inp[i] & 0x3) << 4 | inp[i + 1] >> 4) as usize];
         out[2] = table[((inp[i + 1] & 0xf) << 2 | inp[i + 2] >> 6) as usize];
-        out[3] = table[((inp[i + 2] & 0x3f)) as usize];
+        out[3] = table[(inp[i + 2] & 0x3f) as usize];
         i += 3;
         o += 4;
     }
     out.resize(o, 0u8);
     let bytes_left = inp.len() - i;
     if bytes_left == 1 {
-        out.push(table[(inp[i + 0] >> 2) as usize]);
-        out.push(table[((inp[i + 0] & 0x3) << 4) as usize]);
+        out.push(table[(inp[i] >> 2) as usize]);
+        out.push(table[((inp[i] & 0x3) << 4) as usize]);
     }
     else if bytes_left == 2 {
-        out.push(table[(inp[i + 0] >> 2) as usize]);
-        out.push(table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
+        out.push(table[(inp[i] >> 2) as usize]);
+        out.push(table[((inp[i] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
         out.push(table[((inp[i + 1] & 0xf) << 2) as usize]);
     } 
     let end_pad = 3 - inp.len() % 3;
     if end_pad == 1 {
-        out.push('=' as u8);
+        out.push(b'=');
     }
     else if end_pad == 2 {
-        out.push('=' as u8);
-        out.push('=' as u8);
+        out.push(b'=');
+        out.push(b'=');
     }
     
     out
@@ -69,7 +69,7 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
         i += 4;
         o += 3;
     }
-    if input[input.len()-2] == '=' as u8{
+    if input[input.len()-2] == b'='{
         o -= 1;
     }
     out.resize(o, 0u8);

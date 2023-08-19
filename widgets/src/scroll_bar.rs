@@ -5,7 +5,7 @@ live_design!{
     import crate::theme::*;
     
     DrawScrollBar= {{DrawScrollBar}} {
-        draw_depth: 5.0
+        //draw_depth: 5.0
         uniform border_radius: 1.5
         instance bar_width:6.0
         instance pressed: 0.0
@@ -216,6 +216,17 @@ impl ScrollBar {
         return self.scroll_pos;
     }
     
+    pub fn set_scroll_pos_no_action(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
+        // clamp scroll_pos to
+        let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
+        if self.scroll_pos != scroll_pos {
+            self.scroll_pos = scroll_pos;
+            self.scroll_target = scroll_pos;
+            self.update_shader_scroll_pos(cx);
+            return true
+        };
+        return false
+    }
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
         // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);

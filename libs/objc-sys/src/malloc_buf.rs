@@ -37,7 +37,7 @@ impl<T: Copy> MallocBuffer<T> {
         } else {
             Some(MallocBuffer {
                 ptr: MallocPtr(ptr as *mut i8),
-                len: len,
+                len,
                 items: PhantomData,
             })
         }

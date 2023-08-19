@@ -137,7 +137,7 @@ impl<'a> ShaderParser<'a> {
                 ident_path.push(Ident(ident));
             },
             token => {
-                return Err(span.error(self, live_error_origin!(), format!("expected ident_path, unexpected token `{}`", token).into()));
+                return Err(span.error(self, live_error_origin!(), format!("expected ident_path, unexpected token `{}`", token)));
             }
         };
         
@@ -149,7 +149,7 @@ impl<'a> ShaderParser<'a> {
                 LiveToken::Ident(ident) => {
                     self.skip_token();
                     if !ident_path.push(Ident(ident)) {
-                        return Err(span.error(self, live_error_origin!(), format!("identifier too long `{}`", ident_path).into()));
+                        return Err(span.error(self, live_error_origin!(), format!("identifier too long `{}`", ident_path)));
                     }
                 },
                 _ => {
@@ -288,7 +288,7 @@ impl<'a> ShaderParser<'a> {
                 return Ok(None)
             }
             _ => {
-                return Err(span.error(self, live_error_origin!(), format!("unexpected decl type `{}`", decl_ty).into()))
+                return Err(span.error(self, live_error_origin!(), format!("unexpected decl type `{}`", decl_ty)))
             }
         }
     }
@@ -420,7 +420,7 @@ impl<'a> ShaderParser<'a> {
         let mut params = Vec::new();
         if !self.accept_token(LiveToken::Close(Delim::Paren)) {
             if self.peek_token() == LiveToken::Ident(live_id!(self)) {
-                return Err(span.error(&mut self, live_error_origin!(), format!("use of self not allowed in plain function").into()))
+                return Err(span.error(&mut self, live_error_origin!(), format!("use of self not allowed in plain function")))
             }
             let param = self.expect_param() ?;
             
@@ -469,7 +469,7 @@ impl<'a> ShaderParser<'a> {
                 });
             }
             else {
-                return Err(span.error(self, live_error_origin!(), format!("unexpected token `{}`", token).into()))
+                return Err(span.error(self, live_error_origin!(), format!("unexpected token `{}`", token)))
             }
         }
         Ok(acc)
@@ -526,7 +526,7 @@ impl<'a> ShaderParser<'a> {
                                 kind: TyExprKind::Struct(struct_node_ptr),
                             }))
                         }
-                        return Err(span.error(self, live_error_origin!(), format!("Use of Self not allowed here").into()));
+                        return Err(span.error(self, live_error_origin!(), "Use of Self not allowed here".to_string()));
                     }
                     // ok lets tget the ident path
                     
@@ -538,13 +538,13 @@ impl<'a> ShaderParser<'a> {
                                 return Err(err)
                             }
                             LiveNodeFindResult::NotFound => {
-                                return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
+                                return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path)))
                             }
                             LiveNodeFindResult::Function(_)
                                 | LiveNodeFindResult::Component(_)
                                 | LiveNodeFindResult::LiveValue(_, _)
                                 | LiveNodeFindResult::PossibleStatic(_, _) => {
-                                return Err(span.error(self, live_error_origin!(), format!("Not a Struct type `{}`", ident_path).into()))
+                                return Err(span.error(self, live_error_origin!(), format!("Not a Struct type `{}`", ident_path)))
                             }
                             LiveNodeFindResult::Struct(struct_ptr) => {
                                 //yay .. lets make a struct typedep
