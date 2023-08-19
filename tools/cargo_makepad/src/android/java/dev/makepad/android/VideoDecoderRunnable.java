@@ -5,6 +5,8 @@ public class VideoDecoderRunnable implements Runnable {
     private final VideoDecoder mVideoDecoder;
     private final byte[] mVideoData;
     private final int mChunkSize;
+    private long mStartTimestampUs;
+    private long mEndTimestampUs;
     private boolean mIsInitialized = false;
 
     public VideoDecoderRunnable(byte[] videoData, int chunkSize, VideoDecoder videoDecoder) {
@@ -13,13 +15,18 @@ public class VideoDecoderRunnable implements Runnable {
         mVideoDecoder = videoDecoder;
     }
 
+    public void setTimestamps(long startTimestampUs, long endTimestampUs) {
+        mStartTimestampUs = startTimestampUs;
+        mEndTimestampUs = endTimestampUs;
+    }
+
     @Override
     public void run() {
         if(!mIsInitialized) {
             mVideoDecoder.initializeVideoDecoding(mVideoData, mChunkSize);
             mIsInitialized = true;
         } else {
-            mVideoDecoder.decodeNextChunk();
+            mVideoDecoder.decodeVideoChunk(mStartTimestampUs, mEndTimestampUs);
         }
     }
 
@@ -27,3 +34,4 @@ public class VideoDecoderRunnable implements Runnable {
         mVideoDecoder.cleanup();
     }
 }
+
