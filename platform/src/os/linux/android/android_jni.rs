@@ -333,10 +333,10 @@ impl<'a> AndroidToJava<'a> {
         }
     }
 
-    pub fn decode_next_chunk(&self, video_id: LiveId) {
+    pub fn decode_video_chunk(&self, video_id: LiveId, startTimestamp: u64, endTimestamp: u64) {
         unsafe {
-            let name = CString::new("decodeNextChunk").unwrap();
-            let signature = CString::new("(J)V").unwrap();
+            let name = CString::new("decodeVideoChunk").unwrap();
+            let signature = CString::new("(JJJ)V").unwrap();
             let method_id = (**self.env).GetMethodID.unwrap()(
                 self.env,
                 (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
@@ -349,6 +349,8 @@ impl<'a> AndroidToJava<'a> {
                 self.callback,
                 method_id,
                 video_id.get_value() as jlong,
+                startTimestamp as jlong,
+                endTimestamp as jlong,
             );
         }
     }

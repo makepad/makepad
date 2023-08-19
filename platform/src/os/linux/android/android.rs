@@ -553,8 +553,8 @@ impl Cx {
                 CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size) => { // TODO: ADD TODO FOR OTHER PLATFORMS
                     to_java.initialize_video_decoding(video_id, video, chunk_size);
                 },
-                CxOsOp::DecodeNextChunk(video_id) => {
-                    to_java.decode_next_chunk(video_id);
+                CxOsOp::DecodeVideoChunk(video_id, start_timestamp, end_timestamp) => {
+                    to_java.decode_video_chunk(video_id, start_timestamp, end_timestamp);
                 },
                 _ => ()
             }
