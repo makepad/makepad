@@ -1,6 +1,7 @@
+use std::cmp::Ordering;
+
 use {
     std::rc::Rc,
-    std::collections::HashMap,
     crate::{
         makepad_live_id::*,
         makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin},
@@ -28,11 +29,10 @@ impl<'a> LiveExpander<'a> {
     pub fn shift_parent_stack(&self, parents: &mut Vec<(LiveId, usize)>, nodes: &[LiveNode], after_point: usize, old_size: usize, new_size: usize) {
         for (live_id, item) in parents {
             if *item > after_point {
-                if old_size > new_size {
-                    *item -= old_size - new_size;
-                }
-                else if old_size < new_size {
-                    *item += new_size - old_size;
+                match old_size.cmp(&new_size) {
+                    Ordering::Less => *item += new_size - old_size,
+                    Ordering::Greater => *item -= old_size - new_size,
+                    _ => (),
                 }
                 if nodes[*item].id != *live_id {
                     panic!()
@@ -50,7 +50,7 @@ impl<'a> LiveExpander<'a> {
         out_doc.nodes.push(LiveNode{
             origin: in_doc.nodes[0].origin,
             id: LiveId(0),
-            value: LiveValue::Root{id_resolve:Box::new(HashMap::new())}
+            value: LiveValue::Root { id_resolve: Box::default() }
         });
         let mut current_parent = vec![(LiveId(0), 0usize)];
         let mut in_index = 1;
@@ -126,7 +126,7 @@ impl<'a> LiveExpander<'a> {
                         // do nothing
                     }
                     // replacing object types
-                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
+                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_single_node() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
                         
@@ -208,13 +208,11 @@ impl<'a> LiveExpander<'a> {
                         final_path.push('/');
                         final_path.push_str(path);
                         out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
-                    }
-                    else 
-                    if let Some(path) = path.strip_prefix("crate://"){
+                    } else if let Some(path) = path.strip_prefix("crate://") {
                         let mut split = path.split('/');
                         if let Some(crate_name) = split.next(){
                             if let Some(mut final_path) = self.live_registry.crate_name_to_cargo_manifest_path(crate_name){
-                                while let Some(next) = split.next(){
+                                for next in split {
                                     final_path.push('/');
                                     final_path.push_str(next);
                                 }
@@ -329,7 +327,7 @@ impl<'a> LiveExpander<'a> {
                             }
                             else {
                                 let other_nodes = &self.live_registry.live_files[file_id.to_index()].expanded.nodes;
-                                if other_nodes.len() == 0 {
+                                if other_nodes.is_empty() {
                                     panic!(
                                         "Dependency order bug finding {}, file {} not registered before {}",
                                         lti.type_name,

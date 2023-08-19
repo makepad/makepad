@@ -1,19 +1,20 @@
 use {
-    makepad_futures::executor::Spawner,
     std::{
         any::{TypeId, Any},
+        rc::Rc,
     },
     crate::{
+        makepad_futures::executor::Spawner,
+        makepad_live_id::*,
         makepad_math::{DVec2, Rect},
         gpu_info::GpuInfo,
         cx::{Cx, CxRef, OsType, XrCapabilities},
         event::{
-            DraggedItem, 
+            DragItem, 
             Timer,
             Trigger,
-            WebSocketAutoReconnect,
-            WebSocket,
             NextFrame,
+            HttpRequest,
         },
         draw_list::{
             DrawListId
@@ -44,9 +45,9 @@ pub trait CxOsApi {
     fn init_cx_os(&mut self);
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
-    
+    /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
-    fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);
+    fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
 #[derive(PartialEq)]
@@ -68,9 +69,13 @@ pub enum CxOsOp {
     SetCursor(MouseCursor),
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
     StopTimer(u64),
-    StartDragging(DraggedItem),
+    StartDragging(Vec<DragItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
+    HttpRequest{id:LiveId,request:HttpRequest},
+    WebSocketOpen{id: LiveId, request:HttpRequest},
+    WebSocketSendString{id: LiveId, data:String},
+    WebSocketSendBinary{id: LiveId, data:Vec<u8>},
 }
 
 impl Cx { 
@@ -82,12 +87,12 @@ impl Cx {
         CxRef(self.self_ref.clone().unwrap())
     }
     
-    pub fn get_dependency(&self, path: &str) -> Result<&Vec<u8>,
+    pub fn get_dependency(&self, path: &str) -> Result<Rc<Vec<u8>>,
     String> { 
         if let Some(data) = self.dependencies.get(path) {
             if let Some(data) = &data.data {
                 return match data {
-                    Ok(data) => Ok(data),
+                    Ok(data) => Ok(data.clone()),
                     Err(s) => Err(s.clone())
                 }
             } 
@@ -131,13 +136,13 @@ impl Cx {
         self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
     }
 
-    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+    pub fn start_dragging(&mut self, items: Vec<DragItem>) {
         self.platform_ops.iter().for_each( | p | {
-            if let CxOsOp::StartDragging(_) = p {
+            if let CxOsOp::StartDragging{..} = p {
                 panic!("start drag twice");
             }
         });
-        self.platform_ops.push(CxOsOp::StartDragging(dragged_item));
+        self.platform_ops.push(CxOsOp::StartDragging(items));
     }
     
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
@@ -180,6 +185,9 @@ impl Cx {
         });
         Timer(self.timer_id)
     }
+    
+    
+    
     
     pub fn stop_timer(&mut self, timer: Timer) {
         if timer.0 != 0 {
@@ -321,7 +329,7 @@ impl Cx {
         }
         
         self.fingers.update_area(old_area, new_area);
-        self.finger_drag.update_area(old_area, new_area);
+        self.drag_drop.update_area(old_area, new_area);
         self.keyboard.update_area(old_area, new_area);
         
         new_area
@@ -381,6 +389,24 @@ impl Cx {
 
     pub fn spawner(&self) -> &Spawner {
         &self.spawner
+    }
+
+    pub fn http_request(&mut self, id:LiveId, request: HttpRequest) {
+        self.platform_ops.push(CxOsOp::HttpRequest{id, request});
+    }
+           
+    pub fn web_socket_open(&mut self, id:LiveId, request: HttpRequest) {
+        self.platform_ops.push(CxOsOp::WebSocketOpen{
+            request,
+            id,
+        });
+    }
+    
+    pub fn web_socket_send_binary(&mut self, id: LiveId, data: Vec<u8>) {
+        self.platform_ops.push(CxOsOp::WebSocketSendBinary{
+            id,
+            data,
+        });
     }
 }
 

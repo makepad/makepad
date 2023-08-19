@@ -2,7 +2,7 @@ use {
     std::rc::Rc,
     crate::{
         makepad_platform::*,
-        view::ManyInstances,
+        draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         icon_atlas::{CxIconAtlas, CxIconArgs},
         cx_2d::Cx2d,
@@ -178,8 +178,6 @@ impl DrawIcon {
                 subpixel: subpixel 
             }, path_hash);
             
-
-            self.draw_clip = cx.turtle().draw_clip().into();
             // lets snap the pos/size to actual pixels
             self.rect_pos = (snapped_pos / dpi_factor).into();
             self.rect_size = (snapped_size / dpi_factor).into();

@@ -1,5 +1,4 @@
 pub use makepad_draw::makepad_platform;
-pub use makepad_draw::makepad_image_formats;
 pub use makepad_draw;
 
 pub use makepad_derive_widget;
@@ -8,6 +7,7 @@ pub use makepad_derive_widget::*;
 
 pub mod button;
 pub mod label;
+pub mod image;
 pub mod link_label;
 pub mod drop_down;
 pub mod popup_menu;
@@ -23,32 +23,21 @@ pub mod fold_button;
 pub mod hook_widget;
 pub mod multi_window;
 pub mod designer;
-//#[cfg(ide_widgets)]
 pub mod dock;
-//#[cfg(ide_widgets)]
 pub mod tab;
-//#[cfg(ide_widgets)]
 pub mod tab_bar;
-//#[cfg(ide_widgets)]
 pub mod tab_close_button;
-
+pub mod list_view;
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
+pub mod rotated_image;
 
 pub mod swipe_list;
 
-//#[cfg(ide_widgets)]
 pub mod list_box;
-//#[cfg(ide_widgets)]
 pub mod file_tree;
-//#[cfg(ide_widgets)]
 pub mod slides_view;
-//#[cfg(ide_widgets)]
-pub mod log_list;
-//#[cfg(ide_widgets)]
-pub mod log_icon;
-//#[cfg(ide_widgets)]
 pub mod color_picker;
 
 #[macro_use]
@@ -63,11 +52,13 @@ pub mod widget;
 pub mod data_binding;
 
 mod theme;
+pub mod image_cache;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     frame::*,
+    image::*,
     label::*,
     slider::*,
     check_box::*,
@@ -76,6 +67,7 @@ pub use crate::{
     swipe_list::*,
     text_input::*,
     link_label::*,
+    list_view::*,
     desktop_window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
@@ -96,6 +88,7 @@ pub use crate::{
         WidgetRegistry,
         WidgetFactory,
         WidgetAction,
+        DrawStateWrap,
     }
 };
 
@@ -109,6 +102,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::slider::live_design(cx);
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
+    crate::image::live_design(cx);
+    crate::rotated_image::live_design(cx);
     crate::frame::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
@@ -128,9 +123,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
+    crate::list_view::live_design(cx);
     //#[cfg(ide_widgets)]{
-        crate::log_list::live_design(cx);
-        crate::log_icon::live_design(cx);
         crate::tab::live_design(cx);
         crate::tab_bar::live_design(cx);
         crate::dock::live_design(cx);

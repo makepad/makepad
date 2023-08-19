@@ -180,7 +180,7 @@ impl VideoInputsEvent {
         vec![]
     }
     
-    pub fn find_highest_at_res(&self, device_index:usize, width:usize, height:usize) -> Vec<(VideoInputId,VideoFormatId)> {
+    pub fn find_highest_at_res(&self, device_index:usize, width:usize, height:usize, max_fps:f64) -> Vec<(VideoInputId,VideoFormatId)> {
         if let Some(device) = self.descs.get(device_index){
             let mut max_frame_rate = 0.0;
             let mut max_quality = 0;
@@ -188,7 +188,7 @@ impl VideoInputsEvent {
 
             for format in &device.formats {
                 if let Some(frame_rate) = format.frame_rate{
-                    if width == format.width && height == format.height && frame_rate >= max_frame_rate {
+                    if width == format.width && height == format.height && frame_rate >= max_frame_rate && frame_rate <= max_fps{
                         max_frame_rate = frame_rate;
                     }
                 }

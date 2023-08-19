@@ -1,22 +1,26 @@
 workspace.members = [
-    "code_editor/core",
-    "code_editor/frontend",
+#    "code_editor",
     "examples/numbers", 
     "examples/fractal_zoom", 
+    "examples/news_feed", 
     "examples/ironfish",
     "examples/simple",
-    "libs/futures",
-    "libs/wasm_bridge/test",
+    "examples/widgets",
+    "examples/chatgpt",
+    "examples/comfyui",
+#    "libs/futures",
+#    "libs/wasm_bridge/test",
     "studio",
+    "tools/video_mixer",
     "tools/cargo_makepad",
-    "tools/windows_strip",
+#    "tools/windows_strip",
     "tools/auto_version",
     "tools/web_server", 
     "tools/file_router", 
     "tools/wasm_strip",
 ]
 
-
+workspace.resolver = "2"
 [profile.release]
 #debug = true
 # opt-level = 'z'     # Optimize for size
@@ -24,3 +28,37 @@ workspace.members = [
 #codegen-units = 1   # Reduce number of codegen units to increase optimizations
 #panic = 'abort'     # Abort on panic
 #strip = true   
+
+
+#[profile.dev.package.makepad-live-tokenizer]
+#opt-level = 3
+#[profile.dev.package.makepad-live-compiler]
+#opt-level = 3
+#[profile.dev.package.makepad-shader-compiler]
+#opt-level = 3
+#[profile.dev.package.makepad-platform]
+#opt-level = 3
+#[profile.dev.package.makepad-draw]
+#opt-level = 3
+[profile.dev.package.makepad-vector]
+opt-level = 3
+[profile.dev.package.rustybuzz]
+opt-level = 3
+[profile.dev.package.bitflags]
+opt-level = 3
+[profile.dev.package.bytemuck]
+opt-level = 3
+[profile.dev.package.smallvec]
+opt-level = 3
+[profile.dev.package.unicode-bidi-mirroring]
+opt-level = 3
+[profile.dev.package.unicode-ccc]
+opt-level = 3
+[profile.dev.package.unicode-properties]
+opt-level = 3
+[profile.dev.package.unicode-script]
+opt-level = 3
+[profile.dev.package.unicode-bidi]
+opt-level = 3
+[profile.dev.package.ttf-parser]
+opt-level = 3

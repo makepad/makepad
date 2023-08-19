@@ -34,9 +34,9 @@ use {
 
 pub trait LiveStateImpl {
     
-    fn cut_state(&mut self, cx: &mut Cx, state: &StatePair);
-    fn animate_state(&mut self, cx: &mut Cx, state: &StatePair);
-    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &StatePair, state2: &StatePair) {
+    fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
+    fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
+    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
         if is_state_1 {
             if let Animate::Yes = animate {
                 self.animate_state(cx, state1)
@@ -98,7 +98,7 @@ pub enum Play {
     #[live {duration: 1.0, end: 1.0}]
     BounceLoop {duration: f64, end: f64},
 }
-pub type StatePair = [LiveId; 2];
+//pub type StatePair = [LiveId; 2];
 
 impl Play {
     /*
@@ -871,7 +871,7 @@ impl LiveState {
         false
     }
     
-    pub fn is_in_state(&self, cx: &Cx, check_state_pair: &StatePair) -> bool {
+    pub fn is_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool {
         // if we aren't initialized, look if our state id is a default
         if self.need_init() {
             if let Some(live_ptr) = self.live_ptr {
@@ -894,7 +894,7 @@ impl LiveState {
         false
     }
     
-    pub fn cut_to_live(&mut self, cx: &mut Cx, state_id: &StatePair) {
+    pub fn cut_to_live(&mut self, cx: &mut Cx, state_id: &[LiveId; 2]) {
         if let Some(live_ptr) = self.live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
@@ -918,7 +918,7 @@ impl LiveState {
     }
     
     // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
+    pub fn cut_to(&mut self, cx: &mut Cx, state_pair: &[LiveId; 2], index: usize, nodes: &[LiveNode]) {
         
         if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
             let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
@@ -1011,7 +1011,7 @@ impl LiveState {
         }
     }
     
-    pub fn animate_to_live(&mut self, cx: &mut Cx, state_pair: &StatePair) {
+    pub fn animate_to_live(&mut self, cx: &mut Cx, state_pair: &[LiveId; 2]) {
         if let Some(live_ptr) = self.live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
@@ -1033,7 +1033,7 @@ impl LiveState {
         }
     }
     
-    pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
+    pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &[LiveId; 2], index: usize, nodes: &[LiveNode]) {
         
         if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
             let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);

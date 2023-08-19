@@ -8,6 +8,7 @@ use {
         window::CxWindowPool,
         area::Area,
         event::{
+            ScrollEvent,
             MouseDownEvent,
             MouseUpEvent,
             MouseMoveEvent,
@@ -82,17 +83,47 @@ impl From<StdinMouseUp> for MouseUpEvent {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct StdinScroll{
+   pub time: f64,
+   pub sx: f64,
+   pub sy: f64,
+   pub x: f64,
+   pub y: f64,
+   pub is_mouse: bool,
+}
+
+impl From<StdinScroll> for ScrollEvent {
+    fn from(v: StdinScroll) -> Self {
+        Self{
+            abs: dvec2(v.x, v.y),
+            scroll: dvec2(v.sx, v.sy),
+            window_id: CxWindowPool::id_zero(),
+            modifiers: Default::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: v.is_mouse,
+            time: v.time,
+        }
+    }
+}
+
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum HostToStdin{
     WindowSize(StdinWindowSize),
-    Signal(u64),
     Tick{
         frame: u64,
         time: f64,
     },
     MouseDown(StdinMouseDown),
     MouseUp(StdinMouseUp),
-    MouseMove(StdinMouseMove)
+    MouseMove(StdinMouseMove),
+    Scroll(StdinScroll),
+    ReloadFile{
+        file:String,
+        contents:String
+    }
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

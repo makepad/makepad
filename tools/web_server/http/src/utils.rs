@@ -42,9 +42,7 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     
     // find the end_of_name skipping everything else
     let end_of_name = url.find(' ');
-    if end_of_name.is_none() {
-        return None;
-    }
+    end_of_name?;
     let end_of_name = end_of_name.unwrap();
     let mut search = None;
     let end_of_name = if let Some(q) = url.find('?') {
@@ -54,7 +52,7 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     
     let mut url = url[0..end_of_name].to_string();
     
-    if url.ends_with("/") {
+    if url.ends_with('/') {
         url.push_str("index.html");
     }
     
@@ -82,7 +80,7 @@ impl HttpHeaders {
         let mut sec_websocket_key = None;
         let mut line = String::new();
         
-        while let Ok(_) = reader.read_line(&mut line) { // TODO replace this with a non-line read
+        while reader.read_line(&mut line).is_ok() { // TODO replace this with a non-line read
             if line == "\r\n" { // the newline
                 break;
             }
@@ -127,12 +125,10 @@ impl HttpHeaders {
         else{
             return None
         }
-        if path.is_none(){
-            return None
-        }
+        path.as_ref()?;
         let path = path.unwrap();
 
-        return Some(HttpHeaders {
+        Some(HttpHeaders {
             verb: verb.to_string(),
             path_no_slash: path.0[1..].to_string(),
             path: path.0,
@@ -141,6 +137,6 @@ impl HttpHeaders {
             content_length,
             accept_encoding,
             sec_websocket_key
-        });
+        })
     }
 }

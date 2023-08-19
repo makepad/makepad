@@ -3,13 +3,12 @@ use {
     std::{
         rc::Rc,
         cell::{RefCell},
-        ptr,
         time::Instant,
         collections::{HashMap},
-        os::raw::{c_void}
+        os::raw::{c_void},
     },
     crate::{
-        makepad_objc_sys::runtime::{ObjcId,nil},
+        makepad_objc_sys::runtime::{ObjcId, nil},
         makepad_math::{
             DVec2,
         },
@@ -19,7 +18,10 @@ use {
             cocoa_event::{
                 CocoaEvent,
             },
+            av_capture::define_av_video_callback_delegate,
+            audio_unit::define_key_value_observing_delegate,
             cocoa_window::CocoaWindow,
+            cocoa_app_nw::define_web_socket_delegate,
             apple_util::{
                 nsstring_to_string,
                 str_to_nsstring,
@@ -39,33 +41,30 @@ use {
             KeyCode,
             KeyEvent,
             TextInputEvent,
-            TextCopyEvent,
-            TextCutEvent,
+            TextClipboardEvent,
             TimerEvent,
-            //Signal,
-            //SignalEvent,
-            DraggedItem,
+            DragItem,
             KeyModifiers,
         },
         cursor::MouseCursor,
         menu::{
             Menu,
             MenuCommand
-        }
+        },
     }
 };
 
-// this is unsafe, however we don't have much choice since the system calls into 
+// this is unsafe, however we don't have much choice since the system calls into
 // the objective C entrypoints we need to enter our eventloop
 // So wherever we put this boundary, it will be unsafe
 
 // this value will be fetched from multiple threads (post signal uses it)
 pub static mut COCOA_CLASSES: *const CocoaClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
-pub static mut COCOA_APP : *mut CocoaApp = 0 as *mut _;
+pub static mut COCOA_APP: *mut CocoaApp = 0 as *mut _;
 
-pub fn init_cocoa_app_global(event_callback:Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>){
-    unsafe{
+pub fn init_cocoa_app_global(event_callback: Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>) {
+    unsafe {
         COCOA_CLASSES = Box::into_raw(Box::new(CocoaClasses::new()));
         COCOA_APP = Box::into_raw(Box::new(CocoaApp::new(event_callback)));
     }
@@ -101,28 +100,30 @@ pub struct CocoaClasses {
     pub view: *const Class,
     pub key_value_observing_delegate: *const Class,
     pub video_callback_delegate: *const Class,
+    pub web_socket_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
 
-impl CocoaClasses{
-    pub fn new()->Self{
+impl CocoaClasses {
+    pub fn new() -> Self {
         let const_attributes = vec![
             RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSMarkedClauseSegment")).unwrap()).forget(),
             RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSGlyphInfo")).unwrap()).forget(),
         ];
-        Self{
+        Self {
             window: define_cocoa_window_class(),
             window_delegate: define_cocoa_window_delegate(),
             //post_delegate: define_cocoa_post_delegate(),
             timer_delegate: define_cocoa_timer_delegate(),
+            web_socket_delegate: define_web_socket_delegate(),
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
             menu_target: define_menu_target_class(),
             video_callback_delegate: define_av_video_callback_delegate(),
             view: define_cocoa_view_class(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
-            const_attributes_for_marked_text: unsafe{msg_send![
+            const_attributes_for_marked_text: unsafe {msg_send![
                 class!(NSArray),
                 arrayWithObjects: const_attributes.as_ptr()
                 count: const_attributes.len()
@@ -143,29 +144,30 @@ pub struct CocoaApp {
     last_key_mod: KeyModifiers,
     pasteboard: ObjcId,
     startup_focus_hack_ran: bool,
-    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>>,
+    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow >>,
     event_flow: EventFlow,
+    
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
-    ns_event: ObjcId,
+    //current_ns_event: Option<ObjcId>,
 }
 
 impl CocoaApp {
-    pub fn new(event_callback:Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>) -> CocoaApp {
+    pub fn new(event_callback: Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>) -> CocoaApp {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let app_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().app_delegate, new];
             
             let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
-
+            
             // Construct the bits that are shared between windows
             CocoaApp {
                 startup_focus_hack_ran: false,
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
-                timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
-                menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
+                timer_delegate_instance: msg_send![get_cocoa_class_global().timer_delegate, new],
+                menu_delegate_instance: msg_send![get_cocoa_class_global().menu_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
@@ -175,10 +177,11 @@ impl CocoaApp {
                 event_callback: Some(event_callback),
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
-                ns_event: ptr::null_mut(),
+                //current_ns_event: None,
             }
         }
     }
+    
     
     pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<MenuCommand, CxCommandSetting>,) {
         unsafe fn make_menu(
@@ -311,8 +314,8 @@ impl CocoaApp {
             }
         }
     }*/
-    pub fn startup_focus_hack(&mut self){
-        unsafe{
+    pub fn startup_focus_hack(&mut self) {
+        unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
                 let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
@@ -339,8 +342,8 @@ impl CocoaApp {
                         ];
                     }
                 }
-            }        
-        }       
+            }
+        }
     }
     
     pub fn time_now(&self) -> f64 {
@@ -401,12 +404,12 @@ impl CocoaApp {
                         KeyCode::KeyC => if modifiers.logo || modifiers.control {
                             let response = Rc::new(RefCell::new(None));
                             self.do_callback(
-                                CocoaEvent::TextCopy(TextCopyEvent {
+                                CocoaEvent::TextCopy(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
                             let response = response.borrow();
-                            if let Some(response) = response.as_ref(){
+                            if let Some(response) = response.as_ref() {
                                 let nsstring = str_to_nsstring(&response);
                                 let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
                                 let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
@@ -416,12 +419,12 @@ impl CocoaApp {
                         KeyCode::KeyX => if modifiers.logo || modifiers.control {
                             let response = Rc::new(RefCell::new(None));
                             self.do_callback(
-                                CocoaEvent::TextCut(TextCutEvent {
+                                CocoaEvent::TextCut(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
                             let response = response.borrow();
-                            if let Some(response) = response.as_ref(){
+                            if let Some(response) = response.as_ref() {
                                 let nsstring = str_to_nsstring(&response);
                                 let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
                                 let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
@@ -482,7 +485,7 @@ impl CocoaApp {
                 add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::Logo);
                 add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::Control);
                 if events.len() >0 {
-                    for event in events{
+                    for event in events {
                         self.do_callback(event);
                     }
                 }
@@ -515,18 +518,18 @@ impl CocoaApp {
         }
     }
     
-    pub fn event_loop(&mut self){
+    pub fn event_loop(&mut self) {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, finishLaunching];
             
-            loop{
-                match self.event_flow{
-                    EventFlow::Exit=>{
+            loop {
+                match self.event_flow {
+                    EventFlow::Exit => {
                         break;
                     }
-                    EventFlow::Poll | EventFlow::Wait=>{
-                        let event_wait =  if let EventFlow::Wait = self.event_flow {true}else{false};
+                    EventFlow::Poll | EventFlow::Wait => {
+                        let event_wait = if let EventFlow::Wait = self.event_flow {true}else {false};
                         let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
                         
                         let ns_until: ObjcId = if event_wait {
@@ -542,7 +545,7 @@ impl CocoaApp {
                             inMode: NSDefaultRunLoopMode
                             dequeue: YES
                         ];
-                        
+                        //self.current_ns_event = Some(ns_event);
                         if ns_event != nil {
                             self.process_ns_event(ns_event);
                         }
@@ -550,6 +553,7 @@ impl CocoaApp {
                         if ns_event == nil || event_wait {
                             self.do_callback(CocoaEvent::Paint);
                         }
+                        //self.current_ns_event = None;
                         
                         let () = msg_send![pool, release];
                     }
@@ -559,12 +563,12 @@ impl CocoaApp {
     }
     
     pub fn do_callback(&mut self, event: CocoaEvent) {
-        if let Some(mut callback) = self.event_callback.take(){
+        if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, event);
-            if let EventFlow::Exit = self.event_flow{
-                unsafe{ 
+            if let EventFlow::Exit = self.event_flow {
+                unsafe {
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-                    let () = msg_send![ns_app, terminate:nil];    
+                    let () = msg_send![ns_app, terminate: nil];
                 }
                 println!("EXIT!");
             }
@@ -716,14 +720,20 @@ impl CocoaApp {
         self.do_callback(CocoaEvent::Paint);
     }
     
-    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
-        let cocoa_window = unsafe {
-            let window: ObjcId = msg_send![self.ns_event, window];
+    pub fn start_dragging(&mut self, items: Vec<DragItem>) {
+       unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let ns_event: ObjcId = msg_send![ns_app, currentEvent];
+            
+            let window: ObjcId = msg_send![ns_event, window];
             let window_delegate: ObjcId = msg_send![window, delegate];
+            if window == nil {
+                crate::error!("start_dragging: Cocoa window nil on event");
+                return
+            }
             let cocoa_window: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
-            &mut *(cocoa_window as *mut CocoaWindow)
+            let cocoa_window = &mut *(cocoa_window as *mut CocoaWindow);
+            cocoa_window.start_dragging(ns_event, items);
         };
-        
-        cocoa_window.start_dragging(self.ns_event, dragged_item);
     }
 }

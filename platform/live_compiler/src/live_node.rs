@@ -362,9 +362,10 @@ impl LiveEditInfo {
             panic!();
         }
         if v == 0 {
-            return None
+            None
+        } else {
+            Some(Self(v))
         }
-        return Some(Self (v))
     }
 }
 
@@ -430,15 +431,13 @@ impl InlineString {
         let bytes = inp.as_bytes();
         if bytes.len()<INLINE_STRING_BUFFER_SIZE {
             let mut buffer = [0u8; INLINE_STRING_BUFFER_SIZE];
-            for i in 0..bytes.len() {
-                buffer[i] = bytes[i];
-            }
+            buffer[..bytes.len()].copy_from_slice(bytes);
             return Some(Self {length: bytes.len() as u8, buffer})
         }
             None
     }
     
-    pub fn as_str<'a>(&'a self) -> &'a str {
+    pub fn as_str(&self) -> &str {
         unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer.as_ptr(), self.length as usize))}
     }
 }
@@ -459,78 +458,52 @@ impl LiveValue {
     }
     
     pub fn is_close(&self) -> bool {
-        match self {
-            Self::Close => true,
-            _ => false
-        }
+        matches!(self, Self::Close)
     }
     
     pub fn is_enum(&self) -> bool {
-        match self {
-            Self::BareEnum {..} |
+        matches!(self, Self::BareEnum {..} |
             Self::TupleEnum {..} |
-            Self::NamedEnum {..} => true,
-            _ => false
-        }
+            Self::NamedEnum {..})
     }
     
     pub fn is_array(&self) -> bool {
-        match self {
-            Self::Array => true,
-            _ => false
-        }
+        matches!(self, Self::Array)
     }
     
     pub fn is_expr(&self) -> bool {
-        match self {
-            Self::Expr {..} => true,
-            _ => false
-        }
+        matches!(self, Self::Expr {..})
     }
     
     pub fn is_class(&self) -> bool {
-        match self {
-            Self::Class {..} => true,
-            _ => false
-        }
+        matches!(self, Self::Class {..})
     }
     
     pub fn is_clone(&self) -> bool {
-        match self {
-            Self::Clone {..} => true,
-            _ => false
-        }
+        matches!(self, Self::Clone {..})
     }
     
     pub fn is_object(&self) -> bool {
-        match self {
-            Self::Object => true,
-            _ => false
-        }
+        matches!(self, Self::Object)
     }
     
     pub fn is_dsl(&self) -> bool {
-        match self {
-            Self::DSL {..} => true,
-            _ => false
-        }
+        matches!(self, Self::DSL {..})
     }
     
     pub fn set_dsl_expand_index_if_none(&mut self, index: usize) {
-        match self {
-            Self::DSL {expand_index, ..} => if expand_index.is_none() {
+        if let Self::DSL {expand_index, ..} = self {
+            if expand_index.is_none() {
                 *expand_index = Some(index as u32)
-            },
-            _ => ()
+            }
         }
     }
     
     pub fn set_expr_expand_index_if_none(&mut self, index: usize) {
-        match self {
-            Self::Expr {expand_index, ..} => if expand_index.is_none() {
+        if let Self::Expr {expand_index, ..} = self {
+            if expand_index.is_none() {
                 *expand_index = Some(index as u32)
-            },
-            _ => ()
+            }
         }
     }
     
@@ -542,25 +515,19 @@ impl LiveValue {
     }
     
     pub fn is_id(&self) -> bool {
-        match self {
-            Self::Id(_) => true,
-            _ => false
-        }
+        matches!(self, Self::Id(_))
     }
     
     pub fn is_color(&self) -> bool {
-        match self {
-            Self::Color(_) => true,
-            _ => false
-        }
+        matches!(self, Self::Color(_))
     }
     
     pub fn is_value_type(&self) -> bool {
-        match self {
-            Self::Id(_) |
+        matches!(self, Self::Id(_) |
             Self::Str(_) |
             Self::String(_) |
             Self::InlineString {..} |
+            Self::Dependency {..} |
             Self::Bool(_) |
             Self::Int64(_) |
             Self::Float64(_) |
@@ -568,7 +535,14 @@ impl LiveValue {
             Self::Color(_) |
             Self::Vec2(_) |
             Self::Vec3(_) |
-            Self::Vec4(_) => true,
+            Self::Vec4(_))
+    }
+
+    pub fn is_single_node(&self) -> bool {
+        self.is_value_type() || match self {
+            Self::Id(_) |
+            Self::IdPath(_) |
+            Self::BareEnum(_) => true,
             _ => false
         }
     }
@@ -583,12 +557,9 @@ impl LiveValue {
     }
     
     pub fn is_number_type(&self) -> bool {
-        match self {
-            Self::Int64(_) |
+        matches!(self, Self::Int64(_) |
             Self::Float32(_) |
-            Self::Float64(_) => true,
-            _ => false
-        }
+            Self::Float64(_))
     }
     
     pub fn as_float(&self) -> Option<f64> {
@@ -662,9 +633,8 @@ impl LiveValue {
     }*/
     
     pub fn set_clone_name(&mut self, name: LiveId) {
-        match self {
-            Self::Clone(clone) => *clone = name,
-            _ => ()
+        if let Self::Clone(clone) = self {
+            *clone = name
         }
     }
     

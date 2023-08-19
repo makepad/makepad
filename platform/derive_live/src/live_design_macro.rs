@@ -21,8 +21,8 @@ pub fn live_design_impl(input: TokenStream) -> TokenStream {
         tb.add("        cargo_manifest_path: env!(").string("CARGO_MANIFEST_DIR").add(").to_string(),");
         tb.add("        module_path :").ident_with_span("module_path", span).add("!().to_string(),");
         tb.add("        file:").ident_with_span("file", span).add("!().to_string().replace(").string("\\").add(",").string("/").add("),");
-        tb.add("        line:").unsuf_usize(span.start().line - 1).add(",");
-        tb.add("        column:").unsuf_usize(span.start().column - 1).add(",");
+        tb.add("        line:line!() as usize,");
+        tb.add("        column:column!() as usize,");
         tb.add("        live_type_infos:{");
         tb.add("            let mut v = Vec::new();");
         for live_type in &live_types {
@@ -35,12 +35,12 @@ pub fn live_design_impl(input: TokenStream) -> TokenStream {
         tb.add("    };");
         tb.add("    cx.register_live_body(live_body);");
         tb.add("}");
-        return tb.end();
+        tb.end()
     }
     else {
         tb.add("pub fn live_design(cx:&mut Cx) {");
         tb.add("}");
-        return tb.end();
+        tb.end()
     }
 }
 
@@ -91,19 +91,20 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
     fn tp_to_str(parser: &mut TokenParser, span: Span, out: &mut String, live_types: &mut Vec<TokenStream>, last_end: &mut Option<Lc>) {
         fn lc_from_start(span: Span) -> Lc {
             Lc {
-                line: span.start().line,
-                column: span.start().column
+                line: span.start().line(),
+                column: span.start().column()
             }
         }
         
         fn lc_from_end(span: Span) -> Lc {
             Lc {
-                line: span.end().line,
-                column: span.end().column
+                line: span.end().line(),
+                column: span.end().column()
             }
         }
         
         #[cfg(not(lines))]
+        #[allow(clippy::ptr_arg)]
         fn delta_whitespace(_now: Lc, _needed: Lc, _out: &mut String) {
         }
         
@@ -178,9 +179,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                             false
                         }
                         if let Some(last_tt) = &last_tt {
-                            if is_ident(last_tt) && is_string_lit(tt) {}
-                            else if is_punct(last_tt) {}
-                            else {
+                            if !((is_ident(last_tt) && is_string_lit(tt)) || is_punct(last_tt)) {
                                 out.push(' ');
                             }
                         }
@@ -210,6 +209,12 @@ use proc_macro::TokenTree;
 struct SpanFallbackApiInfo {
     line: usize,
     column: usize
+}
+
+#[cfg(not(lines))]
+impl SpanFallbackApiInfo{
+    fn line(&self)->usize{self.line}
+    fn column(&self)->usize{self.column}
 }
 
 #[cfg(not(lines))]
