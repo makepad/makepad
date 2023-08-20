@@ -42,9 +42,6 @@ fn main() {
         ("/makepad/".to_string(),makepad_path.clone()),
         ("/".to_string(),"".to_string())
     ];
-    for remap in &remaps{
-        println!("{} -> {}",remap.0, remap.1);
-    }
     while let Ok(message) = rx_request.recv() {
         match message{
             HttpRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
@@ -92,7 +89,6 @@ fn main() {
                 for remap in &remaps{
                     if let Some(s) = path.strip_prefix(&remap.0){
                         strip = Some(format!("{}{}",remap.1, s));
-                        println!("REMAPPING {:?}", strip);
                         break;
                     }
                 }
