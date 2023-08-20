@@ -356,6 +356,16 @@ pub enum FrameOptimize{
     DrawList,
     Texture    
 }
+/*
+
+#[derive(Live, LiveHook)]
+#[live_ignore]
+pub enum EventOrder{
+    Down,
+    #[pick] Up,
+    List(Vec<LiveId>),
+}*/
+
 
 impl FrameOptimize{
     fn is_texture(&self)->bool{
@@ -383,6 +393,7 @@ pub struct Frame { // draw info per UI element
     #[live] dpi_factor: Option<f64>,
     
     #[live] optimize: FrameOptimize,
+    //#[live] event_order: EventOrder,
     
     #[live(true)] visible: bool,
     
