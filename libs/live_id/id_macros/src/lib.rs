@@ -139,16 +139,16 @@ pub fn live_id_num(item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn live_id_from_str(item: TokenStream) -> TokenStream {
+pub fn id_lut(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
 
     let mut parser = TokenParser::new(item);
     if let Some(name) = parser.eat_any_ident() {
-        tb.add("LiveId::from_str(").string(&name).add(")");
+        tb.add("LiveId::from_str(").string(&name).add(").unwrap()");
         tb.end()
     }
     else if let Some(punct) = parser.eat_any_punct(){
-        tb.add("LiveId::from_str(").string(&punct).add(")");
+        tb.add("LiveId::from_str(").string(&punct).add(").unwrap()");
         tb.end()
     }
     else{
