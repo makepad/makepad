@@ -186,7 +186,7 @@ impl AppMain for App {
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
             let text_input = self.ui.get_text_input(id!(text_input)).get_text();
-            let keyword_input = self.ui.get_text_input(id!(text_input)).get_text();
+            let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
             let negative_input = self.ui.get_text_input(id!(negative_input)).get_text();
             self.send_prompt(cx, text_input, keyword_input, negative_input);
             self.set_progress(cx, "Starting query");
