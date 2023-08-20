@@ -189,8 +189,6 @@ live_design!{
                 profile_img = <Image> {
                     source: (IMG_PROFILE_A)
                     walk: {margin: 0, width: 50., height: 50.}
-                    layout: {padding: 0}
-
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -246,7 +244,6 @@ live_design!{
             source: (IMG_A),
             //image_scale: 1.0,
             walk: {margin: 0, width: Fill, height: 200}
-            layout: {padding: 0}
         }
         
         post = <Post> {
