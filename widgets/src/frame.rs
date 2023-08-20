@@ -643,13 +643,37 @@ impl Widget for Frame {
             }
         }
         
-        for id in self.draw_order.iter().rev() {
-            if let Some(child) = self.children.get_mut(id) {
-                if child.is_visible() || !event.requires_visibility() {
-                    child.handle_widget_event_with(cx, event, dispatch_action);
+        match &self.event_order{
+            EventOrder::Up=>{
+                for id in self.draw_order.iter().rev() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }
+                }
+            }
+            EventOrder::Down=>{
+                for id in self.draw_order.iter() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }
+                }
+            }
+            EventOrder::List(list)=>{
+                for id in list{
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }                    
                 }
             }
         }
+        
+        
         if self.cursor.is_some() || self.state.live_ptr.is_some(){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(d) => {
