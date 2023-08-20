@@ -32,12 +32,19 @@ fn main() {
     //let route_secret = fs::read_to_string("route_secret.txt").unwrap_or("\nNO\nACCESS\n".to_string()).trim().to_string();
     //let route_start = format!("/route/{}", route_secret);
     //let mut route_connections = HashMap::new();
+    
+    
+    let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
     let remaps = [
-        (format!("/makepad/{}/",std::env::current_dir().unwrap().display()),makepad_path.clone()),
+        (format!("/makepad/{}/",abs_makepad_path),makepad_path.clone()),
+        (format!("/makepad/{}/",std::env::current_dir().unwrap().display()),"".to_string()),
         ("/makepad//".to_string(),makepad_path.clone()),
         ("/makepad/".to_string(),makepad_path.clone()),
         ("/".to_string(),"".to_string())
     ];
+    for remap in &remaps{
+        println!("{} -> {}",remap.0, remap.1);
+    }
     while let Ok(message) = rx_request.recv() {
         match message{
             HttpRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
@@ -85,6 +92,7 @@ fn main() {
                 for remap in &remaps{
                     if let Some(s) = path.strip_prefix(&remap.0){
                         strip = Some(format!("{}{}",remap.1, s));
+                        println!("REMAPPING {:?}", strip);
                         break;
                     }
                 }
