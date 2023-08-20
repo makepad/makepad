@@ -363,13 +363,24 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         impl EnumItem {
             
-            fn gen_new(&self, tb: &mut TokenBuilder) {
+            fn gen_new(&self, tb: &mut TokenBuilder) -> Result<(), TokenStream>{
                 tb.add("Self::").ident(&self.name);
                 match &self.kind {
                     EnumKind::Bare => (),
-                    EnumKind::Named(_) => {tb.add("{").stream(self.attributes[0].args.clone()).add("}");},
-                    EnumKind::Tuple(_) => {tb.add("(").stream(self.attributes[0].args.clone()).add(")");}
+                    EnumKind::Named(_) => {
+                        if self.attributes.len() != 1{
+                            return error_result("For named and typle enums please provide default values");
+                        }
+                        tb.add("{").stream(self.attributes[0].args.clone()).add("}");
+                    },
+                    EnumKind::Tuple(_) => {
+                        if self.attributes.len() != 1{
+                            return error_result("For named and typle enums please provide default values");
+                        }
+                        tb.add("(").stream(self.attributes[0].args.clone()).add(")");
+                    }
                 }
+                Ok(())
             }
         }
         
@@ -408,7 +419,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         tb.add("    fn new(cx:&mut Cx) -> Self {");
         tb.add("        let mut ret = ");
-        items[pick.unwrap()].gen_new(tb);
+        items[pick.unwrap()].gen_new(tb)?;
         tb.add("        ;ret.after_new_before_apply(cx);ret");
         tb.add("    }");
         
@@ -482,7 +493,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")=>{");
                 tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
                 tb.add("                else{*self = ");
-                item.gen_new(tb);
+                item.gen_new(tb)?;
                 tb.add("                }");
                 tb.add("                if let Self::").ident(&item.name).add("{");
                 for field in fields {
@@ -525,7 +536,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 
                 tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
                 tb.add("                else{*self = ");
-                item.gen_new(tb);
+                item.gen_new(tb)?;
                 tb.add("                }");
                 
                 tb.add("                if let Self::").ident(&item.name).add("(");

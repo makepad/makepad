@@ -13,7 +13,7 @@ live_design!{
     import makepad_widgets::list_view::ListView;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
-    
+     
     App = {{App}} {
         ui: <DesktopWindow> {
             window: {inner_size: vec2(1024, 1024)},
@@ -100,11 +100,12 @@ impl Machine {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-        Machine::new("192.168.1.59:8188", live_id!(m1)),
-        Machine::new("192.168.1.62:8188", live_id!(m2)),
-        Machine::new("192.168.1.204:8188", live_id!(m3)),
-        Machine::new("192.168.1.154:8188", live_id!(m4)),
-        Machine::new("192.168.1.144:8188", live_id!(m5))
+        Machine::new("192.168.1.62:8188", id_lut!(m1)),
+        Machine::new("192.168.1.204:8188", id_lut!(m2)),
+        Machine::new("192.168.1.154:8188", id_lut!(m3)),
+        Machine::new("192.168.1.144:8188", id_lut!(m4)),
+        Machine::new("192.168.1.59:8188", id_lut!(m7)),
+        Machine::new("192.168.1.180:8188", id_lut!(m8))
     ])] machines: Vec<Machine>,
     #[rust] num_images: u64,
     #[rust(10000u64)] last_seed: u64,
