@@ -2,7 +2,7 @@
 name = "makepad-example-news-feed"
 version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
-edition = "2018"
+edition = "2021"
 description = "Makepad news feed example"
 license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "5POKajmZt90sjG2MIw5C9dizbBo="

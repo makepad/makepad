@@ -19,7 +19,7 @@ macro_rules!app_main {
                 if let Event::LiveEdit = event{
                     app.borrow_mut().update_main(cx);
                 }
-                <AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
+                <dyn AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }))));
             live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();
