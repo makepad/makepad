@@ -498,13 +498,13 @@ impl ShaderRegistry {
         let mut draw_shader_def = DrawShaderDef::default();
         
         // lets insert the 2D drawshader uniforms
-        draw_shader_def.add_uniform(live_id_from_str!(camera_projection).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(live_id_from_str!(camera_view).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(live_id_from_str!(camera_inv).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(live_id_from_str!(dpi_factor).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
-        draw_shader_def.add_uniform(live_id_from_str!(dpi_dilate).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
-        draw_shader_def.add_uniform(live_id_from_str!(view_transform).unwrap(), live_id_from_str!(view).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(live_id_from_str!(draw_zbias).unwrap(), live_id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(camera_projection), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(camera_view), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(camera_inv), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(dpi_factor), id_lut!(pass), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(dpi_dilate), id_lut!(pass), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(view_transform), id_lut!(view), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(draw_zbias), id_lut!(draw), Ty::Float, TokenSpan::default());
         
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
 
