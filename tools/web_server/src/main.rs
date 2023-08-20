@@ -15,6 +15,13 @@ fn main() {
     #[cfg(target_os = "macos")]
     let addr = SocketAddr::from(([127, 0, 0, 1], 61234));
     
+    let args: Vec<String> = std::env::args().collect();
+    
+    if args.len()!=2{
+        println!("Pass in makepad path as first arg");
+    }
+    let makepad_path = args[1].clone();
+    
     start_http_server(HttpServer{
         listen_address:addr,
         post_max_size: 1024*1024,
@@ -26,10 +33,14 @@ fn main() {
     //let route_start = format!("/route/{}", route_secret);
     //let mut route_connections = HashMap::new();
     
-    let prefixes = [
-        format!("/makepad/{}/",std::env::current_dir().unwrap().display()),
-        "/makepad//".to_string(),
-        "/makepad/".to_string()
+    
+    let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
+    let remaps = [
+        (format!("/makepad/{}/",abs_makepad_path),makepad_path.clone()),
+        (format!("/makepad/{}/",std::env::current_dir().unwrap().display()),"".to_string()),
+        ("/makepad//".to_string(),makepad_path.clone()),
+        ("/makepad/".to_string(),makepad_path.clone()),
+        ("/".to_string(),"".to_string())
     ];
     while let Ok(message) = rx_request.recv() {
         match message{
@@ -44,6 +55,7 @@ fn main() {
             }
             HttpRequest::Get{headers, response_sender}=>{
                 let path = &headers.path;
+                
                 
                 if path == "/$watch"{
                     let header = "HTTP/1.1 200 OK\r\n\
@@ -73,8 +85,13 @@ fn main() {
                     continue
                 }
                 
-                let strip = path.strip_prefix(&prefixes[0]).or_else(|| path.strip_prefix(&prefixes[1])).or_else(|| path.strip_prefix(&prefixes[2]));
-
+                let mut strip = None;
+                for remap in &remaps{
+                    if let Some(s) = path.strip_prefix(&remap.0){
+                        strip = Some(format!("{}{}",remap.1, s));
+                        break;
+                    }
+                }
                 if let Some(base) = strip{
                     if let Ok(mut file_handle) = File::open(base) {
                         let mut body = Vec::<u8>::new();

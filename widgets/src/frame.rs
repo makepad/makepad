@@ -356,15 +356,15 @@ pub enum FrameOptimize{
     DrawList,
     Texture    
 }
-/*
+
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
 pub enum EventOrder{
     Down,
     #[pick] Up,
-    List(Vec<LiveId>),
-}*/
+    #[live(Default::default())] List(Vec<LiveId>),
+}
 
 
 impl FrameOptimize{
@@ -393,7 +393,7 @@ pub struct Frame { // draw info per UI element
     #[live] dpi_factor: Option<f64>,
     
     #[live] optimize: FrameOptimize,
-    //#[live] event_order: EventOrder,
+    #[live] event_order: EventOrder,
     
     #[live(true)] visible: bool,
     
@@ -643,13 +643,37 @@ impl Widget for Frame {
             }
         }
         
-        for id in self.draw_order.iter().rev() {
-            if let Some(child) = self.children.get_mut(id) {
-                if child.is_visible() || !event.requires_visibility() {
-                    child.handle_widget_event_with(cx, event, dispatch_action);
+        match &self.event_order{
+            EventOrder::Up=>{
+                for id in self.draw_order.iter().rev() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }
+                }
+            }
+            EventOrder::Down=>{
+                for id in self.draw_order.iter() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }
+                }
+            }
+            EventOrder::List(list)=>{
+                for id in list{
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }                    
                 }
             }
         }
+        
+        
         if self.cursor.is_some() || self.state.live_ptr.is_some(){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(d) => {
