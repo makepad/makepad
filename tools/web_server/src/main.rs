@@ -13,7 +13,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     #[cfg(target_os = "macos")]
-    let addr = SocketAddr::from(([0, 0, 0, 0], 61234));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 61234));
     
     start_http_server(HttpServer{
         listen_address:addr,
