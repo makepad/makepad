@@ -16,7 +16,7 @@ live_design!{
      
     App = {{App}} {
         ui: <DesktopWindow> {
-            window: {inner_size: vec2(1024, 1024)},
+            window: {inner_size: vec2(550, 1024)},
             
             show_bg: true
             layout: {
@@ -43,7 +43,7 @@ live_design!{
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
                 text_input = <TextInput> {
-                    text: "Purple tomatoes"
+                    text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
                     walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20}},
                     draw_bg: {
                         color: #1113

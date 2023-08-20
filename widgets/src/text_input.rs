@@ -735,6 +735,15 @@ impl TextInput {
         // draw selection rects
         
         if self.cursor_head != self.cursor_tail {
+            let top_drop = self.draw_label.get_font_size()*0.3;
+            let bottom_drop = self.draw_label.get_font_size()*0.1;
+
+            let (start, end) = self.sorted_cursor();
+            let rects = self.draw_label.get_selection_rects(cx, start, end, dvec2(0.0,-top_drop), dvec2(0.0,bottom_drop));
+            for rect in rects{
+                self.draw_select.draw_abs(cx,rect);
+            }
+            /*
             let tail_x = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_tail)
                 .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
             
@@ -750,7 +759,8 @@ impl TextInput {
             self.draw_select.draw_abs(cx, Rect {
                 pos: dvec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
                 size: dvec2(right_x - left_x + self.cursor_size + 2.0 * pad, turtle.size.y)
-            });
+            });*/
+            
         }
         self.draw_bg.end(cx);
         
