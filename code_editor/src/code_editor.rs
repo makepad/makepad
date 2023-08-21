@@ -177,7 +177,7 @@ impl CodeEditor {
 
         self.scroll_bars.begin(cx, walk, Layout::default());
         
-        self.viewport_rect = cx.turtle().rect();
+        self.viewport_rect = cx.r#box().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
         
         let pad_left_top = dvec2(10.,10.);
@@ -186,7 +186,7 @@ impl CodeEditor {
         self.viewport_rect.size -= pad_left_top;
         
         
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        self.draw_bg.draw_abs(cx, cx.r#box().unscrolled_rect());
         
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
@@ -200,7 +200,7 @@ impl CodeEditor {
         );
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
-        cx.turtle_mut().set_used(
+        cx.box_mut().set_used(
             session.width() * self.cell_size.x,
             session.height() * self.cell_size.y,
         );

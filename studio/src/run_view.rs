@@ -141,7 +141,7 @@ impl RunView {
         // pick a texture off the buildstate
         let dpi_factor = cx.current_dpi_factor();
         let walk = if let Some(walk) = self.draw_state.get(){walk}else{panic!()};
-        let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
+        let rect = cx.walk_box(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
         for client in &manager.clients {
             for process in client.processes.values() {

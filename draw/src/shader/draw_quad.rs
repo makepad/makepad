@@ -4,7 +4,7 @@ use {
         draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d,
-        turtle::{Walk, Layout}
+        r#box::{Walk, Layout}
     },
 };
 
@@ -76,7 +76,7 @@ impl LiveHook for DrawQuad{
 
 impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
-        cx.begin_turtle(walk, layout);
+        cx.begin_box(walk, layout);
         if self.draw_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
@@ -84,12 +84,12 @@ impl DrawQuad {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        let rect = cx.end_turtle();
+        let rect = cx.end_box();
         self.draw_vars.area.set_rect(cx, &rect);
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
-        let rect = cx.walk_turtle(walk);
+        let rect = cx.walk_box(walk);
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw(cx);
@@ -119,7 +119,7 @@ impl DrawQuad {
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect) {
-        let rect = rect.translate(cx.turtle().origin());
+        let rect = rect.translate(cx.r#box().origin());
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw(cx);

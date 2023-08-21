@@ -6,7 +6,7 @@ use {
         geometry::GeometryQuad2D,
         icon_atlas::{CxIconAtlas, CxIconArgs},
         cx_2d::Cx2d,
-        turtle::{Walk, Size}
+        r#box::{Walk, Length}
     },
 };
 
@@ -135,25 +135,25 @@ impl DrawIcon {
         if let Some((path_hash, bounds)) = icon_atlas.get_icon_bounds(cx, &self.svg_path, self.svg_file.as_ref()) {
             let width_is_fit = walk.width.is_fit();
             let height_is_fit = walk.height.is_fit();
-            let peek_rect = cx.peek_walk_turtle(walk);
+            let peek_rect = cx.peek_walk_box(walk);
             let mut scale = 1.0;
 
             if width_is_fit {
                 if !height_is_fit {
                     scale = peek_rect.size.y / bounds.size.y
                 };
-                walk.width = Size::Fixed(bounds.size.x * self.scale * scale);
+                walk.width = Length::Fixed(bounds.size.x * self.scale * scale);
             }
             if height_is_fit {
                 if !width_is_fit {
                     scale = peek_rect.size.x / bounds.size.x
                 };
-                walk.height = Size::Fixed(bounds.size.y * self.scale * scale);
+                walk.height = Length::Fixed(bounds.size.y * self.scale * scale);
             }
             if !width_is_fit && !height_is_fit {
                 scale = (peek_rect.size.y / bounds.size.y).min(peek_rect.size.x / bounds.size.x);
             }
-            let rect = cx.walk_turtle(walk);
+            let rect = cx.walk_box(walk);
             if rect.is_nan(){
                 return
             }

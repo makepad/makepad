@@ -323,7 +323,7 @@ impl DropDown {
         //cx.clear_sweep_lock(self.draw_bg.area());
         
         self.draw_bg.begin(cx, walk, self.layout);
-        //let start_pos = cx.turtle().rect().pos;
+        //let start_pos = cx.r#box().rect().pos;
         if let Some(val) = self.labels.get(self.selected_item) {
             self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
@@ -350,7 +350,7 @@ impl DropDown {
             for (i, item) in self.labels.iter().enumerate() {
                 let node_id = LiveId(i as u64).into();
                 if i == self.selected_item {
-                    item_pos = Some(cx.turtle().pos());
+                    item_pos = Some(cx.r#box().pos());
                 }
                 popup_menu.draw_item(cx, node_id, &item);
             }

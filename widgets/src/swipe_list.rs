@@ -64,7 +64,7 @@ impl Widget for SwipeListEntry {
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, EntryDrawState::LeftDrawer) {
-            cx.begin_turtle(walk, self.layout);
+            cx.begin_box(walk, self.layout);
         }
         if let Some(EntryDrawState::LeftDrawer) = self.draw_state.get() {
             self.left_drawer.draw_widget(cx) ?;
@@ -76,7 +76,7 @@ impl Widget for SwipeListEntry {
         }
         if let Some(EntryDrawState::Center) = self.draw_state.get() {
             self.center.draw_widget(cx) ?;
-            cx.end_turtle();
+            cx.end_box();
             self.draw_state.end();
         }
         WidgetDraw::done()

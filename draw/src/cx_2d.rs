@@ -23,7 +23,7 @@ use {
             CxFontsAtlasRc,
         },
         draw_list_2d::DrawList2d,
-        turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
+        r#box::{Box, BoxWalk, Walk, AlignEntry},
     }
 };
 
@@ -31,7 +31,7 @@ pub struct PassStackItem {
     pub pass_id: PassId,
     dpi_factor: f64,
     draw_list_stack_len: usize,
-    turtles_len: usize
+    boxes_len: usize
 }
 
 
@@ -42,9 +42,9 @@ pub struct Cx2d<'a> {
     pub (crate) overlay_id: Option<DrawListId>,
     //pub (crate) overlay_sweep_lock: Option<Rc<RefCell<Area>>>,
     pub draw_list_stack: Vec<DrawListId>,
-    pub (crate) turtles: Vec<Turtle>,
-    pub (crate) turtle_walks: Vec<TurtleWalk>,
-    pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
+    pub (crate) boxes: Vec<Box>,
+    pub (crate) box_walks: Vec<BoxWalk>,
+    pub (crate) box_clips: Vec<(DVec2, DVec2)>,
     pub (crate) align_list: Vec<AlignEntry>,
     pub fonts_atlas_rc: CxFontsAtlasRc,
     pub icon_atlas_rc: CxIconAtlasRc,
@@ -90,9 +90,9 @@ impl<'a> Cx2d<'a> {
             // overlay_sweep_lock: None,
             pass_stack: Vec::new(),
             draw_list_stack: Vec::new(),
-            turtle_clips: Vec::new(),
-            turtle_walks: Vec::new(),
-            turtles: Vec::new(),
+            box_clips: Vec::new(),
+            box_walks: Vec::new(),
+            boxes: Vec::new(),
             align_list: Vec::new(),
             nav_tree_rc,
             icon_atlas_rc
@@ -139,7 +139,7 @@ impl<'a> Cx2d<'a> {
         self.pass_stack.push(PassStackItem {
             dpi_factor,
             draw_list_stack_len: self.draw_list_stack.len(),
-            turtles_len: self.turtles.len(),
+            boxes_len: self.boxes.len(),
             pass_id: pass.pass_id()
         });
     }
@@ -153,8 +153,8 @@ impl<'a> Cx2d<'a> {
         if self.draw_list_stack.len() != stack_item.draw_list_stack_len {
             panic!("Draw list stack disaligned, forgot an end_view(cx)");
         }
-        if self.turtles.len() != stack_item.turtles_len {
-            panic!("Turtle stack disaligned, forgot an end_turtle()");
+        if self.boxes.len() != stack_item.boxes_len {
+            panic!("Box stack disaligned, forgot an end_r#box()");
         }
     }
     
@@ -171,9 +171,9 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn will_redraw(&self, draw_list_2d: &mut DrawList2d, walk: Walk) -> bool {
-        // ok so we need to check if our turtle position has changed since last time.
+        // ok so we need to check if our box position has changed since last time.
         // if it did, we redraw
-        let rect = self.peek_walk_turtle(walk);
+        let rect = self.peek_walk_box(walk);
         if draw_list_2d.dirty_check_rect != rect {
             draw_list_2d.dirty_check_rect = rect;
             return true;

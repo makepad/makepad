@@ -113,11 +113,11 @@ impl Widget for FoldHeader {
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
-            cx.begin_turtle(walk, self.layout);
+            cx.begin_box(walk, self.layout);
         }
         if let Some(DrawState::DrawHeader) = self.draw_state.get() {
             self.header.draw_widget(cx) ?;
-            cx.begin_turtle(
+            cx.begin_box(
                 self.body_walk,
                 Layout::flow_down()
                 .with_scroll(dvec2(0.0, self.rect_size * (1.0 - self.opened)))
@@ -126,9 +126,9 @@ impl Widget for FoldHeader {
         }
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
             self.body.draw_widget(cx) ?;
-            self.rect_size = cx.turtle().used().y;
-            cx.end_turtle();
-            cx.end_turtle_with_area(&mut self.area);
+            self.rect_size = cx.r#box().used().y;
+            cx.end_box();
+            cx.end_box_with_area(&mut self.area);
             self.draw_state.end();
         }
         WidgetDraw::done()

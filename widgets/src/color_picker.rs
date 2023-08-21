@@ -254,7 +254,7 @@ impl ColorPicker {
         }
         //self.draw_wheel.shader = live_shader!(cx, self::shader_wheel);
         // i wanna draw a draw_wheel with 'width' set but height a fixed height.
-        self.size = cx.turtle().rect().size.y;
+        self.size = cx.r#box().rect().size.y;
         self.draw_wheel.hue = self.hue;
         self.draw_wheel.sat = self.sat;
         self.draw_wheel.val = self.val;

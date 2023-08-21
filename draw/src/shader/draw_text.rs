@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        turtle::{Walk, Size, Align},
+        r#box::{Walk, Length, Align},
         font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
         draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
@@ -282,7 +282,7 @@ impl DrawText {
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
-        self.draw_inner(cx, pos + cx.turtle().origin(), val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
+        self.draw_inner(cx, pos + cx.r#box().origin(), val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
         }
@@ -331,7 +331,7 @@ impl DrawText {
             || self.text_style.font.font_id.is_none() {
             return
         }
-        //self.draw_clip = cx.turtle().draw_clip().into();
+        //self.draw_clip = cx.r#box().draw_clip().into();
         //let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
         
@@ -483,8 +483,8 @@ impl DrawText {
         
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
         let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
-        let eval_width = cx.turtle().eval_width(walk.width, walk.margin, cx.turtle().layout().flow);
-        let eval_height = cx.turtle().eval_height(walk.height, walk.margin, cx.turtle().layout().flow);
+        let eval_width = cx.r#box().eval_width(walk.width, walk.margin, cx.r#box().layout().flow);
+        let eval_height = cx.r#box().eval_height(walk.height, walk.margin, cx.r#box().layout().flow);
         
         match if walk.width.is_fit() {&TextWrap::Line}else {&self.wrap} {
             TextWrap::Ellipsis => {
@@ -619,22 +619,22 @@ impl DrawText {
                     // otherwise we should check the ellipsis
                     if let Some((ellip, at_x, dots)) = geom.ellip_pt {
                         // ok so how do we draw this
-                        let rect = cx.walk_turtle(Walk {
+                        let rect = cx.walk_box(Walk {
                             abs_pos: walk.abs_pos,
                             margin: walk.margin,
-                            width: Size::Fixed(geom.eval_width),
-                            height: Size::Fixed(height)
+                            width: Length::Fixed(geom.eval_width),
+                            height: Length::Fixed(height)
                         });
                         
                         self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip], fonts_atlas);
                         self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots], fonts_atlas);
                     }
                     else { // we might have space to h-align
-                        let rect = cx.walk_turtle(Walk {
+                        let rect = cx.walk_box(Walk {
                             abs_pos: walk.abs_pos,
                             margin: walk.margin,
-                            width: Size::Fixed(geom.eval_width),
-                            height: Size::Fixed(
+                            width: Length::Fixed(geom.eval_width),
+                            height: Length::Fixed(
                                 if walk.height.is_fit() {
                                     geom.measured_height
                                 } else {
@@ -650,11 +650,11 @@ impl DrawText {
                     let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
                     let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
                     
-                    let rect = cx.walk_turtle(Walk {
+                    let rect = cx.walk_box(Walk {
                         abs_pos: walk.abs_pos,
                         margin: walk.margin,
-                        width: Size::Fixed(geom.eval_width),
-                        height: Size::Fixed(geom.measured_height)
+                        width: Length::Fixed(geom.eval_width),
+                        height: Length::Fixed(geom.measured_height)
                     });
                     let mut pos = dvec2(0.0, 0.0);
                     
@@ -676,11 +676,11 @@ impl DrawText {
                 TextWrap::Line => {
                     let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
                     // lets just output it and walk it
-                    let rect = cx.walk_turtle(Walk {
+                    let rect = cx.walk_box(Walk {
                         abs_pos: walk.abs_pos,
                         margin: walk.margin,
-                        width: Size::Fixed(geom.measured_width),
-                        height: Size::Fixed(height)
+                        width: Length::Fixed(geom.measured_width),
+                        height: Length::Fixed(height)
                     });
                     // lets do our y alignment
                     let mut ypos = 0.0;

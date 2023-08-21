@@ -37,8 +37,8 @@ pub struct DrawScrollShadow {
 impl DrawScrollShadow {
     pub fn draw(&mut self, cx: &mut Cx2d, offset: DVec2) {
         let shadow_size = self.shadow_size as f64;
-        let rect = cx.turtle().rect();
-        let scroll = cx.turtle().scroll();
+        let rect = cx.r#box().rect();
+        let scroll = cx.r#box().scroll();
         
         self.shadow_is_top = 0.0;
         self.scroll = scroll.x as f32;

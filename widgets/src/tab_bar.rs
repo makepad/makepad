@@ -86,14 +86,14 @@ impl TabBar {
             self.draw_drag.draw_walk(
                 cx,
                 Walk {
-                    width: Size::Fill,
-                    height: Size::Fill,
+                    width: Length::Fill,
+                    height: Length::Fill,
                     ..Walk::default()
                 },
             );
         }
         self.tabs.retain_visible();
-        self.draw_fill.draw_walk(cx, Walk::size(Size::Fill, Size::Fill));
+        self.draw_fill.draw_walk(cx, Walk::size(Length::Fill, Length::Fill));
         self.scroll_bars.end(cx);
     }
     

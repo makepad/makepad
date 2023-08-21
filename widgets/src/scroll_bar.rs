@@ -437,7 +437,7 @@ impl ScrollBar {
                     self.draw_bar.is_vertical = 0.0;
                     self.draw_bar.norm_scroll = norm_scroll as f32;
                     self.draw_bar.norm_handle = norm_handle as f32;
-                    let scroll = cx.turtle().scroll();
+                    let scroll = cx.r#box().scroll();
                     self.draw_bar.draw_rel(
                         cx,
                         Rect {
@@ -464,7 +464,7 @@ impl ScrollBar {
                     self.draw_bar.is_vertical = 1.0;
                     self.draw_bar.norm_scroll = norm_scroll as f32;
                     self.draw_bar.norm_handle = norm_handle as f32;
-                    let scroll = cx.turtle().scroll();
+                    let scroll = cx.r#box().scroll();
                     self.draw_bar.draw_rel(
                         cx,
                         Rect {

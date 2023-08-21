@@ -3,7 +3,7 @@ use {
         makepad_platform::*,
         nav::*,
         cx_2d::{Cx2d},
-        turtle::{Walk,AlignEntry}
+        r#box::{Walk,AlignEntry}
     }
 };
 
@@ -172,7 +172,7 @@ impl DrawList2d {
             let walk = Walk {abs_pos: None, width: w, height: h, margin: walk.margin};
             //let pos = cx.peek_walk_pos(walk);
             //if pos == cx.cx.draw_lists[self.draw_list.id()].rect.pos {
-             cx.walk_turtle(walk);*/
+             cx.walk_box(walk);*/
             return Redrawing::no();
             //}
         }

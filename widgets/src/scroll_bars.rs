@@ -225,14 +225,14 @@ impl ScrollBars {
     // all in one scrollbar api
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
-        cx.begin_turtle(walk, layout.with_scroll(self.scroll));
+        cx.begin_box(walk, layout.with_scroll(self.scroll));
         self.begin_nav_area(cx);
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         self.draw_scroll_bars(cx);
         // this needs to be a rect_area
-        cx.end_turtle_with_area(&mut self.area);
+        cx.end_box_with_area(&mut self.area);
         self.end_nav_area(cx);
     }
     
@@ -251,9 +251,9 @@ impl ScrollBars {
     }
     
     pub fn draw_scroll_bars(&mut self, cx: &mut Cx2d) {
-        // lets ask the turtle our actual bounds
-        let view_total = cx.turtle().used();
-        let mut rect_now = cx.turtle().rect();
+        // lets ask the box our actual bounds
+        let view_total = cx.r#box().used();
+        let mut rect_now = cx.r#box().rect();
         
         if rect_now.size.y.is_nan() {
             rect_now.size.y = view_total.y;
