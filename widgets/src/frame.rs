@@ -800,8 +800,8 @@ impl Frame {
         let view_size = self.view_size.unwrap_or(DVec2::default());
         Walk {
             abs_pos: walk.abs_pos,
-            width: if walk.width.is_fill() {walk.width}else {Size::Fixed(view_size.x)},
-            height: if walk.height.is_fill() {walk.height}else {Size::Fixed(view_size.y)},
+            width: if walk.width.is_fill() {walk.width}else {Length::Fixed(view_size.x)},
+            height: if walk.height.is_fill() {walk.height}else {Length::Fixed(view_size.y)},
             margin: walk.margin
         }
     }

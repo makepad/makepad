@@ -120,8 +120,8 @@ impl ListView {
                 cx.begin_turtle(Walk {
                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.top_scroll)),
                     margin: Default::default(),
-                    width: Size::Fill,
-                    height: Size::Fit
+                    width: Length::Fill,
+                    height: Length::Fit
                 }, Layout::flow_down());
                 return Some(self.top_id)
             }
@@ -149,8 +149,8 @@ impl ListView {
                         cx.begin_turtle(Walk {
                             abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                             margin: Default::default(),
-                            width: Size::Fill,
-                            height: Size::Fit
+                            width: Length::Fill,
+                            height: Length::Fit
                         }, Layout::flow_down());
                         return Some(self.top_id - 1);
                     }
@@ -177,8 +177,8 @@ impl ListView {
                 cx.begin_turtle(Walk {
                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + scroll)),
                     margin: Default::default(),
-                    width: Size::Fill,
-                    height: Size::Fit
+                    width: Length::Fill,
+                    height: Length::Fit
                 }, Layout::flow_down());
                 return Some(index + 1)
             }
@@ -214,8 +214,8 @@ impl ListView {
                 cx.begin_turtle(Walk {
                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                     margin: Default::default(),
-                    width: Size::Fill,
-                    height: Size::Fit
+                    width: Length::Fill,
+                    height: Length::Fit
                 }, Layout::flow_down());
                 
                 return Some(self.top_id - 1);

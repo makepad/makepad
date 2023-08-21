@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        turtle::{Walk, Size, Align},
+        turtle::{Walk, Length, Align},
         font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
         draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
@@ -622,8 +622,8 @@ impl DrawText {
                         let rect = cx.walk_turtle(Walk {
                             abs_pos: walk.abs_pos,
                             margin: walk.margin,
-                            width: Size::Fixed(geom.eval_width),
-                            height: Size::Fixed(height)
+                            width: Length::Fixed(geom.eval_width),
+                            height: Length::Fixed(height)
                         });
                         
                         self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip], fonts_atlas);
@@ -633,8 +633,8 @@ impl DrawText {
                         let rect = cx.walk_turtle(Walk {
                             abs_pos: walk.abs_pos,
                             margin: walk.margin,
-                            width: Size::Fixed(geom.eval_width),
-                            height: Size::Fixed(
+                            width: Length::Fixed(geom.eval_width),
+                            height: Length::Fixed(
                                 if walk.height.is_fit() {
                                     geom.measured_height
                                 } else {
@@ -653,8 +653,8 @@ impl DrawText {
                     let rect = cx.walk_turtle(Walk {
                         abs_pos: walk.abs_pos,
                         margin: walk.margin,
-                        width: Size::Fixed(geom.eval_width),
-                        height: Size::Fixed(geom.measured_height)
+                        width: Length::Fixed(geom.eval_width),
+                        height: Length::Fixed(geom.measured_height)
                     });
                     let mut pos = dvec2(0.0, 0.0);
                     
@@ -679,8 +679,8 @@ impl DrawText {
                     let rect = cx.walk_turtle(Walk {
                         abs_pos: walk.abs_pos,
                         margin: walk.margin,
-                        width: Size::Fixed(geom.measured_width),
-                        height: Size::Fixed(height)
+                        width: Length::Fixed(geom.measured_width),
+                        height: Length::Fixed(height)
                     });
                     // lets do our y alignment
                     let mut ypos = 0.0;

@@ -23,7 +23,7 @@ pub use crate::{
         Align,
         Padding,
         Flow,
-        Size,
+        Length,
         DeferWalk
     },
     overlay::{

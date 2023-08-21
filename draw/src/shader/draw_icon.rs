@@ -6,7 +6,7 @@ use {
         geometry::GeometryQuad2D,
         icon_atlas::{CxIconAtlas, CxIconArgs},
         cx_2d::Cx2d,
-        turtle::{Walk, Size}
+        turtle::{Walk, Length}
     },
 };
 
@@ -142,13 +142,13 @@ impl DrawIcon {
                 if !height_is_fit {
                     scale = peek_rect.size.y / bounds.size.y
                 };
-                walk.width = Size::Fixed(bounds.size.x * self.scale * scale);
+                walk.width = Length::Fixed(bounds.size.x * self.scale * scale);
             }
             if height_is_fit {
                 if !width_is_fit {
                     scale = peek_rect.size.x / bounds.size.x
                 };
-                walk.height = Size::Fixed(bounds.size.y * self.scale * scale);
+                walk.height = Length::Fixed(bounds.size.y * self.scale * scale);
             }
             if !width_is_fit && !height_is_fit {
                 scale = (peek_rect.size.y / bounds.size.y).min(peek_rect.size.x / bounds.size.x);

@@ -196,7 +196,7 @@ impl ListBoxItem {
         node_height: f64,
     ) {
         self.set_draw_state(is_even);
-        self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
+        self.draw_bg.begin(cx, Walk::size(Length::Fill, Length::Fixed(node_height)), self.layout);
         self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
     }
@@ -250,7 +250,7 @@ impl ListBox {
         while walk < height_left {
             self.count += 1;
             self.draw_filler.is_even = Self::is_even(self.count);
-            self.draw_filler.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
+            self.draw_filler.draw_walk(cx, Walk::size(Length::Fill, Length::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         
@@ -286,7 +286,7 @@ impl ListBox {
     
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
         let height = self.node_height;
-        let walk = Walk::size(Size::Fill, Size::Fixed(height));
+        let walk = Walk::size(Length::Fill, Length::Fixed(height));
         if cx.walk_turtle_would_be_visible(walk) {
             return true
         }

@@ -38,8 +38,8 @@ impl Default for Layout{
 pub struct Walk {
     #[live] pub abs_pos: Option<DVec2>,
     #[live] pub margin: Margin,
-    #[live] pub width: Size,
-    #[live] pub height: Size,
+    #[live] pub width: Length,
+    #[live] pub height: Length,
 }
 
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
@@ -81,7 +81,7 @@ pub enum Flow {
 
 #[derive(Copy, Clone, Debug, Live)]
 #[live_ignore]
-pub enum Size {
+pub enum Length {
     #[pick] Fill,
     #[live(200.0)] Fixed(f64),
     Fit,
@@ -92,7 +92,7 @@ pub enum DeferWalk{
     Unresolved{
         defer_index: usize,
         margin: Margin,
-        other_axis: Size,
+        other_axis: Length,
         pos: DVec2
     },
     Resolved(Walk)
@@ -321,17 +321,17 @@ impl<'a> Cx2d<'a> {
         
         // computed height
         let w = if turtle.width.is_nan() {
-            Size::Fixed(turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x)
+            Length::Fixed(turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x)
         }
         else {
-            Size::Fixed(turtle.width)
+            Length::Fixed(turtle.width)
         };
         
         let h = if turtle.height.is_nan() {
-            Size::Fixed(turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y)
+            Length::Fixed(turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y)
         }
         else {
-            Size::Fixed(turtle.height)
+            Length::Fixed(turtle.height)
         };
         
         match turtle.layout.flow {
@@ -744,11 +744,11 @@ impl Turtle {
         self.layout.scroll
     }
     
-    pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f64 {
+    pub fn eval_width(&self, width: Length, margin: Margin, flow: Flow) -> f64 {
         return match width {
-            Size::Fit => std::f64::NAN,
-            Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Fill => {
+            Length::Fit => std::f64::NAN,
+            Length::Fixed(v) => max_zero_keep_nan(v),
+            Length::Fill => {
                 match flow {
                     Flow::Right => {
                         max_zero_keep_nan(self.width_left() - margin.width())
@@ -765,11 +765,11 @@ impl Turtle {
         }
     }
     
-    pub fn eval_height(&self, height: Size, margin: Margin, flow: Flow) -> f64 {
+    pub fn eval_height(&self, height: Length, margin: Margin, flow: Flow) -> f64 {
         return match height {
-            Size::Fit => std::f64::NAN,
-            Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Fill => {
+            Length::Fit => std::f64::NAN,
+            Length::Fixed(v) => max_zero_keep_nan(v),
+            Length::Fill => {
                 match flow {
                     Flow::Right | Flow::Overlay => {
                         let r = max_zero_keep_nan(self.height - self.layout.padding.height() - margin.height());
@@ -867,7 +867,7 @@ impl DeferWalk {
                         Walk {
                             abs_pos: Some(*pos + dvec2(part * *defer_index as f64, 0.)),
                             margin: *margin,
-                            width: Size::Fixed(part),
+                            width: Length::Fixed(part),
                             height: *other_axis
                         }
                     },
@@ -877,7 +877,7 @@ impl DeferWalk {
                         Walk {
                             abs_pos: Some(*pos + dvec2(0., part * *defer_index as f64)),
                             margin: *margin,
-                            height: Size::Fixed(part),
+                            height: Length::Fixed(part),
                             width: *other_axis
                         }
                     }
@@ -968,12 +968,12 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fixed(0.0),
-            height: Size::Fixed(0.0),
+            width: Length::Fixed(0.0),
+            height: Length::Fixed(0.0),
         }
     }
     
-    pub fn size(w: Size, h: Size) -> Self {
+    pub fn size(w: Length, h: Length) -> Self {
         Self {
             abs_pos: None,
             margin: Margin::default(),
@@ -987,8 +987,8 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fixed(w),
-            height: Size::Fixed(h),
+            width: Length::Fixed(w),
+            height: Length::Fixed(h),
         }
     }
         
@@ -996,8 +996,8 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fixed(size.x),
-            height: Size::Fixed(size.y),
+            width: Length::Fixed(size.x),
+            height: Length::Fixed(size.y),
         }
     }
     
@@ -1005,8 +1005,8 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fit,
-            height: Size::Fit,
+            width: Length::Fit,
+            height: Length::Fit,
         }
     }
     
@@ -1014,8 +1014,8 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fill,
-            height: Size::Fill,
+            width: Length::Fill,
+            height: Length::Fill,
         }
     }
     
@@ -1023,8 +1023,8 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fill,
-            height: Size::Fit,
+            width: Length::Fill,
+            height: Length::Fit,
         }
     }
     
@@ -1098,7 +1098,7 @@ impl Default for Flow {
 }
 
 
-impl LiveHook for Size {
+impl LiveHook for Length {
     fn skip_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
             LiveValue::Expr {..} => {
@@ -1135,13 +1135,13 @@ impl LiveHook for Size {
     }
 }
 
-impl Default for Size {
+impl Default for Length {
     fn default() -> Self {
-        Size::Fill
+        Length::Fill
     }
 }
 
-impl Size {
+impl Length {
     pub fn fixed_or_zero(&self) -> f64 {
         match self {
             Self::Fixed(v) => *v,
