@@ -112,7 +112,7 @@ pub struct App {
         Machine::new("192.168.1.180:8188", id_lut!(m8))
     ])] machines: Vec<Machine>,
     #[rust] num_images: u64,
-    #[rust(10000u64)] last_seed: u64,
+    #[rust(1000000u64)] last_seed: u64,
 }
 
 impl LiveHook for App {
