@@ -35,6 +35,7 @@ use {
             HttpResponseEvent,
             HttpRequestErrorEvent,
             VideoDecodingInitializedEvent,
+            VideoColorFormat,
             VideoStreamEvent,
         },
         window::CxWindowPool,
@@ -379,14 +380,14 @@ impl Cx {
     }
 
     pub fn from_java_on_video_decoding_initialized(&mut self, video_id: u64, frame_rate: usize, video_width: u32, video_height: u32, 
-        color_format: usize, duration: u64, to_java: AndroidToJava) {
+        color_format: String, duration: u64, to_java: AndroidToJava) {
         let e = Event::VideoDecodingInitialized(
             VideoDecodingInitializedEvent { 
                 video_id: LiveId(video_id),
                 frame_rate,
                 video_width,
                 video_height,
-                color_format,
+                color_format: VideoColorFormat::from_str(&color_format),
                 duration,
             }
         );

@@ -333,7 +333,7 @@ impl<'a> AndroidToJava<'a> {
         }
     }
 
-    pub fn decode_video_chunk(&self, video_id: LiveId, startTimestamp: u64, endTimestamp: u64) {
+    pub fn decode_video_chunk(&self, video_id: LiveId, start_timestamp: u64, end_timestamp: u64) {
         unsafe {
             let name = CString::new("decodeVideoChunk").unwrap();
             let signature = CString::new("(JJJ)V").unwrap();
@@ -349,8 +349,8 @@ impl<'a> AndroidToJava<'a> {
                 self.callback,
                 method_id,
                 video_id.get_value() as jlong,
-                startTimestamp as jlong,
-                endTimestamp as jlong,
+                start_timestamp as jlong,
+                end_timestamp as jlong,
             );
         }
     }
@@ -849,7 +849,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoDecodingInitial
     frame_rate: jint,
     video_width: jint,
     video_height: jint,
-    color: jint,
+    color_format: jstring,
     duration: jlong,
     callback: jobject,
 ) {
@@ -858,7 +858,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoDecodingInitial
         frame_rate as usize,
         video_width as u32,
         video_height as u32,
-        color as usize,
+        jstring_to_string(env, color_format),
         duration as u64,
         AndroidToJava {
             env,

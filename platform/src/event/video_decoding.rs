@@ -14,6 +14,26 @@ pub struct VideoDecodingInitializedEvent {
     pub frame_rate: usize,
     pub video_width: u32,
     pub video_height: u32,
-    pub color_format: usize,
+    pub color_format: VideoColorFormat,
     pub duration: u64,
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+pub enum VideoColorFormat {
+    YUV420Planar,
+    YUV420SemiPlanar,
+    YUV420Flexible,
+    #[default]
+    Unknown,
+}
+
+impl VideoColorFormat {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "YUV420Flexible" => VideoColorFormat::YUV420Flexible,
+            "YUV420Planar" => VideoColorFormat::YUV420Planar,
+            "YUV420SemiPlanar" => VideoColorFormat::YUV420SemiPlanar,
+            _ => VideoColorFormat::Unknown,
+        }
+    }
 }
