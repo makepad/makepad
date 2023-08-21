@@ -3,7 +3,7 @@ use {
         makepad_platform::*,
         nav::*,
         cx_2d::{Cx2d},
-        turtle::{Walk,AlignEntry}
+        r#box::{Walk,AlignEntry}
     }
 };
 

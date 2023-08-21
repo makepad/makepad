@@ -23,7 +23,7 @@ use {
             CxFontsAtlasRc,
         },
         draw_list_2d::DrawList2d,
-        turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
+        r#box::{Box, TurtleWalk, Walk, AlignEntry},
     }
 };
 
@@ -42,7 +42,7 @@ pub struct Cx2d<'a> {
     pub (crate) overlay_id: Option<DrawListId>,
     //pub (crate) overlay_sweep_lock: Option<Rc<RefCell<Area>>>,
     pub draw_list_stack: Vec<DrawListId>,
-    pub (crate) turtles: Vec<Turtle>,
+    pub (crate) turtles: Vec<Box>,
     pub (crate) turtle_walks: Vec<TurtleWalk>,
     pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
     pub (crate) align_list: Vec<AlignEntry>,

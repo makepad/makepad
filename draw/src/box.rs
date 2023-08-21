@@ -116,7 +116,7 @@ pub struct TurtleWalk {
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct Turtle {
+pub struct Box {
     walk: Walk,
     layout: Layout,
     align_start: usize,
@@ -133,11 +133,11 @@ pub struct Turtle {
 }
 
 impl<'a> Cx2d<'a> {
-    pub fn turtle(&self) -> &Turtle {
+    pub fn turtle(&self) -> &Box {
         self.turtles.last().unwrap()
     }
     
-    pub fn turtle_mut(&mut self) -> &mut Turtle {
+    pub fn turtle_mut(&mut self) -> &mut Box {
         self.turtles.last_mut().unwrap()
     }
     
@@ -193,7 +193,7 @@ impl<'a> Cx2d<'a> {
     pub fn begin_pass_sized_turtle(&mut self, layout: Layout) {
         let pass_size = self.current_pass_size();
         self.align_list.push(AlignEntry::BeginTurtle(dvec2(0.0,0.0),pass_size));
-        let turtle = Turtle {
+        let turtle = Box {
             walk: Walk::fill(),
             layout,
             align_start: self.align_list.len() - 1,
@@ -278,7 +278,7 @@ impl<'a> Cx2d<'a> {
             (o, w, h, (dvec2(o.x, o.y), dvec2(o.x + w, o.y + h)))
         };
         self.align_list.push(AlignEntry::BeginTurtle(draw_clip.0,draw_clip.1));
-        let turtle = Turtle {
+        let turtle = Box {
             walk,
             layout,
             align_start: self.align_list.len()-1,
@@ -656,7 +656,7 @@ impl<'a> Cx2d<'a> {
     }
 }
 
-impl Turtle {
+impl Box {
     pub fn update_width_max(&mut self, pos:f64, dx: f64) {
         self.width_used = self.width_used.max((pos + dx) - self.origin.x);
     }
