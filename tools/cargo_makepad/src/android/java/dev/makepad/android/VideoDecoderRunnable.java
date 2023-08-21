@@ -1,5 +1,4 @@
 package dev.makepad.android;
-import android.util.Log;
 
 public class VideoDecoderRunnable implements Runnable {
     private final VideoDecoder mVideoDecoder;

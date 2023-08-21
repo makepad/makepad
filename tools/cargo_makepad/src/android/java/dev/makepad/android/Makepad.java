@@ -47,6 +47,7 @@ public class Makepad {
     static native void onCutToClipboard(long cx, Callback callback);
     static native void onHttpResponse(long cx, long id, int statusCode, String headers, byte[] body, Callback callback);
     static native void onHttpRequestError(long cx, long id, String error, Callback callback);
-    static native void onVideoDecodingInitialized(long cx, long videoId, int frameRate, int videoWidth, int videoHeight, int colorFormat, long duration, Callback callback);
+    static native void onVideoDecodingInitialized(long cx, long videoId, int frameRate, int videoWidth, int videoHeight, 
+    String colorFormat, long duration, Callback callback);
     static native void onVideoStream(long cx, long videoId, byte[] video, long timestamp, boolean isEOS, Callback callback); 
 }
