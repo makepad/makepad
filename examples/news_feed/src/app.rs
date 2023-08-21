@@ -352,7 +352,7 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        for (item_id, item) in news_feeds.items_with_actions(&actions) {
+        for (_item_id, item) in news_feeds.items_with_actions(&actions) {
             // check for actions inside the list item
             if item.get_button(id!(likes)).clicked(&actions) {
                 //log!("Live {}", item_id);
