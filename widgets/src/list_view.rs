@@ -49,6 +49,7 @@ pub struct ListView {
     #[live(0.2)] swipe_drag_duration: f64,
     #[rust] top_id: u64,
     #[rust] top_scroll: f64,
+    #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
@@ -63,7 +64,7 @@ impl LiveHook for ListView {
     }
     
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from{
+        if let ApplyFrom::UpdateFromDoc {..} = from {
             self.templates.clear();
         }
     }
@@ -91,6 +92,15 @@ impl LiveHook for ListView {
         }
         nodes.skip_node(index)
     }
+    
+    fn after_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if let Flow::Down = self.layout.flow {
+            self.vec_index = Vec2Index::Y
+        }
+        else {
+            self.vec_index = Vec2Index::X
+        }
+    }
 }
 
 impl ListView {
@@ -108,6 +118,7 @@ impl ListView {
     }
     
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<u64> {
+        let vi = self.vec_index;
         match self.draw_state.get() {
             Some(ListDrawState::Begin) => {
                 let viewport = cx.turtle().rect();
@@ -118,7 +129,7 @@ impl ListView {
                 });
                 
                 cx.begin_turtle(Walk {
-                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.top_scroll)),
+                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y) + DVec2::from_index_pair(vi, self.top_scroll, 0.0)),
                     margin: Default::default(),
                     width: Size::Fill,
                     height: Size::Fit
@@ -129,17 +140,17 @@ impl ListView {
                 let did_draw = cx.turtle_has_align_items();
                 let rect = cx.end_turtle();
                 
-                if did_draw && rect.pos.y + rect.size.y < viewport.pos.y && index + 1 < self.range_end{
+                if did_draw && rect.pos.index(vi) + rect.size.index(vi) < viewport.pos.index(vi) && index + 1 < self.range_end {
                     self.top_id = index + 1;
-                    self.top_scroll = (rect.pos.y + rect.size.y) - viewport.pos.y;
+                    self.top_scroll = (rect.pos.index(vi) + rect.size.index(vi)) - viewport.pos.index(vi);
                     if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
                         self.top_scroll = 0.0;
                     }
                 }
                 
                 if !did_draw
-                    || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y
-                   /* || index + 1 == self.range_end*/ {
+                    || rect.pos.index(vi) + rect.size.index(vi) > viewport.pos.index(vi) + viewport.size.index(vi)
+                /* || index + 1 == self.range_end*/ {
                     if self.top_id > self.range_start && self.top_scroll > 0.0 {
                         self.draw_state.set(ListDrawState::Up {
                             index: self.top_id - 1,
@@ -159,23 +170,16 @@ impl ListView {
                         return None
                     }
                 }
-                /*
-                if index + 1 == self.range_end { 
-                    self.draw_state.set(ListDrawState::End);
-                    return None
-                }*/
                 
-                let scroll = scroll + rect.size.y;
-                /*if self.top_id + 1 == self.range_end {
-                    scroll = 0.0;
-                }*/
+                let scroll = scroll + rect.size.index(vi);
+                
                 self.draw_state.set(ListDrawState::Down {
                     index: index + 1,
                     scroll,
                     viewport
                 });
                 cx.begin_turtle(Walk {
-                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + scroll)),
+                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y) + DVec2::from_index_pair(vi, scroll, 0.0)),
                     margin: Default::default(),
                     width: Size::Fill,
                     height: Size::Fit
@@ -185,16 +189,16 @@ impl ListView {
             Some(ListDrawState::Up {index, scroll, viewport}) => {
                 let did_draw = cx.turtle_has_align_items();
                 let used = cx.turtle().used();
-                let shift = dvec2(0.0, scroll - used.y);
+                let shift = DVec2::from_index_pair(vi, scroll - used.index(vi), 0.0);
                 cx.turtle_mut().set_shift(shift);
                 
                 let rect = cx.end_turtle();
-                if !did_draw || rect.pos.y + rect.size.y + shift.y < viewport.pos.y {
+                if !did_draw || rect.pos.index(vi) + rect.size.index(vi) + shift.index(vi) < viewport.pos.index(vi) {
                     self.draw_state.set(ListDrawState::End);
                     return None
                 }
                 self.top_id = index;
-                self.top_scroll = scroll - used.y;
+                self.top_scroll = scroll - used.index(vi);
                 
                 if self.top_id == self.range_start && self.top_scroll < 0.0 {
                     self.top_scroll = 0.0;
@@ -315,10 +319,10 @@ impl Widget for ListView {
                 }
             }
         }
-        
+        let vi = self.vec_index;
         match event.hits(cx, self.area) {
             Hit::FingerScroll(e) => {
-                self.delta_top_scroll(cx, -e.scroll.y);
+                self.delta_top_scroll(cx, -e.scroll.index(vi));
                 dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                 self.area.redraw(cx);
             },
@@ -326,7 +330,7 @@ impl Widget for ListView {
                 cx.set_key_focus(self.area);
                 // ok so fingerdown eh.
                 self.drag_state = DragState::SwipeDrag {
-                    last_abs: e.abs.y,
+                    last_abs: e.abs.index(vi),
                     delta: 0.0,
                     initial_time: e.time
                 };
@@ -334,39 +338,40 @@ impl Widget for ListView {
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.top_id += 1;
-                    if self.top_id >= self.range_end.max(1){
-                        self.top_id = self.range_end -1;
+                    if self.top_id >= self.range_end.max(1) {
+                        self.top_id = self.range_end - 1;
                     }
                     self.top_scroll = 0.0;
                     self.area.redraw(cx);
                 },
                 KeyCode::ArrowUp => {
-                    if self.top_id > 0{
+                    if self.top_id > 0 {
                         self.top_id -= 1;
-                        if self.top_id < self.range_start{
+                        if self.top_id < self.range_start {
                             self.top_id = self.range_start;
                         }
                         self.top_scroll = 0.0;
                         self.area.redraw(cx);
                     }
                 },
-                _=>()
+                _ => ()
             }
             Hit::FingerMove(e) => {
                 cx.set_cursor(MouseCursor::Default);
+                
                 // ok we kinda have to set the scroll pos to our abs position
                 match &mut self.drag_state {
                     DragState::SwipeDrag {last_abs, delta, initial_time} => {
-                        let new_delta = e.abs.y - *last_abs;
+                        let new_delta = e.abs.index(vi) - *last_abs;
                         if e.time - *initial_time < self.swipe_drag_duration {
                             *delta = new_delta;
-                            *last_abs = e.abs.y;
+                            *last_abs = e.abs.index(vi);
                         }
                         else {
                             // After a short span of time, the flick motion is considered a normal drag
                             self.scroll_state = ScrollState::Stopped;
                             self.drag_state = DragState::NormalDrag {
-                                last_abs: e.abs.y,
+                                last_abs: e.abs.index(vi),
                                 delta: new_delta
                             };
                         }
@@ -375,9 +380,9 @@ impl Widget for ListView {
                         self.area.redraw(cx);
                     },
                     DragState::NormalDrag {last_abs, delta} => {
-                        let new_delta = e.abs.y - *last_abs;
+                        let new_delta = e.abs.index(vi) - *last_abs;
                         *delta = new_delta;
-                        *last_abs = e.abs.y;
+                        *last_abs = e.abs.index(vi);
                         self.delta_top_scroll(cx, new_delta);
                         dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                         self.area.redraw(cx);
@@ -427,10 +432,10 @@ pub struct ListViewRef(WidgetRef);
 
 impl ListViewRef {
     pub fn get_item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
-        if let Some(mut inner) = self.borrow_mut(){
+        if let Some(mut inner) = self.borrow_mut() {
             inner.get_item(cx, entry_id, template)
         }
-        else{
+        else {
             None
         }
     }
