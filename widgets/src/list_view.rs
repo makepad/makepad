@@ -47,8 +47,8 @@ pub struct ListView {
     #[live(0.1)] flick_scroll_minimum: f64,
     #[live(0.98)] flick_scroll_decay: f64,
     #[live(0.2)] swipe_drag_duration: f64,
-    #[rust] top_id: u64,
-    #[rust] top_scroll: f64,
+    #[rust] first_id: u64,
+    #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
@@ -123,38 +123,38 @@ impl ListView {
             Some(ListDrawState::Begin) => {
                 let viewport = cx.turtle().rect();
                 self.draw_state.set(ListDrawState::Down {
-                    index: self.top_id,
-                    scroll: self.top_scroll,
+                    index: self.first_id,
+                    scroll: self.first_scroll,
                     viewport,
                 });
                 
                 cx.begin_turtle(Walk {
-                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y) + DVec2::from_index_pair(vi, self.top_scroll, 0.0)),
+                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y) + DVec2::from_index_pair(vi, self.first_scroll, 0.0)),
                     margin: Default::default(),
                     width: Size::Fill,
                     height: Size::Fit
                 }, Layout::flow_down());
-                return Some(self.top_id)
+                return Some(self.first_id)
             }
             Some(ListDrawState::Down {index, scroll, viewport}) => {
                 let did_draw = cx.turtle_has_align_items();
                 let rect = cx.end_turtle();
                 
                 if did_draw && rect.pos.index(vi) + rect.size.index(vi) < viewport.pos.index(vi) && index + 1 < self.range_end {
-                    self.top_id = index + 1;
-                    self.top_scroll = (rect.pos.index(vi) + rect.size.index(vi)) - viewport.pos.index(vi);
-                    if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
-                        self.top_scroll = 0.0;
+                    self.first_id = index + 1;
+                    self.first_scroll = (rect.pos.index(vi) + rect.size.index(vi)) - viewport.pos.index(vi);
+                    if self.first_id + 1 == self.range_end && self.first_scroll < 0.0 {
+                        self.first_scroll = 0.0;
                     }
                 }
                 
                 if !did_draw
                     || rect.pos.index(vi) + rect.size.index(vi) > viewport.pos.index(vi) + viewport.size.index(vi)
                 /* || index + 1 == self.range_end*/ {
-                    if self.top_id > self.range_start && self.top_scroll > 0.0 {
+                    if self.first_id > self.range_start && self.first_scroll > 0.0 {
                         self.draw_state.set(ListDrawState::Up {
-                            index: self.top_id - 1,
-                            scroll: self.top_scroll,
+                            index: self.first_id - 1,
+                            scroll: self.first_scroll,
                             viewport
                         });
                         cx.begin_turtle(Walk {
@@ -163,7 +163,7 @@ impl ListView {
                             width: Size::Fill,
                             height: Size::Fit
                         }, Layout::flow_down());
-                        return Some(self.top_id - 1);
+                        return Some(self.first_id - 1);
                     }
                     else {
                         self.draw_state.set(ListDrawState::End);
@@ -197,11 +197,11 @@ impl ListView {
                     self.draw_state.set(ListDrawState::End);
                     return None
                 }
-                self.top_id = index;
-                self.top_scroll = scroll - used.index(vi);
+                self.first_id = index;
+                self.first_scroll = scroll - used.index(vi);
                 
-                if self.top_id == self.range_start && self.top_scroll < 0.0 {
-                    self.top_scroll = 0.0;
+                if self.first_id == self.range_start && self.first_scroll < 0.0 {
+                    self.first_scroll = 0.0;
                 }
                 
                 if index == self.range_start {
@@ -210,8 +210,8 @@ impl ListView {
                 }
                 
                 self.draw_state.set(ListDrawState::Up {
-                    index: self.top_id - 1,
-                    scroll: self.top_scroll,
+                    index: self.first_id - 1,
+                    scroll: self.first_scroll,
                     viewport
                 });
                 
@@ -222,7 +222,7 @@ impl ListView {
                     height: Size::Fit
                 }, Layout::flow_down());
                 
-                return Some(self.top_id - 1);
+                return Some(self.first_id - 1);
             }
             _ => {
                 return None
@@ -247,14 +247,14 @@ impl ListView {
     }
     
     fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64) {
-        self.top_scroll += delta;
-        if self.top_id == self.range_start && self.top_scroll > 0.0 {
-            self.top_scroll = 0.0;
+        self.first_scroll += delta;
+        if self.first_id == self.range_start && self.first_scroll > 0.0 {
+            self.first_scroll = 0.0;
         }
-        if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
-            self.top_scroll = 0.0;
+        if self.first_id + 1 == self.range_end && self.first_scroll < 0.0 {
+            self.first_scroll = 0.0;
         }
-        let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
+        let scroll_pos = ((self.first_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
         // move the scrollbar to the right 'top' position
         self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
     }
@@ -292,8 +292,8 @@ impl Widget for ListView {
         if let Some(scroll_to) = scroll_to {
             // reverse compute the top_id
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
-            self.top_id = scroll_to;
-            self.top_scroll = 0.0;
+            self.first_id = scroll_to;
+            self.first_scroll = 0.0;
             dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
             self.area.redraw(cx);
         }
@@ -337,20 +337,20 @@ impl Widget for ListView {
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowDown => {
-                    self.top_id += 1;
-                    if self.top_id >= self.range_end.max(1) {
-                        self.top_id = self.range_end - 1;
+                    self.first_id += 1;
+                    if self.first_id >= self.range_end.max(1) {
+                        self.first_id = self.range_end - 1;
                     }
-                    self.top_scroll = 0.0;
+                    self.first_scroll = 0.0;
                     self.area.redraw(cx);
                 },
                 KeyCode::ArrowUp => {
-                    if self.top_id > 0 {
-                        self.top_id -= 1;
-                        if self.top_id < self.range_start {
-                            self.top_id = self.range_start;
+                    if self.first_id > 0 {
+                        self.first_id -= 1;
+                        if self.first_id < self.range_start {
+                            self.first_id = self.range_start;
                         }
-                        self.top_scroll = 0.0;
+                        self.first_scroll = 0.0;
                         self.area.redraw(cx);
                     }
                 },
