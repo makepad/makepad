@@ -694,7 +694,7 @@ impl DrawText {
         }
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
-        }        
+        }
     }
     
     pub fn closest_offset(&self, cx: &Cx, pos: DVec2) -> Option<usize> {
@@ -703,65 +703,81 @@ impl DrawText {
         if !area.is_valid(cx) {
             return None
         }
-        //let debug = cx.debug.clone();
-        //let scroll_pos = area.get_scroll_pos(cx);
-        //let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        let line_spacing = self.get_line_spacing() ;
+
+        let line_spacing = self.get_line_spacing();
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
         let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
-        //let font_size = area.get_read_ref(cx, live_id!(font_size), ShaderTy::Float).unwrap();
-        
-        //let line_spacing = self.text_style.line_spacing;
-        
-        // TODO add multiline support
+
+        let mut last_y = None;
         for i in 0..rect_pos.repeat {
-            //let index = rect_pos.stride * i;
-            //let fs = font_size.buffer[index];
             let index = rect_pos.stride * i;
             let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
             let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            if last_y.is_none() {last_y = Some(y)}
             let advance = advance.buffer[index + 0] as f64;
-            if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64{
+            if i > 0 && y > last_y.unwrap() && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
+                return Some(i - 1)
+            }
+            if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64 {
                 return Some(i)
             }
+            last_y = Some(y)
         }
         return Some(rect_pos.repeat);
         
     }
     
-    pub fn get_selection_vec(&self, cx: &Cx, _pos: f32, _start: usize, _end:usize) -> Vec<Rect> {
+    pub fn get_selection_rects(&self, cx: &Cx, start: usize, end: usize, shift: DVec2, pad: DVec2) -> Vec<Rect> {
         let area = &self.draw_vars.area;
-        let  ret = Vec::new();
+        
         if !area.is_valid(cx) {
-            return ret
+            return Vec::new();
         }
         
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
-        let _delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
-        let _advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
+        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
+        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
         
-        if rect_pos.repeat == 0 {
-            return ret
+        if rect_pos.repeat == 0 || start >= rect_pos.repeat{
+            return Vec::new();
         }
         // alright now we go and walk from start to end and collect our selection rects
         
-        /*if index >= rect_pos.repeat {
-            // lets get the last one and advance
-            let index = (rect_pos.repeat - 1) * rect_pos.stride;
-            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0];
-            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-            //Some(dvec2(x as f64, y as f64))
-        }
-        else {
+        let index = start * rect_pos.stride;
+        let start_x = rect_pos.buffer[index + 0] - delta.buffer[index + 0]; // + advance.buffer[index + 0] * pos;
+        let start_y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+        let line_spacing = self.get_line_spacing();
+        let mut last_y = start_y;
+        let mut min_x = start_x;
+        let mut last_x = start_x;
+        let mut last_advance = advance.buffer[index + 0];
+        let mut out = Vec::new();
+        for index in start..end {
+            if index >= rect_pos.repeat{
+                break;
+            }
             let index = index * rect_pos.stride;
-            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0] * pos;
-            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-            //Some(dvec2(x as f64, y as f64))
-        }*/
-        ret
+            let end_x = rect_pos.buffer[index + 0] - delta.buffer[index + 0];
+            let end_y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            last_advance = advance.buffer[index + 0];
+            if end_y > last_y { // emit rect
+                out.push(Rect {
+                    pos: dvec2(min_x as f64, last_y as f64) + shift,
+                    size: dvec2((last_x - min_x + last_advance) as f64, line_spacing) + pad
+                });
+                min_x = end_x;
+                last_y = end_y;
+            }
+            last_x = end_x;
+        }
+        out.push(Rect {
+            pos: dvec2(min_x as f64, last_y as f64) + shift,
+            size: dvec2((last_x - min_x + last_advance) as f64, line_spacing) + pad
+        });
+        out
     }
-
+    
     
     pub fn get_char_count(&self, cx: &Cx) -> usize {
         let area = &self.draw_vars.area;
@@ -772,7 +788,7 @@ impl DrawText {
         rect_pos.repeat
     }
     
-    pub fn get_cursor_pos(&self, cx: &Cx, pos:f32, index: usize) -> Option<DVec2> {
+    pub fn get_cursor_pos(&self, cx: &Cx, pos: f32, index: usize) -> Option<DVec2> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
