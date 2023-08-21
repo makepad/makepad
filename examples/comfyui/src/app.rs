@@ -14,9 +14,22 @@ live_design!{
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
      
+    UnderlineTextInput = <TextInput>{
+        walk: {width: Fill, height: Fit, margin: {top: 30}},
+        draw_bg:{
+             fn pixel(self)->vec4{
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.move_to(1.0,self.rect_size.y-1.0);
+                sdf.line_to(self.rect_size.x - 2.0,self.rect_size.y-1.0);
+                sdf.stroke(#a, 1.0)
+                return sdf.result;
+            }
+        }
+    } 
+     
     App = {{App}} {
         ui: <DesktopWindow> {
-            window: {inner_size: vec2(550, 1024)},
+            window: {inner_size: vec2(1024, 1024)},
             
             show_bg: true
             layout: {
@@ -37,28 +50,19 @@ live_design!{
                 Image = <Image> {
                     walk: {width: 1920, height: 1080}
                 }
-            }            
+            }
             <Frame> {
                 
                 walk: {height: Fill, width: Fill}
-                layout: {flow: Down}
-                text_input = <TextInput> {
+                layout: {flow: Right, padding:10}
+                text_input = <UnderlineTextInput> {
                     text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
-                    walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20}},
                     draw_bg: {
                         color: #1113
                     }
                 }
-                keyword_input = <TextInput> {
-                    text: "Photographic"
-                    walk: {width: Fill, height: Fit, margin: { left: 20, right: 20,}},
-                    draw_bg: {
-                        color: #1113
-                    }
-                }
-                negative_input = <TextInput> {
+                negative_input = <UnderlineTextInput> {
                     text: "text, watermark, cartoon"
-                    walk: {width: Fill, height: Fit, margin: {left: 20, right: 20}},
                     draw_bg: {
                         color: #1113
                     }
@@ -123,7 +127,7 @@ impl LiveHook for App {
 const CLIENT_ID: &'static str = "1234";
 
 impl App {
-    fn send_prompt(&mut self, cx: &mut Cx, text_input: String, keyword_input: String, negative_input:String) {
+    fn send_prompt(&mut self, cx: &mut Cx, text_input: String, negative_input:String) {
         for machine in &self.machines {
             let url = format!("http://{}/prompt", machine.ip);
             let mut request = HttpRequest::new(url, HttpMethod::POST);
@@ -133,7 +137,7 @@ impl App {
             let ws = fs::read_to_string("examples/comfyui/workspace_3000.json").unwrap();
             let ws = ws.replace("CLIENT_ID", CLIENT_ID);
             let ws = ws.replace("TEXT_INPUT", &text_input);
-            let ws = ws.replace("KEYWORD_INPUT", &keyword_input);
+            let ws = ws.replace("KEYWORD_INPUT", &text_input);
             let ws = ws.replace("NEGATIVE_INPUT", &negative_input);
             let ws = ws.replace("11223344", &format!("{}", self.last_seed));
             self.last_seed += 1;
@@ -187,9 +191,9 @@ impl AppMain for App {
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
             let text_input = self.ui.get_text_input(id!(text_input)).get_text();
-            let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
+            //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
             let negative_input = self.ui.get_text_input(id!(negative_input)).get_text();
-            self.send_prompt(cx, text_input, keyword_input, negative_input);
+            self.send_prompt(cx, text_input, negative_input);
             self.set_progress(cx, "Starting query");
         }
         

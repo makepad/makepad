@@ -743,24 +743,6 @@ impl TextInput {
             for rect in rects{
                 self.draw_select.draw_abs(cx,rect);
             }
-            /*
-            let tail_x = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_tail)
-                .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
-            
-            let (left_x, right_x, left, right) = if self.cursor_head < self.cursor_tail {
-                (head.x, tail_x, self.cursor_head, self.cursor_tail)
-            }
-            else {
-                (tail_x, head.x, self.cursor_tail, self.cursor_head)
-            };
-            let char_count = self.draw_label.get_char_count(cx);
-            let pad = if left == 0 && right == char_count {self.select_pad_edges}else {0.0};
-            
-            self.draw_select.draw_abs(cx, Rect {
-                pos: dvec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
-                size: dvec2(right_x - left_x + self.cursor_size + 2.0 * pad, turtle.size.y)
-            });*/
-            
         }
         self.draw_bg.end(cx);
         

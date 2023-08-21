@@ -139,6 +139,27 @@ impl DVec2 {
         DVec2 {x, y: x}
     }
     
+    pub fn index(&self, index:Vec2Index)->f64{
+        match index{
+            Vec2Index::X=>self.x,
+            Vec2Index::Y=>self.y
+        }
+    }
+
+    pub fn set_index(&mut self, index:Vec2Index, v: f64){
+        match index{
+            Vec2Index::X=>{self.x = v},
+            Vec2Index::Y=>{self.y = v}
+        }
+    }
+    
+    pub fn from_index_pair(index:Vec2Index, a: f64, b:f64)->Self{
+        match index{
+            Vec2Index::X=>{Self{x:a,y:b}},
+            Vec2Index::Y=>{Self{x:b,y:a}}
+        }
+    }
+    
     pub fn into_vec2(self) -> Vec2 {
         Vec2 {x: self.x as f32, y: self.y as f32}
     }
