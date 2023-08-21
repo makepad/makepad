@@ -193,11 +193,11 @@ impl SeqButton {
 
 impl Sequencer {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, Layout::default());
+        cx.begin_box(walk, Layout::default());
         
-        let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
+        let start_pos = cx.r#box().pos(); //+ vec2(10., 10.);
         
-        let rect = cx.turtle().rect();
+        let rect = cx.r#box().rect();
         let sz = rect.size / dvec2(self.grid_x as f64, self.grid_y as f64);
         let button = self.button;
         for y in 0..self.grid_y {
@@ -215,9 +215,9 @@ impl Sequencer {
         }
         let used = dvec2(self.grid_x as f64 * self.button_size.x, self.grid_y as f64 * self.button_size.y);
         
-        cx.turtle_mut().set_used(used.x, used.y);
+        cx.box_mut().set_used(used.x, used.y);
         
-        cx.end_turtle_with_area(&mut self.area);
+        cx.end_box_with_area(&mut self.area);
         self.buttons.retain_visible();
     }
     

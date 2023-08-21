@@ -702,7 +702,7 @@ impl TextInput {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         
         self.draw_bg.begin(cx, walk, self.layout);
-        let turtle_rect = cx.turtle().rect();
+        let box_rect = cx.r#box().rect();
         
         // this makes sure selection goes behind the text
         self.draw_select.append_to_draw_call(cx);
@@ -716,14 +716,14 @@ impl TextInput {
             self.draw_label.draw_walk(cx, self.label_walk, self.align, &self.text);
         }
         
-        let mut turtle = cx.turtle().padded_rect_used();
-        turtle.pos.y -= self.cursor_margin_top;
-        turtle.size.y += self.cursor_margin_top + self.cursor_margin_bottom;
+        let mut boxx = cx.r#box().padded_rect_used();
+        boxx.pos.y -= self.cursor_margin_top;
+        boxx.size.y += self.cursor_margin_top + self.cursor_margin_bottom;
         // move the IME
         let line_spacing = self.draw_label.get_line_spacing();
         let top_drop = self.draw_label.get_font_size()*0.2;
         let head = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head)
-            .unwrap_or(dvec2(turtle.pos.x, 0.0));
+            .unwrap_or(dvec2(boxx.pos.x, 0.0));
 
         if !self.read_only && self.cursor_head == self.cursor_tail {
             self.draw_cursor.draw_abs(cx, Rect {
@@ -736,7 +736,7 @@ impl TextInput {
         
         if self.cursor_head != self.cursor_tail {
             let tail_x = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_tail)
-                .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
+                .unwrap_or(dvec2(boxx.pos.x, 0.0)).x;
             
             let (left_x, right_x, left, right) = if self.cursor_head < self.cursor_tail {
                 (head.x, tail_x, self.cursor_head, self.cursor_tail)
@@ -748,8 +748,8 @@ impl TextInput {
             let pad = if left == 0 && right == char_count {self.select_pad_edges}else {0.0};
             
             self.draw_select.draw_abs(cx, Rect {
-                pos: dvec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
-                size: dvec2(right_x - left_x + self.cursor_size + 2.0 * pad, turtle.size.y)
+                pos: dvec2(left_x - 0.5 * self.cursor_size - pad, boxx.pos.y),
+                size: dvec2(right_x - left_x + self.cursor_size + 2.0 * pad, boxx.size.y)
             });
         }
         self.draw_bg.end(cx);
@@ -757,14 +757,14 @@ impl TextInput {
         if cx.has_key_focus(self.draw_bg.area()) {
             // ok so. if we have the IME we should inject a tracking point
             let ime_x = self.draw_label.get_cursor_pos(cx, 0.5, self.cursor_head)
-                .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
+                .unwrap_or(dvec2(boxx.pos.x, 0.0)).x;
             
             if self.numeric_only{
                 cx.hide_text_ime();
             }
             else{
-                let ime_abs = dvec2(ime_x, turtle.pos.y);
-                cx.show_text_ime(self.draw_bg.area(), ime_abs - turtle_rect.pos);
+                let ime_abs = dvec2(ime_x, boxx.pos.y);
+                cx.show_text_ime(self.draw_bg.area(), ime_abs - box_rect.pos);
             }
         }
         

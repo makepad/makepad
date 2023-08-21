@@ -270,7 +270,7 @@ impl LiveHook for Dock {
 impl Dock {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, self.layout);
+        cx.begin_box(walk, self.layout);
         //self.drop_zones.clear();
     }
     
@@ -291,9 +291,9 @@ impl Dock {
             self.round_corner.draw_corners(cx, splitter.area_a().get_rect(cx));
             self.round_corner.draw_corners(cx, splitter.area_b().get_rect(cx));
         }
-        self.round_corner.draw_corners(cx, cx.turtle().rect());
+        self.round_corner.draw_corners(cx, cx.r#box().rect());
         
-        cx.end_turtle_with_area(&mut self.area);
+        cx.end_box_with_area(&mut self.area);
     }
     
     fn find_drop_position(&self, cx: &Cx, abs: DVec2) -> Option<DropPosition> {
@@ -883,7 +883,7 @@ impl Widget for Dock {
                         }
                         else {
                             tab_bar.tab_bar.end(cx);
-                            tab_bar.contents_rect = cx.turtle().rect();
+                            tab_bar.contents_rect = cx.r#box().rect();
                             if tabs.len()>0 && tab_bar.contents_draw_list.begin(cx, Walk::default()).is_redrawing() {
                                 stack.push(DrawStackItem::TabContent {id});
                                 stack.push(DrawStackItem::Tab {id: tabs[*selected]});

@@ -243,9 +243,9 @@ impl PianoKey {
 
 impl Piano {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, Layout::default());
+        cx.begin_box(walk, Layout::default());
 
-        let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
+        let start_pos = cx.r#box().pos(); //+ vec2(10., 10.);
         let mut pos = start_pos;
         
         let midi_a0 = 21;
@@ -301,8 +301,8 @@ impl Piano {
                 pos.x += white_size.x;
             }
         }
-        cx.turtle_mut().set_used(white_size.x * (midi_c8 - midi_a0) as f64, white_size.y);
-        cx.end_turtle_with_area(&mut self.area);
+        cx.box_mut().set_used(white_size.x * (midi_c8 - midi_a0) as f64, white_size.y);
+        cx.end_box_with_area(&mut self.area);
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();
     }

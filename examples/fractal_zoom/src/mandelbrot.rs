@@ -655,13 +655,13 @@ impl Mandelbrot {
     // draw the mandelbrot view
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // checks if our view is dirty, exits here if its clean
-        cx.begin_turtle(walk, Layout::flow_right());
+        cx.begin_box(walk, Layout::flow_right());
         // lets check our clip
         
         self.had_first_draw = true;
         // store the view information here as its the only place it's known in the codeflow
         self.space.tile_size = dvec2(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor() as f64;
-        self.space.view_rect = cx.turtle().rect();
+        self.space.view_rect = cx.r#box().rect();
         
         // update bail window the workers check to skip tiles that are no longer in view
         self.tile_cache.set_bail_test(BailTest {
@@ -684,6 +684,6 @@ impl Mandelbrot {
             self.draw_tile.draw_abs(cx, rect);
         }
         
-        cx.end_turtle_with_area(&mut self.view_area);
+        cx.end_box_with_area(&mut self.view_area);
     }
 }

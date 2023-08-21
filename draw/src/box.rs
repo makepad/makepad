@@ -102,14 +102,14 @@ pub enum DeferWalk{
 pub enum AlignEntry{
     Unset,
     Area(Area),
-    ShiftTurtle{area:Area, shift:DVec2, skip:usize},
-    SkipTurtle{skip:usize},
-    BeginTurtle(DVec2,DVec2),
-    EndTurtle
+    ShiftBox{area:Area, shift:DVec2, skip:usize},
+    SkipBox{skip:usize},
+    BeginBox(DVec2,DVec2),
+    EndBox
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct TurtleWalk {
+pub struct BoxWalk {
     align_start: usize,
     defer_index: usize,
     rect: Rect,
@@ -120,7 +120,7 @@ pub struct Box {
     walk: Walk,
     layout: Layout,
     align_start: usize,
-    turtle_walks_start: usize,
+    box_walks_start: usize,
     defer_count: usize,
     shift: DVec2,
     pos: DVec2,
@@ -133,37 +133,37 @@ pub struct Box {
 }
 
 impl<'a> Cx2d<'a> {
-    pub fn turtle(&self) -> &Box {
-        self.turtles.last().unwrap()
+    pub fn r#box(&self) -> &Box {
+        self.boxes.last().unwrap()
     }
     
-    pub fn turtle_mut(&mut self) -> &mut Box {
-        self.turtles.last_mut().unwrap()
+    pub fn box_mut(&mut self) -> &mut Box {
+        self.boxes.last_mut().unwrap()
     }
     
-    pub fn begin_turtle(&mut self, walk: Walk, layout: Layout) {
-        self.begin_turtle_with_guard(walk, layout, Area::Empty)
+    pub fn begin_box(&mut self, walk: Walk, layout: Layout) {
+        self.begin_box_with_guard(walk, layout, Area::Empty)
     }
     
     pub fn defer_walk(&mut self, walk: Walk) -> Option<DeferWalk> {
         if walk.abs_pos.is_some(){
             return None
         }
-        let turtle = self.turtles.last_mut().unwrap();
-        let defer_index = turtle.defer_count;
-        let pos = turtle.pos;
+        let bx = self.boxes.last_mut().unwrap();
+        let defer_index = bx.defer_count;
+        let pos = bx.pos;
         let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+            bx.eval_width(walk.width, walk.margin, bx.layout.flow),
+            bx.eval_height(walk.height, walk.margin, bx.layout.flow)
         );
         let margin_size = walk.margin.size();
-        match turtle.layout.flow {
+        match bx.layout.flow {
             Flow::Right if walk.width.is_fill() => {
-                let spacing = turtle.child_spacing(self.turtle_walks.len());
-                turtle.pos.x += margin_size.x + spacing.x;
-                turtle.update_width_max(turtle.pos.x, 0.0);
-                turtle.update_height_max(turtle.pos.y, size.y + margin_size.y);
-                turtle.defer_count += 1;
+                let spacing = bx.child_spacing(self.box_walks.len());
+                bx.pos.x += margin_size.x + spacing.x;
+                bx.update_width_max(bx.pos.x, 0.0);
+                bx.update_height_max(bx.pos.y, size.y + margin_size.y);
+                bx.defer_count += 1;
                 Some(DeferWalk::Unresolved{
                     defer_index,
                     margin: walk.margin,
@@ -172,11 +172,11 @@ impl<'a> Cx2d<'a> {
                 })
             },
             Flow::Down if walk.height.is_fill() => {
-                let spacing = turtle.child_spacing(self.turtle_walks.len());
-                turtle.pos.y += margin_size.y + spacing.y;
-                turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
-                turtle.update_height_max(turtle.pos.y, 0.0);
-                turtle.defer_count += 1;
+                let spacing = bx.child_spacing(self.box_walks.len());
+                bx.pos.y += margin_size.y + spacing.y;
+                bx.update_width_max(bx.pos.x, size.x + margin_size.x);
+                bx.update_height_max(bx.pos.y, 0.0);
+                bx.defer_count += 1;
                 Some(DeferWalk::Unresolved {
                     defer_index,
                     margin: walk.margin,
@@ -190,14 +190,14 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    pub fn begin_pass_sized_turtle(&mut self, layout: Layout) {
+    pub fn begin_pass_sized_box(&mut self, layout: Layout) {
         let pass_size = self.current_pass_size();
-        self.align_list.push(AlignEntry::BeginTurtle(dvec2(0.0,0.0),pass_size));
-        let turtle = Box {
+        self.align_list.push(AlignEntry::BeginBox(dvec2(0.0,0.0),pass_size));
+        let boxx = Box {
             walk: Walk::fill(),
             layout,
             align_start: self.align_list.len() - 1,
-            turtle_walks_start: self.turtle_walks.len(),
+            box_walks_start: self.box_walks.len(),
             defer_count: 0,
             pos: DVec2 {
                 x: layout.padding.left,
@@ -211,38 +211,38 @@ impl<'a> Cx2d<'a> {
             height_used: layout.padding.top,
             guard_area: Area::Empty,
         };
-        self.turtles.push(turtle);
+        self.boxes.push(boxx);
     }
     
-    pub fn end_pass_sized_turtle(&mut self){
-        let turtle = self.turtles.pop().unwrap();
+    pub fn end_pass_sized_box(&mut self){
+        let boxx = self.boxes.pop().unwrap();
         // lets perform clipping on our alignlist.
-        self.align_list.push(AlignEntry::EndTurtle);
-        self.perform_nested_clipping_on_align_list_and_shift(turtle.align_start, self.align_list.len());
-        //log!("{:?}", self.align_list[turtle.align_start]);
-        self.align_list[turtle.align_start] = AlignEntry::SkipTurtle{skip:self.align_list.len()};
-        self.turtle_walks.truncate(turtle.turtle_walks_start);
+        self.align_list.push(AlignEntry::EndBox);
+        self.perform_nested_clipping_on_align_list_and_shift(boxx.align_start, self.align_list.len());
+        //log!("{:?}", self.align_list[boxx.align_start]);
+        self.align_list[boxx.align_start] = AlignEntry::SkipBox{skip:self.align_list.len()};
+        self.box_walks.truncate(boxx.box_walks_start);
     }
 
-    pub fn end_pass_sized_turtle_with_shift(&mut self, area:Area, shift:DVec2){
-        let turtle = self.turtles.pop().unwrap();
+    pub fn end_pass_sized_box_with_shift(&mut self, area:Area, shift:DVec2){
+        let boxx = self.boxes.pop().unwrap();
         // lets perform clipping on our alignlist.
-        self.align_list.push(AlignEntry::EndTurtle);
-        self.perform_nested_clipping_on_align_list_and_shift(turtle.align_start, self.align_list.len());
-        //log!("{:?}", self.align_list[turtle.align_start]);
-        self.align_list[turtle.align_start] = AlignEntry::ShiftTurtle{
+        self.align_list.push(AlignEntry::EndBox);
+        self.perform_nested_clipping_on_align_list_and_shift(boxx.align_start, self.align_list.len());
+        //log!("{:?}", self.align_list[boxx.align_start]);
+        self.align_list[boxx.align_start] = AlignEntry::ShiftBox{
             area,
             shift, 
             skip: self.align_list.len()
         };
-        self.turtle_walks.truncate(turtle.turtle_walks_start);
+        self.box_walks.truncate(boxx.box_walks_start);
     }
     
-    pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard_area: Area) {
-        let (origin, width, height, draw_clip) = if let Some(parent) = self.turtles.last() {
+    pub fn begin_box_with_guard(&mut self, walk: Walk, layout: Layout, guard_area: Area) {
+        let (origin, width, height, draw_clip) = if let Some(parent) = self.boxes.last() {
             
             let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos {pos} else {
-                parent.pos + parent.child_spacing(self.turtle_walks.len()) 
+                parent.pos + parent.child_spacing(self.box_walks.len()) 
             };
             
             let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow) * layout.scale;
@@ -277,12 +277,12 @@ impl<'a> Cx2d<'a> {
             
             (o, w, h, (dvec2(o.x, o.y), dvec2(o.x + w, o.y + h)))
         };
-        self.align_list.push(AlignEntry::BeginTurtle(draw_clip.0,draw_clip.1));
-        let turtle = Box {
+        self.align_list.push(AlignEntry::BeginBox(draw_clip.0,draw_clip.1));
+        let boxx = Box {
             walk,
             layout,
             align_start: self.align_list.len()-1,
-            turtle_walks_start: self.turtle_walks.len(),
+            box_walks_start: self.box_walks.len(),
             defer_count: 0,
             pos: DVec2 {
                 x: origin.x + layout.padding.left,
@@ -297,137 +297,137 @@ impl<'a> Cx2d<'a> {
             guard_area,
         };
         
-        self.turtles.push(turtle);
+        self.boxes.push(boxx);
     }
     
-    pub fn turtle_has_align_items(&mut self)->bool{
-        self.align_list.len() != self.turtle().align_start + 1
+    pub fn box_has_align_items(&mut self)->bool{
+        self.align_list.len() != self.r#box().align_start + 1
     }
     
-    pub fn end_turtle(&mut self) -> Rect {
-        self.end_turtle_with_guard(Area::Empty)
+    pub fn end_box(&mut self) -> Rect {
+        self.end_box_with_guard(Area::Empty)
     }
     
-    pub fn end_turtle_with_area(&mut self, area: &mut Area) {
-        let rect = self.end_turtle_with_guard(Area::Empty);
+    pub fn end_box_with_area(&mut self, area: &mut Area) {
+        let rect = self.end_box_with_guard(Area::Empty);
         self.add_aligned_rect_area(area, rect)
     }
     
-    pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {
-        let turtle = self.turtles.pop().unwrap();
-        if guard_area != turtle.guard_area {
-            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard_area, guard_area)
+    pub fn end_box_with_guard(&mut self, guard_area: Area) -> Rect {
+        let boxx = self.boxes.pop().unwrap();
+        if guard_area != boxx.guard_area {
+            panic!("End box guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", boxx.guard_area, guard_area)
         }
         
         // computed height
-        let w = if turtle.width.is_nan() {
-            Length::Fixed(turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x)
+        let w = if boxx.width.is_nan() {
+            Length::Fixed(boxx.width_used + boxx.layout.padding.right - boxx.layout.scroll.x)
         }
         else {
-            Length::Fixed(turtle.width)
+            Length::Fixed(boxx.width)
         };
         
-        let h = if turtle.height.is_nan() {
-            Length::Fixed(turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y)
+        let h = if boxx.height.is_nan() {
+            Length::Fixed(boxx.height_used + boxx.layout.padding.bottom - boxx.layout.scroll.y)
         }
         else {
-            Length::Fixed(turtle.height)
+            Length::Fixed(boxx.height)
         };
         
-        match turtle.layout.flow {
+        match boxx.layout.flow {
             Flow::Right => {
-                if turtle.defer_count > 0 {
-                    let left = turtle.width_left();
-                    let part = left / turtle.defer_count as f64;
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
+                if boxx.defer_count > 0 {
+                    let left = boxx.width_left();
+                    let part = left / boxx.defer_count as f64;
+                    for i in boxx.box_walks_start..self.box_walks.len() {
+                        let walk = &self.box_walks[i];
                         let shift_x = walk.defer_index as f64 * part;
-                        let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
+                        let shift_y = boxx.layout.align.y * (boxx.padded_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                        let align_end = self.get_box_walk_align_end(i);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, boxx.shift);
                     }
                 }
                 else {
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * turtle.width_left();
-                        let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
+                    for i in boxx.box_walks_start..self.box_walks.len() {
+                        let walk = &self.box_walks[i];
+                        let shift_x = boxx.layout.align.x * boxx.width_left();
+                        let shift_y = boxx.layout.align.y * (boxx.padded_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                        let align_end = self.get_box_walk_align_end(i);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, boxx.shift);
                     }
                 }
             },
             Flow::Down => {
-                if turtle.defer_count > 0 {
-                    let left = turtle.height_left();
-                    let part = left / turtle.defer_count as f64;
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
+                if boxx.defer_count > 0 {
+                    let left = boxx.height_left();
+                    let part = left / boxx.defer_count as f64;
+                    for i in boxx.box_walks_start..self.box_walks.len() {
+                        let walk = &self.box_walks[i];
+                        let shift_x = boxx.layout.align.x * (boxx.padded_width_or_used() - walk.rect.size.x);
                         let shift_y = walk.defer_index as f64 * part;
                         let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                        let align_end = self.get_box_walk_align_end(i);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, boxx.shift);
                     }
                 }
                 else {
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
-                        let shift_y = turtle.layout.align.y * turtle.height_left();
+                    for i in boxx.box_walks_start..self.box_walks.len() {
+                        let walk = &self.box_walks[i];
+                        let shift_x = boxx.layout.align.x * (boxx.padded_width_or_used() - walk.rect.size.x);
+                        let shift_y = boxx.layout.align.y * boxx.height_left();
                         let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                        let align_end = self.get_box_walk_align_end(i);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, boxx.shift);
                     }
                 }
             },
             Flow::Overlay => {
-                for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                    let walk = &self.turtle_walks[i];
-                    let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
-                    let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
+                for i in boxx.box_walks_start..self.box_walks.len() {
+                    let walk = &self.box_walks[i];
+                    let shift_x = boxx.layout.align.x * (boxx.padded_width_or_used() - walk.rect.size.x);
+                    let shift_y = boxx.layout.align.y * (boxx.padded_height_or_used() - walk.rect.size.y);
                     let align_start = walk.align_start;
-                    let align_end = self.get_turtle_walk_align_end(i);
-                    self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                    let align_end = self.get_box_walk_align_end(i);
+                    self.move_align_list(shift_x, shift_y, align_start, align_end, false, boxx.shift);
                 }
             }
         }
 
-        self.turtle_walks.truncate(turtle.turtle_walks_start);
-        self.align_list.push(AlignEntry::EndTurtle);
-        if self.turtles.len() == 0 {
+        self.box_walks.truncate(boxx.box_walks_start);
+        self.align_list.push(AlignEntry::EndBox);
+        if self.boxes.len() == 0 {
             return Rect {
                 pos: dvec2(0.0, 0.0),
                 size: dvec2(w.fixed_or_zero(), h.fixed_or_zero())
             }
         }
-        let rect = self.walk_turtle_move(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start);
+        let rect = self.walk_box_move(Walk {width: w, height: h, ..boxx.walk}, boxx.align_start);
         rect
     }
     
-    pub fn walk_turtle(&mut self, walk: Walk) -> Rect {
-        self.walk_turtle_move(walk, self.align_list.len())
+    pub fn walk_box(&mut self, walk: Walk) -> Rect {
+        self.walk_box_move(walk, self.align_list.len())
     }
     
-    pub fn walk_turtle_with_area(&mut self, area: &mut Area, walk: Walk) -> Rect {
-        let rect = self.walk_turtle_move(walk, self.align_list.len());
+    pub fn walk_box_with_area(&mut self, area: &mut Area, walk: Walk) -> Rect {
+        let rect = self.walk_box_move(walk, self.align_list.len());
         self.add_aligned_rect_area(area, rect);
         rect
     }
     
-    pub fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
-        self.walk_turtle_move(walk, align_start)
+    pub fn walk_box_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
+        self.walk_box_move(walk, align_start)
     }
     
-    pub fn peek_walk_turtle(&self, walk: Walk) -> Rect {
-        self.walk_turtle_peek(walk)
+    pub fn peek_walk_box(&self, walk: Walk) -> Rect {
+        self.walk_box_peek(walk)
     }
     
-    pub fn walk_turtle_would_be_visible(&mut self, walk: Walk) -> bool {
-        let rect = self.walk_turtle_peek(walk);
-        self.turtle().rect_is_visible(rect)
+    pub fn walk_box_would_be_visible(&mut self, walk: Walk) -> bool {
+        let rect = self.walk_box_peek(walk);
+        self.r#box().rect_is_visible(rect)
     }
     
     pub fn peek_walk_pos(&self, walk: Walk) -> DVec2 {
@@ -435,100 +435,100 @@ impl<'a> Cx2d<'a> {
             pos + walk.margin.left_top()
         }
         else {
-            let turtle = self.turtles.last().unwrap();
-            turtle.pos + walk.margin.left_top()
+            let boxx = self.boxes.last().unwrap();
+            boxx.pos + walk.margin.left_top()
         }
     }
     
-     fn walk_turtle_move(&mut self, walk: Walk, align_start: usize) -> Rect {
+     fn walk_box_move(&mut self, walk: Walk, align_start: usize) -> Rect {
         
-        let turtle = self.turtles.last_mut().unwrap();
+        let boxx = self.boxes.last_mut().unwrap();
         let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+            boxx.eval_width(walk.width, walk.margin, boxx.layout.flow),
+            boxx.eval_height(walk.height, walk.margin, boxx.layout.flow)
         );
         
         if let Some(pos) = walk.abs_pos {
-            self.turtle_walks.push(TurtleWalk {
+            self.box_walks.push(BoxWalk {
                 align_start,
                 defer_index: 0,
                 rect: Rect {pos, size: size + walk.margin.size()}
             });
             
-            match turtle.layout.flow {
-                Flow::Right=>turtle.update_height_max(pos.y, size.y + walk.margin.size().y),
-                Flow::Down=>turtle.update_width_max(pos.x, size.x + walk.margin.size().x),
+            match boxx.layout.flow {
+                Flow::Right=>boxx.update_height_max(pos.y, size.y + walk.margin.size().y),
+                Flow::Down=>boxx.update_width_max(pos.x, size.x + walk.margin.size().x),
                 _=>()
             }
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
-            let spacing = turtle.child_spacing(self.turtle_walks.len());
-            let pos = turtle.pos;
+            let spacing = boxx.child_spacing(self.box_walks.len());
+            let pos = boxx.pos;
         
             let margin_size = walk.margin.size();
-            match turtle.layout.flow {
+            match boxx.layout.flow {
                 Flow::Right => {
-                    turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
+                    boxx.pos.x = pos.x + size.x + margin_size.x + spacing.x;
                     if size.x < 0.0 {
-                        turtle.update_width_min(turtle.pos.x, 0.0);
-                        turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
+                        boxx.update_width_min(boxx.pos.x, 0.0);
+                        boxx.update_height_max(boxx.pos.y,size.y + margin_size.y);
                     }
                     else {
-                        turtle.update_width_max(turtle.pos.x, 0.0);
-                        turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
+                        boxx.update_width_max(boxx.pos.x, 0.0);
+                        boxx.update_height_max(boxx.pos.y,size.y + margin_size.y);
                     }
                 },
                 Flow::Down => {
-                    turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
+                    boxx.pos.y = pos.y + size.y + margin_size.y + spacing.y;
                     if size.y < 0.0 {
-                        turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
-                        turtle.update_height_min(turtle.pos.y,0.0);
+                        boxx.update_width_max(boxx.pos.x, size.x + margin_size.x);
+                        boxx.update_height_min(boxx.pos.y,0.0);
                     }
                     else {
-                        turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
-                        turtle.update_height_max(turtle.pos.y,0.0);
+                        boxx.update_width_max(boxx.pos.x, size.x + margin_size.x);
+                        boxx.update_height_max(boxx.pos.y,0.0);
                     }
                 },
                 Flow::Overlay => { // do not walk
-                    turtle.update_width_max(turtle.pos.x, size.x);
-                    turtle.update_height_max(turtle.pos.y,size.y);
+                    boxx.update_width_max(boxx.pos.x, size.x);
+                    boxx.update_height_max(boxx.pos.y,size.y);
                 }
             };
             
-            self.turtle_walks.push(TurtleWalk {
+            self.box_walks.push(BoxWalk {
                 align_start,
-                defer_index: turtle.defer_count,
+                defer_index: boxx.defer_count,
                 rect: Rect {pos, size: size + margin_size}
             });
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
     }
     
-    fn walk_turtle_peek(&self, walk: Walk) -> Rect {
-        if self.turtles.len() == 0{
+    fn walk_box_peek(&self, walk: Walk) -> Rect {
+        if self.boxes.len() == 0{
             return Rect::default()
         }
-        let turtle = self.turtles.last().unwrap();
+        let boxx = self.boxes.last().unwrap();
         let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+            boxx.eval_width(walk.width, walk.margin, boxx.layout.flow),
+            boxx.eval_height(walk.height, walk.margin, boxx.layout.flow)
         );
         
         if let Some(pos) = walk.abs_pos {
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
-            let spacing = turtle.child_spacing(self.turtle_walks.len());
-            let pos = turtle.pos;
+            let spacing = boxx.child_spacing(self.box_walks.len());
+            let pos = boxx.pos;
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
     }
     
-    fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
+    fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, box_shift:DVec2) {
         let current_dpi_factor = self.current_dpi_factor();
-        let dx = if dx.is_nan() {0.0}else {dx} + turtle_shift.x;
-        let dy = if dy.is_nan() {0.0}else {dy} + turtle_shift.y;
+        let dx = if dx.is_nan() {0.0}else {dx} + box_shift.x;
+        let dy = if dy.is_nan() {0.0}else {dy} + box_shift.y;
         if dx == 0.0 && dy == 0.0 {
             return 
         }
@@ -569,11 +569,11 @@ impl<'a> Cx2d<'a> {
                         rect_area.draw_clip.1 += d;
                     }
                 }
-                AlignEntry::BeginTurtle(clip0, clip1)=>{
+                AlignEntry::BeginBox(clip0, clip1)=>{
                     *clip0 += d;
                     *clip1 += d;
                 }
-                AlignEntry::SkipTurtle{skip} | AlignEntry::ShiftTurtle{skip,..} =>{
+                AlignEntry::SkipBox{skip} | AlignEntry::ShiftBox{skip,..} =>{
                     c = *skip;
                     continue;
                 }
@@ -584,37 +584,37 @@ impl<'a> Cx2d<'a> {
     }
     
     fn perform_nested_clipping_on_align_list_and_shift(&mut self, align_start:usize, align_end:usize){
-        self.turtle_clips.clear();
+        self.box_clips.clear();
         let mut i = align_start;
         while i < align_end{
             let align_item = &self.align_list[i];
             match align_item {
-                AlignEntry::SkipTurtle{skip} =>{
+                AlignEntry::SkipBox{skip} =>{
                     i = *skip;
                     continue;
                 }
-                AlignEntry::ShiftTurtle{area, shift, skip} =>{
+                AlignEntry::ShiftBox{area, shift, skip} =>{
                     let rect = area.get_rect(self);
                     let skip = *skip;
                     self.move_align_list(rect.pos.x+shift.x, rect.pos.y+shift.y, i + 1, skip, true, dvec2(0.0,0.0));
                     i = skip;
                     continue;
                 }
-                AlignEntry::BeginTurtle(clip0, clip1)=>{
-                    if let Some((tclip0, tclip1)) = self.turtle_clips.last(){
-                        self.turtle_clips.push((
+                AlignEntry::BeginBox(clip0, clip1)=>{
+                    if let Some((tclip0, tclip1)) = self.box_clips.last(){
+                        self.box_clips.push((
                             dvec2(clip0.x.max(tclip0.x),clip0.y.max(tclip0.y)),
                             dvec2(clip1.x.min(tclip1.x),clip1.y.min(tclip1.y)),
                         ));
                     }
                     else{
-                        self.turtle_clips.push((*clip0, *clip1));
+                        self.box_clips.push((*clip0, *clip1));
                     }
                 }
-                AlignEntry::EndTurtle=>{
-                    self.turtle_clips.pop().unwrap();
+                AlignEntry::EndBox=>{
+                    self.box_clips.pop().unwrap();
                 }
-                AlignEntry::Area(Area::Instance(inst)) => if let Some((clip0, clip1)) = self.turtle_clips.last(){
+                AlignEntry::Area(Area::Instance(inst)) => if let Some((clip0, clip1)) = self.box_clips.last(){
                     let draw_list = &mut self.cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                     let draw_call = draw_item.draw_call().unwrap();
@@ -629,7 +629,7 @@ impl<'a> Cx2d<'a> {
                         }
                     }
                 },
-                AlignEntry::Area(Area::Rect(ra)) => if let Some((clip0, clip1)) = self.turtle_clips.last(){
+                AlignEntry::Area(Area::Rect(ra)) => if let Some((clip0, clip1)) = self.box_clips.last(){
                     let draw_list = &mut self.cx.draw_lists[ra.draw_list_id];
                     let rect_area = &mut draw_list.rect_areas[ra.rect_id];
                     rect_area.draw_clip.0 = *clip0;
@@ -641,9 +641,9 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    fn get_turtle_walk_align_end(&self, i: usize) -> usize {
-        if i < self.turtle_walks.len() - 1 {
-            self.turtle_walks[i + 1].align_start
+    fn get_box_walk_align_end(&self, i: usize) -> usize {
+        if i < self.box_walks.len() - 1 {
+            self.box_walks[i + 1].align_start
         }
         else {
             self.align_list.len()
@@ -651,7 +651,7 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn add_rect_area(&mut self, area: &mut Area, rect: Rect) {
-        //let turtle = self.turtle();
+        //let boxx = self.r#box();
         self.add_aligned_rect_area(area, rect)
     }
 }
@@ -702,7 +702,7 @@ impl Box {
     }
     
     fn child_spacing(&self, walks_len: usize) -> DVec2 {
-        if self.turtle_walks_start < walks_len || self.defer_count > 0 {
+        if self.box_walks_start < walks_len || self.defer_count > 0 {
             match self.layout.flow {
                 Flow::Right => {
                     dvec2(self.layout.spacing, 0.0)
@@ -859,11 +859,11 @@ impl DeferWalk {
         match self{
             Self::Resolved(walk)=>{*walk},
             Self::Unresolved{pos, defer_index, margin, other_axis}=>{
-                let turtle = cx.turtles.last().unwrap();
-                let walk = match turtle.layout.flow {
+                let boxx = cx.boxes.last().unwrap();
+                let walk = match boxx.layout.flow {
                     Flow::Right => {
-                        let left = turtle.width_left();
-                        let part = left / turtle.defer_count as f64;
+                        let left = boxx.width_left();
+                        let part = left / boxx.defer_count as f64;
                         Walk {
                             abs_pos: Some(*pos + dvec2(part * *defer_index as f64, 0.)),
                             margin: *margin,
@@ -872,8 +872,8 @@ impl DeferWalk {
                         }
                     },
                     Flow::Down => {
-                        let left = turtle.height_left();
-                        let part = left / turtle.defer_count as f64;
+                        let left = boxx.height_left();
+                        let part = left / boxx.defer_count as f64;
                         Walk {
                             abs_pos: Some(*pos + dvec2(0., part * *defer_index as f64)),
                             margin: *margin,

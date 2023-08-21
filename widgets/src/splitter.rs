@@ -200,28 +200,28 @@ impl Widget for Splitter {
 
 impl Splitter {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // we should start a fill turtle in the layout direction of choice
+        // we should start a fill box in the layout direction of choice
         match self.axis {
             Axis::Horizontal => {
-                cx.begin_turtle(walk, Layout::flow_right());
+                cx.begin_box(walk, Layout::flow_right());
             }
             Axis::Vertical => {
-                cx.begin_turtle(walk, Layout::flow_down());
+                cx.begin_box(walk, Layout::flow_down());
             }
         }
         
-        self.rect = cx.turtle().padded_rect();
+        self.rect = cx.r#box().padded_rect();
         self.position = self.align.to_position(self.axis, self.rect);
         
         let walk = match self.axis {
             Axis::Horizontal => Walk::size(Length::Fixed(self.position), Length::Fill),
             Axis::Vertical => Walk::size(Length::Fill, Length::Fixed(self.position)),
         };
-        cx.begin_turtle(walk, Layout::flow_down());
+        cx.begin_box(walk, Layout::flow_down());
     }
     
     pub fn middle(&mut self, cx: &mut Cx2d) {
-        cx.end_turtle_with_area(&mut self.area_a);
+        cx.end_box_with_area(&mut self.area_a);
         match self.axis {
             Axis::Horizontal => {
                 self.draw_splitter.is_vertical = 1.0;
@@ -232,12 +232,12 @@ impl Splitter {
                 self.draw_splitter.draw_walk(cx, Walk::size(Length::Fill, Length::Fixed(self.split_bar_size)));
             }
         }
-        cx.begin_turtle(Walk::default(), Layout::flow_down());
+        cx.begin_box(Walk::default(), Layout::flow_down());
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        cx.end_turtle_with_area(&mut self.area_b);
-        cx.end_turtle();
+        cx.end_box_with_area(&mut self.area_b);
+        cx.end_box();
     }
     
     pub fn axis(&self) -> Axis {

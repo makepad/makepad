@@ -339,7 +339,7 @@ impl FileTreeNode {
         
         self.draw_bg.begin(cx, Walk::size(Length::Fill, Length::Fixed(scale * node_height)), self.layout);
         
-        cx.walk_turtle(self.indent_walk(depth));
+        cx.walk_box(self.indent_walk(depth));
         
         self.draw_icon.draw_walk(cx, self.icon_walk);
         
@@ -352,7 +352,7 @@ impl FileTreeNode {
         
         self.draw_bg.begin(cx, Walk::size(Length::Fill, Length::Fixed(scale * node_height)), self.layout);
         
-        cx.walk_turtle(self.indent_walk(depth));
+        cx.walk_box(self.indent_walk(depth));
         
         self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
@@ -435,7 +435,7 @@ impl FileTree {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
-        let height_left = cx.turtle().height_left();
+        let height_left = cx.r#box().height_left();
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
@@ -459,11 +459,11 @@ impl FileTree {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         let walk = Walk::size(Length::Fill, Length::Fixed(height));
-        if scale > 0.01 && cx.walk_turtle_would_be_visible(walk) {
+        if scale > 0.01 && cx.walk_box_would_be_visible(walk) {
             return true
         }
         else {
-            cx.walk_turtle(walk);
+            cx.walk_box(walk);
             return false
         }
     }

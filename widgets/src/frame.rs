@@ -822,7 +822,7 @@ impl Frame {
                     if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
                             self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
-                            let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
+                            let mut rect = cx.walk_box_with_area(&mut self.area, walk);
                             rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
@@ -849,7 +849,7 @@ impl Frame {
                 FrameOptimize::DrawList=>{
                     let walk = self.walk_from_previous_size(walk);
                     if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
-                        cx.walk_turtle_with_area(&mut self.area, walk);
+                        cx.walk_box_with_area(&mut self.area, walk);
                         return WidgetDraw::done()
                     }
                 }
@@ -873,7 +873,7 @@ impl Frame {
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                cx.begin_box(walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
         }
         
@@ -924,7 +924,7 @@ impl Frame {
                     self.area = self.draw_bg.area();
                 }
                 else {
-                    cx.end_turtle_with_area(&mut self.area);
+                    cx.end_box_with_area(&mut self.area);
                 };
                 
                 if let Some(scroll_bars) = &mut self.scroll_bars_obj {

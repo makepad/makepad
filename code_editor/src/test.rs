@@ -298,7 +298,7 @@ impl CodeEditor {
 
         self.scroll_bars.begin(cx, walk, Layout::default());
 
-        self.viewport_rect = cx.turtle().rect();
+        self.viewport_rect = cx.r#box().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
 
         self.cell_size =
@@ -314,7 +314,7 @@ impl CodeEditor {
 
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
-        cx.turtle_mut().set_used(
+        cx.box_mut().set_used(
             session.width() * self.cell_size.x,
             session.height() * self.cell_size.y,
         );
@@ -4316,7 +4316,7 @@ impl CodeEditor {
 
         self.scroll_bars.begin(cx, walk, Layout::default());
 
-        self.viewport_rect = cx.turtle().rect();
+        self.viewport_rect = cx.r#box().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
 
         self.cell_size =
@@ -4332,7 +4332,7 @@ impl CodeEditor {
 
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
-        cx.turtle_mut().set_used(
+        cx.box_mut().set_used(
             session.width() * self.cell_size.x,
             session.height() * self.cell_size.y,
         );
@@ -8334,7 +8334,7 @@ impl CodeEditor {
 
         self.scroll_bars.begin(cx, walk, Layout::default());
 
-        self.viewport_rect = cx.turtle().rect();
+        self.viewport_rect = cx.r#box().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
 
         self.cell_size =
@@ -8350,7 +8350,7 @@ impl CodeEditor {
 
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
-        cx.turtle_mut().set_used(
+        cx.box_mut().set_used(
             session.width() * self.cell_size.x,
             session.height() * self.cell_size.y,
         );
@@ -12352,7 +12352,7 @@ impl CodeEditor {
 
         self.scroll_bars.begin(cx, walk, Layout::default());
 
-        self.viewport_rect = cx.turtle().rect();
+        self.viewport_rect = cx.r#box().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
 
         self.cell_size =
@@ -12368,7 +12368,7 @@ impl CodeEditor {
 
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
-        cx.turtle_mut().set_used(
+        cx.box_mut().set_used(
             session.width() * self.cell_size.x,
             session.height() * self.cell_size.y,
         );
@@ -16370,7 +16370,7 @@ impl CodeEditor {
 
         self.scroll_bars.begin(cx, walk, Layout::default());
 
-        self.viewport_rect = cx.turtle().rect();
+        self.viewport_rect = cx.r#box().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
 
         self.cell_size =
@@ -16386,7 +16386,7 @@ impl CodeEditor {
 
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
-        cx.turtle_mut().set_used(
+        cx.box_mut().set_used(
             session.width() * self.cell_size.x,
             session.height() * self.cell_size.y,
         );

@@ -245,7 +245,7 @@ impl ListBox {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
-        let height_left = cx.turtle().height_left();
+        let height_left = cx.r#box().height_left();
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
@@ -287,11 +287,11 @@ impl ListBox {
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
         let height = self.node_height;
         let walk = Walk::size(Length::Fill, Length::Fixed(height));
-        if cx.walk_turtle_would_be_visible(walk) {
+        if cx.walk_box_would_be_visible(walk) {
             return true
         }
         else {
-            cx.walk_turtle(walk);
+            cx.walk_box(walk);
             return false
         }
     }

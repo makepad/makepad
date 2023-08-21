@@ -159,9 +159,9 @@ impl Tab {
         self.draw_bg.begin(cx, self.walk, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);
         self.close_button.draw(cx);
-        //cx.turtle_align_y();
+        //cx.box_align_y();
         self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
-        //cx.turtle_align_y();
+        //cx.box_align_y();
         self.draw_bg.end(cx);
         
         //if self.is_dragged {

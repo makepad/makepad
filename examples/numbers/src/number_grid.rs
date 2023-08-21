@@ -253,7 +253,7 @@ impl NumberGrid{
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, self.layout);
 
-        let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
+        let start_pos = cx.r#box().pos(); //+ vec2(10., 10.);
         let number_box = self.number_box;
 
         let mut buf = String::new();
