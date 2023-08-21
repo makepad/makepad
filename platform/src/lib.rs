@@ -188,6 +188,7 @@ pub use {
             HitOptions,
             DragHitEvent,
             DropHitEvent,
+            VideoColorFormat,
         },
         cursor::MouseCursor,
         menu::Menu,
