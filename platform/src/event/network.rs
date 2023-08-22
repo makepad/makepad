@@ -72,6 +72,7 @@ impl Default for NetworkResponseChannel {
 
 #[derive(PartialEq, Debug)]
 pub struct HttpRequest {
+    pub request_id: LiveId,
     pub url: String,
     pub method: HttpMethod,
     pub headers: BTreeMap<String, Vec<String>>,
@@ -81,13 +82,18 @@ pub struct HttpRequest {
 impl HttpRequest { 
     pub fn new(url: String, method: HttpMethod) -> Self {
         HttpRequest {
+            request_id: LiveId(0),
             url,
             method,
             headers: BTreeMap::new(),
             body: None
         }
     }
-
+    
+    pub fn set_request_id(&mut self, id: LiveId){
+        self.request_id = id;
+    }
+    
     pub fn set_header(&mut self, name: String, value: String) {
         let entry = self.headers.entry(name).or_insert(Vec::new());
         entry.push(value);
@@ -118,14 +124,16 @@ impl HttpRequest {
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
+    pub request_id: LiveId,
     pub status_code: u16,
     pub headers: BTreeMap<String, Vec<String>>,
     pub body: Option<Vec<u8>>,
 }
 
 impl HttpResponse {
-    pub fn new(status_code: u16, string_headers: String, body: Option<Vec<u8>>) -> Self {
+    pub fn new(request_id:LiveId, status_code: u16, string_headers: String, body: Option<Vec<u8>>) -> Self {
         HttpResponse {
+            request_id,
             status_code,
             headers: HttpResponse::parse_headers(string_headers),
             body

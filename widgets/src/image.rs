@@ -84,6 +84,9 @@ impl Image {
         if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
         }
+        else{
+            self.draw_bg.draw_vars.empty_texture(0);
+        }
         self.draw_bg.draw_walk(cx, walk);
         
         WidgetDraw::done()
@@ -109,6 +112,12 @@ impl ImageRef {
     pub fn load_png_from_data(&self, cx:&mut Cx, data:&[u8]){
         if let Some(mut inner) = self.borrow_mut(){
             inner.load_png_from_data(cx, data)
+        }
+    }
+    
+    pub fn set_texture(&self, texture:Option<Texture>){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.texture = texture
         }
     }
 }

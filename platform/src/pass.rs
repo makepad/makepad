@@ -103,7 +103,7 @@ impl LiveNew for Pass {
             fields: Vec::new(),
             live_ignore: true,
             //kind: LiveTypeKind::Object,
-            type_name: LiveId::from_str("Pass").unwrap()
+            type_name: id_lut!(Pass)
         }
     }
 }

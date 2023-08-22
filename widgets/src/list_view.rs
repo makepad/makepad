@@ -195,14 +195,15 @@ impl ListView {
                 let rect = cx.end_turtle();
                 if !did_draw || rect.pos.index(vi) + rect.size.index(vi) + shift.index(vi) < viewport.pos.index(vi) {
                     self.draw_state.set(ListDrawState::End);
+                    if self.first_id == self.range_start && self.first_scroll < 0.0 {
+                        self.first_scroll = 0.0;
+                    }
                     return None
                 }
                 self.first_id = index;
                 self.first_scroll = scroll - used.index(vi);
                 
-                if self.first_id == self.range_start && self.first_scroll < 0.0 {
-                    self.first_scroll = 0.0;
-                }
+                
                 
                 if index == self.range_start {
                     self.draw_state.set(ListDrawState::End);
@@ -431,6 +432,13 @@ impl Widget for ListView {
 pub struct ListViewRef(WidgetRef);
 
 impl ListViewRef {
+    pub fn set_first_id(&self, id:u64){
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.first_id = id;
+            inner.first_scroll = 0.0;
+        }
+    }
+    
     pub fn get_item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.get_item(cx, entry_id, template)
@@ -466,6 +474,12 @@ impl ListViewRef {
 pub struct ListViewSet(WidgetSet);
 
 impl ListViewSet {
+    pub fn set_first_id(&self, id:u64){
+        for list in self.iter() {
+            list.set_first_id(id)
+        }
+    }
+    
     pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
         let mut set = Vec::new();
         for list in self.iter() {
