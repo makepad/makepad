@@ -15,6 +15,7 @@ live_design!{
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::image::Image;
     import makepad_widgets::list_view::ListView;
+    import makepad_widgets::slide_panel::SlidePanel;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
     
@@ -71,7 +72,7 @@ live_design!{
             <Frame> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Right, padding: 10}
-                open_search = <Button>{
+                open_library = <Button>{
                     label:">"
                 }
                 positive = <UnderlineTextInput> {
@@ -87,57 +88,58 @@ live_design!{
                     }
                 }
             }
-            <Rect> {
-                draw_bg:{color:#777f}
-                
-                walk: {height: Fill, width: 800}
-                layout:{padding:20, flow:Down},
-                <Frame>{ 
-                    walk: {height: Fit, width: Fill}
-                    layout:{flow:Right},
-                    search = <UnderlineTextInput> {
+            library = <SlidePanel>{
+                <Rect> {
+                    draw_bg:{color:#777f}
+                    walk: {height: Fill, width: 800}
+                    layout:{padding:20, flow:Down},
+                    <Frame>{ 
                         walk: {height: Fit, width: Fill}
-                        empty_message: "Search"
-                        draw_bg: {
-                            color: #1113
-                        }
-                    }
-                    close_search = <Button>{
-                        label:"<"
-                    }
-                }
-                image_db = <ListView> {
-                    walk: {height: Fill, width: Fill}
-                    layout: {flow: Down}
-                    PromptGroup = <Frame> {
-                        walk: {height: Fit, width: Fill,margin:{bottom:20}}
-                        layout: {flow: Right, spacing: 10}
-                        prompt = <TextInput> {
-                            read_only: true,
-                            walk: {width: Fill, height: Fit, margin: {top: 30}},
-                            draw_bg:{
-                                color:#5
+                        layout:{flow:Right},
+                        search = <UnderlineTextInput> {
+                            walk: {height: Fit, width: Fill}
+                            empty_message: "Search"
+                            draw_bg: {
+                                color: #1113
                             }
                         }
+                        close_library = <Button>{
+                            label:"<"
+                        }
                     }
-                    Empty = <Frame>{}
-                    ImageRow1= <Frame> {
-                        walk: {height: Fit, width: Fill, margin:{bottom:20}}
-                        layout: {spacing: 20 ,flow:Right},
-                        row1 = <ImageTile> {}
-                    }
-                    ImageRow2 = <Frame> {
-                        walk: {height: Fit, width: Fill, margin:{bottom:20}}
-                        layout: {spacing: 20 ,flow:Right},
-                        row1 = <ImageTile> {}
-                        row2= <ImageTile> {}
-                    }
-                    ImageRow3 = <Frame> {
-                        walk: {height: Fit, width: Fill, margin:{bottom:20}}
-                        layout: {spacing: 20 ,flow:Right},
-                        row1 = <ImageTile> {}
-                        row2= <ImageTile> {}
-                        row3 = <ImageTile> {}
+                    image_db = <ListView> {
+                        walk: {height: Fill, width: Fill}
+                        layout: {flow: Down}
+                        PromptGroup = <Frame> {
+                            walk: {height: Fit, width: Fill,margin:{bottom:20}}
+                            layout: {flow: Right, spacing: 10}
+                            prompt = <TextInput> {
+                                read_only: true,
+                                walk: {width: Fill, height: Fit, margin: {top: 30}},
+                                draw_bg:{
+                                    color:#5
+                                }
+                            }
+                        }
+                        Empty = <Frame>{}
+                        ImageRow1= <Frame> {
+                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
+                            layout: {spacing: 20 ,flow:Right},
+                            row1 = <ImageTile> {}
+                        }
+                        ImageRow2 = <Frame> {
+                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
+                            layout: {spacing: 20 ,flow:Right},
+                            row1 = <ImageTile> {}
+                            row2= <ImageTile> {}
+                        }
+                        ImageRow3 = <Frame> {
+                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
+                            layout: {spacing: 20 ,flow:Right},
+                            row1 = <ImageTile> {}
+                            row2= <ImageTile> {}
+                            row3 = <ImageTile> {}
+                        }
                     }
                 }
             }
@@ -657,6 +659,14 @@ impl AppMain for App {
             self.image_list = self.db.filter_image_list(&change, false);
             self.ui.redraw(cx);
             image_db.set_first_id(0);
+        }
+        
+        if self.ui.get_button(id!(open_library)).pressed(&actions){
+            self.ui.get_slide_panel(id!(library)).open(cx);
+        }
+
+        if self.ui.get_button(id!(close_library)).pressed(&actions){
+            self.ui.get_slide_panel(id!(library)).close(cx);
         }
     }
 }
