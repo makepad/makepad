@@ -32,15 +32,19 @@ live_design!{
         }
     }
     
-    ImageTile = <Image> {
-        walk: {width: (1600*0.15), height: (900*0.15)},
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.box(1,1,self.rect_size.x-2,self.rect_size.y-2,4.0)
-                let color = self.get_color();
-                sdf.fill(color);
-                return sdf.result
+    ImageTile = <Frame>{
+        walk: {width: Fit, height: Fit},
+        cursor: Hand
+        img = <Image> {
+            walk: {width: (1600*0.15), height: (900*0.15)},
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    sdf.box(1,1,self.rect_size.x-2,self.rect_size.y-2,4.0)
+                    let color = self.get_color();
+                    sdf.fill(color);
+                    return sdf.result
+                }
             }
         }
     }
@@ -62,12 +66,8 @@ live_design!{
                     return mix(#3, #1, self.geom_pos.y + Math::random_2d(self.pos.xy) * 0.04);
                 }
             }
-            big_list = <ListView> {
-                walk: {height: Fill, width: Fill}
-                layout: {flow: Down, spacing: 0}
-                Image = <Image> {
-                    walk: {width: 1920, height: 1080}
-                }
+            big_image = <Image> {
+                walk: {width: 1920, height: 1080}
             }
             <Frame> {
                 walk: {height: Fill, width: Fill}
@@ -88,7 +88,7 @@ live_design!{
                     }
                 }
             }
-            library = <SlidePanel>{
+            library_panel = <SlidePanel>{
                 <Rect> {
                     draw_bg:{color:#777f}
                     walk: {height: Fill, width: 800}
@@ -107,7 +107,7 @@ live_design!{
                             label:"<"
                         }
                     }
-                    image_db = <ListView> {
+                    image_list = <ListView> {
                         walk: {height: Fill, width: Fill}
                         layout: {flow: Down}
                         PromptGroup = <Frame> {
@@ -223,15 +223,16 @@ pub struct App {
     #[rust] num_images: u64,
     #[rust(6u64)] batch_size: u64,
     #[rust(1000000u64)] last_seed: u64,
-    #[rust] image_list: Vec<ImageListItem>
+    #[rust] image_list: Vec<ImageListItem>,
+    #[rust] current_image: Option<ImageId>
 }
 
 enum ImageListItem {
-    PromptGroup {group_index: usize},
+    PromptGroup {group_id: usize},
     ImageRow {
-        group_index: usize,
-        item_count: usize,
-        item_index: [usize; 3]
+        group_id: usize,
+        image_count: usize,
+        image_ids: [usize; 3]
     }
 }
 
@@ -259,6 +260,12 @@ struct TextureItem{
 enum DecoderToUI{
     Error(String),
     Done(String, ImageBuffer)
+}
+
+#[derive(Clone,Copy)]
+struct ImageId{
+    group_id: usize,
+    image_id: usize,
 }
 
 struct Database {
@@ -305,9 +312,9 @@ impl Database {
         updates
     }
     
-    fn get_image_texture(&mut self, group_id:usize, image_id:usize)->Option<Texture>{
-        let group = &self.groups[group_id];
-        let image = &group.images[image_id];
+    fn get_image_texture(&mut self, image:ImageId)->Option<Texture>{
+        let group = &self.groups[image.group_id];
+        let image = &group.images[image.image_id];
         if self.in_flight.contains(&image.file_name){
             return None
         }
@@ -334,24 +341,24 @@ impl Database {
     
     fn filter_image_list(&self, search: &str, starred:bool) -> Vec<ImageListItem> {
         let mut out = Vec::new();
-        for (group_index, group) in self.groups.iter().enumerate() {
+        for (group_id, group) in self.groups.iter().enumerate() {
             if search.len() == 0
                 || group.prompt.as_ref().unwrap().positive.contains(search)
                 || group.prompt.as_ref().unwrap().negative.contains(search) {
-                out.push(ImageListItem::PromptGroup {group_index});
+                out.push(ImageListItem::PromptGroup {group_id});
                 // lets collect images in pairs of 3
                 for (store_index, image) in group.images.iter().enumerate() {
                     if starred && !image.starred{
                         continue
                     }
-                    if let Some(ImageListItem::ImageRow {group_index: _, item_count, item_index}) = out.last_mut() {
-                        if *item_count<3 {
-                            item_index[*item_count] = store_index;
-                            *item_count += 1;
+                    if let Some(ImageListItem::ImageRow {group_id: _, image_count, image_ids}) = out.last_mut() {
+                        if *image_count<3 {
+                            image_ids[*image_count] = store_index;
+                            *image_count += 1;
                             continue;
                         }
                     }
-                    out.push(ImageListItem::ImageRow {group_index, item_count: 1, item_index: [store_index, 0, 0]})
+                    out.push(ImageListItem::ImageRow {group_id, image_count: 1, image_ids: [store_index, 0, 0]})
                 }
             }
         }
@@ -505,6 +512,15 @@ impl App {
         label.redraw(cx);
     }
     
+    fn set_current_image_by_row(&mut self, cx:&mut Cx, item_id:u64, row:usize){
+        self.ui.redraw(cx);
+        if let ImageListItem::ImageRow{group_id, image_count, image_ids} = self.image_list[item_id as usize]{
+            self.current_image = Some(ImageId{
+                group_id: group_id,
+                image_id: image_ids[row.min(image_count)]
+            })
+        }
+    }
 }
 
 impl AppMain for App {
@@ -513,42 +529,37 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
-        let big_list = self.ui.get_list_view_set(ids!(big_list));
-        let image_db = self.ui.get_list_view_set(ids!(image_db));
+        let image_list = self.ui.get_list_view_set(ids!(image_list));
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
+            if let Some(current_image) = self.current_image{
+                let tex = self.db.get_image_texture(current_image);
+                self.ui.get_image(id!(big_image)).set_texture(tex)
+            } 
+            
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                
-                if let Some(mut list) = big_list.has_widget(&next).borrow_mut() {
-                    list.set_item_range(0, self.num_images, 1);
-                    while let Some(item_id) = list.next_visible_item(cx) {
-                        if item_id >= self.num_images {
-                            continue;
-                        }
-                        let item = list.get_item(cx, item_id, live_id!(Image)).unwrap();
-                        item.draw_widget_all(cx);
-                    }
-                }
-                if let Some(mut list) = image_db.has_widget(&next).borrow_mut(){
+
+                if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut(){
                     // alright now we draw the items
-                    list.set_item_range(0, self.image_list.len() as u64, 1);
-                    while let Some(item_id) = list.next_visible_item(cx) {
+                    image_list.set_item_range(0, self.image_list.len() as u64, 1);
+                    while let Some(item_id) = image_list.next_visible_item(cx) {
                         if let Some(item) = self.image_list.get(item_id as usize){
                             match item{
-                                ImageListItem::PromptGroup{group_index}=>{
-                                    let group = &self.db.groups[*group_index];
-                                    let item = list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
+                                ImageListItem::PromptGroup{group_id}=>{
+                                    let group = &self.db.groups[*group_id];
+                                    let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
                                     item.get_text_input(id!(prompt)).set_text(&group.prompt.as_ref().unwrap().positive);
                                     item.draw_widget_all(cx);
                                 }
-                                ImageListItem::ImageRow{group_index, item_count, item_index}=>{
-                                    let item = list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2.ImageRow3)[*item_count]).unwrap();
-                                    let rows = item.get_image_set(ids!(row1,row2,row3));
+                                ImageListItem::ImageRow{group_id, image_count, image_ids}=>{
+                                    let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2.ImageRow3)[*image_count]).unwrap();
+                                    let rows = item.get_frame_set(ids!(row1,row2,row3));
                                     for (index,row) in rows.iter().enumerate(){
-                                        if index >= *item_count{break}
+                                        if index >= *image_count{break}
                                         // alright we need to query our png cache for an image.
-                                        let tex = self.db.get_image_texture(*group_index, item_index[index]);
-                                        row.as_image().set_texture(tex);
+                                        let image_id = ImageId{group_id:*group_id, image_id:image_ids[index]};
+                                        let tex = self.db.get_image_texture(image_id);
+                                        row.get_image(id!(img)).set_texture(tex);
                                     }
                                     item.draw_widget_all(cx);
                                 }
@@ -658,15 +669,25 @@ impl AppMain for App {
         if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions){
             self.image_list = self.db.filter_image_list(&change, false);
             self.ui.redraw(cx);
-            image_db.set_first_id(0);
+            image_list.set_first_id(0);
         }
         
         if self.ui.get_button(id!(open_library)).pressed(&actions){
-            self.ui.get_slide_panel(id!(library)).open(cx);
+            self.ui.get_slide_panel(id!(library_panel)).open(cx);
         }
 
         if self.ui.get_button(id!(close_library)).pressed(&actions){
-            self.ui.get_slide_panel(id!(library)).close(cx);
+            self.ui.get_slide_panel(id!(library_panel)).close(cx);
+        }
+        
+        for (item_id, item) in image_list.items_with_actions(&actions) {
+            // check for actions inside the list item
+            let rows = item.get_frame_set(ids!(row1,row2,row3));
+            for (index,row) in rows.iter().enumerate(){
+                if row.finger_down(&actions).is_some() {
+                    self.set_current_image_by_row(cx, item_id, index);
+                }
+            }
         }
     }
 }
