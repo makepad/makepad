@@ -157,6 +157,7 @@ struct Machine {
     ip: String,
     id: LiveId,
     running: Option<RunningPrompt>,
+    fetching: Option<RunningPrompt>
 }
 
 struct RunningPrompt {
@@ -169,6 +170,7 @@ impl Machine {
         ip: ip.to_string(),
         id,
         running: None,
+        fetching: None
     }}
 }
 
@@ -239,7 +241,6 @@ struct TextureItem{
     last_seen: Instant,
     texture: Texture
 }
-
 
 enum DecoderToUI{
     Error(String),
@@ -569,18 +570,29 @@ impl AppMain for App {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => match ComfyUIMessage::deserialize_json(&s) {
                     Ok(data) => {
-                        if data._type == "executed" {
-                            if let Some(output) = &data.data.output {
-                                if let Some(image) = output.images.first() {
-                                    self.fetch_image(cx, event.id, &image.filename);
+                        if data._type == "status"{
+                            if let Some(status) = data.data.status{
+                                if status.exec_info.queue_remaining == 0{
+                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                                        machine.running = None;
+                                    }
+                                    if let Some(prompt) = self.queue.pop() {
+                                        self.send_prompt(cx, prompt);
+                                    }
                                 }
                             }
-                            
-                            if let Some(prompt) = self.queue.pop() {
-                                self.send_prompt(cx, prompt);
+                        }
+                        else if data._type == "executed" {
+                            if let Some(output) = &data.data.output {
+                                if let Some(image) = output.images.first() {
+                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                                        machine.fetching = Some(machine.running.take().unwrap());
+                                        self.fetch_image(cx, event.id, &image.filename);
+                                    }
+                                }
                             }
                         }
-                        if data._type == "progress" {
+                        else if data._type == "progress" {
                             // draw the progress bar / progress somewhere
                             self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
                         }
@@ -597,24 +609,26 @@ impl AppMain for App {
                     if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
                         // alright we got an image back
                         match res.request_id {
-                            live_id!(prompt) => { // lets check if the prompt executed
-                                
+                            live_id!(prompt) =>if let Some(data) = res.get_string_body() { // lets check if the prompt executed
+                                log!("{}", data);
                             }
                             live_id!(image) => if let Some(data) = res.get_body() {
-                                let run = machine.running.take().unwrap();
-                                
-                                // lets write our image to disk properly
-                                self.db.add_png_and_prompt(run.prompt_state, data);
-                                
-                                // alright we got a png. lets decode it and stuff it in our image viewer
-                                let big_list = self.ui.get_list_view(id!(big_list));
-                                let image_id = self.num_images;
-                                self.num_images += 1;
-                                let item = big_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
-                                item.load_png_from_data(cx, data);
-                                
-                                self.ui.redraw(cx);
-                            }
+                                if let Some(fetching) = machine.fetching.take(){
+                                    
+                                    // lets write our image to disk properly
+                                    self.db.add_png_and_prompt(fetching.prompt_state, data);
+                                    
+                                    // alright we got a png. lets decode it and stuff it in our image viewer
+                                    let big_list = self.ui.get_list_view(id!(big_list));
+                                    let image_id = self.num_images;
+                                    self.num_images += 1;
+                                    let item = big_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
+                                    item.load_png_from_data(cx, data);
+                                    
+                                    self.ui.redraw(cx);
+                                }
+                                 
+                           }
                             _ => panic!()
                         }
                     }
