@@ -30,16 +30,16 @@ impl LiveModuleId {
         let mut i = 0;
         while i < len {
             if bytes[i] == b':' {
-                crate_id = LiveId::from_str(std::str::from_utf8(&bytes[0..i]).unwrap()) ?;
+                crate_id = LiveId::from_str_with_lut(std::str::from_utf8(&bytes[0..i]).unwrap()) ?;
                 i += 2;
                 break
             }
             i += 1;
         }
         if i == len { // module_path is only one thing
-            Ok(LiveModuleId(LiveId(0), LiveId::from_str(std::str::from_utf8(&bytes[0..len]).unwrap()) ?))
+            Ok(LiveModuleId(LiveId(0), LiveId::from_str_with_lut(std::str::from_utf8(&bytes[0..len]).unwrap()) ?))
         } else {
-            Ok(LiveModuleId(crate_id, LiveId::from_str(std::str::from_utf8(&bytes[i..len]).unwrap()) ?))
+            Ok(LiveModuleId(crate_id, LiveId::from_str_with_lut(std::str::from_utf8(&bytes[i..len]).unwrap()) ?))
         }
     }
 

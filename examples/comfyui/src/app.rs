@@ -1,7 +1,11 @@
 use crate::{makepad_live_id::*};
 use makepad_micro_serde::*;
 use makepad_widgets::*;
+use makepad_platform::thread::*;
+use makepad_widgets::image_cache::{ImageBuffer};
 use std::fs;
+use std::time::Instant;
+use std::collections::HashMap;
 
 live_design!{
     import makepad_widgets::button::Button;
@@ -13,23 +17,36 @@ live_design!{
     import makepad_widgets::list_view::ListView;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
-     
-    UnderlineTextInput = <TextInput>{
+    
+    UnderlineTextInput = <TextInput> {
         walk: {width: Fill, height: Fit, margin: {top: 30}},
-        draw_bg:{
-             fn pixel(self)->vec4{
+        draw_bg: {
+            fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0,self.rect_size.y-1.0);
-                sdf.line_to(self.rect_size.x - 2.0,self.rect_size.y-1.0);
+                sdf.move_to(1.0, self.rect_size.y - 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 1.0);
                 sdf.stroke(#a, 1.0)
                 return sdf.result;
             }
         }
-    } 
-     
+    }
+    
+    ImageTile = <Image> {
+        walk: {width: (1600*0.15), height: (900*0.15)},
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.box(1,1,self.rect_size.x-2,self.rect_size.y-2,4.0)
+                let color = self.get_color();
+                sdf.fill(color);
+                return sdf.result
+            }
+        }
+    }
+    
     App = {{App}} {
         ui: <DesktopWindow> {
-            window: {inner_size: vec2(1024, 1024)},
+            window: {inner_size: vec2(2000, 1024)},
             
             show_bg: true
             layout: {
@@ -44,29 +61,73 @@ live_design!{
                     return mix(#3, #1, self.geom_pos.y + Math::random_2d(self.pos.xy) * 0.04);
                 }
             }
-            image_list = <ListView> {
+            big_list = <ListView> {
                 walk: {height: Fill, width: Fill}
-                layout: {flow: Down}
+                layout: {flow: Down, spacing: 0}
                 Image = <Image> {
                     walk: {width: 1920, height: 1080}
                 }
             }
             <Frame> {
-                
                 walk: {height: Fill, width: Fill}
-                layout: {flow: Right, padding:10}
-                text_input = <UnderlineTextInput> {
+                layout: {flow: Right, padding: 10}
+                positive = <UnderlineTextInput> {
                     text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
                     draw_bg: {
                         color: #1113
                     }
                 }
-                negative_input = <UnderlineTextInput> {
+                negative = <UnderlineTextInput> {
                     text: "text, watermark, cartoon"
                     draw_bg: {
                         color: #1113
                     }
-                } 
+                }
+            }
+            <Rect> {
+                draw_bg:{color:#777f}
+                walk: {height: Fill, width: 800}
+                layout:{padding:20, flow:Down}, 
+                search = <UnderlineTextInput> {
+                    empty_message: "Search"
+                    draw_bg: {
+                        color: #1113
+                    }
+                }
+                image_db = <ListView> {
+                    walk: {height: Fill, width: Fill}
+                    layout: {flow: Down}
+                    PromptGroup = <Frame> {
+                        walk: {height: Fit, width: Fill,margin:{bottom:20}}
+                        layout: {flow: Right, spacing: 10}
+                        prompt = <TextInput> {
+                            read_only: true,
+                            walk: {width: Fill, height: Fit, margin: {top: 30}},
+                            draw_bg:{
+                                color:#5
+                            }
+                        }
+                    }
+                    Empty = <Frame>{}
+                    ImageRow1= <Frame> {
+                        walk: {height: Fit, width: Fill, margin:{bottom:20}}
+                        layout: {spacing: 20 ,flow:Right},
+                        row1 = <ImageTile> {}
+                    }
+                    ImageRow2 = <Frame> {
+                        walk: {height: Fit, width: Fill, margin:{bottom:20}}
+                        layout: {spacing: 20 ,flow:Right},
+                        row1 = <ImageTile> {}
+                        row2= <ImageTile> {}
+                    }
+                    ImageRow3 = <Frame> {
+                        walk: {height: Fit, width: Fill, margin:{bottom:20}}
+                        layout: {spacing: 20 ,flow:Right},
+                        row1 = <ImageTile> {}
+                        row2= <ImageTile> {}
+                        row3 = <ImageTile> {}
+                    }
+                }
             }
             <Frame> {
                 
@@ -95,9 +156,39 @@ app_main!(App);
 struct Machine {
     ip: String,
     id: LiveId,
+    running: Option<RunningPrompt>,
 }
+
+struct RunningPrompt {
+    _started: Instant,
+    prompt_state: PromptState,
+}
+
 impl Machine {
-    fn new(ip: &str, id: LiveId) -> Self {Self {ip: ip.to_string(), id}}
+    fn new(ip: &str, id: LiveId) -> Self {Self {
+        ip: ip.to_string(),
+        id,
+        running: None,
+    }}
+}
+
+#[derive(Clone)]
+struct PromptState {
+    prompt: Prompt,
+    workflow: String,
+    seed: u64
+}
+
+#[derive(Clone, DeJson, SerJson)]
+struct Prompt{
+    positive: String,
+    negative: String,
+}
+
+impl Prompt {
+    fn hash(&self) -> LiveId {
+        LiveId::from_str(&self.positive).str_append(&self.negative)
+    }
 }
 
 #[derive(Live)]
@@ -111,8 +202,226 @@ pub struct App {
         Machine::new("192.168.1.59:8188", id_lut!(m7)),
         Machine::new("192.168.1.180:8188", id_lut!(m8))
     ])] machines: Vec<Machine>,
+    #[rust] queue: Vec<PromptState>,
+    #[rust(Database::new(cx))] db: Database,
     #[rust] num_images: u64,
+    #[rust(6u64)] batch_size: u64,
     #[rust(1000000u64)] last_seed: u64,
+    #[rust] image_list: Vec<ImageListItem>
+}
+
+enum ImageListItem {
+    PromptGroup {group_index: usize},
+    ImageRow {
+        group_index: usize,
+        item_count: usize,
+        item_index: [usize; 3]
+    }
+}
+
+#[allow(dead_code)]
+struct ImageFile {
+    starred: bool,
+    file_name: String,
+    workflow: String,
+    seed: u64
+}
+
+struct PromptGroup {
+    starred: bool,
+    hash: LiveId,
+    prompt: Option<Prompt>,
+    images: Vec<ImageFile>
+}
+
+#[allow(dead_code)]
+struct TextureItem{
+    last_seen: Instant,
+    texture: Texture
+}
+
+
+enum DecoderToUI{
+    Error(String),
+    Done(String, ImageBuffer)
+}
+
+struct Database {
+    image_path: String,
+    groups: Vec<PromptGroup>,
+    textures: HashMap<String, TextureItem>,
+    in_flight: Vec<String>,
+    thread_pool: ThreadPool<()>,
+    to_ui: ToUIReceiver<DecoderToUI>,
+}
+
+impl Database {
+    fn new(cx:&mut Cx) -> Self {
+        let use_cores = cx.cpu_cores().max(3) - 2;
+        Self {
+            textures: HashMap::new(),
+            in_flight: Vec::new(),
+            thread_pool: ThreadPool::new(cx, use_cores),
+            image_path: "./comfyui_images".to_string(),
+            groups: Vec::new(),
+            to_ui: ToUIReceiver::default()
+        }
+    }
+    
+    fn handle_decoded_images(&mut self, cx:&mut Cx)->bool{
+        let mut updates = false;
+        while let Ok(msg) = self.to_ui.receiver.try_recv() {
+            match msg{
+                DecoderToUI::Done(file_name, image_buffer)=>{
+                    let index = self.in_flight.iter().position(|v| *v == file_name).unwrap();
+                    self.in_flight.remove(index);
+                    self.textures.insert(file_name, TextureItem{
+                        last_seen: Instant::now(),
+                        texture: image_buffer.into_new_texture(cx)
+                    });
+                    updates = true;
+                }
+                DecoderToUI::Error(file_name)=>{
+                    let index = self.in_flight.iter().position(|v| *v == file_name).unwrap();
+                    self.in_flight.remove(index);
+                }
+            }
+        }
+        updates
+    }
+    
+    fn get_image_texture(&mut self, group_id:usize, image_id:usize)->Option<Texture>{
+        let group = &self.groups[group_id];
+        let image = &group.images[image_id];
+        if self.in_flight.contains(&image.file_name){
+            return None
+        }
+        if let Some(texture) = self.textures.get(&image.file_name){
+            return Some(texture.texture.clone());
+        }
+        // request decode
+        let file_name = image.file_name.clone();
+        let image_path = self.image_path.clone();
+        let to_ui = self.to_ui.sender();
+        self.in_flight.push(file_name.clone());
+        self.thread_pool.execute(move | _ | {
+            
+            if let Ok(data) = fs::read(format!("{}/{}", image_path, file_name)){
+                if let Ok(image_buffer) = ImageBuffer::from_png(&data){
+                    let _ = to_ui.send(DecoderToUI::Done(file_name, image_buffer));
+                    return
+                }
+            }
+            let _ = to_ui.send(DecoderToUI::Error(file_name));
+        });
+        None
+    }
+    
+    fn filter_image_list(&self, search: &str, starred:bool) -> Vec<ImageListItem> {
+        let mut out = Vec::new();
+        for (group_index, group) in self.groups.iter().enumerate() {
+            if search.len() == 0
+                || group.prompt.as_ref().unwrap().positive.contains(search)
+                || group.prompt.as_ref().unwrap().negative.contains(search) {
+                out.push(ImageListItem::PromptGroup {group_index});
+                // lets collect images in pairs of 3
+                for (store_index, image) in group.images.iter().enumerate() {
+                    if starred && !image.starred{
+                        continue
+                    }
+                    if let Some(ImageListItem::ImageRow {group_index: _, item_count, item_index}) = out.last_mut() {
+                        if *item_count<3 {
+                            item_index[*item_count] = store_index;
+                            *item_count += 1;
+                            continue;
+                        }
+                    }
+                    out.push(ImageListItem::ImageRow {group_index, item_count: 1, item_index: [store_index, 0, 0]})
+                }
+            }
+        }
+        out
+    }
+    
+    fn load_database(&mut self) -> std::io::Result<()> {
+        // alright lets read the entire directory list
+        let entries = fs::read_dir(&self.image_path) ?;
+        for entry in entries {
+            let entry = entry ?;
+            let file_name = entry.file_name().to_str().unwrap().to_string();
+            if let Some(name) = file_name.strip_suffix(".json") {
+                let mut starred = false;
+                let name = if let Some(name) = name.strip_prefix("star_"){starred = true;name}else{name};
+                
+                if let Ok(hash) = name.parse::<u64>() {
+                    let hash = LiveId(hash);
+                    if let Ok(v) = fs::read_to_string(format!("{}/{}", self.image_path, file_name)) {
+                        if let Ok(prompt) = Prompt::deserialize_json(&v) {
+                            if prompt.hash() == hash {
+                                //ok lets create a group
+                                if let Some(group) = self.groups.iter_mut().find( | v | v.hash == hash) {
+                                    group.prompt = Some(prompt);
+                                    group.starred = starred;
+                                }
+                                else {
+                                    self.groups.push(PromptGroup {
+                                        hash,
+                                        starred,
+                                        prompt: Some(prompt),
+                                        images: Vec::new()
+                                    });
+                                }
+                            }
+                            else {
+                                log!("prompt hash invalid for json {}", file_name);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(name) = file_name.strip_suffix(".png") {
+                let mut starred = false;
+                let name = if let Some(name) = name.strip_prefix("star_"){starred = true;name}else{name};
+
+                let parts = name.split("_").collect::<Vec<&str >> ();
+                if parts.len() == 3 {
+                    if let Ok(hash) = parts[0].parse::<u64>() {
+                        let hash = LiveId(hash);
+                        if let Ok(seed) = parts[2].parse::<u64>() {
+                            let workflow = parts[1].to_string();
+                            let image_item = ImageFile {
+                                starred,
+                                seed,
+                                workflow,
+                                file_name
+                            };
+                            if let Some(group) = self.groups.iter_mut().find( | v | v.hash == hash) {
+                                group.images.push(image_item)
+                            }
+                            else {
+                                self.groups.push(PromptGroup {
+                                    hash,
+                                    starred: false,
+                                    prompt: None,
+                                    images: vec![image_item]
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.groups.retain( | v | v.prompt.is_some());
+        Ok(())
+    }
+    
+    fn add_png_and_prompt(&mut self, state: PromptState, image: &[u8]) {
+        let hash = state.prompt.hash();
+        let prompt_file = format!("{}/{:#016}.json", self.image_path, hash.0);
+        let _ = fs::write(&prompt_file, state.prompt.serialize_json());
+        let image_file = format!("{}/{:#016}_{}_{}.png", self.image_path, hash.0, state.workflow, state.seed);
+        let _ = fs::write(&image_file, &image);
+    }
 }
 
 impl LiveHook for App {
@@ -122,36 +431,49 @@ impl LiveHook for App {
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.open_web_socket(cx);
+        let _ = self.db.load_database();
+        self.image_list = self.db.filter_image_list("", false);
     }
 }
 const CLIENT_ID: &'static str = "1234";
 
 impl App {
-    fn send_prompt(&mut self, cx: &mut Cx, text_input: String, negative_input:String) {
-        for machine in &self.machines {
+    fn send_prompt(&mut self, cx: &mut Cx, prompt_state: PromptState) {
+        // lets find a machine with the minimum queue size and
+        for machine in &mut self.machines {
+            if machine.running.is_some() {
+                continue
+            }
             let url = format!("http://{}/prompt", machine.ip);
             let mut request = HttpRequest::new(url, HttpMethod::POST);
             
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-            let ws = fs::read_to_string("examples/comfyui/workspace_3000.json").unwrap();
+            let ws = fs::read_to_string(format!("examples/comfyui/workspace_{}.json", prompt_state.workflow)).unwrap();
             let ws = ws.replace("CLIENT_ID", CLIENT_ID);
-            let ws = ws.replace("TEXT_INPUT", &text_input);
-            let ws = ws.replace("KEYWORD_INPUT", &text_input);
-            let ws = ws.replace("NEGATIVE_INPUT", &negative_input);
-            let ws = ws.replace("11223344", &format!("{}", self.last_seed));
-            self.last_seed += 1;
+            let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive);
+            let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive);
+            let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative);
+            let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
+            // lets store that we queued this image
+            request.set_request_id(live_id!(prompt));
             request.set_body(ws.as_bytes().to_vec());
-            
             cx.http_request(machine.id, request);
+            machine.running = Some(RunningPrompt {
+                prompt_state: prompt_state.clone(),
+                _started: Instant::now(),
+            });
+            return
         }
+        self.queue.push(prompt_state);
     }
     
     fn fetch_image(&self, cx: &mut Cx, machine_id: LiveId, image_name: &str) {
         let machine = self.machines.iter().find( | v | v.id == machine_id).unwrap();
         let url = format!("http://{}/view?filename={}&subfolder=&type=output", machine.ip, image_name);
-        let request = HttpRequest::new(url, HttpMethod::GET);
-        cx.http_request(live_id!(fetch_image), request);
+        let mut request = HttpRequest::new(url, HttpMethod::GET);
+        request.set_request_id(live_id!(image));
+        cx.http_request(machine.id, request);
     }
     
     fn open_web_socket(&self, cx: &mut Cx) {
@@ -167,15 +489,22 @@ impl App {
         label.set_label(value);
         label.redraw(cx);
     }
+    
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.get_list_view_set(ids!(image_list));
+        if self.db.handle_decoded_images(cx){
+            self.ui.redraw(cx);
+        }
+        
+        let big_list = self.ui.get_list_view_set(ids!(big_list));
+        let image_db = self.ui.get_list_view_set(ids!(image_db));
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                if let Some(mut list) = image_list.has_widget(&next).borrow_mut() {
+                
+                if let Some(mut list) = big_list.has_widget(&next).borrow_mut() {
                     list.set_item_range(0, self.num_images, 1);
                     while let Some(item_id) = list.next_visible_item(cx) {
                         if item_id >= self.num_images {
@@ -185,15 +514,54 @@ impl AppMain for App {
                         item.draw_widget_all(cx);
                     }
                 }
+                if let Some(mut list) = image_db.has_widget(&next).borrow_mut(){
+                    // alright now we draw the items
+                    list.set_item_range(0, self.image_list.len() as u64, 1);
+                    while let Some(item_id) = list.next_visible_item(cx) {
+                        if let Some(item) = self.image_list.get(item_id as usize){
+                            match item{
+                                ImageListItem::PromptGroup{group_index}=>{
+                                    let group = &self.db.groups[*group_index];
+                                    let item = list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
+                                    item.get_text_input(id!(prompt)).set_text(&group.prompt.as_ref().unwrap().positive);
+                                    item.draw_widget_all(cx);
+                                }
+                                ImageListItem::ImageRow{group_index, item_count, item_index}=>{
+                                    let item = list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2.ImageRow3)[*item_count]).unwrap();
+                                    let rows = item.get_image_set(ids!(row1,row2,row3));
+                                    for (index,row) in rows.iter().enumerate(){
+                                        if index >= *item_count{break}
+                                        // alright we need to query our png cache for an image.
+                                        let tex = self.db.get_image_texture(*group_index, item_index[index]);
+                                        row.as_image().set_texture(tex);
+                                    }
+                                    item.draw_widget_all(cx);
+                                }
+                            }
+                        }
+                    }
+                    
+                }
+                
             }
             return
         }
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
-            let text_input = self.ui.get_text_input(id!(text_input)).get_text();
+            let positive = self.ui.get_text_input(id!(positive)).get_text();
             //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
-            let negative_input = self.ui.get_text_input(id!(negative_input)).get_text();
-            self.send_prompt(cx, text_input, negative_input);
+            let negative = self.ui.get_text_input(id!(negative)).get_text();
+            for _ in 0..self.batch_size {
+                self.last_seed += 1;
+                self.send_prompt(cx, PromptState {
+                    prompt: Prompt {
+                        positive: positive.clone(),
+                        negative: negative.clone(),
+                    },
+                    workflow: "3840".to_string(),
+                    seed: self.last_seed
+                });
+            }
             self.set_progress(cx, "Starting query");
         }
         
@@ -204,9 +572,12 @@ impl AppMain for App {
                         if data._type == "executed" {
                             if let Some(output) = &data.data.output {
                                 if let Some(image) = output.images.first() {
-                                    log!("Fetching {}", image.filename);
                                     self.fetch_image(cx, event.id, &image.filename);
                                 }
+                            }
+                            
+                            if let Some(prompt) = self.queue.pop() {
+                                self.send_prompt(cx, prompt);
                             }
                         }
                         if data._type == "progress" {
@@ -221,16 +592,31 @@ impl AppMain for App {
                 NetworkResponse::WebSocketBinary(bin) => {
                     log!("Got Binary {}", bin.len());
                 }
-                NetworkResponse::HttpResponse(res) => if let Some(data) = res.get_body() {
-                    if event.id == live_id!(fetch_image) {
-                        // alright we got a png. lets decode it and stuff it in our image viewer
-                        let image_list = self.ui.get_list_view(id!(image_list));
-                        let image_id = self.num_images;
-                        self.num_images += 1;
-                        let item = image_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
-                        item.load_png_from_data(cx, data);
-                        
-                        self.ui.redraw(cx);
+                NetworkResponse::HttpResponse(res) => {
+                    // prompt request
+                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                        // alright we got an image back
+                        match res.request_id {
+                            live_id!(prompt) => { // lets check if the prompt executed
+                                
+                            }
+                            live_id!(image) => if let Some(data) = res.get_body() {
+                                let run = machine.running.take().unwrap();
+                                
+                                // lets write our image to disk properly
+                                self.db.add_png_and_prompt(run.prompt_state, data);
+                                
+                                // alright we got a png. lets decode it and stuff it in our image viewer
+                                let big_list = self.ui.get_list_view(id!(big_list));
+                                let image_id = self.num_images;
+                                self.num_images += 1;
+                                let item = big_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
+                                item.load_png_from_data(cx, data);
+                                
+                                self.ui.redraw(cx);
+                            }
+                            _ => panic!()
+                        }
                     }
                 }
                 e => {
@@ -239,8 +625,29 @@ impl AppMain for App {
             }
         }
         
-        let _actions = self.ui.handle_widget_event(cx, event);
+        let actions = self.ui.handle_widget_event(cx, event);
+        
+        if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions){
+            self.image_list = self.db.filter_image_list(&change, false);
+            self.ui.redraw(cx);
+            image_db.set_first_id(0);
+        }
     }
+}
+
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUINodeError {
+    unknown: Option<String>
+}
+
+
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUIResponse {
+    pub prompt_id: String,
+    pub number: String,
+    pub node_errors: ComfyUINodeError,
 }
 
 #[allow(dead_code)]

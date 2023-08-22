@@ -254,7 +254,7 @@ impl AvCaptureAccess {
                     
                     if min_frame_rate != max_frame_rate { // this is not really what you'd want. but ok.
                         let frame_rate = min_frame_rate;
-                        let format_id = LiveId::from_str_unchecked(&format!("{} {} {:?} {}", res.width, res.height, pixel_format, frame_rate)).into();
+                        let format_id = LiveId::from_str(&format!("{} {} {:?} {}", res.width, res.height, pixel_format, frame_rate)).into();
                         av_formats.push(AvFormatObj {
                             format_id,
                             min_frame_duration: max_frame_duration,
@@ -270,7 +270,7 @@ impl AvCaptureAccess {
                     }
                     
                     let frame_rate = max_frame_rate;
-                    let format_id = LiveId::from_str_unchecked(&format!("{} {} {:?} {}", res.width, res.height, pixel_format, frame_rate)).into();
+                    let format_id = LiveId::from_str(&format!("{} {} {:?} {}", res.width, res.height, pixel_format, frame_rate)).into();
                     av_formats.push(AvFormatObj {
                         format_id,
                         min_frame_duration,
@@ -287,7 +287,7 @@ impl AvCaptureAccess {
                 inputs.push(AvVideoInput {
                     device_obj: RcObjcId::from_unowned(NonNull::new(device_obj).unwrap()),
                     desc: VideoInputDesc {
-                        input_id: LiveId::from_str_unchecked(&uuid).into(),
+                        input_id: LiveId::from_str(&uuid).into(),
                         name,
                         formats
                     },

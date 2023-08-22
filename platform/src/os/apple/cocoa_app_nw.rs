@@ -158,6 +158,7 @@ impl CocoaApp {
                 let response_code: u16 = msg_send![response, statusCode];
                 let headers: ObjcId = msg_send![response, allHeaderFields];
                 let mut response = HttpResponse::new(
+                    request.request_id,
                     response_code,
                     "".to_string(),
                     Some(data_bytes.to_vec()),

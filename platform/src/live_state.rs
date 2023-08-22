@@ -541,7 +541,7 @@ impl LiveNew for LiveState {
             live_type: LiveType::of::<Self>(),
             live_ignore: true,
             fields: Vec::new(),
-            type_name: LiveId::from_str("States").unwrap()
+            type_name: id_lut!(States)
         }
     }
 }

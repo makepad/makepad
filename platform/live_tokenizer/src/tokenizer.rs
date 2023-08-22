@@ -261,7 +261,7 @@ impl InitialState {
     fn identifier_tail(self, start: usize, cursor: &mut Cursor) -> (State, FullToken) {
         while cursor.skip_if( | ch | ch.is_identifier_continue()) {}
         (State::Initial(InitialState), FullToken::Ident(
-            LiveId::from_str(cursor.from_start_to_scratch(start)).unwrap()
+            LiveId::from_str_with_lut(cursor.from_start_to_scratch(start)).unwrap()
         ))
     }
     

@@ -43,13 +43,13 @@ impl ImageBuffer {
         })
     }
     
-    fn into_new_texture(self, cx:&mut Cx)->Texture{
+    pub fn into_new_texture(self, cx:&mut Cx)->Texture{
         let texture = Texture::new(cx);
         self.into_texture(cx, &texture);
         texture
     }
     
-    fn into_texture(mut self, cx:&mut Cx, texture:&Texture){
+    pub fn into_texture(mut self, cx:&mut Cx, texture:&Texture){
         texture.set_desc(
             cx,
             TextureDesc {
@@ -59,6 +59,43 @@ impl ImageBuffer {
             },
         );
         texture.swap_image_u32(cx, &mut self.data);
+    }
+    
+    
+    pub fn from_png(
+        data: &[u8]
+    ) -> Result<Self, String> {
+        let mut decoder = PngDecoder::new(data);
+        match decoder.decode() {
+            Ok(image) => {
+                if let Some(data) = image.u8(){
+                    let (width,height) = decoder.get_dimensions().unwrap();
+                    ImageBuffer::new(&data, width as usize, height as usize)
+                }
+                else{
+                    Err("Error decoding PNG: image data empty".to_string())
+                }
+            }
+            Err(err) => {
+                Err(format!("Error decoding PNG: {:?}", err))
+            }
+        }
+    }
+
+    pub fn from_jpg(
+        data: &[u8]
+    ) -> Result<Self, String> {
+        let mut decoder = JpegDecoder::new(&*data);
+        // decode the file
+        match decoder.decode() {
+            Ok(data) => {
+                let info = decoder.info().unwrap();
+                ImageBuffer::new(&data, info.width as usize, info.height as usize)
+            },
+            Err(err) => {
+                Err(format!("Error decoding JPG: {:?}", err))
+            }
+        }
     }
 }
 
@@ -84,44 +121,9 @@ pub trait ImageCacheImpl {
         }
     }
 
-    fn decode_png(
-        data: &[u8]
-    ) -> Result<ImageBuffer, String> {
-        let mut decoder = PngDecoder::new(data);
-        match decoder.decode() {
-            Ok(image) => {
-                if let Some(data) = image.u8(){
-                    let (width,height) = decoder.get_dimensions().unwrap();
-                    ImageBuffer::new(&data, width as usize, height as usize)
-                }
-                else{
-                    Err("Error decoding PNG: image data empty".to_string())
-                }
-            }
-            Err(err) => {
-                Err(format!("Error decoding PNG: {:?}", err))
-            }
-        }
-    }
-
-    fn decode_jpg(
-        data: &[u8]
-    ) -> Result<ImageBuffer, String> {
-        let mut decoder = JpegDecoder::new(&*data);
-        // decode the file
-        match decoder.decode() {
-            Ok(data) => {
-                let info = decoder.info().unwrap();
-                ImageBuffer::new(&data, info.width as usize, info.height as usize)
-            },
-            Err(err) => {
-                Err(format!("Error decoding JPG: {:?}", err))
-            }
-        }
-    }
 
     fn load_png_from_data(&mut self, cx:&mut Cx, data:&[u8]){
-        match Self::decode_png(&*data){
+        match ImageBuffer::from_png(&*data){
             Ok(data)=>{
                 if let Some(texture) = self.get_texture(){
                     data.into_texture(cx, texture);
@@ -137,7 +139,7 @@ pub trait ImageCacheImpl {
     }
     
     fn load_jpg_from_data(&mut self, cx:&mut Cx, data:&[u8]){
-        match Self::decode_jpg(&*data){
+        match ImageBuffer::from_jpg(&*data){
             Ok(data)=>{
                 if let Some(texture) = self.get_texture(){
                     data.into_texture(cx, texture);
@@ -164,7 +166,7 @@ pub trait ImageCacheImpl {
             match cx.get_dependency(image_path) {
                 Ok(data) => {
                     if image_path.ends_with(".jpg") {
-                        match Self::decode_jpg(&*data){
+                        match ImageBuffer::from_jpg(&*data){
                             Ok(data)=>{
                                 let texture = data.into_new_texture(cx);
                                 cx.get_global::<ImageCache>().map.insert(image_path.to_string(), texture.clone());
@@ -175,7 +177,7 @@ pub trait ImageCacheImpl {
                             }
                         }
                     } else if image_path.ends_with(".png") {
-                        match Self::decode_png(&*data){
+                        match ImageBuffer::from_png(&*data){
                             Ok(data)=>{
                                 let texture = data.into_new_texture(cx);
                                 cx.get_global::<ImageCache>().map.insert(image_path.to_string(), texture.clone());
