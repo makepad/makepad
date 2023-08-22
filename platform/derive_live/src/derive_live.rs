@@ -155,7 +155,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         for field in &fields {
             if field.attrs[0].name == "live" || field.attrs[0].name == "state" {
-                tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
+                tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
         }
         // Unknown value handling
@@ -207,7 +207,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("    let mut state_index = None;");
         }
         tb.add("        let index = if let Some(index) = self.skip_apply(cx, apply_from, start_index, nodes){index} else {");
-        tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
+        tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).0).add(");");
         tb.add("            if !nodes[start_index].value.is_structy_type(){");
         tb.add("                cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
         tb.add("                self.after_apply(cx, apply_from, start_index, nodes);");
@@ -249,7 +249,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         for field in &fields {
             let attr = &field.attrs[0];
             if attr.name == "state" || attr.name == "live" || attr.name == "calc" || attr.name == "deref"{
-                tb.add("fields.push(LiveTypeField{id:LiveId::from_str(").string(&field.name).add(").unwrap(),");
+                tb.add("fields.push(LiveTypeField{id:LiveId::from_str_with_lut(").string(&field.name).add(").unwrap(),");
                 // ok so what do we do if we have an Option<..>
                 // how about LiveOrCalc becomes LiveFieldType::Option
                 match unwrap_option(field.ty.clone()) {
@@ -286,7 +286,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            live_ignore: ").ident(if live_ignore {"true"} else {"false"}).add(",");
         tb.add("            fields,");
         
-        tb.add("            type_name: LiveId::from_str(").string(&struct_name).add(").unwrap()");
+        tb.add("            type_name: LiveId::from_str_with_lut(").string(&struct_name).add(").unwrap()");
         tb.add("        }");
         tb.add("    }");
         
@@ -430,7 +430,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            fields: Vec::new(),");
         let live_ignore = main_attribs.iter().any( | attr | attr.name == "live_ignore");
         tb.add("            live_ignore: ").ident(if live_ignore {"true"} else {"false"}).add(",");
-        tb.add("            type_name: LiveId::from_str(").string(&enum_name).add(").unwrap(),");
+        tb.add("            type_name: LiveId::from_str_with_lut(").string(&enum_name).add(").unwrap(),");
         /*tb.add("            kind: LiveTypeKind::Enum,");*/
         tb.add("        }");
         tb.add("    }");
@@ -444,7 +444,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             for item in &items {
                 match item.kind {
                     EnumKind::Bare => {
-                        tb.add("variants.push(LiveId::from_str(").string(&item.name).add(").unwrap());");
+                        tb.add("variants.push(LiveId::from_str_with_lut(").string(&item.name).add(").unwrap());");
                     },
                     EnumKind::Named(_) |
                     EnumKind::Tuple(_) => {
@@ -452,7 +452,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                     }
                 }
             }
-            tb.add("        cx.shader_registry.register_enum(LiveType::of::<").ident(&enum_name).add(">(),ShaderEnum{enum_name:LiveId::from_str(").string(&enum_name).add(").unwrap(),variants});");
+            tb.add("        cx.shader_registry.register_enum(LiveType::of::<").ident(&enum_name).add(">(),ShaderEnum{enum_name:LiveId::from_str_with_lut(").string(&enum_name).add(").unwrap(),variants});");
         }
         
         tb.add("    }");
@@ -469,14 +469,14 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            return index");
         tb.add("        }");
         tb.add("        let mut index = start_index;");
-        tb.add("        let enum_id = LiveId(").suf_u64(LiveId::from_str(&enum_name).unwrap().0).add(");");
+        tb.add("        let enum_id = LiveId(").suf_u64(LiveId::from_str(&enum_name).0).add(");");
         tb.add("        match &nodes[start_index].value{");
 
         tb.add("            LiveValue::BareEnum(variant)=>{");
         tb.add("                match variant{");
         for item in &items {
             if let EnumKind::Bare = item.kind {
-                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")=>{index += 1;*self = Self::").ident(&item.name).add("},");
+                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).0).add(")=>{index += 1;*self = Self::").ident(&item.name).add("},");
             }
         }
         tb.add("                    _=>{");
@@ -490,7 +490,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("                match variant{");
         for item in &items {
             if let EnumKind::Named(fields) = &item.kind {
-                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")=>{");
+                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).0).add(")=>{");
                 tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
                 tb.add("                else{*self = ");
                 item.gen_new(tb)?;
@@ -508,7 +508,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("                        }");
                 tb.add("                        match nodes[index].id{");
                 for field in fields {
-                    tb.add("                        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>{index = (*");
+                    tb.add("                        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>{index = (*");
                     tb.ident(&format!("prefix_{}", field.name)).add(").apply(cx, apply_from, index, nodes);},");
                 }
                 tb.add("                            _=>{");
@@ -532,7 +532,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         for item in &items {
             if let EnumKind::Tuple(args) = &item.kind {
-                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")=>{");
+                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).0).add(")=>{");
                 
                 tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
                 tb.add("                else{*self = ");

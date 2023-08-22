@@ -14,11 +14,11 @@ use {
 
 impl LiveIdInterner {
     pub fn add(&mut self, val: &str) {
-        self.id_to_string.insert(LiveId::from_str_unchecked(val), val.to_string());
+        self.id_to_string.insert(LiveId::from_str(val), val.to_string());
     }
     
     pub fn contains(&mut self, val: &str) -> bool {
-        self.id_to_string.contains_key(&LiveId::from_str_unchecked(val))
+        self.id_to_string.contains_key(&LiveId::from_str(val))
     }
     
     pub fn with<F, R>(f: F) -> R
@@ -158,7 +158,7 @@ impl LiveId {
         Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
-    pub const fn from_str_unchecked(id_str: &str) -> Self {
+    pub const fn from_str(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
     }
@@ -177,19 +177,19 @@ impl LiveId {
         Self::from_bytes(self.0, &bytes, 0, bytes.len())
     }
     
-    pub const fn from_str_num_unchecked(id_str: &str, num:u64) -> Self {
+    pub const fn from_str_num(id_str: &str, num:u64) -> Self {
         let bytes = id_str.as_bytes();
         let id = Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len());
         Self::from_bytes(id.0, &num.to_be_bytes(), 0, 8)
     }
     
-    pub const fn from_num_unchecked(seed:u64, num:u64) -> Self {
+    pub const fn from_num(seed:u64, num:u64) -> Self {
         Self::from_bytes(seed, &num.to_be_bytes(), 0, 8)
     }
     
-    pub fn from_str(id_str: &str) -> Result<Self,
+    pub fn from_str_with_lut(id_str: &str) -> Result<Self,
     String> {
-        let id = Self::from_str_unchecked(id_str);
+        let id = Self::from_str(id_str);
         LiveIdInterner::with( | idmap | {
             if let Some(stored) = idmap.id_to_string.get(&id) {
                 if stored != id_str {
@@ -203,9 +203,9 @@ impl LiveId {
         })
     }
     
-    pub fn from_str_num(id_str: &str, num:u64) -> Result<Self,
+    pub fn from_str_num_with_lut(id_str: &str, num:u64) -> Result<Self,
     String> {
-        let id = Self::from_str_num_unchecked(id_str, num);
+        let id = Self::from_str_num(id_str, num);
         LiveIdInterner::with( | idmap | {
             idmap.id_to_string.insert(id, format!("{}{}",id_str, num));
             Ok(id)
