@@ -23,7 +23,7 @@ fn parse_object(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenS
         }
         else{
             let mut prop = TokenBuilder::new();
-            let prop_id = LiveId::from_str(&parser.expect_any_ident()?).unwrap();
+            let prop_id = LiveId::from_str_with_lut(&parser.expect_any_ident()?).unwrap();
             prop.add("LiveId(").suf_u64(prop_id.0).add(")");
             prop.end()
         };
@@ -79,11 +79,11 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
     }  
     // key values
     else if let Some(class) = parser.eat_any_ident(){
-        let class_id = LiveId::from_str(&class).unwrap().0;
+        let class_id = LiveId::from_str_with_lut(&class).unwrap().0;
         // could be local class or enum
         if parser.eat_double_colon_destruct(){
             let variant = parser.expect_any_ident()?;
-            let variant_id = LiveId::from_str(&variant).unwrap().0;
+            let variant_id = LiveId::from_str_with_lut(&variant).unwrap().0;
             // now check if we have a , eot or ( or {
             if parser.is_punct_alone(',') || parser.is_eot(){
                 tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::BareEnum{");
@@ -95,7 +95,7 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
                 parser.open_group();
                 while !parser.eat_eot(){
                     let prop = parser.expect_any_ident()?;
-                    let prop_id = LiveId::from_str(&prop).unwrap();
+                    let prop_id = LiveId::from_str_with_lut(&prop).unwrap();
                     let mut start = TokenBuilder::new();
                     start.add("origin:LiveNodeOrigin::empty(), id:LiveId(").suf_u64(prop_id.0).add(")");
                     parser.expect_punct_alone(':')?;

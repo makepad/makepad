@@ -53,7 +53,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         
         for field in &fields {
             if field.attrs[0].name == "live" {
-                tb.add("    LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply_atomic(cx, apply_from, index, nodes),");
+                tb.add("    LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply_atomic(cx, apply_from, index, nodes),");
             }
         }
         tb.add("            _=> {");
@@ -71,7 +71,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
 
         tb.add("    fn apply_atomic(&self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
         tb.add("        let index = start_index;");
-        tb.add("        let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
+        tb.add("        let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).0).add(");");
         tb.add("        if !nodes[start_index].value.is_structy_type(){");
         tb.add("            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
         tb.add("            return nodes.skip_node(start_index);");
