@@ -511,6 +511,15 @@ pub enum FrameAction {
 }
 
 impl FrameRef {
+    pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::FingerDown(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
     pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.cut_state(cx, state);
