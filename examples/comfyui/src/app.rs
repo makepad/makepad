@@ -87,11 +87,19 @@ live_design!{
             <Rect> {
                 draw_bg:{color:#777f}
                 walk: {height: Fill, width: 800}
-                layout:{padding:20, flow:Down}, 
-                search = <UnderlineTextInput> {
-                    empty_message: "Search"
-                    draw_bg: {
-                        color: #1113
+                layout:{padding:20, flow:Down},
+                <Frame>{ 
+                    walk: {height: Fit, width: Fill}
+                    layout:{flow:Right},
+                    search = <UnderlineTextInput> {
+                        walk: {height: Fit, width: Fill}
+                        empty_message: "Search"
+                        draw_bg: {
+                            color: #1113
+                        }
+                    }
+                    close_search = <Button>{
+                        label:"<"
                     }
                 }
                 image_db = <ListView> {
