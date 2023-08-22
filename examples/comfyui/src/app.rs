@@ -71,6 +71,9 @@ live_design!{
             <Frame> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Right, padding: 10}
+                open_search = <Button>{
+                    label:">"
+                }
                 positive = <UnderlineTextInput> {
                     text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
                     draw_bg: {
@@ -86,6 +89,7 @@ live_design!{
             }
             <Rect> {
                 draw_bg:{color:#777f}
+                
                 walk: {height: Fill, width: 800}
                 layout:{padding:20, flow:Down},
                 <Frame>{ 
