@@ -323,6 +323,7 @@ impl Widget for ListView {
         let vi = self.vec_index;
         match event.hits(cx, self.area) {
             Hit::FingerScroll(e) => {
+                self.scroll_state = ScrollState::Stopped;
                 self.delta_top_scroll(cx, -e.scroll.index(vi));
                 dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                 self.area.redraw(cx);
