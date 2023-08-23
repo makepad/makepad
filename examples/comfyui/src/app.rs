@@ -595,39 +595,50 @@ impl AppMain for App {
             self.set_progress(cx, "Starting query");
         }
         
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Space, ..}) = event {
+            self.ui.get_slide_panel(id!(library_panel)).toggle(cx);
+        }
+        
         for event in event.network_responses() {
             match &event.response {
-                NetworkResponse::WebSocketString(s) => match ComfyUIMessage::deserialize_json(&s) {
-                    Ok(data) => {
-                        if data._type == "status"{
-                            if let Some(status) = data.data.status{
-                                if status.exec_info.queue_remaining == 0{
-                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
-                                        machine.running = None;
-                                    }
-                                    if let Some(prompt) = self.queue.pop() {
-                                        self.send_prompt(cx, prompt);
-                                    }
-                                }
-                            }
-                        }
-                        else if data._type == "executed" {
-                            if let Some(output) = &data.data.output {
-                                if let Some(image) = output.images.first() {
-                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
-                                        machine.fetching = Some(machine.running.take().unwrap());
-                                        self.fetch_image(cx, event.id, &image.filename);
-                                    }
-                                }
-                            }
-                        }
-                        else if data._type == "progress" {
-                            // draw the progress bar / progress somewhere
-                            self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
-                        }
+                NetworkResponse::WebSocketString(s) => {
+                    if s.contains("execution_error"){ // i dont care to expand the json def for this one
+                        log!("Got execution error for {} {}", event.id, s);
                     }
-                    Err(err) => {
-                        log!("Error parsing JSON {:?} {:?}", err, s);
+                    else {
+                        match ComfyUIMessage::deserialize_json(&s) {
+                            Ok(data) => {
+                                if data._type == "status"{
+                                    if let Some(status) = data.data.status{
+                                        if status.exec_info.queue_remaining == 0{
+                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                                                machine.running = None;
+                                            }
+                                            if let Some(prompt) = self.queue.pop() {
+                                                self.send_prompt(cx, prompt);
+                                            }
+                                        }
+                                    }
+                                }
+                                else if data._type == "executed" {
+                                    if let Some(output) = &data.data.output {
+                                        if let Some(image) = output.images.first() {
+                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                                                machine.fetching = Some(machine.running.take().unwrap());
+                                                self.fetch_image(cx, event.id, &image.filename);
+                                            }
+                                        }
+                                    }
+                                }
+                                else if data._type == "progress" {
+                                    // draw the progress bar / progress somewhere
+                                    self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
+                                }
+                            }
+                            Err(err) => {
+                                log!("Error parsing JSON {:?} {:?}", err, s);
+                            }
+                        }
                     }
                 }
                 NetworkResponse::WebSocketBinary(bin) => {
