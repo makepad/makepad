@@ -32,11 +32,21 @@ live_design!{
     }
 }
 
+#[derive(Live, LiveHook)]
+#[live_ignore]
+enum ImageFit{
+    #[pick] Stretch,
+    Horizontal,
+    Vertical,
+    Smallest,
+    Biggest
+}
+
 #[derive(Live)]
 pub struct Image {
     #[live] walk: Walk,
     #[live] draw_bg: DrawQuad,
-    
+    #[live] fit: ImageFit,
     #[live] source: LiveDependency,
     #[live] texture: Option<Texture>,
 }
@@ -80,13 +90,51 @@ impl Widget for Image {
 }
 
 impl Image {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
+        // alright we get a walk. depending on our aspect ratio 
+        // we change either nothing, or width or height 
         if let Some(image_texture) = &self.texture {
+            let desc = image_texture.get_desc(cx);
+            let rect = cx.peek_walk_turtle(walk);
+            let dpi = cx.current_dpi_factor();
+            let width = desc.width.unwrap_or(0) as f64 / dpi;
+            let height = desc.height.unwrap_or(0) as f64 / dpi;
+            let aspect = width/height;
+            match self.fit{
+                ImageFit::Stretch=>{},
+                ImageFit::Horizontal=>{
+                    walk.height = Size::Fixed(rect.size.x/aspect);
+                },
+                ImageFit::Vertical=>{
+                    walk.width = Size::Fixed(rect.size.y*aspect);
+                },
+                ImageFit::Smallest=>{
+                    let walk_height = rect.size.x/aspect;
+                    if walk_height > rect.size.y{
+                        walk.width = Size::Fixed(rect.size.y*aspect);
+                    }
+                    else{
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+                ImageFit::Biggest=>{
+                    let walk_height = rect.size.x/aspect;
+                    if walk_height < rect.size.y{
+                        walk.width = Size::Fixed(rect.size.y*aspect);
+                    }
+                    else{
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+            }
+
             self.draw_bg.draw_vars.set_texture(0, image_texture);
         }
         else{
             self.draw_bg.draw_vars.empty_texture(0);
         }
+        // lets start a turtle and center horizontally
+        
         self.draw_bg.draw_walk(cx, walk);
         
         WidgetDraw::done()
