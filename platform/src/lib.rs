@@ -34,7 +34,6 @@ mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
-pub mod network;
 
 pub mod audio_stream;
 

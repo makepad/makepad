@@ -136,7 +136,7 @@ impl CocoaApp {
         }
     }
     
-    pub fn make_http_request(&mut self, id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
+    pub fn make_http_request(&mut self, request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
         unsafe {
             let ns_request = Self::make_ns_request(&request);
             
@@ -145,7 +145,7 @@ impl CocoaApp {
                 if error != ptr::null_mut() {
                     let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                     let message = NetworkResponseEvent {
-                        id,
+                        id: request_id,
                         response: NetworkResponse::HttpRequestError(error_str)
                     };
                     networking_sender.send(message).unwrap();
@@ -158,7 +158,7 @@ impl CocoaApp {
                 let response_code: u16 = msg_send![response, statusCode];
                 let headers: ObjcId = msg_send![response, allHeaderFields];
                 let mut response = HttpResponse::new(
-                    request.request_id,
+                    request.metadata_id,
                     response_code,
                     "".to_string(),
                     Some(data_bytes.to_vec()),
@@ -175,7 +175,10 @@ impl CocoaApp {
                     key = msg_send![key_enumerator, nextObject];
                 }
                 
-                let message = NetworkResponseEvent {id, response: NetworkResponse::HttpResponse(response)};
+                let message = NetworkResponseEvent {
+                    id: request_id,
+                    response: NetworkResponse::HttpResponse(response)
+                };
                 networking_sender.send(message).unwrap();
             });
             
