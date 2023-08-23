@@ -513,8 +513,8 @@ export class WasmWebBrowser extends WasmBridge {
             let responseEvent = event.target;
 
             this.to_wasm.ToWasmHTTPResponse({
-                id_lo: args.id_lo,
-                id_hi: args.id_hi,
+                request_id_lo: args.request_id_lo,
+                request_id_hi: args.request_id_hi,
                 status: responseEvent.status,
                 body: responseEvent.response,
                 headers: responseEvent.getAllResponseHeaders()
@@ -529,8 +529,8 @@ export class WasmWebBrowser extends WasmBridge {
             }
 
             this.to_wasm.ToWasmHttpRequestError({
-                id_lo: args.id_lo,
-                id_hi: args.id_hi,
+                request_id_lo: args.request_id_lo,
+                request_id_hi: args.request_id_hi,
                 error: errorMessage,
             });
             this.do_wasm_pump();
@@ -538,8 +538,8 @@ export class WasmWebBrowser extends WasmBridge {
 
         req.addEventListener("timeout", event => {
             this.to_wasm.ToWasmHttpRequestError({
-                id_lo: args.id_lo,
-                id_hi: args.id_hi,
+                request_id_lo: args.request_id_lo,
+                request_id_hi: args.request_id_hi,
                 error: "The HTTP request timed out.",
             });
             this.do_wasm_pump();
@@ -547,8 +547,8 @@ export class WasmWebBrowser extends WasmBridge {
 
         req.addEventListener("abort", event => {
             this.to_wasm.ToWasmHttpRequestError({
-                id_lo: args.id_lo,
-                id_hi: args.id_hi,
+                request_id_lo: args.request_id_lo,
+                request_id_hi: args.request_id_hi,
                 error: "The HTTP request was aborted.",
             });
             this.do_wasm_pump();
@@ -558,8 +558,8 @@ export class WasmWebBrowser extends WasmBridge {
             console.log("progress", event);
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpResponseProgress({
-                    id_lo: args.id_lo,
-                    id_hi: args.id_hi,
+                    request_id_lo: args.request_id_lo,
+                    request_id_hi: args.request_id_hi,
                     loaded: event.loaded,
                     total: event.total,
                 });
@@ -570,8 +570,8 @@ export class WasmWebBrowser extends WasmBridge {
         req.upload.addEventListener("progress", (event) => {
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpUploadProgress({
-                    id_lo: args.id_lo,
-                    id_hi: args.id_hi,
+                    request_id_lo: args.request_id_lo,
+                    request_id_hi: args.request_id_hi,
                     loaded: event.loaded,
                     total: event.total,
                 });
