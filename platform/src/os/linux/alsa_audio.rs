@@ -107,7 +107,7 @@ impl AlsaAudioAccess {
                         let name_str = from_alsa_string(snd_device_name_get_hint(hint_ptr, "NAME\0".as_ptr())).unwrap_or("".into());
                         let desc_str = from_alsa_string(snd_device_name_get_hint(hint_ptr, "DESC\0".as_ptr())).unwrap_or("".into()).replace("\n", " ");
                         let ioid = from_alsa_string(snd_device_name_get_hint(hint_ptr, "IOID\0".as_ptr())).unwrap_or("".into());
-                        let device_id = AudioDeviceId(LiveId::from_str_unchecked(&name_str));
+                        let device_id = AudioDeviceId(LiveId::from_str(&name_str));
                         let desc = AudioDeviceDesc {
                             has_failed: alsa.failed_devices.lock().unwrap().contains(&device_id),
                             device_id,
