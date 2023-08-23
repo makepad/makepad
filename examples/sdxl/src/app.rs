@@ -202,8 +202,8 @@ live_design!{
                 }
                 
                 big_image = <Frame> {
-                    visible: false,
-                    walk: {height: Fit, width: Fit}
+                    visible: true,
+                    walk: {height: All, width: All}
                     cursor: Hand,
                     image = <Image> {
                         walk: {width: 1920, height: 1080}
@@ -382,7 +382,7 @@ impl Database {
             textures: HashMap::new(),
             in_flight: Vec::new(),
             thread_pool: ThreadPool::new(cx, use_cores),
-            image_path: "./comfyui_images".to_string(),
+            image_path: "./sdxl_images".to_string(),
             groups: Vec::new(),
             to_ui: ToUIReceiver::default(),
         }
