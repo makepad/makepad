@@ -121,7 +121,7 @@ impl ListView {
         let vi = self.vec_index;
         match self.draw_state.get() {
             Some(ListDrawState::Begin) => {
-                let viewport = cx.turtle().rect();
+                let viewport = cx.turtle().padded_rect();
                 self.draw_state.set(ListDrawState::Down {
                     index: self.first_id,
                     scroll: self.first_scroll,

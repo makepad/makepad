@@ -17,6 +17,7 @@ live_design!{
     import makepad_widgets::list_view::ListView;
     import makepad_widgets::slide_panel::SlidePanel;
     import makepad_widgets::frame::*;
+    import makepad_widgets::theme::*;
     import makepad_draw::shader::std::*;
     import makepad_widgets::dock::*;
     
@@ -33,16 +34,16 @@ live_design!{
         }
     }
     
-    ImageTile = <Frame>{
+    ImageTile = <Frame> {
         walk: {width: Fill, height: Fit},
         cursor: Hand
         img = <Image> {
-            walk: {width:Fill, height:Fill}
+            walk: {width: Fill, height: Fill}
             fit: Horizontal,
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    sdf.box(1,1,self.rect_size.x-2,self.rect_size.y-2,4.0)
+                    sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
                     let color = self.get_color();
                     sdf.fill(color);
                     return sdf.result
@@ -54,138 +55,136 @@ live_design!{
     App = {{App}} {
         ui: <DesktopWindow> {
             window: {inner_size: vec2(2000, 1024)},
+            caption_bar = {visible: true, caption_label = {label = {label: "SDXL Explorer"}}},
             
-            show_bg: true
-            layout: {
-                flow: Overlay,
-            },
-            walk: {
-                width: Fill,
-                height: Fill
-            },
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    return mix(#3, #1, self.geom_pos.y + Math::random_2d(self.pos.xy) * 0.04);
-                }
-            }
-
-            dock = <Dock> {
-                walk: {height: Fill, width: Fill}
+            <Frame> {
+                layout: {
+                    flow: Overlay,
+                },
+                walk: {
+                    width: Fill,
+                    height: Fill
+                },
                 
-                root = Splitter{
-                    axis: Horizontal,
-                    align: FromA(300.0),
-                    a: image_library,
-                    b: split1
-                }
-                
-                split1 = Splitter{
-                    axis: Vertical,
-                    align: FromB(200.0),
-                    a: image_view,
-                    b: input_panel
-                }
-                
-                image_library = Tab {
-                    name: ""
-                    kind: ImageLibrary
-                }
-
-                input_panel = Tab {
-                    name: ""
-                    kind: InputPanel
-                }
-
-                image_view = Tab {
-                    name: ""
-                    kind: ImageView
-                }
-                
-                ImageView = <Frame> {
+                dock = <Dock> {
                     walk: {height: Fill, width: Fill}
-                    layout: {flow:Down,align:{x:0.5,y:0.5}}
-                    cursor: Hand,
-                    image = <Image> {
-                        fit: Smallest,
-                        walk: {width: Fill, height: Fill}
-                    }
-                }
-                
-                InputPanel = <Frame> {
-                    walk: {height: Fit, width: Fill}
-                    layout: {flow: Right, padding: 10}
-                    positive = <UnderlineTextInput> {
-                        text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
-                        draw_bg: {
-                            color: #1113
-                        }
-                    }
-                    negative = <UnderlineTextInput> {
-                        text: "text, watermark, cartoon"
-                        draw_bg: {
-                            color: #1113
-                        }
-                    }
-                }
                     
-                ImageLibrary = <Rect> {
-                    draw_bg:{color:#7777}
-                    walk: {height: Fill, width: Fill}
-                    layout:{padding:20, flow:Down},
-                    <Frame>{ 
+                    root = Splitter {
+                        axis: Horizontal,
+                        align: FromA(300.0),
+                        a: image_library,
+                        b: split1
+                    }
+                    
+                    split1 = Splitter {
+                        axis: Vertical,
+                        align: FromB(200.0),
+                        a: image_view,
+                        b: input_panel
+                    }
+                    
+                    image_library = Tab {
+                        name: ""
+                        kind: ImageLibrary
+                    }
+                    
+                    input_panel = Tab {
+                        name: ""
+                        kind: InputPanel
+                    }
+                    
+                    image_view = Tab {
+                        name: ""
+                        kind: ImageView
+                    }
+                    
+                    ImageView = <Rect> {
+                        draw_bg: {color: #2}
+                        walk: {height: Fill, width: Fill}
+                        layout: {flow: Down, align: {x: 0.5, y: 0.5}}
+                        cursor: Hand,
+                        image = <Image> {
+                            fit: Smallest,
+                            walk: {width: Fill, height: Fill}
+                        }
+                    }
+                    
+                    InputPanel = <Frame> {
                         walk: {height: Fit, width: Fill}
-                        layout:{flow:Right},
-                        search = <UnderlineTextInput> {
-                            walk: {height: Fit, width: Fill}
-                            empty_message: "Search"
+                        layout: {flow: Right, padding: 10}
+                        positive = <UnderlineTextInput> {
+                            text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
+                            draw_bg: {
+                                color: #1113
+                            }
+                        }
+                        negative = <UnderlineTextInput> {
+                            text: "text, watermark, cartoon"
                             draw_bg: {
                                 color: #1113
                             }
                         }
                     }
-                    image_list = <ListView> {
+                    
+                    ImageLibrary = <Rect> {
+                        draw_bg: {color: #2}
                         walk: {height: Fill, width: Fill}
-                        layout: {flow: Down}
-                        PromptGroup = <Frame> {
-                            walk: {height: Fit, width: Fill,margin:{bottom:20}}
-                            layout: {flow: Right, spacing: 10}
-                            prompt = <TextInput> {
-                                read_only: true,
-                                walk: {width: Fill, height: Fit, margin: {top: 30}},
-                                draw_bg:{
-                                    color:#5
+                        layout: { flow: Down},
+                        <Frame> {
+                            walk: {height: Fit, width: Fill}
+                            layout: {flow: Right,padding:{left:20, right:20}},
+                            search = <UnderlineTextInput> {
+                                walk: {height: Fit, width: Fill}
+                                empty_message: "Search"
+                                draw_bg: {
+                                    color: #1113
                                 }
                             }
                         }
-                        Empty = <Frame>{}
-                        ImageRow1= <Frame> {
-                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
-                            layout: {spacing: 20 ,flow:Right},
-                            row1 = <ImageTile> {}
-                        }
-                        ImageRow2 = <Frame> {
-                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
-                            layout: {spacing: 20 ,flow:Right},
-                            row1 = <ImageTile> {}
-                            row2= <ImageTile> {}
-                        }
-                        ImageRow3 = <Frame> {
-                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
-                            layout: {spacing: 20 ,flow:Right},
-                            row1 = <ImageTile> {}
-                            row2= <ImageTile> {}
-                            row3 = <ImageTile> {}
+                        image_list = <ListView> {
+                            walk: {height: Fill, width: Fill}
+                            layout: {flow: Down, padding: 20}
+                            PromptGroup = <Frame> {
+                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                layout: {flow: Right, spacing: 10}
+                                prompt = <TextInput> {
+                                    read_only: true,
+                                    walk: {width: Fill, height: Fit, margin: {top: 30}},
+                                    draw_bg: {
+                                        color: #5
+                                    }
+                                }
+                            }
+                            Empty = <Frame> {}
+                            ImageRow1 = <Frame> {
+                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                layout: {spacing: 20, flow: Right},
+                                row1 = <ImageTile> {}
+                            }
+                            ImageRow2 = <Frame> {
+                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                layout: {spacing: 20, flow: Right},
+                                row1 = <ImageTile> {}
+                                row2 = <ImageTile> {}
+                            }
+                            ImageRow3 = <Frame> {
+                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                layout: {spacing: 20, flow: Right},
+                                row1 = <ImageTile> {}
+                                row2 = <ImageTile> {}
+                                row3 = <ImageTile> {}
+                            }
                         }
                     }
                 }
-            }
-
-            big_image = <Frame> {
-                visible: false,
-                walk: {height: Fit, width: Fit}
-                cursor: Hand,
-                image = <Image> {
-                    walk: {width: 1920, height: 1080}
+                
+                big_image = <Frame> {
+                    visible: false,
+                    walk: {height: Fit, width: Fit}
+                    cursor: Hand,
+                    image = <Image> {
+                        walk: {width: 1920, height: 1080}
+                    }
                 }
             }
         }
@@ -223,7 +222,7 @@ struct PromptState {
 }
 
 #[derive(Clone, DeJson, SerJson)]
-struct Prompt{
+struct Prompt {
     positive: String,
     negative: String,
 }
@@ -246,19 +245,19 @@ pub struct App {
         Machine::new("192.168.1.180:8188", id_lut!(m8))
     ])] machines: Vec<Machine>,
     #[rust] queue: Vec<PromptState>,
-
+    
     #[rust(Database::new(cx))] db: Database,
-
-    #[rust] filtered:FilteredDb,
+    
+    #[rust] filtered: FilteredDb,
     #[rust] num_images: u64,
     #[rust(6u64)] batch_size: u64,
     #[rust(1000000u64)] last_seed: u64,
-
-
+    
+    
     #[rust] current_image: Option<ImageId>
 }
 
-const LIBRARY_ROWS:usize = 1;
+const LIBRARY_ROWS: usize = 1;
 
 enum ImageListItem {
     PromptGroup {group_id: usize},
@@ -285,18 +284,18 @@ struct PromptGroup {
 }
 
 #[allow(dead_code)]
-struct TextureItem{
+struct TextureItem {
     last_seen: Instant,
     texture: Texture
 }
 
-enum DecoderToUI{
+enum DecoderToUI {
     Error(String),
     Done(String, ImageBuffer)
 }
 
-#[derive(Clone,Copy, PartialEq)]
-struct ImageId{
+#[derive(Clone, Copy, PartialEq)]
+struct ImageId {
     group_id: usize,
     image_id: usize,
 }
@@ -311,14 +310,14 @@ struct Database {
 }
 
 #[derive(Default)]
-struct FilteredDb{
+struct FilteredDb {
     list: Vec<ImageListItem>,
     flat: Vec<ImageId>,
 }
 
-impl FilteredDb{
+impl FilteredDb {
     
-    fn filter_db(&mut self, db:&Database, search: &str, starred:bool) {
+    fn filter_db(&mut self, db: &Database, search: &str, starred: bool) {
         self.list.clear();
         self.flat.clear();
         for (group_id, group) in db.groups.iter().enumerate() {
@@ -328,10 +327,10 @@ impl FilteredDb{
                 self.list.push(ImageListItem::PromptGroup {group_id});
                 // lets collect images in pairs of 3
                 for (store_index, image) in group.images.iter().enumerate() {
-                    if starred && !image.starred{
+                    if starred && !image.starred {
                         continue
                     }
-                    self.flat.push(ImageId{
+                    self.flat.push(ImageId {
                         group_id,
                         image_id: store_index
                     });
@@ -354,7 +353,7 @@ impl FilteredDb{
 
 
 impl Database {
-    fn new(cx:&mut Cx) -> Self {
+    fn new(cx: &mut Cx) -> Self {
         let use_cores = cx.cpu_cores().max(3) - 2;
         Self {
             textures: HashMap::new(),
@@ -366,21 +365,21 @@ impl Database {
         }
     }
     
-    fn handle_decoded_images(&mut self, cx:&mut Cx)->bool{
+    fn handle_decoded_images(&mut self, cx: &mut Cx) -> bool {
         let mut updates = false;
         while let Ok(msg) = self.to_ui.receiver.try_recv() {
-            match msg{
-                DecoderToUI::Done(file_name, image_buffer)=>{
-                    let index = self.in_flight.iter().position(|v| *v == file_name).unwrap();
+            match msg {
+                DecoderToUI::Done(file_name, image_buffer) => {
+                    let index = self.in_flight.iter().position( | v | *v == file_name).unwrap();
                     self.in_flight.remove(index);
-                    self.textures.insert(file_name, TextureItem{
+                    self.textures.insert(file_name, TextureItem {
                         last_seen: Instant::now(),
                         texture: image_buffer.into_new_texture(cx)
                     });
                     updates = true;
                 }
-                DecoderToUI::Error(file_name)=>{
-                    let index = self.in_flight.iter().position(|v| *v == file_name).unwrap();
+                DecoderToUI::Error(file_name) => {
+                    let index = self.in_flight.iter().position( | v | *v == file_name).unwrap();
                     self.in_flight.remove(index);
                 }
             }
@@ -388,13 +387,13 @@ impl Database {
         updates
     }
     
-    fn get_image_texture(&mut self, image:ImageId)->Option<Texture>{
+    fn get_image_texture(&mut self, image: ImageId) -> Option<Texture> {
         let group = &self.groups[image.group_id];
         let image = &group.images[image.image_id];
-        if self.in_flight.contains(&image.file_name){
+        if self.in_flight.contains(&image.file_name) {
             return None
         }
-        if let Some(texture) = self.textures.get(&image.file_name){
+        if let Some(texture) = self.textures.get(&image.file_name) {
             return Some(texture.texture.clone());
         }
         // request decode
@@ -404,8 +403,8 @@ impl Database {
         self.in_flight.push(file_name.clone());
         self.thread_pool.execute(move | _ | {
             
-            if let Ok(data) = fs::read(format!("{}/{}", image_path, file_name)){
-                if let Ok(image_buffer) = ImageBuffer::from_png(&data){
+            if let Ok(data) = fs::read(format!("{}/{}", image_path, file_name)) {
+                if let Ok(image_buffer) = ImageBuffer::from_png(&data) {
                     let _ = to_ui.send(DecoderToUI::Done(file_name, image_buffer));
                     return
                 }
@@ -423,7 +422,7 @@ impl Database {
             let file_name = entry.file_name().to_str().unwrap().to_string();
             if let Some(name) = file_name.strip_suffix(".json") {
                 let mut starred = false;
-                let name = if let Some(name) = name.strip_prefix("star_"){starred = true;name}else{name};
+                let name = if let Some(name) = name.strip_prefix("star_") {starred = true; name}else {name};
                 
                 if let Ok(hash) = name.parse::<u64>() {
                     let hash = LiveId(hash);
@@ -453,8 +452,8 @@ impl Database {
             }
             if let Some(name) = file_name.strip_suffix(".png") {
                 let mut starred = false;
-                let name = if let Some(name) = name.strip_prefix("star_"){starred = true;name}else{name};
-
+                let name = if let Some(name) = name.strip_prefix("star_") {starred = true; name}else {name};
+                
                 let parts = name.split("_").collect::<Vec<&str >> ();
                 if parts.len() == 3 {
                     if let Ok(hash) = parts[0].parse::<u64>() {
@@ -562,35 +561,35 @@ impl App {
         label.redraw(cx);
     }
     
-    fn set_current_image_by_item_id_and_row(&mut self, cx:&mut Cx, item_id:u64, row:usize){
+    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
         self.ui.redraw(cx);
-        if let Some(ImageListItem::ImageRow{group_id, image_count, image_ids}) = self.filtered.list.get(item_id as usize){
-            self.current_image = Some(ImageId{
+        if let Some(ImageListItem::ImageRow {group_id, image_count, image_ids}) = self.filtered.list.get(item_id as usize) {
+            self.current_image = Some(ImageId {
                 group_id: *group_id,
                 image_id: image_ids[row.min(*image_count)]
             })
         }
     }
-
     
-    fn select_next_image(&mut self, cx:&mut Cx){
+    
+    fn select_next_image(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx);
-        if let Some(current_image) = self.current_image{
-            if let Some(pos) = self.filtered.flat.iter().position(|v| *v == current_image){
-                if pos + 1 < self.filtered.flat.len(){
-                    self.current_image = Some(self.filtered.flat[pos+1]);
+        if let Some(current_image) = self.current_image {
+            if let Some(pos) = self.filtered.flat.iter().position( | v | *v == current_image) {
+                if pos + 1 < self.filtered.flat.len() {
+                    self.current_image = Some(self.filtered.flat[pos + 1]);
                 }
             }
         }
     }
     
-        
-    fn select_prev_image(&mut self, cx:&mut Cx){
+    
+    fn select_prev_image(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx);
-        if let Some(current_image) = self.current_image{
-            if let Some(pos) = self.filtered.flat.iter().position(|v| *v == current_image){
+        if let Some(current_image) = self.current_image {
+            if let Some(pos) = self.filtered.flat.iter().position( | v | *v == current_image) {
                 if pos > 0 {
-                    self.current_image = Some(self.filtered.flat[pos-1]);
+                    self.current_image = Some(self.filtered.flat[pos - 1]);
                 }
             }
         }
@@ -599,39 +598,39 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if self.db.handle_decoded_images(cx){
+        if self.db.handle_decoded_images(cx) {
             self.ui.redraw(cx);
         }
         
         let image_list = self.ui.get_list_view_set(ids!(image_list));
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            if let Some(current_image) = self.current_image{
+            if let Some(current_image) = self.current_image {
                 let tex = self.db.get_image_texture(current_image);
                 self.ui.get_image(id!(image_view.image)).set_texture(tex)
-            } 
+            }
             
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-
-                if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut(){
+                
+                if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                     // alright now we draw the items
                     image_list.set_item_range(0, self.filtered.list.len() as u64, 1);
                     while let Some(item_id) = image_list.next_visible_item(cx) {
-                        if let Some(item) = self.filtered.list.get(item_id as usize){
-                            match item{
-                                ImageListItem::PromptGroup{group_id}=>{
+                        if let Some(item) = self.filtered.list.get(item_id as usize) {
+                            match item {
+                                ImageListItem::PromptGroup {group_id} => {
                                     let group = &self.db.groups[*group_id];
                                     let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
                                     item.get_text_input(id!(prompt)).set_text(&group.prompt.as_ref().unwrap().positive);
                                     item.draw_widget_all(cx);
                                 }
-                                ImageListItem::ImageRow{group_id, image_count, image_ids}=>{
+                                ImageListItem::ImageRow {group_id, image_count, image_ids} => {
                                     let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
-                                    let rows = item.get_frame_set(ids!(row1,row2,row3));
-                                    for (index,row) in rows.iter().enumerate(){
-                                        if index >= *image_count{break}
+                                    let rows = item.get_frame_set(ids!(row1, row2, row3));
+                                    for (index, row) in rows.iter().enumerate() {
+                                        if index >= *image_count {break}
                                         // alright we need to query our png cache for an image.
-                                        let image_id = ImageId{group_id:*group_id, image_id:image_ids[index]};
+                                        let image_id = ImageId {group_id: *group_id, image_id: image_ids[index]};
                                         let tex = self.db.get_image_texture(image_id);
                                         row.get_image(id!(img)).set_texture(tex);
                                     }
@@ -650,15 +649,15 @@ impl AppMain for App {
         for event in event.network_responses() {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => {
-                    if s.contains("execution_error"){ // i dont care to expand the json def for this one
+                    if s.contains("execution_error") { // i dont care to expand the json def for this one
                         log!("Got execution error for {} {}", event.id, s);
                     }
                     else {
                         match ComfyUIMessage::deserialize_json(&s) {
                             Ok(data) => {
-                                if data._type == "status"{
-                                    if let Some(status) = data.data.status{
-                                        if status.exec_info.queue_remaining == 0{
+                                if data._type == "status" {
+                                    if let Some(status) = data.data.status {
+                                        if status.exec_info.queue_remaining == 0 {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
                                                 machine.running = None;
                                             }
@@ -697,11 +696,11 @@ impl AppMain for App {
                     if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
                         // alright we got an image back
                         match res.request_id {
-                            live_id!(prompt) =>if let Some(data) = res.get_string_body() { // lets check if the prompt executed
+                            live_id!(prompt) => if let Some(data) = res.get_string_body() { // lets check if the prompt executed
                                 log!("{}", data);
                             }
                             live_id!(image) => if let Some(data) = res.get_body() {
-                                if let Some(fetching) = machine.fetching.take(){
+                                if let Some(fetching) = machine.fetching.take() {
                                     
                                     // lets write our image to disk properly
                                     self.db.add_png_and_prompt(fetching.prompt_state, data);
@@ -715,8 +714,8 @@ impl AppMain for App {
                                     
                                     self.ui.redraw(cx);
                                 }
-                                 
-                           }
+                                
+                            }
                             _ => panic!()
                         }
                     }
@@ -752,7 +751,7 @@ impl AppMain for App {
             self.ui.get_slide_panel(id!(input_panel)).toggle(cx);
         }*/
         
-        if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions){
+        if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions) {
             self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
             image_list.set_first_id(0);
@@ -773,22 +772,22 @@ impl AppMain for App {
             self.ui.get_slide_panel(id!(input_panel)).open(cx);
         }*/
         
-        if let Some(ke) = self.ui.get_frame(id!(big_image)).key_down(&actions){
-            match ke.key_code{
-                KeyCode::ArrowDown=>{
+        if let Some(ke) = self.ui.get_frame(id!(big_image)).key_down(&actions) {
+            match ke.key_code {
+                KeyCode::ArrowDown => {
                     self.select_next_image(cx);
                 }
-                KeyCode::ArrowUp=>{ 
+                KeyCode::ArrowUp => {
                     self.select_prev_image(cx);
                 }
-                _=>()
+                _ => ()
             }
         }
         
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
-            let rows = item.get_frame_set(ids!(row1,row2));
-            for (index,row) in rows.iter().enumerate(){
+            let rows = item.get_frame_set(ids!(row1, row2));
+            for (index, row) in rows.iter().enumerate() {
                 if row.finger_down(&actions).is_some() {
                     self.set_current_image_by_item_id_and_row(cx, item_id, index);
                 }
