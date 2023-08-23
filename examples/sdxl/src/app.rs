@@ -634,11 +634,10 @@ impl App {
             let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative.replace("\n","").replace("\"",""));
             let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
             // lets store that we queued this image
-            request.set_request_id(live_id!(prompt));
+            request.set_metadata_id(machine.id);
             request.set_body(ws.as_bytes().to_vec());
-            cx.http_request(machine.id, request);
             Self::update_progress(cx, &self.ui, machine.id, true, 0);
-
+            cx.http_request(live_id!(prompt), request);
             machine.running = Some(RunningPrompt {
                 steps_counter:0,
                 prompt_state: prompt_state.clone(),
@@ -653,8 +652,8 @@ impl App {
         let machine = self.machines.iter().find( | v | v.id == machine_id).unwrap();
         let url = format!("http://{}/view?filename={}&subfolder=&type=output", machine.ip, image_name);
         let mut request = HttpRequest::new(url, HttpMethod::GET);
-        request.set_request_id(live_id!(image));
-        cx.http_request(machine.id, request);
+        request.set_metadata_id(machine.id);
+        cx.http_request(live_id!(image), request);
     }
     
     fn open_web_socket(&self, cx: &mut Cx) {
@@ -773,7 +772,7 @@ impl AppMain for App {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => {
                     if s.contains("execution_error") { // i dont care to expand the json def for this one
-                        log!("Got execution error for {} {}", event.id, s);
+                        log!("Got execution error for {} {}", event.request_id, s);
                     }
                     else {
                         match ComfyUIMessage::deserialize_json(&s) {
@@ -781,7 +780,7 @@ impl AppMain for App {
                                 if data._type == "status" {
                                     if let Some(status) = data.data.status {
                                         if status.exec_info.queue_remaining == 0 {
-                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 machine.running = None;
                                                 Self::update_progress(cx,  &self.ui, event.id, false, 0);
                                             }
@@ -794,11 +793,11 @@ impl AppMain for App {
                                 else if data._type == "executed" {
                                     if let Some(output) = &data.data.output {
                                         if let Some(image) = output.images.first() {
-                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 if let Some(running) = machine.running.take(){
                                                     log!("GOT: {}", running.steps_counter);
                                                     machine.fetching = Some(running);
-                                                    self.fetch_image(cx, event.id, &image.filename);
+                                                    self.fetch_image(cx, event.request_id, &image.filename);
                                                 }
                                             }
                                         }
@@ -825,13 +824,12 @@ impl AppMain for App {
                     log!("Got Binary {}", bin.len());
                 }
                 NetworkResponse::HttpResponse(res) => {
-                    // prompt request
-                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
-                        // alright we got an image back
-                        match res.request_id {
-                            live_id!(prompt) => if let Some(_data) = res.get_string_body() { // lets check if the prompt executed
-                            }
-                            live_id!(image) => if let Some(data) = res.get_body() {
+                    // alright we got an image back
+                    match event.request_id {
+                        live_id!(prompt) => if let Some(_data) = res.get_string_body() { // lets check if the prompt executed
+                        }
+                        live_id!(image) => if let Some(data) = res.get_body() {
+                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
                                 if let Some(fetching) = machine.fetching.take() {
                                     
                                     // lets write our image to disk properly
@@ -846,14 +844,13 @@ impl AppMain for App {
                                     
                                     self.ui.redraw(cx);
                                 }
-                                
                             }
-                            _ => panic!()
                         }
+                        _ => panic!()
                     }
                 }
                 e => {
-                    log!("{} {:?}", event.id, e)
+                    log!("{} {:?}", event.request_id, e)
                 }
             }
         }

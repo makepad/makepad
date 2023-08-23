@@ -7,7 +7,7 @@ use crate::event::Event;
 
 #[derive(Clone, Debug)]
 pub struct NetworkResponseEvent {
-    pub id: LiveId,
+    pub request_id: LiveId,
     pub response: NetworkResponse,
 }
 
@@ -72,7 +72,7 @@ impl Default for NetworkResponseChannel {
 
 #[derive(PartialEq, Debug)]
 pub struct HttpRequest {
-    pub request_id: LiveId,
+    pub metadata_id: LiveId,
     pub url: String,
     pub method: HttpMethod,
     pub headers: BTreeMap<String, Vec<String>>,
@@ -82,7 +82,7 @@ pub struct HttpRequest {
 impl HttpRequest { 
     pub fn new(url: String, method: HttpMethod) -> Self {
         HttpRequest {
-            request_id: LiveId(0),
+            metadata_id: LiveId(0),
             url,
             method,
             headers: BTreeMap::new(),
@@ -90,8 +90,8 @@ impl HttpRequest {
         }
     }
     
-    pub fn set_request_id(&mut self, id: LiveId){
-        self.request_id = id;
+    pub fn set_metadata_id(&mut self, id: LiveId){
+        self.metadata_id = id;
     }
     
     pub fn set_header(&mut self, name: String, value: String) {
@@ -124,16 +124,16 @@ impl HttpRequest {
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
-    pub request_id: LiveId,
+    pub metadata_id: LiveId,
     pub status_code: u16,
     pub headers: BTreeMap<String, Vec<String>>,
     pub body: Option<Vec<u8>>,
 }
 
 impl HttpResponse {
-    pub fn new(request_id:LiveId, status_code: u16, string_headers: String, body: Option<Vec<u8>>) -> Self {
+    pub fn new(metadata_id: LiveId, status_code: u16, string_headers: String, body: Option<Vec<u8>>) -> Self {
         HttpResponse {
-            request_id,
+            metadata_id,
             status_code,
             headers: HttpResponse::parse_headers(string_headers),
             body

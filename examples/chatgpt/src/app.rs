@@ -8,7 +8,6 @@ live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
-    import makepad_widgets::frame::Image;
     import makepad_widgets::text_input::TextInput;
     
     App = {{App}} {
@@ -74,7 +73,7 @@ impl App{
     // The response will be received and processed by AppMain's handle_event.
     fn send_message(cx: &mut Cx, message: String) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
-        let request_id = LiveId::from_str("SendChatMessage");
+        let request_id = live_id!(SendChatMessage);
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
         
         request.set_header("Content-Type".to_string(), "application/json".to_string());
@@ -100,7 +99,7 @@ impl AppMain for App{
             match &event.response{
                 NetworkResponse::HttpResponse(response)=>{
                     let label = self.ui.get_label(id!(message_label));
-                    match event.id {
+                    match event.request_id {
                          live_id!(SendChatMessage) => {
                             if response.status_code == 200 {
                                 let chat_response = response.get_json_body::<ChatResponse>().unwrap();
@@ -113,11 +112,12 @@ impl AppMain for App{
                         _ => (),
                     }
                 }
-                e=>{
+                NetworkResponse::HttpRequestError(error)=>{
                     let label = self.ui.get_label(id!(message_label));
-                    label.set_label(&format!("Failed to connect with OpenAI {:?}", e));
+                    label.set_label(&format!("Failed to connect with OpenAI {:?}", error));
                     label.redraw(cx);
                 }
+                _ => ()
             }
         }
 
