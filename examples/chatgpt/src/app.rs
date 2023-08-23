@@ -8,7 +8,6 @@ live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
-    import makepad_widgets::frame::Image;
     import makepad_widgets::text_input::TextInput;
     
     App = {{App}} {
@@ -74,7 +73,7 @@ impl App{
     // The response will be received and processed by AppMain's handle_event.
     fn send_message(cx: &mut Cx, message: String) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
-        let request_id = LiveId::from_str("SendChatMessage");
+        let request_id = live_id!(SendChatMessage);
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
         
         request.set_header("Content-Type".to_string(), "application/json".to_string());
