@@ -21,19 +21,6 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::dock::*;
     
-    UnderlineTextInput = <TextInput> {
-        walk: {width: Fill, height: Fit, margin: {top: 30}},
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0, self.rect_size.y - 1.0);
-                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 1.0);
-                sdf.stroke(#a, 1.0)
-                return sdf.result;
-            }
-        }
-    }
-    
     ImageTile = <Frame> {
         walk: {width: Fill, height: Fit},
         cursor: Hand
@@ -80,7 +67,21 @@ live_design!{
                         axis: Vertical,
                         align: FromB(200.0),
                         a: image_view,
-                        b: input_panel
+                        b: split2
+                    }
+                    
+                    split2 = Splitter {
+                        axis: Horizontal,
+                        align: Weighted(0.5),
+                        a: positive_panel,
+                        b: split3
+                    }
+                    
+                    split3 = Splitter {
+                        axis: Horizontal,
+                        align: Weighted(0.5),
+                        a: negative_panel,
+                        b: keyword_panel
                     }
                     
                     image_library = Tab {
@@ -88,10 +89,21 @@ live_design!{
                         kind: ImageLibrary
                     }
                     
-                    input_panel = Tab {
+                    positive_panel = Tab {
                         name: ""
-                        kind: InputPanel
+                        kind: PositivePanel
                     }
+
+                    negative_panel = Tab {
+                        name: ""
+                        kind: NegativePanel
+                    }
+
+                    keyword_panel = Tab {
+                        name: ""
+                        kind: KeywordPanel
+                    }
+
                     
                     image_view = Tab {
                         name: ""
@@ -99,7 +111,7 @@ live_design!{
                     }
                     
                     ImageView = <Rect> {
-                        draw_bg: {color: #2}
+                        draw_bg: {color: #3}
                         walk: {height: Fill, width: Fill}
                         layout: {flow: Down, align: {x: 0.5, y: 0.5}}
                         cursor: Hand,
@@ -109,16 +121,23 @@ live_design!{
                         }
                     }
                     
-                    InputPanel = <Frame> {
-                        walk: {height: Fit, width: Fill}
-                        layout: {flow: Right, padding: 10}
-                        positive = <UnderlineTextInput> {
+                    PositivePanel = <Frame> {
+                        walk: {height: Fill, width: Fill}
+                        layout: {flow: Right, padding: 0}
+                
+                        positive = <TextInput> {
+                            walk: {width: Fill, height: Fill},
                             text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
+                            draw_label:{text_style:{font_size:12}}
                             draw_bg: {
                                 color: #1113
                             }
                         }
-                        negative = <UnderlineTextInput> {
+                    }
+                    NegativePanel = <Frame>{
+                        negative = <TextInput> {
+                            walk: {width: Fill, height: Fill},
+                            draw_label:{text_style:{font_size:12}}
                             text: "text, watermark, cartoon"
                             draw_bg: {
                                 color: #1113
@@ -126,14 +145,18 @@ live_design!{
                         }
                     }
                     
+                    KeywordPanel = <Frame>{
+                        
+                    }
+                    
                     ImageLibrary = <Rect> {
-                        draw_bg: {color: #2}
+                        draw_bg: {color: #3}
                         walk: {height: Fill, width: Fill}
                         layout: { flow: Down},
                         <Frame> {
                             walk: {height: Fit, width: Fill}
-                            layout: {flow: Right,padding:{left:20, right:20}},
-                            search = <UnderlineTextInput> {
+                            layout: {flow: Right,padding:{left:10, right:10, top:10}},
+                            search = <TextInput> {
                                 walk: {height: Fit, width: Fill}
                                 empty_message: "Search"
                                 draw_bg: {
@@ -143,13 +166,13 @@ live_design!{
                         }
                         image_list = <ListView> {
                             walk: {height: Fill, width: Fill}
-                            layout: {flow: Down, padding: 20}
+                            layout: {flow: Down, padding: 10}
                             PromptGroup = <Frame> {
-                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                walk: {height: Fit, width: Fill, margin: {bottom: 10}}
                                 layout: {flow: Right, spacing: 10}
                                 prompt = <TextInput> {
                                     read_only: true,
-                                    walk: {width: Fill, height: Fit, margin: {top: 30}},
+                                    walk: {width: Fill, height: Fit},
                                     draw_bg: {
                                         color: #5
                                     }
@@ -157,18 +180,18 @@ live_design!{
                             }
                             Empty = <Frame> {}
                             ImageRow1 = <Frame> {
-                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                walk: {height: Fit, width: Fill, margin: {bottom: 10}}
                                 layout: {spacing: 20, flow: Right},
                                 row1 = <ImageTile> {}
                             }
                             ImageRow2 = <Frame> {
-                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                walk: {height: Fit, width: Fill, margin: {bottom: 10}}
                                 layout: {spacing: 20, flow: Right},
                                 row1 = <ImageTile> {}
                                 row2 = <ImageTile> {}
                             }
                             ImageRow3 = <Frame> {
-                                walk: {height: Fit, width: Fill, margin: {bottom: 20}}
+                                walk: {height: Fit, width: Fill, margin: {bottom: 10}}
                                 layout: {spacing: 20, flow: Right},
                                 row1 = <ImageTile> {}
                                 row2 = <ImageTile> {}
@@ -671,8 +694,10 @@ impl AppMain for App {
                                     if let Some(output) = &data.data.output {
                                         if let Some(image) = output.images.first() {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
-                                                machine.fetching = Some(machine.running.take().unwrap());
-                                                self.fetch_image(cx, event.id, &image.filename);
+                                                if let Some(running) = machine.running.take(){
+                                                    machine.fetching = Some(running);
+                                                    self.fetch_image(cx, event.id, &image.filename);
+                                                }
                                             }
                                         }
                                     }
