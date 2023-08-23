@@ -222,6 +222,7 @@ impl Cx {
                     network_responses.push(NetworkResponseEvent{
                         id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
                         response: NetworkResponse::HttpResponse(HttpResponse::new(
+                            LiveId(0),
                             tw.status as u16,
                             tw.headers,
                             Some(tw.body.into_vec_u8())

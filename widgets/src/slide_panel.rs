@@ -14,7 +14,7 @@ live_design!{
     SlidePanel = {{SlidePanel}} {
         state: {
             closed = {
-                default: on,
+                default: off,
                 on = {
                     redraw: true,
                     from: {
@@ -47,6 +47,7 @@ pub struct SlidePanel {
     #[deref] frame: Frame,
     #[state] state: LiveState,
     #[live] closed: f64,
+    #[live] side: SlideSide,
     #[rust] next_frame: NextFrame
 }
 
@@ -90,9 +91,23 @@ impl Widget for SlidePanel {
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
         // ok lets set abs pos
         let pos = cx.turtle().eval_width(walk.width, walk.margin, Flow::Overlay);
-        walk.abs_pos = Some(dvec2(-pos * self.closed, 0.0));
+        match self.side{
+            SlideSide::Top=>{
+                walk.abs_pos = Some(dvec2(0.0, -pos * self.closed));
+            }
+            SlideSide::Left=>{
+                walk.abs_pos = Some(dvec2(-pos * self.closed, 0.0));
+            }
+        }
         self.frame.draw_walk_widget(cx, walk)
     }
+}
+
+#[derive(Live, LiveHook)]
+#[live_ignore]
+pub enum SlideSide{
+    #[pick] Left,
+    Top
 }
 
 impl SlidePanel {

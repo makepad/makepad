@@ -354,7 +354,7 @@ impl AndroidAudioAccess {
         Some(AndroidAudioDeviceDesc {
             aaudio_id,
             desc: AudioDeviceDesc {
-                device_id: LiveId::from_str_unchecked(&name).into(),
+                device_id: LiveId::from_str(&name).into(),
                 device_type,
                 is_default: false,
                 has_failed: false,
@@ -373,7 +373,7 @@ impl AndroidAudioAccess {
         self.device_descs.push(AndroidAudioDeviceDesc {
             aaudio_id: 0,
             desc: AudioDeviceDesc {
-                device_id: LiveId::from_str_unchecked(&name).into(),
+                device_id: LiveId::from_str(&name).into(),
                 device_type: AudioDeviceType::Input,
                 is_default: true,
                 has_failed: false,
@@ -385,7 +385,7 @@ impl AndroidAudioAccess {
         self.device_descs.push(AndroidAudioDeviceDesc {
             aaudio_id: 0,
             desc: AudioDeviceDesc {
-                device_id: LiveId::from_str_unchecked(&name).into(),
+                device_id: LiveId::from_str(&name).into(),
                 device_type: AudioDeviceType::Output,
                 is_default: true,
                 has_failed: false,
