@@ -662,6 +662,52 @@ impl FrameSet {
             item.redraw(cx);
         }
     }
+    
+    pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_down(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_up(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+
+    pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_move(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.key_down(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.key_up(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
 }
 
 impl Widget for Frame {
