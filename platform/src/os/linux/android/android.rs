@@ -355,7 +355,7 @@ impl Cx {
     pub fn from_java_on_http_response(&mut self, request_id: u64, metadata_id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
         let e = Event::NetworkResponses(vec![
             NetworkResponseEvent{
-                id: LiveId(request_id),
+                request_id: LiveId(request_id),
                 response: NetworkResponse::HttpResponse(HttpResponse::new(
                     LiveId(metadata_id),
                     status_code,
@@ -371,7 +371,7 @@ impl Cx {
     pub fn from_java_on_http_request_error(&mut self, request_id: u64, _metadata_id: u64, error: String, to_java: AndroidToJava) {
         let e = Event::NetworkResponses(vec![
             NetworkResponseEvent{
-                id: LiveId(request_id),
+                request_id: LiveId(request_id),
                 response: NetworkResponse::HttpRequestError(error)
             }
         ]);
