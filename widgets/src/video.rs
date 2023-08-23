@@ -13,12 +13,33 @@ live_design! {
             height: 500
         }
         draw_bg: {
-            texture image: texture2d
+            texture y_image: texture2d
+            texture uv_image: texture2d
             instance image_scale: vec2(1.0, 1.0)
             instance image_pan: vec2(0.0, 0.0)
             uniform image_alpha: 1.0
+
+            fn yuv_to_rgb(y: float, u: float, v: float) -> vec4 {
+                let c = y - 16.0;
+                let d = u - 128.0;
+                let e = v - 128.0;
+
+                let r = clamp((298.0 * c + 409.0 * e + 128.0) / 65536.0, 0.0, 1.0);
+                let g = clamp((298.0 * c - 100.0 * d - 208.0 * e + 128.0) / 65536.0, 0.0, 1.0);
+                let b = clamp((298.0 * c + 516.0 * d + 128.0) / 65536.0, 0.0, 1.0);
+
+                return vec4(r, g, b, 1.0);
+            }
+
             fn get_color(self) -> vec4 {
-                return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
+                let y_sample = sample2d(self.y_image, self.pos * self.image_scale + self.image_pan).z;
+                let uv_coords = (self.pos * self.image_scale + self.image_pan);
+                let uv_sample = sample2d(self.uv_image, uv_coords);
+
+                let u = uv_sample.x;
+                let v = uv_sample.y;
+
+                return yuv_to_rgb(y_sample * 255., u * 255., v * 255.);
             }
 
             fn pixel(self) -> vec4 {
@@ -47,7 +68,9 @@ pub struct Video {
     #[live]
     source: LiveDependency,
     #[rust]
-    texture: Option<Texture>,
+    y_texture: Option<Texture>,
+    #[rust]
+    uv_texture: Option<Texture>,
 
     // Original video metadata
     #[rust]
@@ -91,7 +114,8 @@ pub struct Video {
 
 #[derive(Clone)]
 struct VideoFrame {
-    pixel_data: Vec<u32>,
+    y_data: Vec<u8>,
+    uv_data: Vec<u8>,
     timestamp: f64,
 }
 
@@ -207,14 +231,22 @@ impl Video {
 
         if let Event::VideoStream(event) = event {
             if event.pixel_data.len() != 0 {
-                let rgba_pixel_data = self.convert_nv12_to_rgba(&event.pixel_data);
+                // TODO: check color format before splitting, might want to support NV12 and other formats
+                let (y_data, uv_data) = split_nv12_data(
+                    &event.pixel_data,
+                    self.width,
+                    self.height,
+                    event.yuv_strides.0,
+                    event.yuv_strides.1,
+                );
                 self.frames_buffer.push(VideoFrame {
-                    pixel_data: rgba_pixel_data,
+                    y_data,
+                    uv_data,
                     timestamp: event.timestamp as f64 / 1_000_000.0,
                 });
             }
 
-            // TODO
+            // TODO:
             // IF IS END OF CHUNK, GO FOR NEXT CHUNK
             if event.is_eos {
                 makepad_error_log::log!("Chunk decoding finished");
@@ -241,7 +273,7 @@ impl Video {
         match self
             .frames_buffer
             .get(self.current_frame)
-            .map(|f| f.pixel_data.clone())
+            .map(|f| (f.y_data.clone(), f.uv_data.clone()))
         {
             Some(pixel_data) => {
                 cloned_pixel_data = pixel_data;
@@ -256,10 +288,15 @@ impl Video {
         // This helps in catching up in case some frames were skipped due to longer `elapsed` times.
         // this used to be a while instead of if, we'll see if needed
         if self.accumulated_time >= frame_timestamp {
-            self.update_texture(cx, &mut cloned_pixel_data);
+            self.update_textures(cx, &mut cloned_pixel_data.0, &mut cloned_pixel_data.1);
+
             self.draw_bg
                 .draw_vars
-                .set_texture(0, self.texture.as_ref().unwrap());
+                .set_texture(0, self.y_texture.as_ref().unwrap());
+
+            self.draw_bg
+                .draw_vars
+                .set_texture(1, self.uv_texture.as_ref().unwrap());
             self.redraw(cx);
 
             // Check if we're at the last frame
@@ -279,13 +316,18 @@ impl Video {
         WidgetDraw::done()
     }
 
-    fn update_texture(&mut self, cx: &mut Cx, texture_data: &mut Vec<u32>) {
-        if let None = self.texture {
-            self.texture = Some(Texture::new(cx));
+    fn update_textures(&mut self, cx: &mut Cx, y_data: &mut Vec<u8>, uv_data: &mut Vec<u8>) {
+        if let None = self.y_texture {
+            self.y_texture = Some(Texture::new(cx));
         }
-        let texture = self.texture.as_mut().unwrap();
+        if let None = self.uv_texture {
+            self.uv_texture = Some(Texture::new(cx));
+        }
 
-        texture.set_desc(
+        let y_texture = self.y_texture.as_mut().unwrap();
+        let uv_texture = self.uv_texture.as_mut().unwrap();
+
+        y_texture.set_desc(
             cx,
             TextureDesc {
                 format: TextureFormat::ImageBGRA,
@@ -294,7 +336,33 @@ impl Video {
             },
         );
 
-        texture.swap_image_u32(cx, texture_data);
+        uv_texture.set_desc(
+            cx,
+            TextureDesc {
+                format: TextureFormat::ImageBGRA,
+                width: Some(self.width / 2),
+                height: Some(self.height / 2),
+            },
+        );
+
+        // TODO:
+        // - optimize by adding support for 8-bit textures
+        // - optimize by already buffering the u32 data instead of converting at this stage.
+
+        // Convert 8-bit Y data to 32-bit
+        let mut y_data_u32: Vec<u32> = y_data.iter().map(|&y| 0xFFFFFF00u32 | (y as u32)).collect();
+        // Convert 8-bit UV data to 32-bit (only 2 channels are used)
+        let mut uv_data_u32: Vec<u32> = uv_data
+            .chunks(2)
+            .map(|chunk| {
+                let u = chunk[0];
+                let v = chunk[1];
+                (u as u32) << 16 | (v as u32) << 8 | 0xFF000000u32
+            })
+            .collect();
+
+        y_texture.swap_image_u32(cx, &mut y_data_u32);
+        uv_texture.swap_image_u32(cx, &mut uv_data_u32);
     }
 
     fn start_decoding(&self, cx: &mut Cx) {
@@ -324,69 +392,9 @@ impl Video {
         );
         self.frames_buffer.size = buffer_size_with_margin;
     }
-
-    // TODO: move to GPU
-    fn convert_nv12_to_rgba(&self, data: &[u8]) -> Vec<u32> {
-        if data.len() < self.width * self.height * 3 / 2 {
-            panic!("Input data is not of expected size for NV12 format");
-        }
-
-        let mut rgba_data = Vec::with_capacity(self.width * self.height);
-
-        // Indices for the Y and UV data.
-        let y_start = 0;
-        let uv_start = self.width * self.height;
-
-        for y in 0..self.height {
-            for x in 0..self.width {
-                // Get the Y value.
-                let y_index = y_start + y * self.width + x;
-                let y_value = data[y_index];
-
-                // Get the U and V values. (For NV12 format, UV values are interleaved.)
-                let uv_index = uv_start + (y / 2) * self.width + 2 * (x / 2);
-                let u_value = data[uv_index];
-                let v_value = data[uv_index + 1];
-
-                let (r, g, b) = yuv_to_rgb(y_value, u_value, v_value);
-
-                rgba_data.push(0xFF << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32);
-            }
-        }
-
-        rgba_data
-    }
-
-    fn convert_nv21_to_rgba(&self, data: &[u8]) -> Vec<u32> {
-        if data.len() < self.width * self.height * 3 / 2 {
-            panic!("Input data is not of expected size for NV21 format");
-        }
-
-        let mut rgba_data = Vec::with_capacity(self.width * self.height);
-
-        let y_start = 0;
-        let uv_start = self.width * self.height;
-
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let y_index = y_start + y * self.width + x;
-                let y_value = data[y_index];
-
-                let uv_index = uv_start + (y / 2) * self.width + 2 * (x / 2);
-                let v_value = data[uv_index];
-                let u_value = data[uv_index + 1];
-
-                let (r, g, b) = yuv_to_rgb(y_value, u_value, v_value);
-
-                rgba_data.push(0xFF << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32);
-            }
-        }
-
-        rgba_data
-    }
 }
 
-// TODO: dynamically calclate this based on frame rate and size
+// TODO: dynamically calculate this based on frame rate and size
 const CHUNK_DURATION_US: u64 = 1_000_000;
 
 struct RingBuffer {
@@ -439,4 +447,32 @@ fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
     let b = (y + 1.772 * u).max(0.0).min(255.0) as u8;
 
     (r, g, b)
+}
+
+fn split_nv12_data(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    y_stride: usize,
+    uv_stride: usize,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut y_data = Vec::with_capacity(width * height);
+    let mut uv_data = Vec::with_capacity(width * height / 2);
+
+    // Extract Y data
+    for row in 0..height {
+        let start = row * y_stride;
+        let end = start + width;
+        y_data.extend_from_slice(&data[start..end]);
+    }
+
+    // Extract UV data
+    let uv_start = y_stride * height;
+    for row in 0..(height / 2) {
+        let start = uv_start + row * uv_stride;
+        let end = start + width; // since U and V are interleaved, and are half the width of Y
+        uv_data.extend_from_slice(&data[start..end]);
+    }
+
+    (y_data, uv_data)
 }
