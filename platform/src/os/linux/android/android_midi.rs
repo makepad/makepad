@@ -311,7 +311,7 @@ impl AndroidMidiAccess {
                     let name = format!("{} port {}", device_name, i);
                     port_descs.push(MidiPortDesc {
                         name: format!("{} port {}", device_name, i),
-                        port_id: LiveId::from_str_unchecked(&name).into(),
+                        port_id: LiveId::from_str(&name).into(),
                         port_type: MidiPortType::Input
                     });
                 }
@@ -319,7 +319,7 @@ impl AndroidMidiAccess {
                     let name = format!("{} port {}", device_name, i);
                     port_descs.push(MidiPortDesc {
                         name: format!("{} port {}", device_name, i),
-                        port_id: LiveId::from_str_unchecked(&name).into(),
+                        port_id: LiveId::from_str(&name).into(),
                         port_type: MidiPortType::Output
                     });
                 }

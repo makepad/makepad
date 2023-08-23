@@ -18,6 +18,7 @@ live_design!{
     import makepad_widgets::slide_panel::SlidePanel;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
+    import makepad_widgets::dock::*;
     
     UnderlineTextInput = <TextInput> {
         walk: {width: Fill, height: Fit, margin: {top: 30}},
@@ -66,36 +67,67 @@ live_design!{
                     return mix(#3, #1, self.geom_pos.y + Math::random_2d(self.pos.xy) * 0.04);
                 }
             }
-            big_image = <Frame> {
-                walk: {height: Fit, width: Fit}
-                cursor: Hand,
-                image = <Image> {
-                    walk: {width: 1920, height: 1080}
-                }
-            }
-            <Frame> {
+
+            dock = <Dock> {
                 walk: {height: Fill, width: Fill}
-                layout: {flow: Right, padding: 10}
-                open_library = <Button>{
-                    label:">"
+                
+                root = Splitter{
+                    axis: Horizontal,
+                    align: FromA(300.0),
+                    a: image_library,
+                    b: split1
                 }
-                positive = <UnderlineTextInput> {
-                    text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
-                    draw_bg: {
-                        color: #1113
+                
+                split1 = Splitter{
+                    axis: Vertical,
+                    align: FromB(200.0),
+                    a: image_view,
+                    b: input_panel
+                }
+                
+                image_library = Tab {
+                    name: ""
+                    kind: ImageLibrary
+                }
+
+                input_panel = Tab {
+                    name: ""
+                    kind: InputPanel
+                }
+
+                image_view = Tab {
+                    name: ""
+                    kind: ImageView
+                }
+                
+                ImageView = <Frame> {
+                    walk: {height: Fill, width: Fill}
+                    cursor: Hand,
+                    image = <Image> {
+                        walk: {width: 1920, height: 1080}
                     }
                 }
-                negative = <UnderlineTextInput> {
-                    text: "text, watermark, cartoon"
-                    draw_bg: {
-                        color: #1113
+                
+                InputPanel = <Frame> {
+                    walk: {height: Fit, width: Fill}
+                    layout: {flow: Right, padding: 10}
+                    positive = <UnderlineTextInput> {
+                        text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
+                        draw_bg: {
+                            color: #1113
+                        }
+                    }
+                    negative = <UnderlineTextInput> {
+                        text: "text, watermark, cartoon"
+                        draw_bg: {
+                            color: #1113
+                        }
                     }
                 }
-            }
-            library_panel = <SlidePanel>{
-                <Rect> {
+                    
+                ImageLibrary = <Rect> {
                     draw_bg:{color:#7777}
-                    walk: {height: Fill, width: 540}
+                    walk: {height: Fill, width: Fill}
                     layout:{padding:20, flow:Down},
                     <Frame>{ 
                         walk: {height: Fit, width: Fill}
@@ -106,9 +138,6 @@ live_design!{
                             draw_bg: {
                                 color: #1113
                             }
-                        }
-                        close_library = <Button>{
-                            label:"<"
                         }
                     }
                     image_list = <ListView> {
@@ -137,25 +166,23 @@ live_design!{
                             row1 = <ImageTile> {}
                             row2= <ImageTile> {}
                         }
+                        ImageRow3 = <Frame> {
+                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
+                            layout: {spacing: 20 ,flow:Right},
+                            row1 = <ImageTile> {}
+                            row2= <ImageTile> {}
+                            row3 = <ImageTile> {}
+                        }
                     }
                 }
             }
-            <Frame> {
-                
-                draw_bg: {color: #f00}
-                layout: {
-                    align: {
-                        x: 0.5,
-                        y: 1.0
-                    }
-                },
-                message_label = <Label> {
-                    walk: {width: Fit, height: Fit, margin: {bottom: 20}},
-                    draw_label: {
-                        wrap: Word
-                        color: #f
-                    },
-                    label: "Progress",
+
+            big_image = <Frame> {
+                visible: false,
+                walk: {height: Fit, width: Fit}
+                cursor: Hand,
+                image = <Image> {
+                    walk: {width: 1920, height: 1080}
                 }
             }
         }
@@ -228,7 +255,7 @@ pub struct App {
     #[rust] current_image: Option<ImageId>
 }
 
-const LIBRARY_ROWS:usize = 2;
+const LIBRARY_ROWS:usize = 1;
 
 enum ImageListItem {
     PromptGroup {group_id: usize},
@@ -312,7 +339,7 @@ impl FilteredDb{
                             continue;
                         }
                     }
-                    self.list.push(ImageListItem::ImageRow {group_id, image_count: 1, image_ids: [store_index, 0]});
+                    self.list.push(ImageListItem::ImageRow {group_id, image_count: 1, image_ids: [store_index]});
                     
                 }
             }
@@ -578,7 +605,7 @@ impl AppMain for App {
             let cx = &mut Cx2d::new(cx, event);
             if let Some(current_image) = self.current_image{
                 let tex = self.db.get_image_texture(current_image);
-                self.ui.get_image(id!(big_image.image)).set_texture(tex)
+                self.ui.get_image(id!(image_view.image)).set_texture(tex)
             } 
             
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
@@ -615,28 +642,6 @@ impl AppMain for App {
                 
             }
             return
-        }
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
-            let positive = self.ui.get_text_input(id!(positive)).get_text();
-            //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
-            let negative = self.ui.get_text_input(id!(negative)).get_text();
-            for _ in 0..self.batch_size {
-                self.last_seed += 1;
-                self.send_prompt(cx, PromptState {
-                    prompt: Prompt {
-                        positive: positive.clone(),
-                        negative: negative.clone(),
-                    },
-                    workflow: "3840".to_string(),
-                    seed: self.last_seed
-                });
-            }
-            self.set_progress(cx, "Starting query");
-        }
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Space, ..}) = event {
-            self.ui.get_slide_panel(id!(library_panel)).toggle(cx);
         }
         
         for event in event.network_responses() {
@@ -721,23 +726,49 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
+            let positive = self.ui.get_text_input(id!(positive)).get_text();
+            //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
+            let negative = self.ui.get_text_input(id!(negative)).get_text();
+            for _ in 0..self.batch_size {
+                self.last_seed += 1;
+                self.send_prompt(cx, PromptState {
+                    prompt: Prompt {
+                        positive: positive.clone(),
+                        negative: negative.clone(),
+                    },
+                    workflow: "3840".to_string(),
+                    seed: self.last_seed
+                });
+            }
+            self.set_progress(cx, "Starting query");
+        }
+        /*
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Space, ..}) = event {
+            self.ui.get_slide_panel(id!(library_panel)).toggle(cx);
+            self.ui.get_slide_panel(id!(input_panel)).toggle(cx);
+        }*/
+        
         if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions){
             self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
             image_list.set_first_id(0);
         }
-        
+        /*
         if self.ui.get_button(id!(open_library)).pressed(&actions){
             self.ui.get_slide_panel(id!(library_panel)).open(cx);
+            self.ui.get_slide_panel(id!(input_panel)).close(cx);
         }
 
         if self.ui.get_button(id!(close_library)).pressed(&actions){
             self.ui.get_slide_panel(id!(library_panel)).close(cx);
+            self.ui.get_slide_panel(id!(input_panel)).open(cx);
         }
         
         if self.ui.get_frame(id!(big_image)).finger_down(&actions).is_some(){
             self.ui.get_slide_panel(id!(library_panel)).close(cx);
-        }
+            self.ui.get_slide_panel(id!(input_panel)).open(cx);
+        }*/
         
         if let Some(ke) = self.ui.get_frame(id!(big_image)).key_down(&actions){
             match ke.key_code{
