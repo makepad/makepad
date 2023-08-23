@@ -34,10 +34,11 @@ live_design!{
     }
     
     ImageTile = <Frame>{
-        walk: {width: Fit, height: Fit},
+        walk: {width: Fill, height: Fit},
         cursor: Hand
         img = <Image> {
-            walk: {width: (1600*0.15), height: (900*0.15)},
+            walk: {width:Fill, height:Fill}
+            fit: Horizontal,
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -102,9 +103,11 @@ live_design!{
                 
                 ImageView = <Frame> {
                     walk: {height: Fill, width: Fill}
+                    layout: {flow:Down,align:{x:0.5,y:0.5}}
                     cursor: Hand,
                     image = <Image> {
-                        walk: {width: 1920, height: 1080}
+                        fit: Smallest,
+                        walk: {width: Fill, height: Fill}
                     }
                 }
                 
