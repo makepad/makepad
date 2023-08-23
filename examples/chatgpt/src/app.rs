@@ -99,7 +99,7 @@ impl AppMain for App{
             match &event.response{
                 NetworkResponse::HttpResponse(response)=>{
                     let label = self.ui.get_label(id!(message_label));
-                    match event.id {
+                    match event.request_id {
                          live_id!(SendChatMessage) => {
                             if response.status_code == 200 {
                                 let chat_response = response.get_json_body::<ChatResponse>().unwrap();
