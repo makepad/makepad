@@ -83,7 +83,7 @@ live_design!{
                     let max_scale = vec2(0.95);
                     let scale = mix(vec2(1.0),max_scale, self.hover);
                     let pan = mix(vec2(0.0),(vec2(1.0)-max_scale)*0.5, self.hover);
-                    let color = self.get_color(scale,pan) + mix(vec4(0.0),vec4(0.05,0.05,0.05,1.0),self.down);
+                    let color = self.get_color(scale,pan) + mix(vec4(0.0),vec4(0.1),self.down);
                     sdf.fill(color);
                     return sdf.result
                 }
