@@ -283,7 +283,6 @@ pub struct App {
     #[live] batch_size: i64,
     #[live] last_seed: i64,
     
-    
     #[rust] current_image: Option<ImageId>
 }
 
@@ -549,11 +548,11 @@ impl App {
             
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-            let ws = fs::read_to_string(format!("examples/comfyui/workspace_{}.json", prompt_state.workflow)).unwrap();
+            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.workflow)).unwrap();
             let ws = ws.replace("CLIENT_ID", "1234");
-            let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive);
-            let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive);
-            let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative);
+            let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive.replace("\n","").replace("\"",""));
+            let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive.replace("\n","").replace("\"",""));
+            let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative.replace("\n","").replace("\"",""));
             let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
             // lets store that we queued this image
             request.set_request_id(live_id!(prompt));
@@ -728,8 +727,7 @@ impl AppMain for App {
                     if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
                         // alright we got an image back
                         match res.request_id {
-                            live_id!(prompt) => if let Some(data) = res.get_string_body() { // lets check if the prompt executed
-                                log!("{}", data);
+                            live_id!(prompt) => if let Some(_data) = res.get_string_body() { // lets check if the prompt executed
                             }
                             live_id!(image) => if let Some(data) = res.get_body() {
                                 if let Some(fetching) = machine.fetching.take() {
