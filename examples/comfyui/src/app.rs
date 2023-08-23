@@ -95,7 +95,7 @@ live_design!{
             library_panel = <SlidePanel>{
                 <Rect> {
                     draw_bg:{color:#7777}
-                    walk: {height: Fill, width: 800}
+                    walk: {height: Fill, width: 540}
                     layout:{padding:20, flow:Down},
                     <Frame>{ 
                         walk: {height: Fit, width: Fill}
@@ -136,13 +136,6 @@ live_design!{
                             layout: {spacing: 20 ,flow:Right},
                             row1 = <ImageTile> {}
                             row2= <ImageTile> {}
-                        }
-                        ImageRow3 = <Frame> {
-                            walk: {height: Fit, width: Fill, margin:{bottom:20}}
-                            layout: {spacing: 20 ,flow:Right},
-                            row1 = <ImageTile> {}
-                            row2= <ImageTile> {}
-                            row3 = <ImageTile> {}
                         }
                     }
                 }
@@ -223,20 +216,26 @@ pub struct App {
         Machine::new("192.168.1.180:8188", id_lut!(m8))
     ])] machines: Vec<Machine>,
     #[rust] queue: Vec<PromptState>,
+
     #[rust(Database::new(cx))] db: Database,
+
+    #[rust] filtered:FilteredDb,
     #[rust] num_images: u64,
     #[rust(6u64)] batch_size: u64,
     #[rust(1000000u64)] last_seed: u64,
-    #[rust] image_list: Vec<ImageListItem>,
+
+
     #[rust] current_image: Option<ImageId>
 }
+
+const LIBRARY_ROWS:usize = 2;
 
 enum ImageListItem {
     PromptGroup {group_id: usize},
     ImageRow {
         group_id: usize,
         image_count: usize,
-        image_ids: [usize; 3]
+        image_ids: [usize; LIBRARY_ROWS]
     }
 }
 
@@ -266,7 +265,7 @@ enum DecoderToUI{
     Done(String, ImageBuffer)
 }
 
-#[derive(Clone,Copy)]
+#[derive(Clone,Copy, PartialEq)]
 struct ImageId{
     group_id: usize,
     image_id: usize,
@@ -281,6 +280,49 @@ struct Database {
     to_ui: ToUIReceiver<DecoderToUI>,
 }
 
+#[derive(Default)]
+struct FilteredDb{
+    list: Vec<ImageListItem>,
+    flat: Vec<ImageId>,
+}
+
+impl FilteredDb{
+    
+    fn filter_db(&mut self, db:&Database, search: &str, starred:bool) {
+        self.list.clear();
+        self.flat.clear();
+        for (group_id, group) in db.groups.iter().enumerate() {
+            if search.len() == 0
+                || group.prompt.as_ref().unwrap().positive.contains(search)
+                || group.prompt.as_ref().unwrap().negative.contains(search) {
+                self.list.push(ImageListItem::PromptGroup {group_id});
+                // lets collect images in pairs of 3
+                for (store_index, image) in group.images.iter().enumerate() {
+                    if starred && !image.starred{
+                        continue
+                    }
+                    self.flat.push(ImageId{
+                        group_id,
+                        image_id: store_index
+                    });
+                    if let Some(ImageListItem::ImageRow {group_id: _, image_count, image_ids}) = self.list.last_mut() {
+                        if *image_count<LIBRARY_ROWS {
+                            image_ids[*image_count] = store_index;
+                            *image_count += 1;
+                            continue;
+                        }
+                    }
+                    self.list.push(ImageListItem::ImageRow {group_id, image_count: 1, image_ids: [store_index, 0]});
+                    
+                }
+            }
+        }
+        
+    }
+    
+}
+
+
 impl Database {
     fn new(cx:&mut Cx) -> Self {
         let use_cores = cx.cpu_cores().max(3) - 2;
@@ -290,7 +332,7 @@ impl Database {
             thread_pool: ThreadPool::new(cx, use_cores),
             image_path: "./comfyui_images".to_string(),
             groups: Vec::new(),
-            to_ui: ToUIReceiver::default()
+            to_ui: ToUIReceiver::default(),
         }
     }
     
@@ -341,32 +383,6 @@ impl Database {
             let _ = to_ui.send(DecoderToUI::Error(file_name));
         });
         None
-    }
-    
-    fn filter_image_list(&self, search: &str, starred:bool) -> Vec<ImageListItem> {
-        let mut out = Vec::new();
-        for (group_id, group) in self.groups.iter().enumerate() {
-            if search.len() == 0
-                || group.prompt.as_ref().unwrap().positive.contains(search)
-                || group.prompt.as_ref().unwrap().negative.contains(search) {
-                out.push(ImageListItem::PromptGroup {group_id});
-                // lets collect images in pairs of 3
-                for (store_index, image) in group.images.iter().enumerate() {
-                    if starred && !image.starred{
-                        continue
-                    }
-                    if let Some(ImageListItem::ImageRow {group_id: _, image_count, image_ids}) = out.last_mut() {
-                        if *image_count<3 {
-                            image_ids[*image_count] = store_index;
-                            *image_count += 1;
-                            continue;
-                        }
-                    }
-                    out.push(ImageListItem::ImageRow {group_id, image_count: 1, image_ids: [store_index, 0, 0]})
-                }
-            }
-        }
-        out
     }
     
     fn load_database(&mut self) -> std::io::Result<()> {
@@ -458,7 +474,7 @@ impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.open_web_socket(cx);
         let _ = self.db.load_database();
-        self.image_list = self.db.filter_image_list("", false);
+        self.filtered.filter_db(&self.db, "", false);
     }
 }
 const CLIENT_ID: &'static str = "1234";
@@ -516,13 +532,37 @@ impl App {
         label.redraw(cx);
     }
     
-    fn set_current_image_by_row(&mut self, cx:&mut Cx, item_id:u64, row:usize){
+    fn set_current_image_by_item_id_and_row(&mut self, cx:&mut Cx, item_id:u64, row:usize){
         self.ui.redraw(cx);
-        if let ImageListItem::ImageRow{group_id, image_count, image_ids} = self.image_list[item_id as usize]{
+        if let Some(ImageListItem::ImageRow{group_id, image_count, image_ids}) = self.filtered.list.get(item_id as usize){
             self.current_image = Some(ImageId{
-                group_id: group_id,
-                image_id: image_ids[row.min(image_count)]
+                group_id: *group_id,
+                image_id: image_ids[row.min(*image_count)]
             })
+        }
+    }
+
+    
+    fn select_next_image(&mut self, cx:&mut Cx){
+        self.ui.redraw(cx);
+        if let Some(current_image) = self.current_image{
+            if let Some(pos) = self.filtered.flat.iter().position(|v| *v == current_image){
+                if pos + 1 < self.filtered.flat.len(){
+                    self.current_image = Some(self.filtered.flat[pos+1]);
+                }
+            }
+        }
+    }
+    
+        
+    fn select_prev_image(&mut self, cx:&mut Cx){
+        self.ui.redraw(cx);
+        if let Some(current_image) = self.current_image{
+            if let Some(pos) = self.filtered.flat.iter().position(|v| *v == current_image){
+                if pos > 0 {
+                    self.current_image = Some(self.filtered.flat[pos-1]);
+                }
+            }
         }
     }
 }
@@ -545,9 +585,9 @@ impl AppMain for App {
 
                 if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut(){
                     // alright now we draw the items
-                    image_list.set_item_range(0, self.image_list.len() as u64, 1);
+                    image_list.set_item_range(0, self.filtered.list.len() as u64, 1);
                     while let Some(item_id) = image_list.next_visible_item(cx) {
-                        if let Some(item) = self.image_list.get(item_id as usize){
+                        if let Some(item) = self.filtered.list.get(item_id as usize){
                             match item{
                                 ImageListItem::PromptGroup{group_id}=>{
                                     let group = &self.db.groups[*group_id];
@@ -556,7 +596,7 @@ impl AppMain for App {
                                     item.draw_widget_all(cx);
                                 }
                                 ImageListItem::ImageRow{group_id, image_count, image_ids}=>{
-                                    let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2.ImageRow3)[*image_count]).unwrap();
+                                    let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
                                     let rows = item.get_frame_set(ids!(row1,row2,row3));
                                     for (index,row) in rows.iter().enumerate(){
                                         if index >= *image_count{break}
@@ -682,7 +722,7 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions){
-            self.image_list = self.db.filter_image_list(&change, false);
+            self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
             image_list.set_first_id(0);
         }
@@ -699,12 +739,24 @@ impl AppMain for App {
             self.ui.get_slide_panel(id!(library_panel)).close(cx);
         }
         
+        if let Some(ke) = self.ui.get_frame(id!(big_image)).key_down(&actions){
+            match ke.key_code{
+                KeyCode::ArrowDown=>{
+                    self.select_next_image(cx);
+                }
+                KeyCode::ArrowUp=>{ 
+                    self.select_prev_image(cx);
+                }
+                _=>()
+            }
+        }
+        
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
-            let rows = item.get_frame_set(ids!(row1,row2,row3));
+            let rows = item.get_frame_set(ids!(row1,row2));
             for (index,row) in rows.iter().enumerate(){
                 if row.finger_down(&actions).is_some() {
-                    self.set_current_image_by_row(cx, item_id, index);
+                    self.set_current_image_by_item_id_and_row(cx, item_id, index);
                 }
             }
         }
