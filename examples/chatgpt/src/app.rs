@@ -112,11 +112,12 @@ impl AppMain for App{
                         _ => (),
                     }
                 }
-                e=>{
+                NetworkResponse::HttpRequestError(error)=>{
                     let label = self.ui.get_label(id!(message_label));
-                    label.set_label(&format!("Failed to connect with OpenAI {:?}", e));
+                    label.set_label(&format!("Failed to connect with OpenAI {:?}", error));
                     label.redraw(cx);
                 }
+                _ => ()
             }
         }
 
