@@ -20,7 +20,7 @@ live_design!{
             mix(
                 mix(
                     mix(
-                        #xFFFFFF33,
+                        #xFFFFFF55,
                         #xFFFFFF88,
                         self.hover
                     ),
@@ -115,7 +115,6 @@ live_design!{
             align: {y: 0.}
         },
         walk: {
-            margin: {top: 5, right: 5}
             width: Fit,
             height: Fit,
             //margin: 0// {left: 0.0, right: 5.0, top: 0.0, bottom: 2.0},
