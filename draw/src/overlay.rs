@@ -33,7 +33,7 @@ impl LiveNew for Overlay {
             live_type: LiveType::of::<Self>(),
             live_ignore: true,
             fields: Vec::new(),
-            type_name: LiveId::from_str("Overlay").unwrap()
+            type_name: id_lut!(Overlay)
         }
     }
 }

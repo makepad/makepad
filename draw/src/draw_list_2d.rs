@@ -30,7 +30,7 @@ impl LiveNew for DrawList2d {
             live_type: LiveType::of::<Self>(),
             live_ignore: true,
             fields: Vec::new(),
-            type_name: LiveId::from_str("View").unwrap()
+            type_name: id_lut!(View)
         }
     }
 }

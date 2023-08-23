@@ -72,7 +72,7 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
-    HttpRequest{id:LiveId,request:HttpRequest},
+    HttpRequest{id:LiveId, request:HttpRequest},
     WebSocketOpen{id: LiveId, request:HttpRequest},
     WebSocketSendString{id: LiveId, data:String},
     WebSocketSendBinary{id: LiveId, data:Vec<u8>},
@@ -422,7 +422,7 @@ macro_rules!register_component_factory {
         $ cx.live_registry.borrow().components.get_or_create::< $ registry>().map.insert(
             LiveType::of::< $ ty>(),
             (LiveComponentInfo {
-                name: LiveId::from_str(stringify!( $ ty)).unwrap(),
+                name: LiveId::from_str_with_lut(stringify!( $ ty)).unwrap(),
                 module_id
             }, Box::new( $ factory()))
         );

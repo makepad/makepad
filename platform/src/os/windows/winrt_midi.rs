@@ -105,7 +105,7 @@ impl WinRTMidiAccess {
             ports.push(WinRTMidiPort {
                 desc: MidiPortDesc {
                     name: item.Name().unwrap().to_string(),
-                    port_id: LiveId::from_str_unchecked(&winrt_id).into(),
+                    port_id: LiveId::from_str(&winrt_id).into(),
                     port_type: MidiPortType::Input,
                 },
                 winrt_id
@@ -118,7 +118,7 @@ impl WinRTMidiAccess {
             ports.push(WinRTMidiPort {
                 desc: MidiPortDesc {
                     name: item.Name().unwrap().to_string(),
-                    port_id: LiveId::from_str_unchecked(&winrt_id).into(),
+                    port_id: LiveId::from_str(&winrt_id).into(),
                     port_type: MidiPortType::Output,
                 },
                 winrt_id

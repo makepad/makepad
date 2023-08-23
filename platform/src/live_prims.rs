@@ -47,7 +47,7 @@ macro_rules!live_primitive {
                     live_type: LiveType::of::<Self>(),
                     fields: Vec::new(),
                     live_ignore: true,
-                    type_name: LiveId::from_str(stringify!( $ ty)).unwrap(),
+                    type_name: LiveId::from_str_with_lut(stringify!( $ ty)).unwrap(),
                     //kind: LiveTypeKind::Primitive
                 }
             }

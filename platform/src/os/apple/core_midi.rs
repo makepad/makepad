@@ -60,7 +60,7 @@ impl CoreMidiPort {
         OSError::from(MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &mut name)) ?;
         OSError::from(MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &mut uid)) ?;
         let name = format!("{} {}", cfstring_ref_to_string(manufacturer), cfstring_ref_to_string(name));
-        let port_id = LiveId::from_str_unchecked(&format!("{}{}", name, uid));
+        let port_id = LiveId::from_str(&format!("{}{}", name, uid));
         Ok(Self {
             endpoint,
             desc: MidiPortDesc {

@@ -108,7 +108,7 @@ impl WebMidiAccess {
             self.ports.push(WebMidiPort {
                 desc: MidiPortDesc {
                     name: port.name,
-                    port_id: LiveId::from_str_unchecked(&port.uid).into(),
+                    port_id: LiveId::from_str(&port.uid).into(),
                     port_type: if port.is_output {MidiPortType::Output}else {MidiPortType::Input}
                 },
                 uid: port.uid,

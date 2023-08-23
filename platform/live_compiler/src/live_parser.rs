@@ -208,7 +208,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
             id: last_id,
-            value: LiveValue::Import(LiveModuleId(crate_id, LiveId::from_str(&module).unwrap()))
+            value: LiveValue::Import(LiveModuleId(crate_id, LiveId::from_str_with_lut(&module).unwrap()))
         });
         
         Ok(())
