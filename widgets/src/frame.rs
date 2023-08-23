@@ -686,7 +686,7 @@ impl Widget for Frame {
         if self.cursor.is_some() || self.state.live_ptr.is_some(){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(d) => {
-                    cx.set_key_focus(Area::Empty);
+                    cx.set_key_focus(self.area());
                     dispatch_action(cx, FrameAction::FingerDown(d).into_action(uid))
                 }
                 Hit::FingerMove(d) => {
