@@ -302,16 +302,16 @@ impl Cx {
                 },
                 CxOsOp::UpdateMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{id:_, request:_} => {
+                CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
                 },
-                CxOsOp::WebSocketOpen{id:_, request:_}=>{
+                CxOsOp::WebSocketOpen{request_id:_, request:_}=>{
                     todo!()
                 }
-                CxOsOp::WebSocketSendBinary{id:_, data:_}=>{
+                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
                     todo!()
                 }
-                CxOsOp::WebSocketSendString{id:_, data:_}=>{
+                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
                     todo!()
                 }
             }
