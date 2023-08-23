@@ -30,14 +30,60 @@ live_design!{
     ImageTile = <Frame> {
         walk: {width: Fill, height: Fit},
         cursor: Hand
+        state:{
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.5}}
+                    ease: OutExp
+                    apply: {
+                        img = {draw_bg: {hover:0.0}}
+                    }
+                }
+                on = {
+                    ease: OutExp
+                    from: {
+                        all: Forward {duration: 0.2}
+                    }
+                    apply: {
+                        img = {draw_bg: {hover:1.0}}
+                    }
+                }
+            }
+            down = {
+                default:off
+                off = {
+                    from: {all: Forward {duration: 0.5}}
+                    ease: OutExp
+                    apply: {
+                        img = {draw_bg: {down:0.0}}
+                    }
+                }
+                on = {
+                    ease: OutExp
+                    from: {
+                        all: Forward {duration: 0.2}
+                    }
+                    apply: {
+                        img = {draw_bg: {down:1.0}}
+                    }
+                }
+            }
+        }
+        
         img = <Image> {
             walk: {width: Fill, height: Fill}
             fit: Horizontal,
             draw_bg: {
+                instance hover:0.0
+                instance down:0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
-                    let color = self.get_color();
+                    let max_scale = vec2(0.95);
+                    let scale = mix(vec2(1.0),max_scale, self.hover);
+                    let pan = mix(vec2(0.0),(vec2(1.0)-max_scale)*0.5, self.hover);
+                    let color = self.get_color(scale,pan) + mix(vec4(0.0),vec4(0.05,0.05,0.05,1.0),self.down);
                     sdf.fill(color);
                     return sdf.result
                 }
@@ -136,7 +182,7 @@ live_design!{
                 
                         positive = <TextInput> {
                             walk: {width: Fill, height: Fill},
-                            text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes "
+                            text: "Positive"
                             draw_label:{text_style:{font_size:12}}
                             draw_bg: {
                                 color: #1113
@@ -663,7 +709,7 @@ impl AppMain for App {
                                 ImageListItem::PromptGroup {group_id} => {
                                     let group = &self.db.groups[*group_id];
                                     let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
-                                    item.get_text_input(id!(prompt)).set_text(&group.prompt.as_ref().unwrap().positive);
+                                    item.get_label(id!(prompt)).set_label(&group.prompt.as_ref().unwrap().positive);
                                     item.draw_widget_all(cx);
                                 }
                                 ImageListItem::ImageRow {group_id, image_count, image_ids} => {
