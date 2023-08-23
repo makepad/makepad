@@ -875,6 +875,8 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
     cx: jlong,
     video_id: jlong,
     pixel_data: jobject,
+    yStride: jint,
+    uvStride: jint,
     timestamp: jlong,
     is_eos: jboolean,
     callback: jobject,
@@ -882,6 +884,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
     (*(cx as *mut Cx)).from_java_on_video_stream(
         video_id as u64,
         java_byte_array_to_vec(env, pixel_data),
+        (yStride as usize, uvStride as usize),
         timestamp as u64,
         is_eos != 0,
         AndroidToJava {
