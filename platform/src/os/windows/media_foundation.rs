@@ -225,7 +225,7 @@ impl MediaFoundationAccess {
                             guid => VideoPixelFormat::Unsupported(guid.data1)
                         };
                         
-                        let format_id = LiveId::from_str_unchecked(&format!("{} {} {} {:?}", width, height, frame_rate, pixel_format)).into();
+                        let format_id = LiveId::from_str(&format!("{} {} {} {:?}", width, height, frame_rate, pixel_format)).into();
                         media_types.push(MfMediaType {
                             media_type,
                             format_id
@@ -245,7 +245,7 @@ impl MediaFoundationAccess {
                         active_format: None,
                         destroy_after_update: false,
                         desc: VideoInputDesc {
-                            input_id: LiveId::from_str_unchecked(&symlink).into(),
+                            input_id: LiveId::from_str(&symlink).into(),
                             name,
                             formats
                         },

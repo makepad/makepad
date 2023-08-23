@@ -357,6 +357,7 @@ impl Cx {
             NetworkResponseEvent{
                 id: LiveId(id),
                 response: NetworkResponse::HttpResponse(HttpResponse::new(
+                    LiveId(0),
                     status_code,
                     headers,
                     Some(body)

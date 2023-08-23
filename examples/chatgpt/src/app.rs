@@ -74,7 +74,7 @@ impl App{
     // The response will be received and processed by AppMain's handle_event.
     fn send_message(cx: &mut Cx, message: String) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
-        let request_id = LiveId::from_str("SendChatMessage").unwrap();
+        let request_id = LiveId::from_str("SendChatMessage");
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
         
         request.set_header("Content-Type".to_string(), "application/json".to_string());
