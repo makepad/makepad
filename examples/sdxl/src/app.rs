@@ -21,6 +21,12 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::dock::*;
     
+    COLOR_PANEL_BG = #x00000033
+    TEXT_BOLD = {
+        font_size: 12,
+        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+    }
+
     ImageTile = <Frame> {
         walk: {width: Fill, height: Fit},
         cursor: Hand
@@ -113,7 +119,7 @@ live_design!{
                     }
                     
                     ImageView = <Rect> {
-                        draw_bg: {color: #3}
+                        draw_bg: {color: (COLOR_PANEL_BG)}
                         walk: {height: Fill, width: Fill}
                         layout: {flow: Down, align: {x: 0.5, y: 0.5}}
                         cursor: Hand,
@@ -123,9 +129,10 @@ live_design!{
                         }
                     }
                     
-                    PositivePanel = <Frame> {
+                    PositivePanel = <Rect> {
                         walk: {height: Fill, width: Fill}
                         layout: {flow: Right, padding: 0}
+                        draw_bg: {color: (COLOR_PANEL_BG)}
                 
                         positive = <TextInput> {
                             walk: {width: Fill, height: Fill},
@@ -136,7 +143,9 @@ live_design!{
                             }
                         }
                     }
-                    NegativePanel = <Frame>{
+                    NegativePanel = <Rect>{
+                        draw_bg: {color: (COLOR_PANEL_BG)}
+
                         negative = <TextInput> {
                             walk: {width: Fill, height: Fill},
                             draw_label:{text_style:{font_size:12}}
@@ -152,7 +161,7 @@ live_design!{
                     }
                     
                     ImageLibrary = <Rect> {
-                        draw_bg: {color: #3}
+                        draw_bg: {color: (COLOR_PANEL_BG)}
                         walk: {height: Fill, width: Fill}
                         layout: { flow: Down},
                         <Frame> {
@@ -162,7 +171,7 @@ live_design!{
                                 walk: {height: Fit, width: Fill}
                                 empty_message: "Search"
                                 draw_bg: {
-                                    color: #1113
+                                    color: #x00000066
                                 }
                             }
                         }
@@ -172,12 +181,16 @@ live_design!{
                             PromptGroup = <Frame> {
                                 walk: {height: Fit, width: Fill, margin: {bottom: 10}}
                                 layout: {flow: Right, spacing: 10}
-                                prompt = <TextInput> {
-                                    read_only: true,
-                                    walk: {width: Fill, height: Fit},
-                                    draw_bg: {
-                                        color: #5
+                                prompt = <Label> {
+                                    walk: { width: Fill, margin: {top: 20}}
+                                    draw_label:{
+                                        text_style: <TEXT_BOLD>{},
+                                        fn get_color(self) -> vec4 {
+                                            return #CCCCCC
+                                        }
+                                        wrap: Word,
                                     }
+                                    label: "Lorem Ipsum dolor sit amet dolorem simus sitis sint agricola servus est."
                                 }
                             }
                             Empty = <Frame> {}
