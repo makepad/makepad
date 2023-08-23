@@ -262,12 +262,30 @@ impl ButtonRef {
         }
         false
     }
+
+    pub fn pressed(&self, actions:&WidgetActions) -> bool {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let ButtonAction::Pressed = item.action() {
+                return true
+            }
+        }
+        false
+    }
+
 }
 
 #[derive(Clone, WidgetSet)]
 pub struct ButtonSet(WidgetSet);
 impl ButtonSet{
     pub fn clicked(&self, actions: &WidgetActions)->bool{
+        for button in self.iter(){
+            if button.clicked(actions){
+                return true
+            }
+        }
+        false
+    }
+    pub fn pressed(&self, actions: &WidgetActions)->bool{
         for button in self.iter(){
             if button.clicked(actions){
                 return true
