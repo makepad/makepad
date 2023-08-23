@@ -519,8 +519,8 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(selected) => {
                     to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::HttpRequest{id, request} => {
-                    to_java.http_request(id, request)
+                CxOsOp::HttpRequest{request_id, request} => {
+                    to_java.http_request(request_id, request)
                 },
                 _ => ()
             }
