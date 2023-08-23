@@ -40,6 +40,8 @@ live_design!{
     }
     
     App = {{App}} {
+        last_seed: 1000;
+        batch_size: 6;
         ui: <DesktopWindow> {
             window: {inner_size: vec2(2000, 1024)},
             caption_bar = {visible: true, caption_label = {label = {label: "SDXL Explorer"}}},
@@ -201,12 +203,17 @@ live_design!{
                     }
                 }
                 
-                big_image = <Frame> {
+                big_image = <Rect> {
                     visible: false,
-                    walk: {height: All, width: All}
+                    draw_bg:{draw_depth:10.0}
+                    draw_bg: {color: #0}
+                    walk: {height: All, width: All, abs_pos:vec2(0.0,0.0)}
+                    layout: {flow: Down, align: {x: 0.5, y: 0.5}}
                     cursor: Hand,
                     image = <Image> {
-                        walk: {width: 1920, height: 1080}
+                        draw_bg:{draw_depth:11.0}
+                        fit: Smallest,
+                        walk: {width: Fill, height: Fill}
                     }
                 }
             }
@@ -273,8 +280,8 @@ pub struct App {
     
     #[rust] filtered: FilteredDb,
     #[rust] num_images: u64,
-    #[rust(6u64)] batch_size: u64,
-    #[rust(1000000u64)] last_seed: u64,
+    #[live] batch_size: i64,
+    #[live] last_seed: i64,
     
     
     #[rust] current_image: Option<ImageId>
@@ -529,7 +536,6 @@ impl LiveHook for App {
         self.filtered.filter_db(&self.db, "", false);
     }
 }
-const CLIENT_ID: &'static str = "1234";
 
 impl App {
     fn send_prompt(&mut self, cx: &mut Cx, prompt_state: PromptState) {
@@ -544,7 +550,7 @@ impl App {
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
             let ws = fs::read_to_string(format!("examples/comfyui/workspace_{}.json", prompt_state.workflow)).unwrap();
-            let ws = ws.replace("CLIENT_ID", CLIENT_ID);
+            let ws = ws.replace("CLIENT_ID", "1234");
             let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive);
             let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive);
             let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative);
@@ -572,7 +578,7 @@ impl App {
     
     fn open_web_socket(&self, cx: &mut Cx) {
         for machine in &self.machines {
-            let url = format!("ws://{}/ws?clientId={}", machine.ip, CLIENT_ID);
+            let url = format!("ws://{}/ws?clientId={}", machine.ip, "1234");
             let request = HttpRequest::new(url, HttpMethod::GET);
             cx.web_socket_open(machine.id, request);
         }
@@ -630,7 +636,8 @@ impl AppMain for App {
             let cx = &mut Cx2d::new(cx, event);
             if let Some(current_image) = self.current_image {
                 let tex = self.db.get_image_texture(current_image);
-                self.ui.get_image(id!(image_view.image)).set_texture(tex)
+                self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
+                self.ui.get_image(id!(big_image.image)).set_texture(tex);
             }
             
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
@@ -765,7 +772,7 @@ impl AppMain for App {
                         negative: negative.clone(),
                     },
                     workflow: "3840".to_string(),
-                    seed: self.last_seed
+                    seed: self.last_seed as u64
                 });
             }
             self.set_progress(cx, "Starting query");
@@ -791,13 +798,22 @@ impl AppMain for App {
             self.ui.get_slide_panel(id!(library_panel)).close(cx);
             self.ui.get_slide_panel(id!(input_panel)).open(cx);
         }
+        */
+        if let Some(e) = self.ui.get_frame(id!(image_view)).finger_down(&actions){
+            if e.tap_count >1{
+                self.ui.get_frame(id!(big_image)).set_visible(true);
+                self.ui.redraw(cx);
+            }
+        }
         
-        if self.ui.get_frame(id!(big_image)).finger_down(&actions).is_some(){
-            self.ui.get_slide_panel(id!(library_panel)).close(cx);
-            self.ui.get_slide_panel(id!(input_panel)).open(cx);
-        }*/
+        if let Some(e) = self.ui.get_frame(id!(big_image)).finger_down(&actions){
+            if e.tap_count >1{
+                self.ui.get_frame(id!(big_image)).set_visible(false);
+                self.ui.redraw(cx);
+            }
+        }
         
-        if let Some(ke) = self.ui.get_frame(id!(big_image)).key_down(&actions) {
+        if let Some(ke) = self.ui.get_frame_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.select_next_image(cx);
