@@ -121,7 +121,7 @@ impl FoldButton {
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
-                if self.state.is_in_state(cx, id!(open.yes)) {
+                if self.is_in_state(cx, id!(open.yes)) {
                     self.animate_state(cx, id!(open.no));
                     dispatch_action(cx, FoldButtonAction::Closing)
                 }

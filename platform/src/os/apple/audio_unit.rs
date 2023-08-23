@@ -439,7 +439,7 @@ impl AudioUnitAccess {
             let output_channels = probe_channels(core_device_id, AudioObjectPropertyScope::Output) ?;
             
             if input_channels>0 {
-                let device_id = LiveId::from_str_unchecked(&format!("{} {} input", device_name, core_device_id)).into();
+                let device_id = LiveId::from_str(&format!("{} {} input", device_name, core_device_id)).into();
                 self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {
@@ -453,7 +453,7 @@ impl AudioUnitAccess {
                 })
             }
             if output_channels>0 {
-                let device_id = LiveId::from_str_unchecked(&format!("{} {} output", device_name, core_device_id)).into();
+                let device_id = LiveId::from_str(&format!("{} {} output", device_name, core_device_id)).into();
                 self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {

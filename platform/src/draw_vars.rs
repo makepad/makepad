@@ -112,7 +112,7 @@ impl LiveNew for DrawVars {
             live_type: std::any::TypeId::of::<Self>(),
             live_ignore: true,
             fields: Vec::new(),
-            type_name: LiveId::from_str("DrawVars").unwrap()
+            type_name: id_lut!(DrawVars)
         }
     }
 }
@@ -129,6 +129,10 @@ impl DrawVars {
     
     pub fn set_texture(&mut self, slot: usize, texture: &Texture) {
         self.texture_slots[slot] = Some(texture.texture_id());
+    }
+    
+    pub fn empty_texture(&mut self, slot: usize) {
+        self.texture_slots[slot] = None;
     }
     
     pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
