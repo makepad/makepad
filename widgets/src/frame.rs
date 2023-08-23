@@ -718,7 +718,9 @@ impl Widget for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.state_handle_event(cx, event);
+        if self.state_handle_event(cx, event).must_redraw(){
+            self.redraw(cx);
+        }
         
         if self.block_signal_event {
             if let Event::Signal = event {
@@ -771,13 +773,19 @@ impl Widget for Frame {
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area());
-                    dispatch_action(cx, FrameAction::FingerDown(e).into_action(uid))
+                    dispatch_action(cx, FrameAction::FingerDown(e).into_action(uid));
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(down.on));
+                    }
                 }
                 Hit::FingerMove(e) => {
                     dispatch_action(cx, FrameAction::FingerMove(e).into_action(uid))
                 }
                 Hit::FingerUp(e) => {
-                    dispatch_action(cx, FrameAction::FingerUp(e).into_action(uid))
+                    dispatch_action(cx, FrameAction::FingerUp(e).into_action(uid));
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(down.off));
+                    }
                 }
                 Hit::FingerHoverIn(_) => {
                     if let Some(cursor) = &self.cursor{
