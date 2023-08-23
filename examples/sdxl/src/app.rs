@@ -23,10 +23,49 @@ live_design!{
     
     COLOR_PANEL_BG = #x00000033
     TEXT_BOLD = {
-        font_size: 12,
+        font_size: 10,
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
-
+    
+    ProgressCircle = <Frame>{
+        show_bg:true,
+        walk:{width:33,height:33}
+        draw_bg:{
+            instance progress:0.0
+            instance active:0.0
+                
+            fn circle_pie(inout sdf: Sdf2d, x: float, y: float, r: float, s:float) {
+                let c = sdf.pos - vec2(x, y);
+                let len = sqrt(c.x * c.x + c.y * c.y) - r;
+                let pi = 3.141592653589793;
+                let ang = (pi-atan(c.x,c.y))/(2.0*pi);
+                let ces = s*0.5;
+                let ang2 = clamp((abs(ang - ces)-ces)*-r*r*sdf.scale_factor,0.0,1.0);
+                sdf.dist = len * ang2 / sdf.scale_factor;
+                sdf.old_shape = sdf.shape;
+                sdf.shape = min(sdf.shape, sdf.dist);
+            }
+            
+            fn pixel(self)->vec4{
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.circle(
+                    self.rect_size.x*0.5,
+                    self.rect_size.y*0.5,
+                    self.rect_size.x*0.4
+                );
+                sdf.fill(mix(#4, #575, self.active));
+                circle_pie(
+                    sdf,
+                    self.rect_size.x*0.5,
+                    self.rect_size.y*0.5,
+                    self.rect_size.x*0.4,
+                    self.progress
+                );
+                sdf.fill(mix(#4, #8f8, self.active));
+                return sdf.result;
+            }
+        }
+    }
     ImageTile = <Frame> {
         walk: {width: Fill, height: Fit},
         cursor: Hand
@@ -80,7 +119,7 @@ live_design!{
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
-                    let max_scale = vec2(0.95);
+                    let max_scale = vec2(0.97);
                     let scale = mix(vec2(1.0),max_scale, self.hover);
                     let pan = mix(vec2(0.0),(vec2(1.0)-max_scale)*0.5, self.hover);
                     let color = self.get_color(scale,pan) + mix(vec4(0.0),vec4(0.1),self.down);
@@ -121,21 +160,7 @@ live_design!{
                         axis: Vertical,
                         align: FromB(200.0),
                         a: image_view,
-                        b: split2
-                    }
-                    
-                    split2 = Splitter {
-                        axis: Horizontal,
-                        align: Weighted(0.5),
-                        a: positive_panel,
-                        b: split3
-                    }
-                    
-                    split3 = Splitter {
-                        axis: Horizontal,
-                        align: Weighted(0.5),
-                        a: negative_panel,
-                        b: keyword_panel
+                        b: input_panel
                     }
                     
                     image_library = Tab {
@@ -143,21 +168,10 @@ live_design!{
                         kind: ImageLibrary
                     }
                     
-                    positive_panel = Tab {
+                    input_panel = Tab {
                         name: ""
-                        kind: PositivePanel
+                        kind: InputPanel
                     }
-
-                    negative_panel = Tab {
-                        name: ""
-                        kind: NegativePanel
-                    }
-
-                    keyword_panel = Tab {
-                        name: ""
-                        kind: KeywordPanel
-                    }
-
                     
                     image_view = Tab {
                         name: ""
@@ -175,35 +189,40 @@ live_design!{
                         }
                     }
                     
-                    PositivePanel = <Rect> {
+                    InputPanel = <Rect> {
                         walk: {height: Fill, width: Fill}
-                        layout: {flow: Right, padding: 0}
+                        layout: {flow: Down, padding: 0}
                         draw_bg: {color: (COLOR_PANEL_BG)}
-                
-                        positive = <TextInput> {
-                            walk: {width: Fill, height: Fill},
-                            text: "Positive"
-                            draw_label:{text_style:{font_size:12}}
-                            draw_bg: {
-                                color: #1113
+                        <Frame>{
+                            walk: {height: Fit, width: Fill}
+                            <Button>{
+                                label:"Render"
+                            }
+                            progress1 = <ProgressCircle>{}
+                            progress2 = <ProgressCircle>{}
+                            progress3 = <ProgressCircle>{}
+                            progress4 = <ProgressCircle>{}
+                            progress5 = <ProgressCircle>{}
+                            progress6 = <ProgressCircle>{}
+                        }
+                        <Frame>{
+                            positive = <TextInput> {
+                                walk: {width: Fill, height: Fill},
+                                text: "Positive"
+                                draw_label:{text_style:{font_size:12}}
+                                draw_bg: {
+                                    color: #1113
+                                }
+                            }
+                            negative = <TextInput> {
+                                walk: {width: Fill, height: Fill, margin:{left:10}},
+                                draw_label:{text_style:{font_size:12}}
+                                text: "text, watermark, cartoon"
+                                draw_bg: {
+                                    color: #1113
+                                }
                             }
                         }
-                    }
-                    NegativePanel = <Rect>{
-                        draw_bg: {color: (COLOR_PANEL_BG)}
-
-                        negative = <TextInput> {
-                            walk: {width: Fill, height: Fill},
-                            draw_label:{text_style:{font_size:12}}
-                            text: "text, watermark, cartoon"
-                            draw_bg: {
-                                color: #1113
-                            }
-                        }
-                    }
-                    
-                    KeywordPanel = <Frame>{
-                        
                     }
                     
                     ImageLibrary = <Rect> {
@@ -291,6 +310,7 @@ struct Machine {
 
 struct RunningPrompt {
     _started: Instant,
+    steps_counter: usize, 
     prompt_state: PromptState,
 }
 
@@ -327,11 +347,11 @@ pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
         Machine::new("192.168.1.62:8188", id_lut!(m1)),
-        Machine::new("192.168.1.204:8188", id_lut!(m2)),
+        //Machine::new("192.168.1.204:8188", id_lut!(m2)),
         Machine::new("192.168.1.154:8188", id_lut!(m3)),
         Machine::new("192.168.1.144:8188", id_lut!(m4)),
-        Machine::new("192.168.1.59:8188", id_lut!(m7)),
-        Machine::new("192.168.1.180:8188", id_lut!(m8))
+        Machine::new("192.168.1.59:8188", id_lut!(m5)),
+        Machine::new("192.168.1.180:8188", id_lut!(m6))
     ])] machines: Vec<Machine>,
     #[rust] queue: Vec<PromptState>,
     
@@ -617,7 +637,10 @@ impl App {
             request.set_request_id(live_id!(prompt));
             request.set_body(ws.as_bytes().to_vec());
             cx.http_request(machine.id, request);
+            Self::update_progress(cx, &self.ui, machine.id, true, 0);
+
             machine.running = Some(RunningPrompt {
+                steps_counter:0,
                 prompt_state: prompt_state.clone(),
                 _started: Instant::now(),
             });
@@ -642,10 +665,21 @@ impl App {
         }
     }
     
-    fn set_progress(&mut self, cx: &mut Cx, value: &str) {
-        let label = self.ui.get_label(id!(message_label));
-        label.set_label(value);
-        label.redraw(cx);
+    fn update_progress(cx: &mut Cx, ui:&WidgetRef, machine:LiveId, active:bool, steps: usize) {
+        let label = ui.get_label(id!(message_label));
+        let progress_id = match machine{
+            live_id!(m1)=>id!(progress1),
+            live_id!(m2)=>id!(progress2),
+            live_id!(m3)=>id!(progress3),
+            live_id!(m4)=>id!(progress4),
+            live_id!(m5)=>id!(progress5),
+            live_id!(m6)=>id!(progress6),
+            _=>panic!()
+        };
+        ui.get_frame(progress_id).apply_over(cx, live!{
+            draw_bg:{active:(if active{1.0}else{0.0}), progress:(steps as f64 / (277.0))}
+        });
+        ui.redraw(cx);
     }
     
     fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
@@ -690,6 +724,7 @@ impl AppMain for App {
         }
         
         let image_list = self.ui.get_list_view_set(ids!(image_list));
+       
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             if let Some(current_image) = self.current_image {
@@ -748,6 +783,7 @@ impl AppMain for App {
                                         if status.exec_info.queue_remaining == 0 {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
                                                 machine.running = None;
+                                                Self::update_progress(cx,  &self.ui, event.id, false, 0);
                                             }
                                             if let Some(prompt) = self.queue.pop() {
                                                 self.send_prompt(cx, prompt);
@@ -760,6 +796,7 @@ impl AppMain for App {
                                         if let Some(image) = output.images.first() {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
                                                 if let Some(running) = machine.running.take(){
+                                                    log!("GOT: {}", running.steps_counter);
                                                     machine.fetching = Some(running);
                                                     self.fetch_image(cx, event.id, &image.filename);
                                                 }
@@ -769,7 +806,13 @@ impl AppMain for App {
                                 }
                                 else if data._type == "progress" {
                                     // draw the progress bar / progress somewhere
-                                    self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
+                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
+                                        if let Some(running) = &mut machine.running{
+                                            running.steps_counter += 1;
+                                            Self::update_progress(cx,  &self.ui, event.id, true, running.steps_counter);
+                                        }
+                                    }
+                                    //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
                                 }
                             }
                             Err(err) => {
@@ -795,11 +838,11 @@ impl AppMain for App {
                                     self.db.add_png_and_prompt(fetching.prompt_state, data);
                                     
                                     // alright we got a png. lets decode it and stuff it in our image viewer
-                                    let big_list = self.ui.get_list_view(id!(big_list));
-                                    let image_id = self.num_images;
-                                    self.num_images += 1;
-                                    let item = big_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
-                                    item.load_png_from_data(cx, data);
+                                    //let big_list = self.ui.get_list_view(id!(big_list));
+                                    //let image_id = self.num_images;
+                                    //self.num_images += 1;
+                                    //let item = big_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
+                                    //item.load_png_from_data(cx, data);
                                     
                                     self.ui.redraw(cx);
                                 }
@@ -832,7 +875,6 @@ impl AppMain for App {
                     seed: self.last_seed as u64
                 });
             }
-            self.set_progress(cx, "Starting query");
         }
         /*
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Space, ..}) = event {
