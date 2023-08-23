@@ -281,7 +281,6 @@ impl Splitter {
             self.animate_state(cx, id!(hover.off));
         },
         Hit::FingerDown(_) => {
-            log!("{:?}", self.axis);
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                 Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
