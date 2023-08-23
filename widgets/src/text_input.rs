@@ -77,6 +77,7 @@ live_design!{
         select_pad_edges: 3.0
         cursor_size: 2.0,
         numeric_only: false,
+        on_focus_select_all: false,
         empty_message: "0",
         draw_bg: {
             instance radius: 2.0
@@ -214,7 +215,7 @@ pub struct TextInput {
     #[live] select_pad_edges: f64,
     #[live] empty_message: String,
     #[live] numeric_only: bool,
-
+    #[live] on_focus_select_all: bool,
     #[live] pub read_only: bool,
 
     #[live] label_walk: Walk,
@@ -467,7 +468,9 @@ impl TextInput {
                 self.undo_id += 1;
                 self.animate_state(cx, id!(focus.on));
                 // select all
-                self.select_all();
+                if self.on_focus_select_all{
+                    self.select_all();
+                }
                 self.draw_bg.redraw(cx);
                 dispatch_action(cx, TextInputAction::KeyFocus);
             }
@@ -634,6 +637,15 @@ impl TextInput {
                 if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
                     //log!("{} {}", pos, fe.abs);
                     let pos = pos.min(self.text.chars().count());
+                    if fe.tap_count == 1 {
+                        if pos != self.cursor_head {
+                            self.cursor_head = pos;
+                            if !fe.modifiers.shift{
+                                self.cursor_tail = pos;
+                            }
+                        }
+                        self.draw_bg.redraw(cx);
+                    }
                     if fe.tap_count == 2 {
                         // lets select the word.
                         self.select_word(pos);
