@@ -5,6 +5,7 @@ import android.media.MediaCodecList;
 import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.media.Image;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -173,6 +174,13 @@ public class VideoDecoder {
                 ByteBuffer outputBuffer = mCodec.getOutputBuffer(outputBufferIndex);
                 byte[] pixelData = acquireBuffer(mInfo.size);
                 outputBuffer.get(pixelData);
+
+                Image outputImage = mCodec.getOutputImage(outputBufferIndex);
+                Image.Plane yPlane = outputImage.getPlanes()[0];
+                int yStride = yPlane.getRowStride();
+                Image.Plane uvPlane = outputImage.getPlanes()[1];
+                int uvStride = uvPlane.getRowStride();
+
                 mCodec.releaseOutputBuffer(outputBufferIndex, false);
 
                 if ((mInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
@@ -182,7 +190,7 @@ public class VideoDecoder {
                 Activity activity = mActivityReference.get();
                 if (activity != null) {
                     activity.runOnUiThread(() -> {
-                        Makepad.onVideoStream(mCx, mVideoId, pixelData, mInfo.presentationTimeUs, mOutputEos, (Makepad.Callback)mView.getContext());
+                        Makepad.onVideoStream(mCx, mVideoId, pixelData, yStride, uvStride, mInfo.presentationTimeUs, mOutputEos, (Makepad.Callback)mView.getContext());
                     });
                 }
 

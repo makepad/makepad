@@ -4,6 +4,7 @@ use makepad_shader_compiler::makepad_live_tokenizer::LiveId;
 pub struct VideoStreamEvent {
     pub video_id: LiveId,
     pub pixel_data: Vec<u8>,
+    pub yuv_strides: (usize, usize),
     pub timestamp: u64,
     pub is_eos: bool,
 }

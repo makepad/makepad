@@ -49,5 +49,5 @@ public class Makepad {
     static native void onHttpRequestError(long cx, long id, String error, Callback callback);
     static native void onVideoDecodingInitialized(long cx, long videoId, int frameRate, int videoWidth, int videoHeight, 
     String colorFormat, long duration, Callback callback);
-    static native void onVideoStream(long cx, long videoId, byte[] video, long timestamp, boolean isEOS, Callback callback); 
+    static native void onVideoStream(long cx, long videoId, byte[] video, int yStride, int uvStride, long timestamp, boolean isEOS, Callback callback); 
 }

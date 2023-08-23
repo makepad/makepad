@@ -395,11 +395,13 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_video_stream(&mut self, video_id: u64, pixel_data: Vec<u8>, timestamp: u64, is_eos: bool, to_java: AndroidToJava) {
+    pub fn from_java_on_video_stream(&mut self, video_id: u64, pixel_data: Vec<u8>, 
+        yuv_strides: (usize, usize), timestamp: u64, is_eos: bool, to_java: AndroidToJava) {
         let e = Event::VideoStream(
         VideoStreamEvent  { 
                 video_id: LiveId(video_id),
                 pixel_data,
+                yuv_strides,
                 timestamp,
                 is_eos,
             }
