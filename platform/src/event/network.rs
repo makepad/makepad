@@ -7,8 +7,7 @@ use crate::event::Event;
 
 #[derive(Clone, Debug)]
 pub struct NetworkResponseEvent {
-    // TODO rename to request_id
-    pub id: LiveId,
+    pub request_id: LiveId,
     pub response: NetworkResponse,
 }
 
