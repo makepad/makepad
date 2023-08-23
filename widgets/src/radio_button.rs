@@ -244,7 +244,7 @@ impl RadioButton {
                 self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                if self.state.is_in_state(cx, id!(selected.off)) {
+                if self.is_in_state(cx, id!(selected.off)) {
                     self.animate_state(cx, id!(selected.on));
                     dispatch_action(cx, RadioButtonAction::Clicked);
                 }

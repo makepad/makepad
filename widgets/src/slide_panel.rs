@@ -136,6 +136,16 @@ impl SlidePanelRef {
             inner.animate_state(cx, id!(closed.off))
         }
     }
+    pub fn toggle(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.is_in_state(cx, id!(closed.on)){
+                inner.animate_state(cx, id!(closed.off))
+            }
+            else{
+                inner.animate_state(cx, id!(closed.on))
+            }
+        }
+    }
 }
 
 #[derive(Clone, WidgetSet)]

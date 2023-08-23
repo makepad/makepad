@@ -69,7 +69,9 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("         self.").ident(&state_field.name).add(".animate_to_live(cx, state);");
             tb.add("         self.apply_animating_state(cx);");
             tb.add("    }");
-            
+            tb.add("    fn is_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool{");
+            tb.add("         self.").ident(&state_field.name).add(".is_in_state(cx, check_state_pair)");
+            tb.add("    }");
             tb.add("    fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
             tb.add("         self.").ident(&state_field.name).add(".cut_to_live(cx, state);");
             tb.add("         self.apply_animating_state(cx);");
