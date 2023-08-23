@@ -507,13 +507,51 @@ pub enum FrameAction {
     None,
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
-    FingerMove(FingerMoveEvent)
+    FingerMove(FingerMoveEvent),
+    KeyDown(KeyEvent),
+    KeyUp(KeyEvent),
 }
 
 impl FrameRef {
     pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let FrameAction::FingerDown(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::FingerUp(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::FingerMove(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::KeyDown(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::KeyUp(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -685,15 +723,15 @@ impl Widget for Frame {
         
         if self.cursor.is_some() || self.state.live_ptr.is_some(){
             match event.hits(cx, self.area()) {
-                Hit::FingerDown(d) => {
+                Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area());
-                    dispatch_action(cx, FrameAction::FingerDown(d).into_action(uid))
+                    dispatch_action(cx, FrameAction::FingerDown(e).into_action(uid))
                 }
-                Hit::FingerMove(d) => {
-                    dispatch_action(cx, FrameAction::FingerMove(d).into_action(uid))
+                Hit::FingerMove(e) => {
+                    dispatch_action(cx, FrameAction::FingerMove(e).into_action(uid))
                 }
-                Hit::FingerUp(d) => {
-                    dispatch_action(cx, FrameAction::FingerUp(d).into_action(uid))
+                Hit::FingerUp(e) => {
+                    dispatch_action(cx, FrameAction::FingerUp(e).into_action(uid))
                 }
                 Hit::FingerHoverIn(_) => {
                     if let Some(cursor) = &self.cursor{
@@ -707,6 +745,12 @@ impl Widget for Frame {
                     if self.state.live_ptr.is_some(){
                         self.animate_state(cx, id!(hover.off));
                     }
+                }
+                Hit::KeyDown(e)=>{
+                    dispatch_action(cx, FrameAction::KeyDown(e).into_action(uid))
+                }
+                Hit::KeyUp(e)=>{
+                    dispatch_action(cx, FrameAction::KeyUp(e).into_action(uid))
                 }
                 _ => ()
             }
