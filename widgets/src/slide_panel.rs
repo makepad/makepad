@@ -90,13 +90,13 @@ impl Widget for SlidePanel {
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
         // ok lets set abs pos
-        let pos = cx.turtle().eval_width(walk.width, walk.margin, Flow::Overlay);
+        let rect = cx.peek_walk_turtle(walk);
         match self.side{
             SlideSide::Top=>{
-                walk.abs_pos = Some(dvec2(0.0, -pos * self.closed));
+                walk.abs_pos = Some(dvec2(0.0, -rect.size.y * self.closed));
             }
             SlideSide::Left=>{
-                walk.abs_pos = Some(dvec2(-pos * self.closed, 0.0));
+                walk.abs_pos = Some(dvec2(-rect.size.x * self.closed, 0.0));
             }
         }
         self.frame.draw_walk_widget(cx, walk)
