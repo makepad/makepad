@@ -220,7 +220,7 @@ impl Cx {
                 live_id!(ToWasmHTTPResponse) => {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpResponse(HttpResponse::new(
                             LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
                             tw.status as u16,
@@ -233,7 +233,7 @@ impl Cx {
                 live_id!(ToWasmHttpRequestError) => {
                     let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpRequestError(tw.error)
                     });
                 }
@@ -241,7 +241,7 @@ impl Cx {
                 live_id!(ToWasmHttpResponseProgress) => {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
                     });
                 }
@@ -249,7 +249,7 @@ impl Cx {
                 live_id!(ToWasmHttpUploadProgress) => {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
                     });
                 }
@@ -257,7 +257,7 @@ impl Cx {
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketClose
                     });
                 }
@@ -265,7 +265,7 @@ impl Cx {
                 live_id!(ToWasmWebSocketOpen) => {
                     let tw = ToWasmWebSocketOpen::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketOpen
                     });
                 }
@@ -273,21 +273,21 @@ impl Cx {
                 live_id!(ToWasmWebSocketError) => {
                     let tw = ToWasmWebSocketError::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketError(tw.error)
                     });
                 }
                 live_id!(ToWasmWebSocketString) => {
                     let tw = ToWasmWebSocketString::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketString(tw.data)
                     });
                 }
                 live_id!(ToWasmWebSocketBinary) => {
                     let tw = ToWasmWebSocketBinary::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
                 }
