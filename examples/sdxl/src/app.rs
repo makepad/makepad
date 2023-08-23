@@ -202,7 +202,7 @@ live_design!{
                 }
                 
                 big_image = <Frame> {
-                    visible: true,
+                    visible: false,
                     walk: {height: All, width: All}
                     cursor: Hand,
                     image = <Image> {
