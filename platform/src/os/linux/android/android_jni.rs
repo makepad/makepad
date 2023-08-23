@@ -249,7 +249,7 @@ impl<'a> AndroidToJava<'a> {
         }
     }
     
-    pub fn http_request(&self, id:LiveId, request: HttpRequest) {
+    pub fn http_request(&self, request_id: LiveId, request: HttpRequest) {
         unsafe {
             let url = CString::new(request.url.clone()).unwrap();
             let url = ((**self.env).NewStringUTF.unwrap())(self.env, url.as_ptr());
@@ -277,7 +277,7 @@ impl<'a> AndroidToJava<'a> {
             };
             
             let name = CString::new("requestHttp").unwrap();
-            let signature = CString::new("(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
+            let signature = CString::new("(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
             let method_id = (**self.env).GetMethodID.unwrap()(
                 self.env,
                 (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
@@ -289,7 +289,8 @@ impl<'a> AndroidToJava<'a> {
                 self.env,
                 self.callback,
                 method_id,
-                id.get_value() as jlong,
+                request_id.get_value() as jlong,
+                request.metadata_id.get_value() as jlong,
                 url,
                 method,
                 headers,
@@ -722,6 +723,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
     _: jclass,
     cx: jlong,
     request_id: jlong,
+    metadata_id: jlong,
     status_code: jint,
     headers: jstring,
     body: jobject,
@@ -732,6 +734,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
     
     (*(cx as *mut Cx)).from_java_on_http_response(
         request_id as u64,
+        metadata_id as u64,
         status_code as u16,
         headers,
         body,
@@ -749,11 +752,13 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
     _: jclass,
     cx: jlong,
     request_id: jlong,
+    metadata_id: jlong,
     exception: jstring,
     callback: jobject,
 ) {
     (*(cx as *mut Cx)).from_java_on_http_request_error(
         request_id as u64,
+        metadata_id as u64,
         jstring_to_string(env, exception),
         AndroidToJava {
             env,

@@ -84,7 +84,7 @@ impl CocoaApp {
     }
     
     
-    pub fn web_socket_open(&mut self, id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
+    pub fn web_socket_open(&mut self, request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
         
         unsafe {
             //self.lazy_init_ns_url_session();
@@ -94,13 +94,13 @@ impl CocoaApp {
             let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
             let web_socket_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().web_socket_delegate, new];
             
-            unsafe fn set_message_receive_handler(data_task2: Arc<ObjcId>, id: LiveId, networking_sender: Sender<NetworkResponseEvent>) {
+            unsafe fn set_message_receive_handler(data_task2: Arc<ObjcId>, request_id: LiveId, networking_sender: Sender<NetworkResponseEvent>) {
                 let data_task = data_task2.clone();
                 let handler = objc_block!(move | message: ObjcId, error: ObjcId | {
                     if error != ptr::null_mut() {
                         let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                         let message = NetworkResponseEvent {
-                            id,
+                            request_id,
                             response: NetworkResponse::WebSocketError(error_str)
                         };
                         networking_sender.send(message).unwrap();
@@ -113,7 +113,7 @@ impl CocoaApp {
                         let length: usize = msg_send![data, length];
                         let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
                         let message = NetworkResponseEvent {
-                            id,
+                            request_id,
                             response: NetworkResponse::WebSocketBinary(data_bytes.to_vec())
                         };
                         networking_sender.send(message).unwrap();
@@ -121,22 +121,22 @@ impl CocoaApp {
                     else { // string
                         let string: ObjcId = msg_send![message, string];
                          let message = NetworkResponseEvent {
-                            id,
+                            request_id,
                             response: NetworkResponse::WebSocketString(nsstring_to_string(string))
                         };
                         networking_sender.send(message).unwrap();
                     }
-                    set_message_receive_handler(data_task.clone(), id, networking_sender.clone())
+                    set_message_receive_handler(data_task.clone(), request_id, networking_sender.clone())
                 });
                 let () = msg_send![*Arc::as_ptr(&data_task2), receiveMessageWithCompletionHandler: handler];
             }
             let () = msg_send![data_task, setDelegate: web_socket_delegate_instance];
-            set_message_receive_handler(Arc::new(data_task), id, networking_sender);
+            set_message_receive_handler(Arc::new(data_task), request_id, networking_sender);
             let () = msg_send![data_task, resume];
         }
     }
     
-    pub fn make_http_request(&mut self, id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
+    pub fn make_http_request(&mut self, request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
         unsafe {
             let ns_request = Self::make_ns_request(&request);
             
@@ -145,7 +145,7 @@ impl CocoaApp {
                 if error != ptr::null_mut() {
                     let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                     let message = NetworkResponseEvent {
-                        id,
+                        request_id,
                         response: NetworkResponse::HttpRequestError(error_str)
                     };
                     networking_sender.send(message).unwrap();
@@ -158,7 +158,7 @@ impl CocoaApp {
                 let response_code: u16 = msg_send![response, statusCode];
                 let headers: ObjcId = msg_send![response, allHeaderFields];
                 let mut response = HttpResponse::new(
-                    request.request_id,
+                    request.metadata_id,
                     response_code,
                     "".to_string(),
                     Some(data_bytes.to_vec()),
@@ -175,7 +175,10 @@ impl CocoaApp {
                     key = msg_send![key_enumerator, nextObject];
                 }
                 
-                let message = NetworkResponseEvent {id, response: NetworkResponse::HttpResponse(response)};
+                let message = NetworkResponseEvent {
+                    request_id,
+                    response: NetworkResponse::HttpResponse(response)
+                };
                 networking_sender.send(message).unwrap();
             });
             
