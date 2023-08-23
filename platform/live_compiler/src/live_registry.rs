@@ -125,7 +125,7 @@ impl LiveRegistry {
     
     pub fn crate_name_to_cargo_manifest_path(&self, crate_name: &str) -> Option<String> {
         let crate_name = crate_name.replace('-', "_");
-        let base_crate = LiveId::from_str(&crate_name).unwrap();
+        let base_crate = LiveId::from_str_with_lut(&crate_name).unwrap();
         for file in &self.live_files {
             if file.module_id.0 == base_crate {
                 if let Some(package_root) = &self.package_root {

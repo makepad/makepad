@@ -257,7 +257,7 @@ impl CheckBox {
                 self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                if self.state.is_in_state(cx, id!(selected.on)) {
+                if self.is_in_state(cx, id!(selected.on)) {
                     self.animate_state(cx, id!(selected.off));
                     dispatch_action(cx, CheckBoxAction::Change(false));
                 }

@@ -664,7 +664,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         fn decode_id(data: &[u8], o: &mut usize) -> Result<Option<LiveId>, LiveNodeFromCborError> {
             // we expect a string OR a u64
             if let Some(val) = decode_str(data, o) ? {
-                if let Ok(id) = LiveId::from_str(val) {
+                if let Ok(id) = LiveId::from_str_with_lut(val) {
                     return Ok(Some(id))
                 }
                 else {

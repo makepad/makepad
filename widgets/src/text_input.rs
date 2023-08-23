@@ -768,13 +768,13 @@ impl TextInput {
 pub struct TextInputRef(WidgetRef);
 
 impl TextInputRef {
-    pub fn changed(&self, actions:&WidgetActions) -> String {
+    pub fn changed(&self, actions:&WidgetActions) -> Option<String> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let TextInputAction::Change(val) = item.action() {
-                return val;
+                return Some(val);
             }
         }
-        "".to_string()
+        None
     }
     
     pub fn set_text(&self, text:&str){

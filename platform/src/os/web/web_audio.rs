@@ -55,7 +55,7 @@ impl WebAudioAccess {
     pub fn to_wasm_audio_device_list(&mut self, tw: ToWasmAudioDeviceList) {
         self.devices.clear();
         for device in tw.devices {
-            let device_id = LiveId::from_str_unchecked(&format!("{} {} {}", device.web_device_id, device.label, device.is_output)).into();
+            let device_id = LiveId::from_str(&format!("{} {} {}", device.web_device_id, device.label, device.is_output)).into();
             self.devices.push(WebAudioDevice {
                 web_device_id: device.web_device_id,
                 desc: AudioDeviceDesc {
