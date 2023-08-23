@@ -66,8 +66,12 @@ live_design!{
                     return mix(#3, #1, self.geom_pos.y + Math::random_2d(self.pos.xy) * 0.04);
                 }
             }
-            big_image = <Image> {
-                walk: {width: 1920, height: 1080}
+            big_image = <Frame> {
+                walk: {height: Fit, width: Fit}
+                cursor: Hand,
+                image = <Image> {
+                    walk: {width: 1920, height: 1080}
+                }
             }
             <Frame> {
                 walk: {height: Fill, width: Fill}
@@ -90,7 +94,7 @@ live_design!{
             }
             library_panel = <SlidePanel>{
                 <Rect> {
-                    draw_bg:{color:#777f}
+                    draw_bg:{color:#7777}
                     walk: {height: Fill, width: 800}
                     layout:{padding:20, flow:Down},
                     <Frame>{ 
@@ -534,7 +538,7 @@ impl AppMain for App {
             let cx = &mut Cx2d::new(cx, event);
             if let Some(current_image) = self.current_image{
                 let tex = self.db.get_image_texture(current_image);
-                self.ui.get_image(id!(big_image)).set_texture(tex)
+                self.ui.get_image(id!(big_image.image)).set_texture(tex)
             } 
             
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
@@ -677,6 +681,10 @@ impl AppMain for App {
         }
 
         if self.ui.get_button(id!(close_library)).pressed(&actions){
+            self.ui.get_slide_panel(id!(library_panel)).close(cx);
+        }
+        
+        if self.ui.get_frame(id!(big_image)).finger_down(&actions).is_some(){
             self.ui.get_slide_panel(id!(library_panel)).close(cx);
         }
         
