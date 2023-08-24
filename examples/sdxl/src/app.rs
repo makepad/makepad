@@ -759,7 +759,7 @@ impl LiveHook for App {
         let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
         let dd = self.ui.get_drop_down(id!(workflow_dropdown));
         dd.set_labels(workflows);
-        cx.start_interval(0.1);
+        cx.start_interval(0.016);
     }
 }
 
@@ -934,7 +934,7 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
-        let image_list = self.ui.get_list_view_set(ids!(image_list));
+        let image_list = self.ui.get_list_view(id!(image_list));
         if let Event::Timer(_te) = event {
             self.handle_slide_show(cx);
         }
@@ -1049,20 +1049,20 @@ impl AppMain for App {
                                 if let Some(fetching) = machine.fetching.take() {
                                     
                                     // lets write our image to disk properly
-                                    self.current_image = Some(self.db.add_png_and_prompt(fetching.prompt_state, data));
+                                    //self.current_image = Some(
+                                    self.db.add_png_and_prompt(fetching.prompt_state, data);
+                                    // scroll by one item
+                                    let first_id = image_list.first_id();
+                                    if first_id != 0 {
+                                        image_list.set_first_id(first_id + 1);
+                                    }
                                     
                                     self.filtered.filter_db(&self.db, "", false);
-                                    if self.db.get_image_texture(self.current_image.as_ref().unwrap()).is_some() {
-                                        self.ui.redraw(cx);
-                                    };
-                                    
-                                    // alright we got a png. lets decode it and stuff it in our image viewer
-                                    //let big_list = self.ui.get_list_view(id!(big_list));
-                                    //let image_id = self.num_images;
-                                    //self.num_images += 1;
-                                    //let item = big_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
-                                    //item.load_png_from_data(cx, data);
-                                    
+                                    if let Some(current_image) = &self.current_image {
+                                        if self.db.get_image_texture(current_image).is_some() {
+                                            self.ui.redraw(cx);
+                                        }
+                                    }
                                     
                                 }
                             }
@@ -1124,7 +1124,7 @@ impl AppMain for App {
         if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions) {
             self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
-            image_list.set_first_id(0);
+            image_list.set_first_id_and_scroll(0, 0.0);
         }
         
         if let Some(e) = self.ui.get_frame(id!(image_view)).finger_down(&actions) {
