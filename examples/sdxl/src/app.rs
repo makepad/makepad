@@ -502,28 +502,17 @@ live_design!{
                     
                     InputPanel = <Rect> {
                         walk: {height: Fill, width: Fill}
-                        layout: {flow: Down, padding: 5}
+                        layout: {flow: Down, padding: 0.0}
                         draw_bg: {color: (COLOR_PANEL_BG)}
                         <Frame> {
                             walk: {height: Fit, width: Fill}
-                            layout: {align: {x: 0.0, y: 0.5}}
+                            layout: {align: {x: 0.0, y: 0.5}, padding: 5}
 
                             <BarLabel> {
                                 label: "Workflow"
                             }
 
                             workflow_dropdown = <SdxlDropDown> {}
-
-                            <DividerH> {}
-                            
-                            render = <Button> {
-                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-                                label: "Render"
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                }
-                            }
 
                             <BarLabel> {
                                 label: "Batch size"
@@ -539,8 +528,17 @@ live_design!{
 
                             clear_queue = <Button> {
                                 layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 10.0}}
                                 label: "Clear queue"
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
+                            }
+
+                            render = <Button> {
+                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
+                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                                label: "Render"
                                 draw_label: {
                                     text_style: <TEXT_BOLD> {},
                                 }
@@ -561,6 +559,8 @@ live_design!{
                                 labels: ["1s", "2s", "5s", "10s"]
                             }
 
+                            <DividerH> {}
+
                             <FillerH> {}
 
                             <BarLabel> {
@@ -579,7 +579,7 @@ live_design!{
                         }
                         <Frame> {
                             positive = <TextInput> {
-                                walk: {width: Fill, height: Fill, margin: {top: 0.0, right: 5.0, bottom: 5.0, left: 5.0}},
+                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0}},
                                 text: "Positive"
                                 draw_label: {text_style: {font_size: (TEXT_BIG)}}
                                 draw_bg: {
@@ -589,7 +589,7 @@ live_design!{
                                 }
                             }
                             negative = <TextInput> {
-                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 0.0, bottom: 5.0, right: 5.0}},
+                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0}},
                                 draw_label: {text_style: {font_size: (TEXT_BIG)}}
                                 text: "text, watermark, cartoon"
                                 draw_bg: {
