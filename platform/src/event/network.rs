@@ -111,6 +111,10 @@ impl HttpRequest {
         self.body = Some(body);
     }
 
+    pub fn set_body_string(&mut self, v: &str) {
+        self.body = Some(v.as_bytes().to_vec());
+    }
+
     pub fn set_json_body<T: SerJson>(&mut self, body: T) {
        let json_body = body.serialize_json();
        let serialized_body = json_body.into_bytes();

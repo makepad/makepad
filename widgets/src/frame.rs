@@ -582,6 +582,15 @@ impl FrameRef {
         }
     }
     
+    pub fn visible(&self)->bool {
+        if let Some(inner) = self.borrow() {
+            inner.visible 
+        }
+        else{
+            false
+        }
+    }
+    
     pub fn set_texture(&self, slot: usize, texture: &Texture) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_texture(slot, texture);
