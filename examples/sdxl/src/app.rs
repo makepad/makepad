@@ -2,7 +2,7 @@ use crate::{makepad_live_id::*};
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use crate::database::*;
 use crate::comfyui::*;
 
@@ -175,6 +175,55 @@ live_design!{
         }
     }
     
+    SdxlCheckBox = <CheckBox> {
+        layout: {padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}}
+        label_walk: {margin: {left: 20.0, top: 8, bottom: 8, right: 10}}
+        state: {
+            selected = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {draw_check: {selected: 0.0}}
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {draw_check: {selected: 1.0}}
+                }
+            }
+        }
+        draw_check: {
+            instance border_width: 1.0
+            instance border_color: #x06
+            instance border_color2: #xFFFFFF0A
+            size: 8.5;
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let sz = self.size;
+                let left = sz + 1.;
+                let c = vec2(left + sz, self.rect_size.y * 0.5);
+                sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
+                
+                sdf.stroke_keep(#xFFF2, 1.25)
+                
+                sdf.fill(#xFFF0)
+                let isz = sz * 0.65;
+                sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
+                sdf.subtract();
+                sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                sdf.blend(self.selected)
+                sdf.fill(#xFFF8);
+                return sdf.result
+            }
+        }
+        draw_label: {
+            text_style: <TEXT_BOLD> {},
+            color: #xFFFA
+        }
+        label: "Slideshow"
+    }
+    
     ProgressCircle = <Frame> {
         show_bg: true,
         walk: {width: 24, height: 24}
@@ -214,91 +263,6 @@ live_design!{
             }
         }
     }
-    /*
-    PromptGroup = <Rect> {
-        draw_bg:{
-            instance hover: 0.0
-            instance down: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
-                sdf.fill(mix( mix(#x00000000, #x00000000, self.hover), #x00000000, self.down));
-                return sdf.result
-            }
-        }
-        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 0, left: 0, right: 0 } }
-        layout: {flow: Right, spacing: 10,  padding: 0}
-        state: {
-            hover = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.5}}
-                    ease: OutExp
-                    apply: {
-                        draw_bg: {hover: 0.0}
-                     }
-                }
-                on = {
-                    ease: OutExp
-                    from: {
-                        all: Forward {duration: 0.2}
-                    }
-                    apply: {
-                        draw_bg: {hover: 1.0}
-                     }
-                }
-            }
-            down = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.5}}
-                    ease: OutExp
-                    apply: {
-                        draw_bg: {down: 0.0}
-                     }
-                }
-                on = {
-                    ease: OutExp
-                    from: {
-                        all: Forward {duration: 0.2}
-                    }
-                    apply: {
-                       draw_bg: {down: 1.0}
-                     }
-                }
-            }
-        }
-
-
-        <Frame> {
-            layout: {flow: Down},
-            walk: { width: Fill, height: Fit}
-
-            <DividerV> {}
-
-            prompt = <Button> {
-                walk: { width: Fill, height:Fit }
-                layout: { align: {x: 0.0, y: 0.}, padding: {top: 5.0, right: 0.0, bottom: 5.0, left: 0.0} }
-                draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
-                        sdf.fill_keep(body)
-                        return sdf.result
-                    }
-                }
-                draw_label: {
-                    walk: { width: Fill }
-                    text_style: <TEXT_BOLD> {},
-                    fn get_color(self) -> vec4 {
-                        return mix(mix(#xFFFA, #xFFFF, self.hover), #xFFF8, self.pressed);
-                    }
-                    wrap: Word,
-                }
-                label: "Placeholder Lorem Ipsum dolor Sit amet"
-            }
-        }
-    }*/
     
     PromptGroup = <Rect> {
         <DividerV> {}
@@ -419,6 +383,8 @@ live_design!{
         
         img = <Image> {
             walk: {width: Fill, height: Fill}
+            min_width: 1920,
+            min_height: 1080,
             fit: Horizontal,
             draw_bg: {
                 instance hover: 0.0
@@ -443,7 +409,6 @@ live_design!{
     }
     
     App = {{App}} {
-        last_seed: 1000;
         ui: <DesktopWindow> {
             window: {inner_size: vec2(2000, 1024)},
             caption_bar = {visible: true, caption_label = {label = {label: "SDXL Surf"}}},
@@ -490,7 +455,7 @@ live_design!{
                     }
                     
                     ImageView = <Rect> {
-                        draw_bg: {color: (COLOR_PANEL_BG)}
+                        draw_bg: {color: #2}
                         walk: {height: Fill, width: Fill}
                         layout: {flow: Down, align: {x: 0.5, y: 0.5}}
                         cursor: Hand,
@@ -522,15 +487,30 @@ live_design!{
                                 labels: ["1", "2", "3", "4", "5", "6", "10000"]
                             }
                             
-                            render = <Button> {
+                            <BarLabel> {
+                                label: "Seed"
+                            }
+                            seed_input = <TextInput> {
+                                walk: {height: Fit, width: Fit, margin: {bottom: 0, left: 0}}
+                                label_walk: {width: Fit}
+                            }
+                            
+                            render_batch = <Button> {
                                 layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
                                 walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-                                label: "Render"
+                                label: "Render batch"
                                 draw_label: {
                                     text_style: <TEXT_BOLD> {},
                                 }
                             }
-
+                            render_one = <Button> {
+                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
+                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                                label: "Render one"
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
+                            }
                             cancel_todo = <Button> {
                                 layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
                                 walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
@@ -542,66 +522,25 @@ live_design!{
                             
                             <DividerH> {}
                             
-                            slide_show_check_box = <CheckBox> {
-                                layout: {padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}}
-                                label_walk: {margin: {left: 20.0, top: 8, bottom: 8, right: 10}}
-                                state: {
-                                    selected = {
-                                        default: off
-                                        off = {
-                                            from: {all: Forward {duration: 0.1}}
-                                            apply: {draw_check: {selected: 0.0}}
-                                        }
-                                        on = {
-                                            cursor: Arrow,
-                                            from: {all: Forward {duration: 0.1}}
-                                            apply: {draw_check: {selected: 1.0}}
-                                        }
-                                    }
-                                }
-                                draw_check: {
-                                    instance border_width: 1.0
-                                    instance border_color: #x06
-                                    instance border_color2: #xFFFFFF0A
-                                    size: 8.5;
-                                    fn pixel(self) -> vec4 {
-                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                                        let sz = self.size;
-                                        let left = sz + 1.;
-                                        let c = vec2(left + sz, self.rect_size.y * 0.5);
-                                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                                        
-                                        sdf.stroke_keep(#xFFF2, 1.25)
-                                        
-                                        sdf.fill(#xFFF0)
-                                        let isz = sz * 0.65;
-                                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
-                                        sdf.subtract();
-                                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                                        sdf.blend(self.selected)
-                                        sdf.fill(#xFFF8);
-                                        return sdf.result
-                                    }
-                                }
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                    color: #xFFFA
-                                }
+                            slide_show_check_box = <SdxlCheckBox> {
                                 label: "Slideshow"
                             }
                             
                             slide_show_dropdown = <SdxlDropDown> {
-                                selected_item: 0
+                                selected_item: 2
                                 walk: {margin: 0},
-                                labels: ["1s", "2s", "5s", "10s"]
+                                labels: ["0s", "0.25s", "0.5s", "0.75s", "1s", "2s", "5s", "10s"]
                             }
-                            
                             
                             <DividerH> {}
                             
-                            <FillerH> {}
                             
+                            <FillerH> {}
+                            cluster_dropdown = <SdxlDropDown> {
+                                selected_item: 0
+                                walk: {margin: 0},
+                                labels: ["All nodes", "Part 1", "Part 2"]
+                            }
                             todo_label = <BarLabel> {
                                 walk: {margin: {right: 5.0}}
                                 label: "Todo 0"
@@ -781,11 +720,11 @@ pub struct App {
     #[rust(Database::new(cx))] db: Database,
     
     #[rust] filtered: FilteredDb,
-    #[live] last_seed: i64,
+    #[rust(10000u64)] last_seed: u64,
     
     #[rust] current_image: Option<ImageId>,
     
-    #[rust(Instant::now())] _last_flip: Instant
+    #[rust(Instant::now())] last_flip: Instant
 }
 
 impl LiveHook for App {
@@ -801,6 +740,7 @@ impl LiveHook for App {
         let dd = self.ui.get_drop_down(id!(workflow_dropdown));
         dd.set_labels(workflows);
         cx.start_interval(0.016);
+        self.update_seed_display(cx);
     }
 }
 
@@ -886,11 +826,19 @@ impl App {
         ui.redraw(cx);
     }
     
-    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
-        self.ui.redraw(cx);
-        if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
-            self.current_image = Some(image_files[row.min(*image_count)].clone());
+    
+    fn load_seed_from_current_image(&mut self, cx: &mut Cx) {
+        if let Some(current_image) = &self.current_image {
+            if let Some(image) = self.db.image_files.iter().find( | v | v.image_id == *current_image) {
+                self.last_seed = image.seed;
+                self.update_seed_display(cx);
+            }
         }
+    }
+    
+    fn update_seed_display(&mut self, cx: &mut Cx) {
+        self.ui.get_text_input(id!(seed_input)).set_text(&format!("{}", self.last_seed));
+        self.ui.redraw(cx);
     }
     
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
@@ -907,6 +855,7 @@ impl App {
             if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos + 1 < self.filtered.flat.len() {
                     self.current_image = Some(self.filtered.flat[pos + 1].clone());
+                    self.last_flip = Instant::now();
                 }
             }
         }
@@ -918,8 +867,17 @@ impl App {
             if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos > 0 {
                     self.current_image = Some(self.filtered.flat[pos - 1].clone());
+                    self.last_flip = Instant::now();
                 }
             }
+        }
+    }
+    
+    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
+        self.ui.redraw(cx);
+        if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
+            self.current_image = Some(image_files[row.min(*image_count)].clone());
+            self.last_flip = Instant::now();
         }
     }
     
@@ -935,14 +893,13 @@ impl App {
         self.ui.redraw(cx);
     }
     
-    fn render(&mut self, cx: &mut Cx) {
+    fn render(&mut self, cx: &mut Cx, is_one: bool) {
         let positive = self.ui.get_text_input(id!(positive)).get_text();
         let negative = self.ui.get_text_input(id!(negative)).get_text();
-        let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected() + 1;
+        let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
         let workflow_id = self.ui.get_drop_down(id!(workflow_dropdown)).get_selected();
         let workflow = self.workflows[workflow_id].name.clone();
-        for _ in 0..batch_size {
-            self.last_seed += 1;
+        for _ in 0..(if is_one {1} else {batch_size}) {
             self.send_prompt(cx, PromptState {
                 prompt: Prompt {
                     positive: positive.clone(),
@@ -951,13 +908,43 @@ impl App {
                 workflow: workflow.clone(),
                 seed: self.last_seed as u64
             });
+            if !is_one {
+                self.last_seed += 1;
+                self.update_seed_display(cx);
+            }
         }
         // lets update the queuedisplay
         self.update_todo_display(cx);
     }
     
-    fn handle_slide_show(&mut self, _cx: &mut Cx) {
-        
+    fn set_slide_show(&mut self, cx: &mut Cx, check: bool) {
+        let check_box = self.ui.get_check_box(id!(slide_show_check_box));
+        check_box.set_selected(cx, check);
+        if check {
+            self.last_flip = Instant::now();
+        }
+    }
+    
+    fn handle_slide_show(&mut self, cx: &mut Cx) {
+        // lets get the slideshow values
+        if self.ui.get_check_box(id!(slide_show_check_box)).selected(cx) {
+            let index = self.ui.get_drop_down(id!(slide_show_dropdown)).get_selected();
+            let time = match index {
+                0 => 0.0,
+                1 => 0.25,
+                2 => 0.5,
+                3 => 0.75,
+                4 => 1.0,
+                5 => 2.0,
+                6 => 5.0,
+                7 => 10.,
+                _ => 0.
+            };
+            // ok lets check our last-change instant
+            if Instant::now() - self.last_flip > Duration::from_millis((time * 1000.0)as u64) {
+                self.select_prev_image(cx);
+            }
+        }
     }
     
     fn update_render_todo(&mut self, cx: &mut Cx) {
@@ -1091,7 +1078,7 @@ impl AppMain for App {
                                     
                                     // lets write our image to disk properly
                                     //self.current_image = Some(
-                                    self.db.add_png_and_prompt(fetching.prompt_state, data);
+                                    let image_id = self.db.add_png_and_prompt(fetching.prompt_state, data);
                                     // scroll by one item
                                     let first_id = image_list.first_id();
                                     if first_id != 0 {
@@ -1099,10 +1086,9 @@ impl AppMain for App {
                                     }
                                     
                                     self.filtered.filter_db(&self.db, "", false);
-                                    if let Some(current_image) = &self.current_image {
-                                        if self.db.get_image_texture(current_image).is_some() {
-                                            self.ui.redraw(cx);
-                                        }
+                                    
+                                    if self.db.get_image_texture(&image_id).is_some() {
+                                        self.ui.redraw(cx);
                                     }
                                     
                                 }
@@ -1121,8 +1107,8 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
-            self.render(cx);
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, modifiers, ..}) = event {
+            self.render(cx, modifiers.control | modifiers.logo);
         }
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..}) = event {
@@ -1134,10 +1120,10 @@ impl AppMain for App {
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Tab, ..}) = event {
             let check_box = self.ui.get_check_box(id!(slide_show_check_box));
             if check_box.selected(cx) {
-                check_box.set_selected(cx, false);
+                self.set_slide_show(cx, false);
             }
             else {
-                check_box.set_selected(cx, true);
+                self.set_slide_show(cx, true);
             }
         }
         
@@ -1152,10 +1138,16 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(render)).clicked(&actions) {
-            self.render(cx);
+        if self.ui.get_button(id!(render_batch)).clicked(&actions) {
+            self.render(cx, false);
             self.ui.redraw(cx);
         }
+        
+        if self.ui.get_button(id!(render_one)).clicked(&actions) {
+            self.render(cx, true);
+            self.ui.redraw(cx);
+        }
+        
         
         if self.ui.get_button(id!(cancel_todo)).clicked(&actions) {
             self.clear_todo(cx);
@@ -1186,9 +1178,11 @@ impl AppMain for App {
             match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.select_next_image(cx);
+                    self.set_slide_show(cx, false);
                 }
                 KeyCode::ArrowUp => {
                     self.select_prev_image(cx);
+                    self.set_slide_show(cx, false);
                 }
                 _ => ()
             }
@@ -1197,12 +1191,14 @@ impl AppMain for App {
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
             let rows = item.get_frame_set(ids!(row1, row2));
-            for (index, row) in rows.iter().enumerate() {
+            for (row_index, row) in rows.iter().enumerate() {
                 if let Some(fd) = row.finger_down(&actions) {
-                    self.set_current_image_by_item_id_and_row(cx, item_id, index);
+                    self.set_current_image_by_item_id_and_row(cx, item_id, row_index);
                     if fd.tap_count == 2 {
                         if let ImageListItem::ImageRow {prompt_hash, ..} = self.filtered.list[item_id as usize] {
+                            self.load_seed_from_current_image(cx);
                             self.load_inputs_from_prompt_hash(cx, prompt_hash);
+                            self.set_slide_show(cx, false);
                         }
                     }
                 }

@@ -82,11 +82,11 @@ pub struct Database {
     
     pub prompt_files: Vec<PromptFile>,
     pub image_files: Vec<ImageFile>,
-    pub image_index: HashMap<ImageId, usize>,
+    //pub image_index: HashMap<ImageId, usize>,
     
     pub textures: HashMap<ImageId, TextureItem>,
     pub in_flight: Vec<ImageId>,
-    pub thread_pool: ThreadPool<()>,
+    pub thread_pool: TagThreadPool<ImageId>,
     pub to_ui: ToUIReceiver<DecoderToUI>,
 }
 
@@ -139,11 +139,11 @@ impl Database {
         Self {
             textures: HashMap::new(),
             in_flight: Vec::new(),
-            thread_pool: ThreadPool::new(cx, use_cores),
+            thread_pool: TagThreadPool::new(cx, use_cores),
             image_path: "./sdxl_images".to_string(),
             image_files: Vec::new(),
             prompt_files: Vec::new(),
-            image_index: HashMap::new(),
+            //image_index: HashMap::new(),
             to_ui: ToUIReceiver::default(),
         }
     }
@@ -171,20 +171,33 @@ impl Database {
     }
     
     pub fn get_image_texture(&mut self, image_id: &ImageId) -> Option<Texture> {
-        if self.in_flight.contains(&image_id) {
-            return None
-        }
-        if let Some(texture) = self.textures.get(&image_id) {
+        
+        if let Some(texture) = self.textures.get_mut(&image_id) {
+            texture.last_seen = Instant::now();
             return Some(texture.texture.clone());
         }
         //let image_file = &self.image_files[*self.image_index.get(&image_id).unwrap()];
+        // lets see if we have too many images
+        let now = Instant::now();
+        while self.textures.len()>200{
+            if let Some((image_id,_)) = self.textures.iter().max_by(|(_,a),(_,b)|{
+                (now-a.last_seen).cmp(&(now-b.last_seen))
+            }){
+                let image_id = image_id.clone();
+                self.textures.remove(&image_id);
+            }
+            else{
+                break;
+            }
+        }
         
         // request decode
         let image_path = self.image_path.clone();
         let to_ui = self.to_ui.sender();
         self.in_flight.push(image_id.clone());
         let image_id = image_id.clone();
-        self.thread_pool.execute(move | _ | {
+
+        self.thread_pool.execute_rev(image_id, move |image_id| {
             
             if let Ok(data) = fs::read(format!("{}/{}", image_path, image_id.as_file_name())) {
                 if let Ok(image_buffer) = ImageBuffer::from_png(&data) {
