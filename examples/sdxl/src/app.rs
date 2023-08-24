@@ -135,6 +135,16 @@ live_design!{
             }
         }
     }
+    
+    FillerH = <Frame> {
+        walk: {width: Fill, height: Fit}
+    }
+    
+    FillerV = <Frame> {
+        walk: {width: Fit, height: Fill}
+    }
+    
+    
     DividerV = <Frame> {
         layout: {flow: Down, spacing: 0.0}
         walk: {margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}, width: Fill, height: Fit}
@@ -145,6 +155,21 @@ live_design!{
         }
         <Rect> {
             walk: {height: 2, width: Fill, margin: 0.0}
+            layout: {flow: Down, padding: 0.0},
+            draw_bg: {color: #xFFFFFF22}
+        }
+    }
+    
+    DividerH = <Frame> {
+        layout: {flow: Right, spacing: 0.0}
+        walk: {margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}, width: Fit, height: Fill}
+        <Rect> {
+            walk: {height: Fill, width: 2, margin: 0.0}
+            layout: {flow: Down, padding: 0.0},
+            draw_bg: {color: #x00000066}
+        }
+        <Rect> {
+            walk: {height: Fill, width: 2, margin: 0.0}
             layout: {flow: Down, padding: 0.0},
             draw_bg: {color: #xFFFFFF22}
         }
@@ -477,11 +502,11 @@ live_design!{
                     
                     InputPanel = <Rect> {
                         walk: {height: Fill, width: Fill}
-                        layout: {flow: Down, padding: 5}
+                        layout: {flow: Down, padding: 0.0}
                         draw_bg: {color: (COLOR_PANEL_BG)}
                         <Frame> {
                             walk: {height: Fit, width: Fill}
-                            layout: {align: {x: 0.0, y: 0.5}}
+                            layout: {align: {x: 0.0, y: 0.5}, padding: 5}
                             
                             render = <Button> {
                                 layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
@@ -494,7 +519,9 @@ live_design!{
                             <BarLabel> {
                                 label: "Workflow"
                             }
+                            
                             workflow_dropdown = <SdxlDropDown> {}
+                            
                             <BarLabel> {
                                 label: "Batch size"
                             }
@@ -503,18 +530,30 @@ live_design!{
                                 labels: ["1", "2", "3", "4", "5", "6", "stepped"]
                             }
                             
+                            <DividerH> {}
+                            
                             slide_show_check_box = <CheckBox> {
                                 draw_label: {
                                     text_style: <TEXT_BOLD> {},
                                 }
                                 label: "Slideshow"
                                 walk: {width: Fit, height: Fit, margin: 0}
+                                
                             }
+                            
                             slide_show_dropdown = <SdxlDropDown> {
                                 selected_item: 0
                                 walk: {margin: 0},
                                 labels: ["1s", "2s", "5s", "10s"]
-                            }todo_label = <BarLabel> {
+                            }
+                            
+                            
+                            <DividerH> {}
+                            
+                            <FillerH> {}
+                            
+                            todo_label = <BarLabel> {
+                                walk: {margin: {right: 5.0}}
                                 label: "Todo 0"
                             }
                             progress1 = <ProgressCircle> {}
@@ -538,7 +577,7 @@ live_design!{
                         }
                         <Frame> {
                             positive = <TextInput> {
-                                walk: {width: Fill, height: Fill, margin: {top: 0.0, right: 5.0, bottom: 5.0, left: 5.0}},
+                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0}},
                                 text: "Positive"
                                 draw_label: {text_style: {font_size: (TEXT_BIG)}}
                                 draw_bg: {
@@ -548,7 +587,7 @@ live_design!{
                                 }
                             }
                             negative = <TextInput> {
-                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 0.0, bottom: 5.0, right: 5.0}},
+                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0}},
                                 draw_label: {text_style: {font_size: (TEXT_BIG)}}
                                 text: "text, watermark, cartoon"
                                 draw_bg: {
