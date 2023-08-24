@@ -1,11 +1,10 @@
 use crate::{makepad_live_id::*};
 use makepad_micro_serde::*;
 use makepad_widgets::*;
-use makepad_platform::thread::*;
-use makepad_widgets::image_cache::{ImageBuffer};
 use std::fs;
 use std::time::Instant;
-use std::collections::HashMap;
+use crate::database::*;
+use crate::comfyui::*;
 
 live_design!{
     import makepad_widgets::button::Button;
@@ -15,6 +14,7 @@ live_design!{
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::image::Image;
     import makepad_widgets::list_view::ListView;
+    import makepad_widgets::drop_down::DropDown;
     import makepad_widgets::slide_panel::SlidePanel;
     import makepad_widgets::frame::*;
     import makepad_widgets::theme::*;
@@ -26,39 +26,131 @@ live_design!{
         font_size: 10,
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
+    COLOR_UP_0 = #xFFFFFF00
+    FONT_SIZE_H2 = 9.5
     
-    ProgressCircle = <Frame>{
-        show_bg:true,
-        walk:{width:33,height:33}
-        draw_bg:{
-            instance progress:0.0
-            instance active:0.0
+    SSPACING_0 = 0.0
+    SSPACING_1 = 4.0
+    SSPACING_2 = (SSPACING_1 * 2)
+    SSPACING_3 = (SSPACING_1 * 3)
+    SSPACING_4 = (SSPACING_1 * 4)
+    
+    SPACING_0 = {top: (SSPACING_0), right: (SSPACING_0), bottom: (SSPACING_0), left: (SSPACING_0)}
+    SPACING_1 = {top: (SSPACING_1), right: (SSPACING_1), bottom: (SSPACING_1), left: (SSPACING_1)}
+    SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
+    SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
+    SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
+    H2_TEXT_BOLD = {
+        font_size: (FONT_SIZE_H2),
+        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+    }
+    H2_TEXT_REGULAR = {
+        font_size: (FONT_SIZE_H2),
+        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
+    }
+    
+    SdxlDropDown = <DropDown> {
+        walk: {width: Fit}
+        layout: {padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}}
+        
+        draw_label: {
+            text_style: <H2_TEXT_REGULAR> {},
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        mix(
+                            (#xFFF8),
+                            (#xFFF8),
+                            self.focus
+                        ),
+                        (#xFFFF),
+                        self.hover
+                    ),
+                    (#x000A),
+                    self.pressed
+                )
+            }
+        }
+        
+        popup_menu: {
+            menu_item: {
+                indent_width: 10.0
+                walk: {width: Fill, height: Fit}
                 
-            fn circle_pie(inout sdf: Sdf2d, x: float, y: float, r: float, s:float) {
+                layout: {
+                    padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)},
+                }
+                
+                draw_bg: {
+                    color: #x48,
+                    color_selected: #x6
+                }
+            }
+        }
+        
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                self.get_bg(sdf);
+                // triangle
+                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                let sz = 2.5;
+                
+                sdf.move_to(c.x - sz, c.y - sz);
+                sdf.line_to(c.x + sz, c.y - sz);
+                sdf.line_to(c.x, c.y + sz * 0.75);
+                sdf.close_path();
+                
+                sdf.fill(mix(#FFFA, #FFFF, self.hover));
+                
+                return sdf.result
+            }
+            
+            fn get_bg(self, inout sdf: Sdf2d) {
+                sdf.rect(
+                    0,
+                    0,
+                    self.rect_size.x,
+                    self.rect_size.y
+                )
+                sdf.fill((COLOR_UP_0))
+            }
+        }
+    }
+    
+    
+    ProgressCircle = <Frame> {
+        show_bg: true,
+        walk: {width: 33, height: 33}
+        draw_bg: {
+            instance progress: 0.0
+            instance active: 0.0
+            
+            fn circle_pie(inout sdf: Sdf2d, x: float, y: float, r: float, s: float) {
                 let c = sdf.pos - vec2(x, y);
                 let len = sqrt(c.x * c.x + c.y * c.y) - r;
                 let pi = 3.141592653589793;
-                let ang = (pi-atan(c.x,c.y))/(2.0*pi);
-                let ces = s*0.5;
-                let ang2 = clamp((abs(ang - ces)-ces)*-r*r*sdf.scale_factor,0.0,1.0);
+                let ang = (pi - atan(c.x, c.y)) / (2.0 * pi);
+                let ces = s * 0.5;
+                let ang2 = clamp((abs(ang - ces) - ces) * -r * r * sdf.scale_factor, 0.0, 1.0);
                 sdf.dist = len * ang2 / sdf.scale_factor;
                 sdf.old_shape = sdf.shape;
                 sdf.shape = min(sdf.shape, sdf.dist);
             }
             
-            fn pixel(self)->vec4{
+            fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.circle(
-                    self.rect_size.x*0.5,
-                    self.rect_size.y*0.5,
-                    self.rect_size.x*0.4
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    self.rect_size.x * 0.4
                 );
                 sdf.fill(mix(#4, #575, self.active));
                 circle_pie(
                     sdf,
-                    self.rect_size.x*0.5,
-                    self.rect_size.y*0.5,
-                    self.rect_size.x*0.4,
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    self.rect_size.x * 0.4,
                     self.progress
                 );
                 sdf.fill(mix(#4, #8f8, self.active));
@@ -66,17 +158,27 @@ live_design!{
             }
         }
     }
-    ImageTile = <Frame> {
-        walk: {width: Fill, height: Fit},
-        cursor: Hand
-        state:{
+    PromptGroup = <Rect> {
+        draw_bg:{
+            instance hover: 0.0
+            instance down: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
+                sdf.fill(mix(mix(#4,#6,self.hover),#8,self.down));
+                return sdf.result
+            }
+        }
+        walk: {height: Fit, width: Fill, margin: {bottom: 10,top:20}}
+        layout: {flow: Right, spacing: 10,padding:10}
+        state: {
             hover = {
                 default: off,
                 off = {
                     from: {all: Forward {duration: 0.5}}
                     ease: OutExp
                     apply: {
-                        img = {draw_bg: {hover:0.0}}
+                        draw_bg: {hover: 0.0}
                     }
                 }
                 on = {
@@ -85,17 +187,17 @@ live_design!{
                         all: Forward {duration: 0.2}
                     }
                     apply: {
-                        img = {draw_bg: {hover:1.0}}
+                        draw_bg: {hover: 1.0}
                     }
                 }
             }
             down = {
-                default:off
+                default: off
                 off = {
                     from: {all: Forward {duration: 0.5}}
                     ease: OutExp
                     apply: {
-                        img = {draw_bg: {down:0.0}}
+                        draw_bg: {down: 0.0}
                     }
                 }
                 on = {
@@ -104,7 +206,63 @@ live_design!{
                         all: Forward {duration: 0.2}
                     }
                     apply: {
-                        img = {draw_bg: {down:1.0}}
+                       draw_bg: {down: 1.0}
+                    }
+                }
+            }
+        }
+        prompt = <Label> {
+            walk: {width: Fill}
+            draw_label: {
+                text_style: <TEXT_BOLD> {},
+                fn get_color(self) -> vec4 {
+                    return #CCCCCC
+                }
+                wrap: Word,
+            }
+            label: ""
+        }
+    }
+
+    ImageTile = <Frame> {
+        walk: {width: Fill, height: Fit},
+        cursor: Hand
+        state: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.5}}
+                    ease: OutExp
+                    apply: {
+                        img = {draw_bg: {hover: 0.0}}
+                    }
+                }
+                on = {
+                    ease: OutExp
+                    from: {
+                        all: Forward {duration: 0.2}
+                    }
+                    apply: {
+                        img = {draw_bg: {hover: 1.0}}
+                    }
+                }
+            }
+            down = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.5}}
+                    ease: OutExp
+                    apply: {
+                        img = {draw_bg: {down: 0.0}}
+                    }
+                }
+                on = {
+                    ease: OutExp
+                    from: {
+                        all: Forward {duration: 0.2}
+                    }
+                    apply: {
+                        img = {draw_bg: {down: 1.0}}
                     }
                 }
             }
@@ -114,15 +272,15 @@ live_design!{
             walk: {width: Fill, height: Fill}
             fit: Horizontal,
             draw_bg: {
-                instance hover:0.0
-                instance down:0.0
+                instance hover: 0.0
+                instance down: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
                     let max_scale = vec2(0.97);
-                    let scale = mix(vec2(1.0),max_scale, self.hover);
-                    let pan = mix(vec2(0.0),(vec2(1.0)-max_scale)*0.5, self.hover);
-                    let color = self.get_color(scale,pan) + mix(vec4(0.0),vec4(0.1),self.down);
+                    let scale = mix(vec2(1.0), max_scale, self.hover);
+                    let pan = mix(vec2(0.0), (vec2(1.0) - max_scale) * 0.5, self.hover);
+                    let color = self.get_color(scale, pan) + mix(vec4(0.0), vec4(0.1), self.down);
                     sdf.fill(color);
                     return sdf.result
                 }
@@ -132,10 +290,9 @@ live_design!{
     
     App = {{App}} {
         last_seed: 1000;
-        batch_size: 6;
         ui: <DesktopWindow> {
             window: {inner_size: vec2(2000, 1024)},
-            caption_bar = {visible: true, caption_label = {label = {label: "SDXL Explorer"}}},
+            caption_bar = {visible: true, caption_label = {label = {label: "SDXL Surf"}}},
             
             <Frame> {
                 layout: {
@@ -193,30 +350,38 @@ live_design!{
                         walk: {height: Fill, width: Fill}
                         layout: {flow: Down, padding: 0}
                         draw_bg: {color: (COLOR_PANEL_BG)}
-                        <Frame>{
+                        <Frame> {
                             walk: {height: Fit, width: Fill}
-                            <Button>{
-                                label:"Render"
+                            
+                            render = <Button> {
+                                label: "Render"
                             }
-                            progress1 = <ProgressCircle>{}
-                            progress2 = <ProgressCircle>{}
-                            progress3 = <ProgressCircle>{}
-                            progress4 = <ProgressCircle>{}
-                            progress5 = <ProgressCircle>{}
-                            progress6 = <ProgressCircle>{}
+                            progress1 = <ProgressCircle> {}
+                            progress2 = <ProgressCircle> {}
+                            progress3 = <ProgressCircle> {}
+                            progress4 = <ProgressCircle> {}
+                            progress5 = <ProgressCircle> {}
+                            progress6 = <ProgressCircle> {}
+                            <Label>{walk:{margin:{left:10,top:10}},label:"Workflow: "}
+                            workflow_dropdown = <SdxlDropDown> {}
+                            <Label>{walk:{margin:{left:10,top:10}},label:"Batch: "}
+                            batch_mode_dropdown = <SdxlDropDown> {
+                                selected_item: 0
+                                labels:["1","2","3","4","5","6","stepped"]
+                            }
                         }
-                        <Frame>{
+                        <Frame> {
                             positive = <TextInput> {
                                 walk: {width: Fill, height: Fill},
                                 text: "Positive"
-                                draw_label:{text_style:{font_size:12}}
+                                draw_label: {text_style: {font_size: 12}}
                                 draw_bg: {
                                     color: #1113
                                 }
                             }
                             negative = <TextInput> {
-                                walk: {width: Fill, height: Fill, margin:{left:10}},
-                                draw_label:{text_style:{font_size:12}}
+                                walk: {width: Fill, height: Fill, margin: {left: 10}},
+                                draw_label: {text_style: {font_size: 12}}
                                 text: "text, watermark, cartoon"
                                 draw_bg: {
                                     color: #1113
@@ -228,10 +393,10 @@ live_design!{
                     ImageLibrary = <Rect> {
                         draw_bg: {color: (COLOR_PANEL_BG)}
                         walk: {height: Fill, width: Fill}
-                        layout: { flow: Down},
+                        layout: {flow: Down},
                         <Frame> {
                             walk: {height: Fit, width: Fill}
-                            layout: {flow: Right,padding:{left:10, right:10, top:10}},
+                            layout: {flow: Right, padding: {left: 10, right: 10, top: 10}},
                             search = <TextInput> {
                                 walk: {height: Fit, width: Fill}
                                 empty_message: "Search"
@@ -243,21 +408,7 @@ live_design!{
                         image_list = <ListView> {
                             walk: {height: Fill, width: Fill}
                             layout: {flow: Down, padding: 10}
-                            PromptGroup = <Frame> {
-                                walk: {height: Fit, width: Fill, margin: {bottom: 10}}
-                                layout: {flow: Right, spacing: 10}
-                                prompt = <Label> {
-                                    walk: { width: Fill, margin: {top: 20}}
-                                    draw_label:{
-                                        text_style: <TEXT_BOLD>{},
-                                        fn get_color(self) -> vec4 {
-                                            return #CCCCCC
-                                        }
-                                        wrap: Word,
-                                    }
-                                    label: "Lorem Ipsum dolor sit amet dolorem simus sitis sint agricola servus est."
-                                }
-                            }
+                            PromptGroup = <PromptGroup> {}
                             Empty = <Frame> {}
                             ImageRow1 = <Frame> {
                                 walk: {height: Fit, width: Fill, margin: {bottom: 10}}
@@ -283,13 +434,13 @@ live_design!{
                 
                 big_image = <Rect> {
                     visible: false,
-                    draw_bg:{draw_depth:10.0}
+                    draw_bg: {draw_depth: 10.0}
                     draw_bg: {color: #0}
-                    walk: {height: All, width: All, abs_pos:vec2(0.0,0.0)}
+                    walk: {height: All, width: All, abs_pos: vec2(0.0, 0.0)}
                     layout: {flow: Down, align: {x: 0.5, y: 0.5}}
                     cursor: Hand,
                     image = <Image> {
-                        draw_bg:{draw_depth:11.0}
+                        draw_bg: {draw_depth: 11.0}
                         fit: Smallest,
                         walk: {width: Fill, height: Fill}
                     }
@@ -310,7 +461,7 @@ struct Machine {
 
 struct RunningPrompt {
     _started: Instant,
-    steps_counter: usize, 
+    steps_counter: usize,
     prompt_state: PromptState,
 }
 
@@ -323,24 +474,14 @@ impl Machine {
     }}
 }
 
-#[derive(Clone)]
-struct PromptState {
-    prompt: Prompt,
-    workflow: String,
-    seed: u64
+struct Workflow {
+    name: String,
+    total_steps: usize
+}
+impl Workflow {
+    fn new(name: &str, total_steps: usize) -> Self {Self {name: name.to_string(), total_steps}}
 }
 
-#[derive(Clone, DeJson, SerJson)]
-struct Prompt {
-    positive: String,
-    negative: String,
-}
-
-impl Prompt {
-    fn hash(&self) -> LiveId {
-        LiveId::from_str(&self.positive).str_append(&self.negative)
-    }
-}
 
 #[derive(Live)]
 pub struct App {
@@ -351,256 +492,24 @@ pub struct App {
         Machine::new("192.168.1.154:8188", id_lut!(m3)),
         Machine::new("192.168.1.144:8188", id_lut!(m4)),
         Machine::new("192.168.1.59:8188", id_lut!(m5)),
-        Machine::new("192.168.1.180:8188", id_lut!(m6))
+        //Machine::new("192.168.1.180:8188", id_lut!(m6))
     ])] machines: Vec<Machine>,
+    
+    #[rust(vec![
+        Workflow::new("1024", 25),
+        Workflow::new("2048", 40),
+        Workflow::new("3000", 37),
+        Workflow::new("3840", 276)
+    ])] workflows: Vec<Workflow>,
+    
     #[rust] queue: Vec<PromptState>,
     
     #[rust(Database::new(cx))] db: Database,
     
     #[rust] filtered: FilteredDb,
-    #[rust] num_images: u64,
-    #[live] batch_size: i64,
     #[live] last_seed: i64,
     
     #[rust] current_image: Option<ImageId>
-}
-
-const LIBRARY_ROWS: usize = 1;
-
-enum ImageListItem {
-    PromptGroup {group_id: usize},
-    ImageRow {
-        group_id: usize,
-        image_count: usize,
-        image_ids: [usize; LIBRARY_ROWS]
-    }
-}
-
-#[allow(dead_code)]
-struct ImageFile {
-    starred: bool,
-    file_name: String,
-    workflow: String,
-    seed: u64
-}
-
-struct PromptGroup {
-    starred: bool,
-    hash: LiveId,
-    prompt: Option<Prompt>,
-    images: Vec<ImageFile>
-}
-
-#[allow(dead_code)]
-struct TextureItem {
-    last_seen: Instant,
-    texture: Texture
-}
-
-enum DecoderToUI {
-    Error(String),
-    Done(String, ImageBuffer)
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct ImageId {
-    group_id: usize,
-    image_id: usize,
-}
-
-struct Database {
-    image_path: String,
-    groups: Vec<PromptGroup>,
-    textures: HashMap<String, TextureItem>,
-    in_flight: Vec<String>,
-    thread_pool: ThreadPool<()>,
-    to_ui: ToUIReceiver<DecoderToUI>,
-}
-
-#[derive(Default)]
-struct FilteredDb {
-    list: Vec<ImageListItem>,
-    flat: Vec<ImageId>,
-}
-
-impl FilteredDb {
-    
-    fn filter_db(&mut self, db: &Database, search: &str, starred: bool) {
-        self.list.clear();
-        self.flat.clear();
-        for (group_id, group) in db.groups.iter().enumerate() {
-            if search.len() == 0
-                || group.prompt.as_ref().unwrap().positive.contains(search)
-                || group.prompt.as_ref().unwrap().negative.contains(search) {
-                self.list.push(ImageListItem::PromptGroup {group_id});
-                // lets collect images in pairs of 3
-                for (store_index, image) in group.images.iter().enumerate() {
-                    if starred && !image.starred {
-                        continue
-                    }
-                    self.flat.push(ImageId {
-                        group_id,
-                        image_id: store_index
-                    });
-                    if let Some(ImageListItem::ImageRow {group_id: _, image_count, image_ids}) = self.list.last_mut() {
-                        if *image_count<LIBRARY_ROWS {
-                            image_ids[*image_count] = store_index;
-                            *image_count += 1;
-                            continue;
-                        }
-                    }
-                    self.list.push(ImageListItem::ImageRow {group_id, image_count: 1, image_ids: [store_index]});
-                    
-                }
-            }
-        }
-        
-    }
-    
-}
-
-
-impl Database {
-    fn new(cx: &mut Cx) -> Self {
-        let use_cores = cx.cpu_cores().max(3) - 2;
-        Self {
-            textures: HashMap::new(),
-            in_flight: Vec::new(),
-            thread_pool: ThreadPool::new(cx, use_cores),
-            image_path: "./sdxl_images".to_string(),
-            groups: Vec::new(),
-            to_ui: ToUIReceiver::default(),
-        }
-    }
-    
-    fn handle_decoded_images(&mut self, cx: &mut Cx) -> bool {
-        let mut updates = false;
-        while let Ok(msg) = self.to_ui.receiver.try_recv() {
-            match msg {
-                DecoderToUI::Done(file_name, image_buffer) => {
-                    let index = self.in_flight.iter().position( | v | *v == file_name).unwrap();
-                    self.in_flight.remove(index);
-                    self.textures.insert(file_name, TextureItem {
-                        last_seen: Instant::now(),
-                        texture: image_buffer.into_new_texture(cx)
-                    });
-                    updates = true;
-                }
-                DecoderToUI::Error(file_name) => {
-                    let index = self.in_flight.iter().position( | v | *v == file_name).unwrap();
-                    self.in_flight.remove(index);
-                }
-            }
-        }
-        updates
-    }
-    
-    fn get_image_texture(&mut self, image: ImageId) -> Option<Texture> {
-        let group = &self.groups[image.group_id];
-        let image = &group.images[image.image_id];
-        if self.in_flight.contains(&image.file_name) {
-            return None
-        }
-        if let Some(texture) = self.textures.get(&image.file_name) {
-            return Some(texture.texture.clone());
-        }
-        // request decode
-        let file_name = image.file_name.clone();
-        let image_path = self.image_path.clone();
-        let to_ui = self.to_ui.sender();
-        self.in_flight.push(file_name.clone());
-        self.thread_pool.execute(move | _ | {
-            
-            if let Ok(data) = fs::read(format!("{}/{}", image_path, file_name)) {
-                if let Ok(image_buffer) = ImageBuffer::from_png(&data) {
-                    let _ = to_ui.send(DecoderToUI::Done(file_name, image_buffer));
-                    return
-                }
-            }
-            let _ = to_ui.send(DecoderToUI::Error(file_name));
-        });
-        None
-    }
-    
-    fn load_database(&mut self) -> std::io::Result<()> {
-        // alright lets read the entire directory list
-        let entries = fs::read_dir(&self.image_path) ?;
-        for entry in entries {
-            let entry = entry ?;
-            let file_name = entry.file_name().to_str().unwrap().to_string();
-            if let Some(name) = file_name.strip_suffix(".json") {
-                let mut starred = false;
-                let name = if let Some(name) = name.strip_prefix("star_") {starred = true; name}else {name};
-                
-                if let Ok(hash) = name.parse::<u64>() {
-                    let hash = LiveId(hash);
-                    if let Ok(v) = fs::read_to_string(format!("{}/{}", self.image_path, file_name)) {
-                        if let Ok(prompt) = Prompt::deserialize_json(&v) {
-                            if prompt.hash() == hash {
-                                //ok lets create a group
-                                if let Some(group) = self.groups.iter_mut().find( | v | v.hash == hash) {
-                                    group.prompt = Some(prompt);
-                                    group.starred = starred;
-                                }
-                                else {
-                                    self.groups.push(PromptGroup {
-                                        hash,
-                                        starred,
-                                        prompt: Some(prompt),
-                                        images: Vec::new()
-                                    });
-                                }
-                            }
-                            else {
-                                log!("prompt hash invalid for json {}", file_name);
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(name) = file_name.strip_suffix(".png") {
-                let mut starred = false;
-                let name = if let Some(name) = name.strip_prefix("star_") {starred = true; name}else {name};
-                
-                let parts = name.split("_").collect::<Vec<&str >> ();
-                if parts.len() == 3 {
-                    if let Ok(hash) = parts[0].parse::<u64>() {
-                        let hash = LiveId(hash);
-                        if let Ok(seed) = parts[2].parse::<u64>() {
-                            let workflow = parts[1].to_string();
-                            let image_item = ImageFile {
-                                starred,
-                                seed,
-                                workflow,
-                                file_name
-                            };
-                            if let Some(group) = self.groups.iter_mut().find( | v | v.hash == hash) {
-                                group.images.push(image_item)
-                            }
-                            else {
-                                self.groups.push(PromptGroup {
-                                    hash,
-                                    starred: false,
-                                    prompt: None,
-                                    images: vec![image_item]
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        self.groups.retain( | v | v.prompt.is_some());
-        Ok(())
-    }
-    
-    fn add_png_and_prompt(&mut self, state: PromptState, image: &[u8]) {
-        let hash = state.prompt.hash();
-        let prompt_file = format!("{}/{:#016}.json", self.image_path, hash.0);
-        let _ = fs::write(&prompt_file, state.prompt.serialize_json());
-        let image_file = format!("{}/{:#016}_{}_{}.png", self.image_path, hash.0, state.workflow, state.seed);
-        let _ = fs::write(&image_file, &image);
-    }
 }
 
 impl LiveHook for App {
@@ -612,6 +521,9 @@ impl LiveHook for App {
         self.open_web_socket(cx);
         let _ = self.db.load_database();
         self.filtered.filter_db(&self.db, "", false);
+        let workflows = self.workflows.iter().map(|v| v.name.clone()).collect();
+        let dd = self.ui.get_drop_down(id!(workflow_dropdown));
+        dd.set_labels(workflows);
     }
 }
 
@@ -627,19 +539,20 @@ impl App {
             
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.workflow)).unwrap();
+            let workflow_name =  self.workflows[prompt_state.workflow].name.clone();
+            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json",workflow_name)).unwrap();
             let ws = ws.replace("CLIENT_ID", "1234");
-            let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive.replace("\n","").replace("\"",""));
-            let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive.replace("\n","").replace("\"",""));
-            let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative.replace("\n","").replace("\"",""));
+            let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
+            let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
+            let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative.replace("\n", "").replace("\"", ""));
             let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
             // lets store that we queued this image
             request.set_metadata_id(machine.id);
             request.set_body(ws.as_bytes().to_vec());
-            Self::update_progress(cx, &self.ui, machine.id, true, 0);
+            Self::update_progress(cx, &self.ui, machine.id, true, 0,1);
             cx.http_request(live_id!(prompt), request);
             machine.running = Some(RunningPrompt {
-                steps_counter:0,
+                steps_counter: 0,
                 prompt_state: prompt_state.clone(),
                 _started: Instant::now(),
             });
@@ -664,19 +577,18 @@ impl App {
         }
     }
     
-    fn update_progress(cx: &mut Cx, ui:&WidgetRef, machine:LiveId, active:bool, steps: usize) {
-        let label = ui.get_label(id!(message_label));
-        let progress_id = match machine{
-            live_id!(m1)=>id!(progress1),
-            live_id!(m2)=>id!(progress2),
-            live_id!(m3)=>id!(progress3),
-            live_id!(m4)=>id!(progress4),
-            live_id!(m5)=>id!(progress5),
-            live_id!(m6)=>id!(progress6),
-            _=>panic!()
+    fn update_progress(cx: &mut Cx, ui: &WidgetRef, machine: LiveId, active: bool, steps: usize, total: usize) {
+        let progress_id = match machine {
+            live_id!(m1) => id!(progress1),
+            live_id!(m2) => id!(progress2),
+            live_id!(m3) => id!(progress3),
+            live_id!(m4) => id!(progress4),
+            live_id!(m5) => id!(progress5),
+            live_id!(m6) => id!(progress6),
+            _ => panic!()
         };
         ui.get_frame(progress_id).apply_over(cx, live!{
-            draw_bg:{active:(if active{1.0}else{0.0}), progress:(steps as f64 / (277.0))}
+            draw_bg: {active: (if active {1.0}else {0.0}), progress: (steps as f64 / total as f64)}
         });
         ui.redraw(cx);
     }
@@ -689,6 +601,13 @@ impl App {
                 image_id: image_ids[row.min(*image_count)]
             })
         }
+    }
+    
+    fn load_inputs_from_group_id(&mut self, cx:&mut Cx, group_id:usize){
+        let group = &self.db.groups[group_id];
+        self.ui.get_text_input(id!(positive)).set_text(&group.prompt.as_ref().unwrap().positive);
+        self.ui.get_text_input(id!(negative)).set_text(&group.prompt.as_ref().unwrap().negative);
+        self.ui.redraw(cx);
     }
     
     
@@ -714,6 +633,26 @@ impl App {
             }
         }
     }
+    
+    fn render(&mut self, cx:&mut Cx){
+        let positive = self.ui.get_text_input(id!(positive)).get_text();
+        //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
+        let negative = self.ui.get_text_input(id!(negative)).get_text();
+        let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected()+1;
+        let workflow = self.ui.get_drop_down(id!(workflow_dropdown)).get_selected();
+        log!("BATCH SIZE {}", batch_size);
+        for _ in 0..batch_size {
+            self.last_seed += 1;
+            self.send_prompt(cx, PromptState {
+                prompt: Prompt {
+                    positive: positive.clone(),
+                    negative: negative.clone(),
+                },
+                workflow,
+                seed: self.last_seed as u64
+            });
+        }
+    }
 }
 
 impl AppMain for App {
@@ -723,7 +662,7 @@ impl AppMain for App {
         }
         
         let image_list = self.ui.get_list_view_set(ids!(image_list));
-       
+        
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             if let Some(current_image) = self.current_image {
@@ -782,9 +721,10 @@ impl AppMain for App {
                                         if status.exec_info.queue_remaining == 0 {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 machine.running = None;
-                                                Self::update_progress(cx,  &self.ui, event.id, false, 0);
+                                                Self::update_progress(cx, &self.ui, event.request_id, false, 0,1);
                                             }
                                             if let Some(prompt) = self.queue.pop() {
+                                                log!("QUEUED PROMPT!");
                                                 self.send_prompt(cx, prompt);
                                             }
                                         }
@@ -794,8 +734,8 @@ impl AppMain for App {
                                     if let Some(output) = &data.data.output {
                                         if let Some(image) = output.images.first() {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
-                                                if let Some(running) = machine.running.take(){
-                                                    log!("GOT: {}", running.steps_counter);
+                                                if let Some(running) = machine.running.take() {
+                                                    log!("Number of steps: {}", running.steps_counter);
                                                     machine.fetching = Some(running);
                                                     self.fetch_image(cx, event.request_id, &image.filename);
                                                 }
@@ -805,10 +745,11 @@ impl AppMain for App {
                                 }
                                 else if data._type == "progress" {
                                     // draw the progress bar / progress somewhere
-                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.id}) {
-                                        if let Some(running) = &mut machine.running{
+                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
+                                        if let Some(running) = &mut machine.running {
                                             running.steps_counter += 1;
-                                            Self::update_progress(cx,  &self.ui, event.id, true, running.steps_counter);
+                                            let total = self.workflows[running.prompt_state.workflow].total_steps;
+                                            Self::update_progress(cx, &self.ui, event.request_id, true, running.steps_counter, total);
                                         }
                                     }
                                     //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
@@ -858,52 +799,28 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
-            let positive = self.ui.get_text_input(id!(positive)).get_text();
-            //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
-            let negative = self.ui.get_text_input(id!(negative)).get_text();
-            for _ in 0..self.batch_size {
-                self.last_seed += 1;
-                self.send_prompt(cx, PromptState {
-                    prompt: Prompt {
-                        positive: positive.clone(),
-                        negative: negative.clone(),
-                    },
-                    workflow: "3840".to_string(),
-                    seed: self.last_seed as u64
-                });
-            }
+            self.render(cx);
         }
-        /*
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Space, ..}) = event {
-            self.ui.get_slide_panel(id!(library_panel)).toggle(cx);
-            self.ui.get_slide_panel(id!(input_panel)).toggle(cx);
-        }*/
-        
+
+        if self.ui.get_button(id!(render)).clicked(&actions){
+            self.render(cx);
+        }
+
         if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions) {
             self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
             image_list.set_first_id(0);
         }
-        /*
-        if self.ui.get_button(id!(open_library)).pressed(&actions){
-            self.ui.get_slide_panel(id!(library_panel)).open(cx);
-            self.ui.get_slide_panel(id!(input_panel)).close(cx);
-        }
 
-        if self.ui.get_button(id!(close_library)).pressed(&actions){
-            self.ui.get_slide_panel(id!(library_panel)).close(cx);
-            self.ui.get_slide_panel(id!(input_panel)).open(cx);
-        }
-        */
-        if let Some(e) = self.ui.get_frame(id!(image_view)).finger_down(&actions){
-            if e.tap_count >1{
+        if let Some(e) = self.ui.get_frame(id!(image_view)).finger_down(&actions) {
+            if e.tap_count >1 {
                 self.ui.get_frame(id!(big_image)).set_visible(true);
                 self.ui.redraw(cx);
             }
         }
         
-        if let Some(e) = self.ui.get_frame(id!(big_image)).finger_down(&actions){
-            if e.tap_count >1{
+        if let Some(e) = self.ui.get_frame(id!(big_image)).finger_down(&actions) {
+            if e.tap_count >1 {
                 self.ui.get_frame(id!(big_image)).set_visible(false);
                 self.ui.redraw(cx);
             }
@@ -925,71 +842,22 @@ impl AppMain for App {
             // check for actions inside the list item
             let rows = item.get_frame_set(ids!(row1, row2));
             for (index, row) in rows.iter().enumerate() {
-                if row.finger_down(&actions).is_some() {
+                if let Some(fd) = row.finger_down(&actions){
                     self.set_current_image_by_item_id_and_row(cx, item_id, index);
+                    if fd.tap_count==2{
+                        if let ImageListItem::ImageRow{group_id,..} = self.filtered.list[item_id as usize]{
+                            self.load_inputs_from_group_id(cx, group_id);
+                        }
+                    }
+                }
+            }
+            if let Some(fd) = item.as_frame().finger_down(&actions){
+                if fd.tap_count==2{
+                    if let ImageListItem::PromptGroup{group_id} = self.filtered.list[item_id as usize]{
+                        self.load_inputs_from_group_id(cx, group_id);
+                    }
                 }
             }
         }
     }
 }
-
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUINodeError {
-    unknown: Option<String>
-}
-
-
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUIResponse {
-    pub prompt_id: String,
-    pub number: String,
-    pub node_errors: ComfyUINodeError,
-}
-
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUIMessage {
-    pub _type: String,
-    pub data: ComfyUIData
-}
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUIData {
-    pub value: Option<u32>,
-    pub max: Option<u32>,
-    pub node: Option<String>,
-    pub prompt_id: Option<String>,
-    pub nodes: Option<Vec<String >>,
-    pub status: Option<ComfyUIStatus>,
-    pub sid: Option<String>,
-    pub output: Option<ComfyUIOutput>
-}
-
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUIStatus {
-    pub exec_info: ComfyUIExecInfo,
-}
-
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUIOutput {
-    pub images: Vec<ComfyUIImage>,
-}
-
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUIImage {
-    pub filename: String,
-    pub subfolder: String,
-    pub _type: String
-}
-
-#[allow(dead_code)]
-#[derive(DeJson, Debug)]
-struct ComfyUIExecInfo {
-    pub queue_remaining: u32
-}
-
