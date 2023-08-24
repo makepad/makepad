@@ -488,11 +488,11 @@ pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
         Machine::new("192.168.1.62:8188", id_lut!(m1)),
-        //Machine::new("192.168.1.204:8188", id_lut!(m2)),
+        Machine::new("192.168.1.204:8188", id_lut!(m2)),
         Machine::new("192.168.1.154:8188", id_lut!(m3)),
         Machine::new("192.168.1.144:8188", id_lut!(m4)),
         Machine::new("192.168.1.59:8188", id_lut!(m5)),
-        //Machine::new("192.168.1.180:8188", id_lut!(m6))
+        Machine::new("192.168.1.180:8188", id_lut!(m6))
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
@@ -539,8 +539,7 @@ impl App {
             
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-            let workflow_name =  self.workflows[prompt_state.workflow].name.clone();
-            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json",workflow_name)).unwrap();
+            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json",prompt_state.workflow)).unwrap();
             let ws = ws.replace("CLIENT_ID", "1234");
             let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
             let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
@@ -595,28 +594,25 @@ impl App {
     
     fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
         self.ui.redraw(cx);
-        if let Some(ImageListItem::ImageRow {group_id, image_count, image_ids}) = self.filtered.list.get(item_id as usize) {
-            self.current_image = Some(ImageId {
-                group_id: *group_id,
-                image_id: image_ids[row.min(*image_count)]
-            })
+        if let Some(ImageListItem::ImageRow {prompt_hash:_, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
+            self.current_image = Some(image_files[row.min(*image_count)].clone());
         }
     }
     
-    fn load_inputs_from_group_id(&mut self, cx:&mut Cx, group_id:usize){
-        let group = &self.db.groups[group_id];
-        self.ui.get_text_input(id!(positive)).set_text(&group.prompt.as_ref().unwrap().positive);
-        self.ui.get_text_input(id!(negative)).set_text(&group.prompt.as_ref().unwrap().negative);
-        self.ui.redraw(cx);
+    fn load_inputs_from_prompt_hash(&mut self, cx:&mut Cx, prompt_hash:LiveId){
+        if let Some(prompt_file) = self.db.prompt_files.iter().find(|v| v.prompt_hash == prompt_hash){
+            self.ui.get_text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
+            self.ui.get_text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
+            self.ui.redraw(cx);
+        }
     }
-    
     
     fn select_next_image(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx);
-        if let Some(current_image) = self.current_image {
-            if let Some(pos) = self.filtered.flat.iter().position( | v | *v == current_image) {
+        if let Some(current_image) = &self.current_image {
+            if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos + 1 < self.filtered.flat.len() {
-                    self.current_image = Some(self.filtered.flat[pos + 1]);
+                    self.current_image = Some(self.filtered.flat[pos + 1].clone());
                 }
             }
         }
@@ -625,10 +621,10 @@ impl App {
     
     fn select_prev_image(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx);
-        if let Some(current_image) = self.current_image {
-            if let Some(pos) = self.filtered.flat.iter().position( | v | *v == current_image) {
+        if let Some(current_image) = &self.current_image {
+            if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos > 0 {
-                    self.current_image = Some(self.filtered.flat[pos - 1]);
+                    self.current_image = Some(self.filtered.flat[pos - 1].clone());
                 }
             }
         }
@@ -639,8 +635,8 @@ impl App {
         //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
         let negative = self.ui.get_text_input(id!(negative)).get_text();
         let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected()+1;
-        let workflow = self.ui.get_drop_down(id!(workflow_dropdown)).get_selected();
-        log!("BATCH SIZE {}", batch_size);
+        let workflow_id = self.ui.get_drop_down(id!(workflow_dropdown)).get_selected();
+        let workflow = self.workflows[workflow_id].name.clone();
         for _ in 0..batch_size {
             self.last_seed += 1;
             self.send_prompt(cx, PromptState {
@@ -648,7 +644,7 @@ impl App {
                     positive: positive.clone(),
                     negative: negative.clone(),
                 },
-                workflow,
+                workflow: workflow.clone(),
                 seed: self.last_seed as u64
             });
         }
@@ -665,7 +661,7 @@ impl AppMain for App {
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            if let Some(current_image) = self.current_image {
+            if let Some(current_image) = &self.current_image {
                 let tex = self.db.get_image_texture(current_image);
                 self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
                 self.ui.get_image(id!(big_image.image)).set_texture(tex);
@@ -679,20 +675,19 @@ impl AppMain for App {
                     while let Some(item_id) = image_list.next_visible_item(cx) {
                         if let Some(item) = self.filtered.list.get(item_id as usize) {
                             match item {
-                                ImageListItem::PromptGroup {group_id} => {
-                                    let group = &self.db.groups[*group_id];
+                                ImageListItem::Prompt {prompt_hash} => {
+                                    let group = self.db.prompt_files.iter().find(|v| v.prompt_hash == *prompt_hash).unwrap();
                                     let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
-                                    item.get_label(id!(prompt)).set_label(&group.prompt.as_ref().unwrap().positive);
+                                    item.get_label(id!(prompt)).set_label(&group.prompt.positive);
                                     item.draw_widget_all(cx);
                                 }
-                                ImageListItem::ImageRow {group_id, image_count, image_ids} => {
+                                ImageListItem::ImageRow {prompt_hash:_, image_count, image_files} => {
                                     let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
                                     let rows = item.get_frame_set(ids!(row1, row2, row3));
                                     for (index, row) in rows.iter().enumerate() {
                                         if index >= *image_count {break}
                                         // alright we need to query our png cache for an image.
-                                        let image_id = ImageId {group_id: *group_id, image_id: image_ids[index]};
-                                        let tex = self.db.get_image_texture(image_id);
+                                        let tex = self.db.get_image_texture(&image_files[index]);
                                         row.get_image(id!(img)).set_texture(tex);
                                     }
                                     item.draw_widget_all(cx);
@@ -700,9 +695,7 @@ impl AppMain for App {
                             }
                         }
                     }
-                    
                 }
-                
             }
             return
         }
@@ -748,7 +741,7 @@ impl AppMain for App {
                                     if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                         if let Some(running) = &mut machine.running {
                                             running.steps_counter += 1;
-                                            let total = self.workflows[running.prompt_state.workflow].total_steps;
+                                            let total = self.workflows.iter().find(|v| v.name == running.prompt_state.workflow).unwrap().total_steps;
                                             Self::update_progress(cx, &self.ui, event.request_id, true, running.steps_counter, total);
                                         }
                                     }
@@ -774,8 +767,8 @@ impl AppMain for App {
                                 if let Some(fetching) = machine.fetching.take() {
                                     
                                     // lets write our image to disk properly
-                                    self.db.add_png_and_prompt(fetching.prompt_state, data);
-                                    
+                                    self.current_image = Some(self.db.add_png_and_prompt(fetching.prompt_state, data));
+                                    self.filtered.filter_db(&self.db, "", false);
                                     // alright we got a png. lets decode it and stuff it in our image viewer
                                     //let big_list = self.ui.get_list_view(id!(big_list));
                                     //let image_id = self.num_images;
@@ -845,16 +838,16 @@ impl AppMain for App {
                 if let Some(fd) = row.finger_down(&actions){
                     self.set_current_image_by_item_id_and_row(cx, item_id, index);
                     if fd.tap_count==2{
-                        if let ImageListItem::ImageRow{group_id,..} = self.filtered.list[item_id as usize]{
-                            self.load_inputs_from_group_id(cx, group_id);
+                        if let ImageListItem::ImageRow{prompt_hash,..} = self.filtered.list[item_id as usize]{
+                            self.load_inputs_from_prompt_hash(cx, prompt_hash);
                         }
                     }
                 }
             }
             if let Some(fd) = item.as_frame().finger_down(&actions){
                 if fd.tap_count==2{
-                    if let ImageListItem::PromptGroup{group_id} = self.filtered.list[item_id as usize]{
-                        self.load_inputs_from_group_id(cx, group_id);
+                    if let ImageListItem::Prompt{prompt_hash} = self.filtered.list[item_id as usize]{
+                        self.load_inputs_from_prompt_hash(cx, prompt_hash);
                     }
                 }
             }
