@@ -269,13 +269,14 @@ impl Database {
         let full_path = format!("{}/{}", self.image_path, file_name);
         let _ = fs::write(&full_path, &image);
         // ok lets see if we need to add a group, or an image
+        let image_id = ImageId::new(file_name);
         self.image_files.push(ImageFile {
             prompt_hash,
             starred: false,
             seed: state.seed,
             modified: SystemTime::now(),
             workflow: state.workflow,
-            image_id: ImageId::new(file_name)
+            image_id: image_id.clone()
         });
         if self.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash).is_none() {
             self.prompt_files.push(PromptFile {
@@ -286,7 +287,7 @@ impl Database {
             });
         }
         self.sort_images();
-        self.image_files.last().unwrap().image_id.clone()
+        image_id
     }
 }
 
