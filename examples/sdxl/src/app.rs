@@ -508,14 +508,6 @@ live_design!{
                             walk: {height: Fit, width: Fill}
                             layout: {align: {x: 0.0, y: 0.5}, padding: 5}
                             
-                            render = <Button> {
-                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-                                label: "Render"
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                }
-                            }
                             <BarLabel> {
                                 label: "Workflow"
                             }
@@ -528,6 +520,24 @@ live_design!{
                             batch_mode_dropdown = <SdxlDropDown> {
                                 selected_item: 5
                                 labels: ["1", "2", "3", "4", "5", "6", "10000"]
+                            }
+                            
+                            render = <Button> {
+                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
+                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                                label: "Render"
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
+                            }
+
+                            cancel_todo = <Button> {
+                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
+                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                                label: "Cancel"
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
                             }
                             
                             <DividerH> {}
@@ -603,15 +613,6 @@ live_design!{
                             progress5 = <ProgressCircle> {}
                             progress6 = <ProgressCircle> {
                                 walk: {margin: {right: 5.0}}
-                            }
-                            
-                            cancel_todo = <Button> {
-                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-                                label: "Cancel"
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                }
                             }
                             
                         }
