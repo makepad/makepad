@@ -410,7 +410,7 @@ live_design!{
                         mix(mix(#x0000, #x0006, self.hover), #xfff2, self.down),
                         1.0
                     )
-
+                    
                     return sdf.result
                 }
             }
@@ -502,31 +502,20 @@ live_design!{
                                 selected_item: 0
                                 labels: ["1", "2", "3", "4", "5", "6", "stepped"]
                             }
-                            queue_label = <BarLabel> {
-                                label: "Queue 0"
-                            }
-                            clear_queue = <Button> {
-                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-                                label: "Clear queue"
+                            
+                            slide_show_check_box = <CheckBox> {
                                 draw_label: {
                                     text_style: <TEXT_BOLD> {},
                                 }
-                            }
-                            slide_show_check_box = <CheckBox>{
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                }
-                                    label: "Slideshow"
-                                walk:{width:Fit,height:Fit,margin:0}
+                                label: "Slideshow"
+                                walk: {width: Fit, height: Fit, margin: 0}
                             }
                             slide_show_dropdown = <SdxlDropDown> {
                                 selected_item: 0
-                                walk:{margin:0},
+                                walk: {margin: 0},
                                 labels: ["1s", "2s", "5s", "10s"]
-                            }
-                            <BarLabel> {
-                                label: "Progress"
+                            }todo_label = <BarLabel> {
+                                label: "Todo 0"
                             }
                             progress1 = <ProgressCircle> {}
                             progress2 = <ProgressCircle> {}
@@ -537,6 +526,14 @@ live_design!{
                                 walk: {margin: {right: 5.0}}
                             }
                             
+                            cancel_todo = <Button> {
+                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
+                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                                label: "Cancel"
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
+                            }
                             
                         }
                         <Frame> {
@@ -571,7 +568,7 @@ live_design!{
                             walk: {height: Fit, width: Fill}
                             layout: {flow: Right, padding: {left: 10, right: 10, top: 10, bottom: 10}},
                             search = <TextInput> {
-                                walk: {height: Fit, width: Fill, margin: {bottom: 0} }
+                                walk: {height: Fit, width: Fill, margin: {bottom: 0}}
                                 empty_message: "Search"
                                 draw_bg: {
                                     color: (COLOR_TEXT_INPUT)
@@ -600,7 +597,7 @@ live_design!{
                             }
                         }
                         image_list = <ListView> {
-                            walk: {height: Fill, width: Fill, margin: {top: 0} }
+                            walk: {height: Fill, width: Fill, margin: {top: 0}}
                             layout: {flow: Down, padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}}
                             
                             PromptGroup = <PromptGroup> {}
@@ -699,7 +696,7 @@ pub struct App {
         Workflow::new("3840", 276)
     ])] workflows: Vec<Workflow>,
     
-    #[rust] queue: Vec<PromptState>,
+    #[rust] todo: Vec<PromptState>,
     
     #[rust(Database::new(cx))] db: Database,
     
@@ -757,11 +754,11 @@ impl App {
             });
             return
         }
-        self.queue.push(prompt_state);
+        self.todo.insert(0, prompt_state);
     }
     
-    fn clear_queue(&mut self, cx: &mut Cx) {
-        self.queue.clear();
+    fn clear_todo(&mut self, cx: &mut Cx) {
+        self.todo.clear();
         for machine in &mut self.machines {
             let url = format!("http://{}/prompt", machine.ip);
             let mut request = HttpRequest::new(url, HttpMethod::POST);
@@ -846,15 +843,16 @@ impl App {
         }
     }
     
-    fn update_queue_display(&mut self) {
-        let mut queue = 0;
+    fn update_todo_display(&mut self, cx: &mut Cx) {
+        let mut todo = 0;
         for machine in &self.machines {
             if machine.running.is_some() {
-                queue += 1;
+                todo += 1;
             }
         }
-        queue += self.queue.len();
-        self.ui.get_label(id!(queue_label)).set_label(&format!("Queue {}", queue));
+        todo += self.todo.len();
+        self.ui.get_label(id!(todo_label)).set_label(&format!("Todo {}", todo));
+        self.ui.redraw(cx);
     }
     
     fn render(&mut self, cx: &mut Cx) {
@@ -875,11 +873,19 @@ impl App {
             });
         }
         // lets update the queuedisplay
-        self.update_queue_display();
+        self.update_todo_display(cx);
     }
     
-    fn handle_slide_show(&mut self, _cx:&mut Cx){
+    fn handle_slide_show(&mut self, _cx: &mut Cx) {
         
+    }
+    
+    fn update_render_todo(&mut self, cx: &mut Cx) {
+        while self.machines.iter().find( | v | v.running.is_none()).is_some() && self.todo.len()>0 {
+            let prompt = self.todo.pop().unwrap();
+            self.send_prompt(cx, prompt);
+        }
+        self.update_todo_display(cx);
     }
 }
 
@@ -890,7 +896,7 @@ impl AppMain for App {
         }
         
         let image_list = self.ui.get_list_view_set(ids!(image_list));
-        if let Event::Timer(_te) = event{
+        if let Event::Timer(_te) = event {
             self.handle_slide_show(cx);
         }
         if let Event::Draw(event) = event {
@@ -954,11 +960,8 @@ impl AppMain for App {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 machine.running = None;
                                                 Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
-                                                self.update_queue_display();
                                             }
-                                            if let Some(prompt) = self.queue.pop() {
-                                                self.send_prompt(cx, prompt);
-                                            }
+                                            self.update_render_todo(cx);
                                         }
                                     }
                                 }
@@ -967,10 +970,11 @@ impl AppMain for App {
                                         if let Some(image) = output.images.first() {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 if let Some(running) = machine.running.take() {
-                                                    log!("Number of steps: {}", running.steps_counter);
                                                     machine.fetching = Some(running);
+                                                    Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
                                                     self.fetch_image(cx, event.request_id, &image.filename);
                                                 }
+                                                self.update_render_todo(cx);
                                             }
                                         }
                                     }
@@ -1043,26 +1047,26 @@ impl AppMain for App {
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
-                self.clear_queue(cx);
+                self.clear_todo(cx);
             }
         }
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Tab, ..}) = event {
             let check_box = self.ui.get_check_box(id!(slide_show_check_box));
-            if check_box.selected(cx){
+            if check_box.selected(cx) {
                 check_box.set_selected(cx, false);
             }
-            else{
+            else {
                 check_box.set_selected(cx, true);
             }
         }
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) = event {
             let big_image = self.ui.get_frame(id!(big_image));
-            if big_image.visible(){
+            if big_image.visible() {
                 big_image.set_visible(false);
             }
-            else{
+            else {
                 big_image.set_visible(true);
             }
             self.ui.redraw(cx);
@@ -1073,8 +1077,8 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(clear_queue)).clicked(&actions) {
-            self.clear_queue(cx);
+        if self.ui.get_button(id!(cancel_todo)).clicked(&actions) {
+            self.clear_todo(cx);
             self.ui.redraw(cx);
         }
         
