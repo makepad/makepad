@@ -539,7 +539,8 @@ impl TextInput {
                     self.cursor_head = self.text.chars().count();
                     self.draw_bg.redraw(cx);
                 }
-                KeyCode::ArrowLeft => {
+                KeyCode::ArrowLeft => if !ke.modifiers.logo{
+                    
                     self.undo_id += 1;
                     if self.cursor_head>0 {
                         self.cursor_head -= 1;
@@ -549,7 +550,7 @@ impl TextInput {
                     }
                     self.draw_bg.redraw(cx);
                 },
-                KeyCode::ArrowRight => {
+                KeyCode::ArrowRight => if !ke.modifiers.logo{
                     self.undo_id += 1;
                     if self.cursor_head < self.text.chars().count() {
                         self.cursor_head += 1;
@@ -559,7 +560,7 @@ impl TextInput {
                     }
                     self.draw_bg.redraw(cx);
                 }
-                KeyCode::ArrowDown => {
+                KeyCode::ArrowDown => if !ke.modifiers.logo{
                     self.undo_id += 1;
                     // we need to figure out what is below our current cursor
                     if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
@@ -572,7 +573,7 @@ impl TextInput {
                         }
                     }
                 },
-                KeyCode::ArrowUp => {
+                KeyCode::ArrowUp =>if !ke.modifiers.logo{
                     self.undo_id += 1;
                     // we need to figure out what is below our current cursor
                     if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
@@ -585,7 +586,7 @@ impl TextInput {
                         }
                     }
                 },
-                KeyCode::Home => {
+                KeyCode::Home => if !ke.modifiers.logo{
                     self.undo_id += 1;
                     self.cursor_head = 0;
                     if !ke.modifiers.shift {
@@ -593,7 +594,7 @@ impl TextInput {
                     }
                     self.draw_bg.redraw(cx);
                 }
-                KeyCode::End => {
+                KeyCode::End => if !ke.modifiers.logo{
                     self.undo_id += 1;
                     self.cursor_head = self.text.chars().count();
                     
