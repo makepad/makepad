@@ -136,6 +136,15 @@ live_design!{
         }
     }
     
+    BarButton = <Button> {
+        layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
+        walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+        label: "Cancel"
+        draw_label: {
+            text_style: <TEXT_BOLD> {},
+        }
+    }
+    
     FillerH = <Frame> {
         walk: {width: Fill, height: Fit}
     }
@@ -484,7 +493,7 @@ live_design!{
                             }
                             batch_mode_dropdown = <SdxlDropDown> {
                                 selected_item: 5
-                                labels: ["1", "2", "3", "4", "5", "6", "10000"]
+                                labels: ["1", "2", "3", "4", "5", "6"]
                             }
                             
                             <BarLabel> {
@@ -495,41 +504,31 @@ live_design!{
                                 label_walk: {width: Fit}
                             }
                             
-                            render_batch = <Button> {
-                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-                                label: "Render batch"
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                }
+                            render_batch = <BarButton> {
+                                label: "Batch"
                             }
-                            render_one = <Button> {
-                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-                                label: "Render one"
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                }
+                            render_single = <BarButton> {
+                                label: "Single"
                             }
-                            cancel_todo = <Button> {
-                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                            render_infinity = <BarButton> {
+                                label: "Infinity"
+                            }
+                            cancel_todo = <BarButton> {
                                 label: "Cancel"
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                }
                             }
                             
                             <DividerH> {}
-                            
+                            play_button = <BarButton> {
+                                label: "Play"
+                            }
                             slide_show_check_box = <SdxlCheckBox> {
                                 label: "Slideshow"
                             }
                             
                             slide_show_dropdown = <SdxlDropDown> {
-                                selected_item: 2
+                                selected_item: 6
                                 walk: {margin: 0},
-                                labels: ["0s", "0.25s", "0.5s", "0.75s", "1s", "2s", "5s", "10s"]
+                                labels: ["0", "0.25", "0.5", "0.75", "1", "2", "5", "7", "10"]
                             }
                             
                             <DividerH> {}
@@ -650,9 +649,9 @@ live_design!{
                     draw_bg: {draw_depth: 10.0}
                     draw_bg: {color: #0}
                     walk: {height: All, width: All, abs_pos: vec2(0.0, 0.0)}
-                    layout: {flow: Down, align: {x: 0.5, y: 0.5}}
+                    layout: {flow: Overlay, align: {x: 0.5, y: 0.5}}
                     cursor: Hand,
-                    image = <Image> {
+                    image1 = <Image> {
                         draw_bg: {draw_depth: 11.0}
                         fit: Smallest,
                         walk: {width: Fill, height: Fill}
@@ -778,19 +777,22 @@ impl App {
     }
     
     fn clear_todo(&mut self, cx: &mut Cx) {
-        self.todo.clear();
-        for machine in &mut self.machines {
-            let url = format!("http://{}/prompt", machine.ip);
-            let mut request = HttpRequest::new(url, HttpMethod::POST);
-            let ws = "{clear:true}";
-            request.set_metadata_id(machine.id);
-            request.set_body_string(ws);
-            cx.http_request(live_id!(clear_queue), request);
-            
-            let url = format!("http://{}/interrupt", machine.ip);
-            let mut request = HttpRequest::new(url, HttpMethod::POST);
-            request.set_metadata_id(machine.id);
-            cx.http_request(live_id!(interrupt), request);
+        for _ in 0..2 {
+            self.todo.clear();
+            for machine in &mut self.machines {
+                let url = format!("http://{}/queue", machine.ip);
+                let mut request = HttpRequest::new(url, HttpMethod::POST);
+                let ws = "{clear:true}";
+                request.set_metadata_id(machine.id);
+                request.set_body_string(ws);
+                cx.http_request(live_id!(clear_queue), request);
+                
+                let url = format!("http://{}/interrupt", machine.ip);
+                let mut request = HttpRequest::new(url, HttpMethod::POST);
+                request.set_metadata_id(machine.id);
+                cx.http_request(live_id!(interrupt), request);
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
     
@@ -831,9 +833,19 @@ impl App {
         if let Some(current_image) = &self.current_image {
             if let Some(image) = self.db.image_files.iter().find( | v | v.image_id == *current_image) {
                 self.last_seed = image.seed;
+                self.ui.get_drop_down(id!(workflow_dropdown)).set_selected_by_label(&image.workflow);
                 self.update_seed_display(cx);
             }
         }
+    }
+    
+    fn prompt_hash_from_current_image(&mut self) -> LiveId {
+        if let Some(current_image) = &self.current_image {
+            if let Some(image) = self.db.image_files.iter().find( | v | v.image_id == *current_image) {
+                return image.prompt_hash
+            }
+        }
+        LiveId(0)
     }
     
     fn update_seed_display(&mut self, cx: &mut Cx) {
@@ -893,13 +905,17 @@ impl App {
         self.ui.redraw(cx);
     }
     
-    fn render(&mut self, cx: &mut Cx, is_one: bool) {
+    fn render(&mut self, cx: &mut Cx, batch_size: usize) {
         let positive = self.ui.get_text_input(id!(positive)).get_text();
         let negative = self.ui.get_text_input(id!(negative)).get_text();
-        let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
         let workflow_id = self.ui.get_drop_down(id!(workflow_dropdown)).get_selected();
         let workflow = self.workflows[workflow_id].name.clone();
-        for _ in 0..(if is_one {1} else {batch_size}) {
+        
+        if batch_size != 1 {
+            self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
+            self.update_seed_display(cx);
+        }
+        for i in 0..batch_size {
             self.send_prompt(cx, PromptState {
                 prompt: Prompt {
                     positive: positive.clone(),
@@ -908,8 +924,8 @@ impl App {
                 workflow: workflow.clone(),
                 seed: self.last_seed as u64
             });
-            if !is_one {
-                self.last_seed += 1;
+            if batch_size != 1 {
+                self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0 + i as u64;
                 self.update_seed_display(cx);
             }
         }
@@ -928,18 +944,7 @@ impl App {
     fn handle_slide_show(&mut self, cx: &mut Cx) {
         // lets get the slideshow values
         if self.ui.get_check_box(id!(slide_show_check_box)).selected(cx) {
-            let index = self.ui.get_drop_down(id!(slide_show_dropdown)).get_selected();
-            let time = match index {
-                0 => 0.0,
-                1 => 0.25,
-                2 => 0.5,
-                3 => 0.75,
-                4 => 1.0,
-                5 => 2.0,
-                6 => 5.0,
-                7 => 10.,
-                _ => 0.
-            };
+            let time = self.ui.get_drop_down(id!(slide_show_dropdown)).get_selected_label().parse::<f64>().unwrap_or(0.0);
             // ok lets check our last-change instant
             if Instant::now() - self.last_flip > Duration::from_millis((time * 1000.0)as u64) {
                 self.select_prev_image(cx);
@@ -954,61 +959,16 @@ impl App {
         }
         self.update_todo_display(cx);
     }
-}
-
-impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if self.db.handle_decoded_images(cx) {
-            self.ui.redraw(cx);
-        }
+    
+    fn play(&mut self, cx:&mut Cx){
+        self.set_current_image_by_item_id_and_row(cx, 0, 0);
+        self.ui.get_list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
+        self.set_slide_show(cx, true);
         
+    }
+    
+    fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
         let image_list = self.ui.get_list_view(id!(image_list));
-        if let Event::Timer(_te) = event {
-            self.handle_slide_show(cx);
-        }
-        if let Event::Draw(event) = event {
-            let cx = &mut Cx2d::new(cx, event);
-            if let Some(current_image) = &self.current_image {
-                let tex = self.db.get_image_texture(current_image);
-                if tex.is_some() {
-                    self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
-                    self.ui.get_image(id!(big_image.image)).set_texture(tex);
-                }
-            }
-            
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                
-                if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
-                    // alright now we draw the items
-                    image_list.set_item_range(0, self.filtered.list.len() as u64, 1);
-                    while let Some(item_id) = image_list.next_visible_item(cx) {
-                        if let Some(item) = self.filtered.list.get(item_id as usize) {
-                            match item {
-                                ImageListItem::Prompt {prompt_hash} => {
-                                    let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
-                                    let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
-                                    item.get_label(id!(prompt)).set_label(&group.prompt.positive);
-                                    item.draw_widget_all(cx);
-                                }
-                                ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
-                                    let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
-                                    let rows = item.get_frame_set(ids!(row1, row2, row3));
-                                    for (index, row) in rows.iter().enumerate() {
-                                        if index >= *image_count {break}
-                                        // alright we need to query our png cache for an image.
-                                        let tex = self.db.get_image_texture(&image_files[index]);
-                                        row.get_image(id!(img)).set_texture(tex);
-                                    }
-                                    item.draw_widget_all(cx);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return
-        }
-        
         for event in event.network_responses() {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => {
@@ -1104,26 +1064,95 @@ impl AppMain for App {
                 }
             }
         }
+    }
+}
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let image_list = self.ui.get_list_view(id!(image_list));
+        
+        if self.db.handle_decoded_images(cx) {
+            self.ui.redraw(cx);
+        }
+        
+        if let Event::Timer(_te) = event {
+            self.handle_slide_show(cx);
+        }
+        if let Event::Draw(event) = event {
+            let cx = &mut Cx2d::new(cx, event);
+            if let Some(current_image) = &self.current_image {
+                let tex = self.db.get_image_texture(current_image);
+                if tex.is_some() {
+                    self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
+                    self.ui.get_image(id!(big_image.image1)).set_texture(tex);
+                }
+            }
+            
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+                
+                if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
+                    // alright now we draw the items
+                    image_list.set_item_range(0, self.filtered.list.len() as u64, 1);
+                    while let Some(item_id) = image_list.next_visible_item(cx) {
+                        if let Some(item) = self.filtered.list.get(item_id as usize) {
+                            match item {
+                                ImageListItem::Prompt {prompt_hash} => {
+                                    let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
+                                    let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
+                                    item.get_label(id!(prompt)).set_label(&group.prompt.positive);
+                                    item.draw_widget_all(cx);
+                                }
+                                ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
+                                    let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
+                                    let rows = item.get_frame_set(ids!(row1, row2, row3));
+                                    for (index, row) in rows.iter().enumerate() {
+                                        if index >= *image_count {break}
+                                        // alright we need to query our png cache for an image.
+                                        let tex = self.db.get_image_texture(&image_files[index]);
+                                        row.get_image(id!(img)).set_texture(tex);
+                                    }
+                                    item.draw_widget_all(cx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return
+        }
+        
+        self.handle_network_response(cx, event);
         
         let actions = self.ui.handle_widget_event(cx, event);
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, modifiers, ..}) = event {
-            self.render(cx, modifiers.control | modifiers.logo);
+            if modifiers.logo {
+                self.clear_todo(cx);
+            }
+            if modifiers.control {
+                self.render(cx, 10000);
+            }
+            else if modifiers.shift {
+                self.render(cx, 1);
+            }
+            else {
+                let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+                self.render(cx, batch_size);
+            }
         }
+        
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Backspace, modifiers, ..}) = event {
+            if modifiers.logo {
+                let prompt_hash = self.prompt_hash_from_current_image();
+                self.load_inputs_from_prompt_hash(cx, prompt_hash);
+                self.load_seed_from_current_image(cx);
+            }
+        }
+        
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
                 self.clear_todo(cx);
-            }
-        }
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Tab, ..}) = event {
-            let check_box = self.ui.get_check_box(id!(slide_show_check_box));
-            if check_box.selected(cx) {
-                self.set_slide_show(cx, false);
-            }
-            else {
-                self.set_slide_show(cx, true);
             }
         }
         
@@ -1138,16 +1167,52 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
+        if self.ui.get_button(id!(play_button)).clicked(&actions){
+            self.play(cx);
+        }
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) = event {
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+                self.play(cx);
+            }
+        }
+        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..}) = event {
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+                self.select_next_image(cx);
+                self.set_slide_show(cx, false);
+            }
+        }
+        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..}) = event {
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+                self.select_prev_image(cx);
+                self.set_slide_show(cx, false);
+            }
+        }
+        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) = event {
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+                self.set_slide_show(cx, false);
+            }
+        }
+        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, modifiers, ..}) = event {
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+                self.set_slide_show(cx, true);
+            }
+        }
+        
         if self.ui.get_button(id!(render_batch)).clicked(&actions) {
-            self.render(cx, false);
+            let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+            self.render(cx, batch_size);
             self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(render_one)).clicked(&actions) {
-            self.render(cx, true);
+        if self.ui.get_button(id!(render_single)).clicked(&actions) {
+            self.render(cx, 1);
             self.ui.redraw(cx);
         }
         
+        if self.ui.get_button(id!(render_infinity)).clicked(&actions) {
+            self.render(cx, 10000);
+            self.ui.redraw(cx);
+        }
         
         if self.ui.get_button(id!(cancel_todo)).clicked(&actions) {
             self.clear_todo(cx);
@@ -1174,31 +1239,17 @@ impl AppMain for App {
             }
         }
         
-        if let Some(ke) = self.ui.get_frame_set(ids!(image_view, big_image)).key_down(&actions) {
-            match ke.key_code {
-                KeyCode::ArrowDown => {
-                    self.select_next_image(cx);
-                    self.set_slide_show(cx, false);
-                }
-                KeyCode::ArrowUp => {
-                    self.select_prev_image(cx);
-                    self.set_slide_show(cx, false);
-                }
-                _ => ()
-            }
-        }
-        
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
             let rows = item.get_frame_set(ids!(row1, row2));
             for (row_index, row) in rows.iter().enumerate() {
                 if let Some(fd) = row.finger_down(&actions) {
                     self.set_current_image_by_item_id_and_row(cx, item_id, row_index);
+                    self.set_slide_show(cx, false);
                     if fd.tap_count == 2 {
                         if let ImageListItem::ImageRow {prompt_hash, ..} = self.filtered.list[item_id as usize] {
                             self.load_seed_from_current_image(cx);
                             self.load_inputs_from_prompt_hash(cx, prompt_hash);
-                            self.set_slide_show(cx, false);
                         }
                     }
                 }

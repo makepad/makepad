@@ -93,6 +93,7 @@ impl Widget for Image {
 }
 
 impl Image {
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
         // alright we get a walk. depending on our aspect ratio 
         // we change either nothing, or width or height 
