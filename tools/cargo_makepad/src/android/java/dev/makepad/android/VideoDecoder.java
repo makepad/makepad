@@ -146,11 +146,12 @@ public class VideoDecoder {
             throw new IllegalStateException("Decoding hasn't been initialized");
         }
 
+        boolean isEndOfChunk = false;
+        long framesDecodedThisChunk = 0;
+        
         mExtractor.seekTo(startTimestampUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
 
-        long framesDecodedThisChunk = 0;
-
-        while (!mOutputEos && framesDecodedThisChunk < mChunkSize) {
+        while (!isEndOfChunk && framesDecodedThisChunk < mChunkSize) {
             if (!mInputEos) {
                 int inputBufferIndex = mCodec.dequeueInputBuffer(2000);
                 if (inputBufferIndex >= 0) {
@@ -158,10 +159,9 @@ public class VideoDecoder {
                     int sampleSize = mExtractor.readSampleData(inputBuffer, 0);
 
                     long presentationTimeUs = mExtractor.getSampleTime();
-                    
+
                     if (sampleSize < 0 || presentationTimeUs > endTimestampUs) {
-                        mCodec.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                        mInputEos = true;
+                        isEndOfChunk = true;
                     } else {
                         mCodec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
                         mExtractor.advance();
@@ -183,14 +183,11 @@ public class VideoDecoder {
 
                 mCodec.releaseOutputBuffer(outputBufferIndex, false);
 
-                if ((mInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                    mOutputEos = true;
-                }
-
                 Activity activity = mActivityReference.get();
+                boolean finalIsEoC = isEndOfChunk;
                 if (activity != null) {
                     activity.runOnUiThread(() -> {
-                        Makepad.onVideoStream(mCx, mVideoId, pixelData, yStride, uvStride, mInfo.presentationTimeUs, mOutputEos, (Makepad.Callback)mView.getContext());
+                        Makepad.onVideoStream(mCx, mVideoId, pixelData, yStride, uvStride, mInfo.presentationTimeUs, finalIsEoC, (Makepad.Callback)mView.getContext());
                     });
                 }
 
@@ -207,7 +204,7 @@ public class VideoDecoder {
                 if (buffer.length == size) {
                     return buffer;
                 } else {
-                    // Resize or just create a new buffer
+                    // resize or just create a new buffer
                     return new byte[size];
                 }
             } else {
