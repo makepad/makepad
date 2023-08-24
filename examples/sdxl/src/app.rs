@@ -277,6 +277,8 @@ live_design!{
     
     PromptGroup = <Rect> {
         <DividerV> {}
+        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 0}}
+        layout: {flow: Down, spacing: 0, padding: 0}
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
@@ -287,8 +289,6 @@ live_design!{
                 return sdf.result
             }
         }
-        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 20}}
-        layout: {flow: Down, spacing: 0, padding: 10}
         state: {
             hover = {
                 default: off,
@@ -564,9 +564,9 @@ live_design!{
                         layout: {flow: Down},
                         <Frame> {
                             walk: {height: Fit, width: Fill}
-                            layout: {flow: Right, padding: {left: 10, right: 10, top: 10}},
+                            layout: {flow: Right, padding: {left: 10, right: 10, top: 10, bottom: 10}},
                             search = <TextInput> {
-                                walk: {height: Fit, width: Fill}
+                                walk: {height: Fit, width: Fill, margin: {bottom: 0} }
                                 empty_message: "Search"
                                 draw_bg: {
                                     color: (COLOR_TEXT_INPUT)
@@ -595,8 +595,8 @@ live_design!{
                             }
                         }
                         image_list = <ListView> {
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down, padding: 10}
+                            walk: {height: Fill, width: Fill, margin: {top: 0} }
+                            layout: {flow: Down, padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}}
                             
                             PromptGroup = <PromptGroup> {}
                             
