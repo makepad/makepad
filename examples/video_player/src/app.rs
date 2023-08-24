@@ -32,6 +32,7 @@ live_design!{
             <Video> {
                 source: (TEST2)
                 walk: { width: 400, height: 709.5 }
+                is_looping: true
             }
         }
     }
