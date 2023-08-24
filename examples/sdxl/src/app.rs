@@ -277,6 +277,8 @@ live_design!{
     
     PromptGroup = <Rect> {
         <DividerV> {}
+        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 0}}
+        layout: {flow: Down, spacing: 0, padding: 0}
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
@@ -287,8 +289,6 @@ live_design!{
                 return sdf.result
             }
         }
-        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 20}}
-        layout: {flow: Down, spacing: 0, padding: 10}
         state: {
             hover = {
                 default: off,
