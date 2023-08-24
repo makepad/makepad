@@ -408,6 +408,10 @@ impl Cx {
             data,
         });
     }
+    
+    pub fn println_resources(&self){
+        println!("Num textures: {}",self.textures.0.pool.len());
+    }
 }
 
 #[macro_export]

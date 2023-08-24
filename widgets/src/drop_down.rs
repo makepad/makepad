@@ -273,7 +273,7 @@ impl DropDown {
                 KeyCode::ArrowUp => {
                     if self.selected_item > 0 {
                         self.selected_item -= 1;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -281,7 +281,7 @@ impl DropDown {
                 KeyCode::ArrowDown => {
                     if self.values.len() > 0 && self.selected_item < self.values.len() - 1 {
                         self.selected_item += 1;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -439,6 +439,14 @@ impl DropDownRef {
             return inner.selected_item
         }
         0
+    }
+
+
+    pub fn get_selected_label(&self)->String{
+        if let Some(inner) = self.borrow() {
+            return inner.labels[inner.selected_item].clone()
+        }
+        "".to_string()
     }
         
 }
