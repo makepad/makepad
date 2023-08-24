@@ -327,6 +327,15 @@ impl Widget for CheckBox {
 pub struct CheckBoxRef(WidgetRef);
 
 impl CheckBoxRef {
+    pub fn changed(&self, actions: &WidgetActions)->Option<bool>{
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let CheckBoxAction::Change(b) = item.action() {
+                return Some(b)
+            }
+        }
+        None
+    }
+
     pub fn set_label_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
             inner.label.clear();

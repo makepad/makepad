@@ -113,7 +113,7 @@ impl ListView {
         let rect = cx.turtle().rect();
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
-        
+        self.items.retain_visible();
         cx.end_turtle_with_area(&mut self.area);
     }
     
