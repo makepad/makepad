@@ -108,7 +108,7 @@ impl FilteredDb {
                     || prompt_file.prompt.positive.contains(search)
                     || prompt_file.prompt.negative.contains(search) {
                     self.flat.push(image.image_id.clone());
-                    if self.list.iter().find(|v|{if let ImageListItem::Prompt{prompt_hash} = v {*prompt_hash == image.prompt_hash}else{false} }).is_none(){
+                    /*if let Some(pos) = self.list.iter().find(|v|{if let ImageListItem::Prompt{prompt_hash} = v {*prompt_hash == image.prompt_hash}else{false} }).is_none(){
                         self.list.push(ImageListItem::Prompt {
                             prompt_hash: image.prompt_hash,
                         });
@@ -119,7 +119,7 @@ impl FilteredDb {
                             *image_count += 1;
                             continue;
                         }
-                    }
+                    }*/
                     self.list.push(ImageListItem::ImageRow {
                         prompt_hash: image.prompt_hash,
                         image_count: 1,
