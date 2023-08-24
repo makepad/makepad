@@ -830,7 +830,6 @@ impl App {
         }
     }
     
-    
     fn select_prev_image(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx);
         if let Some(current_image) = &self.current_image {
@@ -855,7 +854,6 @@ impl App {
     
     fn render(&mut self, cx: &mut Cx) {
         let positive = self.ui.get_text_input(id!(positive)).get_text();
-        //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
         let negative = self.ui.get_text_input(id!(negative)).get_text();
         let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected() + 1;
         let workflow_id = self.ui.get_drop_down(id!(workflow_dropdown)).get_selected();
