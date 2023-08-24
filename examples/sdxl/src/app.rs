@@ -533,12 +533,52 @@ live_design!{
                             <DividerH> {}
                             
                             slide_show_check_box = <CheckBox> {
+                                layout: {padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}}
+                                label_walk: {margin: {left: 20.0, top: 8, bottom: 8, right: 10}}
+                                state: {
+                                    selected = {
+                                        default: off
+                                        off = {
+                                            from: {all: Forward {duration: 0.1}}
+                                            apply: {draw_check: {selected: 0.0}}
+                                        }
+                                        on = {
+                                            cursor: Arrow,
+                                            from: {all: Forward {duration: 0.1}}
+                                            apply: {draw_check: {selected: 1.0}}
+                                        }
+                                    }
+                                }
+                                draw_check: {
+                                    instance border_width: 1.0
+                                    instance border_color: #x06
+                                    instance border_color2: #xFFFFFF0A
+                                    size: 8.5;
+                                    fn pixel(self) -> vec4 {
+                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                                        let sz = self.size;
+                                        let left = sz + 1.;
+                                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
+                                        
+                                        sdf.stroke_keep(#xFFF2, 1.25)
+                                        
+                                        sdf.fill(#xFFF0)
+                                        let isz = sz * 0.65;
+                                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
+                                        sdf.subtract();
+                                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                                        sdf.blend(self.selected)
+                                        sdf.fill(#xFFF8);
+                                        return sdf.result
+                                    }
+                                }
                                 draw_label: {
                                     text_style: <TEXT_BOLD> {},
+                                    color: #xFFFA
                                 }
                                 label: "Slideshow"
-                                walk: {width: Fit, height: Fit, margin: 0}
-                                
                             }
                             
                             slide_show_dropdown = <SdxlDropDown> {
