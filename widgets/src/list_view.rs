@@ -433,10 +433,25 @@ impl Widget for ListView {
 pub struct ListViewRef(WidgetRef);
 
 impl ListViewRef {
+    pub fn set_first_id_and_scroll(&self, id:u64, s:f64){
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.first_id = id;
+            inner.first_scroll =s;
+        }
+    }
+
     pub fn set_first_id(&self, id:u64){
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
-            inner.first_scroll = 0.0;
+        }
+    }
+    
+    pub fn first_id(&self)->u64{
+         if let Some(inner) = self.borrow() {
+             inner.first_id 
+        }
+        else{
+            0
         }
     }
     
@@ -480,6 +495,7 @@ impl ListViewSet {
             list.set_first_id(id)
         }
     }
+    
     
     pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
         let mut set = Vec::new();
