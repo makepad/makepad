@@ -380,7 +380,7 @@ impl Cx {
     }
 
     pub fn from_java_on_video_decoding_initialized(&mut self, video_id: u64, frame_rate: usize, video_width: u32, video_height: u32, 
-        color_format: String, duration: u64, to_java: AndroidToJava) {
+        color_format: String, duration: u128, to_java: AndroidToJava) {
         let e = Event::VideoDecodingInitialized(
             VideoDecodingInitializedEvent { 
                 video_id: LiveId(video_id),
@@ -396,14 +396,14 @@ impl Cx {
     }
 
     pub fn from_java_on_video_stream(&mut self, video_id: u64, pixel_data: Vec<u8>, 
-        yuv_strides: (usize, usize), timestamp: u64, is_eos: bool, to_java: AndroidToJava) {
+        yuv_strides: (usize, usize), timestamp: u128, is_eoc: bool, to_java: AndroidToJava) {
         let e = Event::VideoStream(
         VideoStreamEvent  { 
                 video_id: LiveId(video_id),
                 pixel_data,
                 yuv_strides,
                 timestamp,
-                is_eos,
+                is_eoc,
             }
         );
         self.call_event_handler(&e);

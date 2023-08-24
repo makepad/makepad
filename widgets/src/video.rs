@@ -72,13 +72,17 @@ pub struct Video {
     #[rust]
     uv_texture: Option<Texture>,
 
+    // Playback options
+    #[live]
+    is_looping: bool,
+
     // Original video metadata
     #[rust]
     width: usize,
     #[rust]
     height: usize,
     #[rust]
-    total_duration: u64,
+    total_duration: u128,
     #[rust]
     original_frame_rate: usize,
     #[rust]
@@ -87,36 +91,43 @@ pub struct Video {
     // Buffering
     #[rust]
     frames_buffer: RingBuffer,
-    #[rust]
-    current_start_ts: u64,
-    #[rust]
-    current_end_ts: u64,
 
     // Frame
     #[live]
-    current_frame: usize,
+    current_frame_index: usize,
     #[rust]
     last_update: MyInstant,
     #[rust]
     tick: Timer,
     #[rust]
-    accumulated_time: f64,
+    accumulated_time: u128,
 
     // Decoding
     #[rust]
-    last_decode_request_ts: (u64, u64),
+    decoding_threshold: f64,
     #[rust]
     decoding_state: DecodingState,
+    #[rust]
+    chunk_decoding_state: ChunkDecodingState,
 
     #[rust]
     id: LiveId,
+}
+
+#[derive(Default)]
+struct ChunkDecodingState {
+    progress: f64,
+    start_ts: u128,
+    end_ts: u128,
+    next_start_ts: u128,
+    next_end_ts: u128,
 }
 
 #[derive(Clone)]
 struct VideoFrame {
     y_data: Vec<u8>,
     uv_data: Vec<u8>,
-    timestamp: f64,
+    timestamp_us: u128,
 }
 
 #[derive(Clone, Default, PartialEq, WidgetRef)]
@@ -174,7 +185,8 @@ impl Widget for Video {
     }
 
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk)
+        self.draw_bg.draw_walk(cx, walk);
+        WidgetDraw::done()
     }
 
     fn handle_widget_event_with(
@@ -201,6 +213,15 @@ impl Video {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
             if self.frames_buffer.data.len() > 20 {
                 self.draw(cx);
+            
+                makepad_error_log::log!("Chunk Decoding Progress: {}%", self.chunk_decoding_state.progress);
+
+                if self.chunk_decoding_state.progress >= 40.0 {
+                    if self.should_request_decoding() {
+                        cx.decode_video_chunk(self.id, self.chunk_decoding_state.next_start_ts, self.chunk_decoding_state.next_end_ts);
+                        self.update_next_chunk_times();
+                    }
+                }
             }
         }
 
@@ -221,9 +242,10 @@ impl Video {
 
             self.resize_frames_buffer();
 
-            self.current_start_ts = 0;
-            self.current_end_ts = CHUNK_DURATION_US;
-            cx.decode_video_chunk(self.id, self.current_start_ts, self.current_end_ts);
+            self.chunk_decoding_state.start_ts = 0;
+            self.chunk_decoding_state.end_ts = CHUNK_DURATION_US;
+            cx.decode_video_chunk(self.id, self.chunk_decoding_state.start_ts, self.chunk_decoding_state.end_ts);
+            self.update_next_chunk_times();
             self.decoding_state = DecodingState::Decoding;
 
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
@@ -242,52 +264,85 @@ impl Video {
                 self.frames_buffer.push(VideoFrame {
                     y_data,
                     uv_data,
-                    timestamp: event.timestamp as f64 / 1_000_000.0,
+                    timestamp_us: event.timestamp,
                 });
             }
 
-            // TODO:
-            // IF IS END OF CHUNK, GO FOR NEXT CHUNK
-            if event.is_eos {
-                makepad_error_log::log!("Chunk decoding finished");
-                self.current_start_ts = self.current_end_ts;
-                self.current_end_ts += CHUNK_DURATION_US;
-                cx.decode_video_chunk(self.id, self.current_start_ts, self.current_end_ts);
+            self.update_chunk_decoding_progress(event.timestamp);
+
+            if event.is_eoc {
+                makepad_error_log::log!("EOC");
             }
-            // IF IS END OF VIDEO, GO FOR FIST CHUNK
+        }
+    }
+
+    fn update_next_chunk_times(&mut self) {
+        if self.is_looping && self.chunk_decoding_state.start_ts >= self.total_duration {
+            self.chunk_decoding_state.next_start_ts = 0;
+            self.chunk_decoding_state.next_end_ts = CHUNK_DURATION_US;
+        } else {
+            self.chunk_decoding_state.next_start_ts = self.chunk_decoding_state.next_end_ts;
+            self.chunk_decoding_state.next_end_ts += CHUNK_DURATION_US;
+        }
+    }
+
+    fn update_chunk_decoding_progress(&mut self, newest_frame_ts: u128) {
+        if self.chunk_decoding_state.end_ts > self.chunk_decoding_state.start_ts {
+            let total_duration = self.chunk_decoding_state.end_ts as f64 - self.chunk_decoding_state.start_ts as f64;
+            let decoded_duration = newest_frame_ts as f64 - self.chunk_decoding_state.start_ts as f64;
+            
+            self.chunk_decoding_state.progress = 
+                (decoded_duration / total_duration * 100.0)
+                .max(0.0)
+                .min(100.0);
+        } else {
+            self.chunk_decoding_state.progress = 0.0;
+        }
+    }
+
+    fn should_request_decoding(&self) -> bool {
+        let last_added_index = self.frames_buffer.last_added_index.unwrap();
+        makepad_error_log::log!("current index: {}, last added index: {}", self.current_frame_index, last_added_index);
+        if self.current_frame_index < last_added_index {
+            last_added_index - self.current_frame_index < 10
+        } else { 
+            self.current_frame_index - last_added_index < 10
         }
     }
 
     fn draw(&mut self, cx: &mut Cx) {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_update.0).as_secs_f64();
+        let elapsed = now.duration_since(self.last_update.0).as_micros();
         self.accumulated_time += elapsed;
 
         let frame_timestamp = self
             .frames_buffer
-            .get(self.current_frame)
-            .map(|f| f.timestamp)
-            .unwrap_or(0.0);
+            .get(self.current_frame_index)
+            .map(|f| f.timestamp_us)
+            .unwrap_or(0);
 
-        let mut cloned_pixel_data;
-        match self
-            .frames_buffer
-            .get(self.current_frame)
-            .map(|f| (f.y_data.clone(), f.uv_data.clone()))
-        {
-            Some(pixel_data) => {
-                cloned_pixel_data = pixel_data;
-            }
-            None => {
-                makepad_error_log::log!("No pixel data for frame {}", self.current_frame);
-                return;
-            }
-        }
-
-        // Iterate as long as the accumulated time exceeds the timestamp of the current frame
-        // This helps in catching up in case some frames were skipped due to longer `elapsed` times.
-        // this used to be a while instead of if, we'll see if needed
         if self.accumulated_time >= frame_timestamp {
+            makepad_error_log::log!(
+                "Drawing frame {} of {}",
+                self.current_frame_index,
+                self.frames_buffer.data.len()
+            );
+
+            let mut cloned_pixel_data;
+            match self
+                .frames_buffer
+                .get(self.current_frame_index)
+                .map(|f| (f.y_data.clone(), f.uv_data.clone()))
+            {
+                Some(pixel_data) => {
+                    cloned_pixel_data = pixel_data;
+                }
+                None => {
+                    makepad_error_log::log!("No pixel data for frame {}", self.current_frame_index);
+                    return;
+                }
+            }
+
             self.update_textures(cx, &mut cloned_pixel_data.0, &mut cloned_pixel_data.1);
 
             self.draw_bg
@@ -300,20 +355,15 @@ impl Video {
             self.redraw(cx);
 
             // Check if we're at the last frame
-            if self.current_frame == self.frames_buffer.data.len() - 1 {
+            if self.current_frame_index == self.frames_buffer.data.len() - 1 {
                 self.accumulated_time -= frame_timestamp;
-                self.current_frame = 0;
+                self.current_frame_index = 0;
             } else {
-                self.current_frame += 1;
+                self.current_frame_index += 1;
             }
         }
 
         self.last_update = MyInstant(now);
-    }
-
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_bg.draw_walk(cx, walk);
-        WidgetDraw::done()
     }
 
     fn update_textures(&mut self, cx: &mut Cx, y_data: &mut Vec<u8>, uv_data: &mut Vec<u8>) {
@@ -382,26 +432,29 @@ impl Video {
         let estimated_frames_per_chunk =
             (self.original_frame_rate as f64 * chunk_duration_seconds).ceil() as usize;
 
+        //
+        // we want to start decoding the next chunk when we're 80% done with the current one
+        // self.decoding_threshold = CHUNK_DURATION_US as f64 * 0.8;
         // safety margin of 20%
-        let buffer_size_with_margin = (estimated_frames_per_chunk as f64 * 1.2).ceil() as usize;
+        self.frames_buffer.size = (estimated_frames_per_chunk as f64 * 1.2).ceil() as usize;
 
-        makepad_error_log::log!(
-            "Estimated frames per chunk: {}, Buffer size: {}",
-            estimated_frames_per_chunk,
-            buffer_size_with_margin
-        );
-        self.frames_buffer.size = buffer_size_with_margin;
+        // makepad_error_log::log!(
+        //     "Estimated frames per chunk: {}, Buffer size: {}, decoding threshold: {} ms",
+        //     estimated_frames_per_chunk,
+        //     self.frames_buffer.size,
+        //     self.decoding_threshold
+        // );
     }
 }
 
 // TODO: dynamically calculate this based on frame rate and size
-const CHUNK_DURATION_US: u64 = 1_000_000;
+const CHUNK_DURATION_US: u128 = 1_000_000;
 
+// TODO: probably make this into a VecDequeue
 struct RingBuffer {
     data: Vec<Option<VideoFrame>>,
     size: usize,
-    start: usize,
-    end: usize,
+    last_added_index: Option<usize>,
 }
 
 impl RingBuffer {
@@ -409,18 +462,22 @@ impl RingBuffer {
         self.data.get(index).and_then(|item| item.as_ref())
     }
 
+    fn get_last(&self) -> Option<&VideoFrame> {
+        self.data.get(self.data.len() - 1).and_then(|item| item.as_ref())
+    }
+
     fn push(&mut self, frame: VideoFrame) {
         if self.data.len() < self.size {
             self.data.push(Some(frame));
-            self.end += 1;
-        } else {
-            self.data[self.end] = Some(frame);
-            self.end = (self.end + 1) % self.size;
-
-            // If end has caught up to start, move start to the next oldest item
-            if self.end == self.start {
-                self.start = (self.start + 1) % self.size;
+            if let Some(index) = self.last_added_index {
+                self.last_added_index = Some(index + 1);
+            } else {
+                self.last_added_index = Some(0);
             }
+        } else {
+            let new_index = (self.last_added_index.unwrap() + 1) % self.size;
+            self.data[new_index] = Some(frame);
+            self.last_added_index = Some(new_index);
         }
     }
 }
@@ -431,22 +488,9 @@ impl Default for RingBuffer {
         Self {
             data,
             size: 0,
-            start: 0,
-            end: 0,
+            last_added_index: None,
         }
     }
-}
-
-fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
-    let y = y as f32;
-    let u = u as f32 - 128.0;
-    let v = v as f32 - 128.0;
-
-    let r = (y + 1.402 * v).max(0.0).min(255.0) as u8;
-    let g = (y - 0.344136 * u - 0.714136 * v).max(0.0).min(255.0) as u8;
-    let b = (y + 1.772 * u).max(0.0).min(255.0) as u8;
-
-    (r, g, b)
 }
 
 fn split_nv12_data(
