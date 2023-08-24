@@ -448,5 +448,13 @@ impl DropDownRef {
         }
         "".to_string()
     }
+    
+     pub fn set_selected_by_label(&self,label:&str){
+        if let Some(mut inner) = self.borrow_mut() {
+            if let Some(index) = inner.labels.iter().position(|v| v == label){
+                inner.selected_item = index
+            }
+        }
+    }
         
 }
