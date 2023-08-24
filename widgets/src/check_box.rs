@@ -334,6 +334,15 @@ impl CheckBoxRef {
         }
     }
 
+    pub fn selected(&self, cx: &Cx)->bool {
+        if let Some(inner) = self.borrow(){
+            inner.is_in_state(cx, id!(selected.on))
+        }
+        else{
+            false
+        }
+    }
+
     pub fn set_selected(&self, cx: &mut Cx, value:bool) {
         if let Some(mut inner) = self.borrow_mut(){
             inner.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));

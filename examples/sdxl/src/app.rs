@@ -16,6 +16,7 @@ live_design!{
     import makepad_widgets::list_view::ListView;
     import makepad_widgets::drop_down::DropDown;
     import makepad_widgets::slide_panel::SlidePanel;
+    import makepad_widgets::check_box::CheckBox;
     import makepad_widgets::frame::*;
     import makepad_widgets::theme::*;
     import makepad_draw::shader::std::*;
@@ -124,7 +125,16 @@ live_design!{
             }
         }
     }
-    
+    BarLabel = <Label> {
+        walk: {margin: {left: 10}},
+        label: "Workflow",
+        draw_label: {
+            text_style: <TEXT_BOLD> {},
+            fn get_color(self) -> vec4 {
+                return #CCCCCC
+            }
+        }
+    }
     DividerV = <Frame> {
         layout: {flow: Down, spacing: 0.0}
         walk: {margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}, width: Fill, height: Fit}
@@ -466,42 +476,7 @@ live_design!{
                         draw_bg: {color: (COLOR_PANEL_BG)}
                         <Frame> {
                             walk: {height: Fit, width: Fill}
-                            layout: {align: {x: 1.0, y: 0.5}}
-                            
-                            <Label> {
-                                walk: {margin: {left: 10}},
-                                label: "Workflow",
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                    fn get_color(self) -> vec4 {
-                                        return #CCCCCC
-                                    }
-                                }
-                            }
-                            workflow_dropdown = <SdxlDropDown> {}
-                            <Label> {
-                                walk: {margin: {left: 10}},
-                                label: "Batch",
-                                draw_label: {
-                                    text_style: <TEXT_BOLD> {},
-                                    fn get_color(self) -> vec4 {
-                                        return #CCCCCC
-                                    }
-                                }
-                            }
-                            batch_mode_dropdown = <SdxlDropDown> {
-                                selected_item: 0
-                                labels: ["1", "2", "3", "4", "5", "6", "stepped"]
-                            }
-                            
-                            progress1 = <ProgressCircle> {}
-                            progress2 = <ProgressCircle> {}
-                            progress3 = <ProgressCircle> {}
-                            progress4 = <ProgressCircle> {}
-                            progress5 = <ProgressCircle> {}
-                            progress6 = <ProgressCircle> {
-                                walk: {margin: {right: 5.0}}
-                            }
+                            layout: {align: {x: 0.0, y: 0.5}}
                             
                             render = <Button> {
                                 layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
@@ -511,6 +486,52 @@ live_design!{
                                     text_style: <TEXT_BOLD> {},
                                 }
                             }
+                            <BarLabel> {
+                                label: "Workflow"
+                            }
+                            workflow_dropdown = <SdxlDropDown> {}
+                            <BarLabel> {
+                                label: "Batch size"
+                            }
+                            batch_mode_dropdown = <SdxlDropDown> {
+                                selected_item: 0
+                                labels: ["1", "2", "3", "4", "5", "6", "stepped"]
+                            }
+                            queue_label = <BarLabel> {
+                                label: "Queue 0"
+                            }
+                            clear_queue = <Button> {
+                                layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
+                                walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+                                label: "Clear queue"
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
+                            }
+                            slide_show_check_box = <CheckBox>{
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
+                                    label: "Slideshow"
+                                walk:{width:Fit,height:Fit,margin:0}
+                            }
+                            slide_show_dropdown = <SdxlDropDown> {
+                                selected_item: 0
+                                walk:{margin:0},
+                                labels: ["1s", "2s", "5s", "10s"]
+                            }
+                            <BarLabel> {
+                                label: "Progress"
+                            }
+                            progress1 = <ProgressCircle> {}
+                            progress2 = <ProgressCircle> {}
+                            progress3 = <ProgressCircle> {}
+                            progress4 = <ProgressCircle> {}
+                            progress5 = <ProgressCircle> {}
+                            progress6 = <ProgressCircle> {
+                                walk: {margin: {right: 5.0}}
+                            }
+                            
                             
                         }
                         <Frame> {
@@ -680,7 +701,9 @@ pub struct App {
     #[rust] filtered: FilteredDb,
     #[live] last_seed: i64,
     
-    #[rust] current_image: Option<ImageId>
+    #[rust] current_image: Option<ImageId>,
+    
+    #[rust(Instant::now())] _last_flip: Instant
 }
 
 impl LiveHook for App {
@@ -695,6 +718,7 @@ impl LiveHook for App {
         let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
         let dd = self.ui.get_drop_down(id!(workflow_dropdown));
         dd.set_labels(workflows);
+        cx.start_interval(0.1);
     }
 }
 
@@ -729,6 +753,23 @@ impl App {
             return
         }
         self.queue.push(prompt_state);
+    }
+    
+    fn clear_queue(&mut self, cx: &mut Cx) {
+        self.queue.clear();
+        for machine in &mut self.machines {
+            let url = format!("http://{}/prompt", machine.ip);
+            let mut request = HttpRequest::new(url, HttpMethod::POST);
+            let ws = "{clear:true}";
+            request.set_metadata_id(machine.id);
+            request.set_body_string(ws);
+            cx.http_request(live_id!(clear_queue), request);
+            
+            let url = format!("http://{}/interrupt", machine.ip);
+            let mut request = HttpRequest::new(url, HttpMethod::POST);
+            request.set_metadata_id(machine.id);
+            cx.http_request(live_id!(interrupt), request);
+        }
     }
     
     fn fetch_image(&self, cx: &mut Cx, machine_id: LiveId, image_name: &str) {
@@ -801,6 +842,17 @@ impl App {
         }
     }
     
+    fn update_queue_display(&mut self) {
+        let mut queue = 0;
+        for machine in &self.machines {
+            if machine.running.is_some() {
+                queue += 1;
+            }
+        }
+        queue += self.queue.len();
+        self.ui.get_label(id!(queue_label)).set_label(&format!("Queue {}", queue));
+    }
+    
     fn render(&mut self, cx: &mut Cx) {
         let positive = self.ui.get_text_input(id!(positive)).get_text();
         //let keyword_input = self.ui.get_text_input(id!(keyword_input)).get_text();
@@ -819,6 +871,12 @@ impl App {
                 seed: self.last_seed as u64
             });
         }
+        // lets update the queuedisplay
+        self.update_queue_display();
+    }
+    
+    fn handle_slide_show(&mut self, _cx:&mut Cx){
+        
     }
 }
 
@@ -829,13 +887,17 @@ impl AppMain for App {
         }
         
         let image_list = self.ui.get_list_view_set(ids!(image_list));
-        
+        if let Event::Timer(_te) = event{
+            self.handle_slide_show(cx);
+        }
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             if let Some(current_image) = &self.current_image {
                 let tex = self.db.get_image_texture(current_image);
-                self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
-                self.ui.get_image(id!(big_image.image)).set_texture(tex);
+                if tex.is_some() {
+                    self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
+                    self.ui.get_image(id!(big_image.image)).set_texture(tex);
+                }
             }
             
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
@@ -874,7 +936,10 @@ impl AppMain for App {
         for event in event.network_responses() {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => {
-                    if s.contains("execution_error") { // i dont care to expand the json def for this one
+                    if s.contains("execution_interrupted") {
+                        
+                    }
+                    else if s.contains("execution_error") { // i dont care to expand the json def for this one
                         log!("Got execution error for {} {}", event.request_id, s);
                     }
                     else {
@@ -886,9 +951,9 @@ impl AppMain for App {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 machine.running = None;
                                                 Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
+                                                self.update_queue_display();
                                             }
                                             if let Some(prompt) = self.queue.pop() {
-                                                log!("QUEUED PROMPT!");
                                                 self.send_prompt(cx, prompt);
                                             }
                                         }
@@ -939,7 +1004,12 @@ impl AppMain for App {
                                     
                                     // lets write our image to disk properly
                                     self.current_image = Some(self.db.add_png_and_prompt(fetching.prompt_state, data));
+                                    
                                     self.filtered.filter_db(&self.db, "", false);
+                                    if self.db.get_image_texture(self.current_image.as_ref().unwrap()).is_some() {
+                                        self.ui.redraw(cx);
+                                    };
+                                    
                                     // alright we got a png. lets decode it and stuff it in our image viewer
                                     //let big_list = self.ui.get_list_view(id!(big_list));
                                     //let image_id = self.num_images;
@@ -947,10 +1017,12 @@ impl AppMain for App {
                                     //let item = big_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
                                     //item.load_png_from_data(cx, data);
                                     
-                                    self.ui.redraw(cx);
+                                    
                                 }
                             }
                         }
+                        live_id!(clear_queue) => {}
+                        live_id!(interrupt) => {}
                         _ => panic!()
                     }
                 }
@@ -966,8 +1038,41 @@ impl AppMain for App {
             self.render(cx);
         }
         
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..}) = event {
+            if modifiers.control || modifiers.logo {
+                self.clear_queue(cx);
+            }
+        }
+        
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Tab, ..}) = event {
+            let check_box = self.ui.get_check_box(id!(slide_show_check_box));
+            if check_box.selected(cx){
+                check_box.set_selected(cx, false);
+            }
+            else{
+                check_box.set_selected(cx, true);
+            }
+        }
+        
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) = event {
+            let big_image = self.ui.get_frame(id!(big_image));
+            if big_image.visible(){
+                big_image.set_visible(false);
+            }
+            else{
+                big_image.set_visible(true);
+            }
+            self.ui.redraw(cx);
+        }
+        
         if self.ui.get_button(id!(render)).clicked(&actions) {
             self.render(cx);
+            self.ui.redraw(cx);
+        }
+        
+        if self.ui.get_button(id!(clear_queue)).clicked(&actions) {
+            self.clear_queue(cx);
+            self.ui.redraw(cx);
         }
         
         if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions) {
