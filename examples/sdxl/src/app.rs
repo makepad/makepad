@@ -152,7 +152,7 @@ live_design!{
     
     ProgressCircle = <Frame> {
         show_bg: true,
-        walk: {width: 25, height: 25}
+        walk: {width: 24, height: 24}
         draw_bg: {
             instance progress: 0.0
             instance active: 0.0
@@ -364,7 +364,7 @@ live_design!{
                 on = {
                     ease: OutExp
                     from: {
-                        all: Forward {duration: 0.2}
+                        all: Forward {duration: 0.3}
                     }
                     apply: {
                         img = {draw_bg: {hover: 1.0}}
@@ -383,7 +383,7 @@ live_design!{
                 on = {
                     ease: OutExp
                     from: {
-                        all: Forward {duration: 0.2}
+                        all: Forward {duration: 0.3}
                     }
                     apply: {
                         img = {draw_bg: {down: 1.0}}
@@ -401,11 +401,16 @@ live_design!{
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
-                    let max_scale = vec2(0.97);
+                    let max_scale = vec2(0.92);
                     let scale = mix(vec2(1.0), max_scale, self.hover);
                     let pan = mix(vec2(0.0), (vec2(1.0) - max_scale) * 0.5, self.hover);
                     let color = self.get_color(scale, pan) + mix(vec4(0.0), vec4(0.1), self.down);
-                    sdf.fill(color);
+                    sdf.fill_keep(color);
+                    sdf.stroke(
+                        mix(mix(#x0000, #x0006, self.hover), #xfff2, self.down),
+                        1.0
+                    )
+
                     return sdf.result
                 }
             }
