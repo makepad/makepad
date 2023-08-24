@@ -526,8 +526,8 @@ live_design!{
                                 label: "Batch size"
                             }
                             batch_mode_dropdown = <SdxlDropDown> {
-                                selected_item: 0
-                                labels: ["1", "2", "3", "4", "5", "6", "stepped"]
+                                selected_item: 5
+                                labels: ["1", "2", "3", "4", "5", "6", "10000"]
                             }
                             
                             <DividerH> {}
