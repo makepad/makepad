@@ -20,14 +20,17 @@ live_design!{
     import makepad_widgets::theme::*;
     import makepad_draw::shader::std::*;
     import makepad_widgets::dock::*;
+
     
-    COLOR_PANEL_BG = #x00000033
+    TEXT_BIG = 12.0
+
     TEXT_BOLD = {
-        font_size: 10,
+        font_size: 10.0,
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
     COLOR_UP_0 = #xFFFFFF00
-    FONT_SIZE_H2 = 9.5
+    COLOR_DOWN_2 = #x00000022
+    FONT_SIZE_H2 = 10.0
     
     SSPACING_0 = 0.0
     SSPACING_1 = 4.0
@@ -48,10 +51,14 @@ live_design!{
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
+
+    COLOR_PANEL_BG = (COLOR_DOWN_2)
+    COLOR_TEXT_INPUT = (COLOR_DOWN_2)
+
     
     SdxlDropDown = <DropDown> {
-        walk: {width: Fit}
-        layout: {padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}}
+        walk: { width: Fit }
+        layout: { padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)} }
         
         draw_label: {
             text_style: <H2_TEXT_REGULAR> {},
@@ -118,10 +125,24 @@ live_design!{
         }
     }
     
+    DividerV = <Frame> {
+        layout: { flow: Down, spacing: 0.0 }
+        walk: { margin: { top: 0.0, right: 0.0, bottom: 10.0, left: 0.0 }, width: Fill, height: Fit}
+        <Rect> {
+            walk: {height: 2, width: Fill, margin: 0.0}
+            layout: {flow: Down, padding: 0.0},
+            draw_bg: { color: #x00000066 }
+        }
+        <Rect> {
+            walk: {height: 2, width: Fill, margin: 0.0}
+            layout: {flow: Down, padding: 0.0},
+            draw_bg: { color: #xFFFFFF22 }
+        }
+    }
     
     ProgressCircle = <Frame> {
         show_bg: true,
-        walk: {width: 33, height: 33}
+        walk: {width: 25, height: 25}
         draw_bg: {
             instance progress: 0.0
             instance active: 0.0
@@ -158,6 +179,7 @@ live_design!{
             }
         }
     }
+
     PromptGroup = <Rect> {
         draw_bg:{
             instance hover: 0.0
@@ -165,12 +187,12 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
-                sdf.fill(mix(mix(#4,#6,self.hover),#8,self.down));
+                sdf.fill(mix( mix(#x00000000, #x00000000, self.hover), #x00000000, self.down));
                 return sdf.result
             }
         }
-        walk: {height: Fit, width: Fill, margin: {bottom: 10,top:20}}
-        layout: {flow: Right, spacing: 10,padding:10}
+        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 0, left: 0, right: 0 } }
+        layout: {flow: Right, spacing: 10,  padding: 0}
         state: {
             hover = {
                 default: off,
@@ -179,7 +201,7 @@ live_design!{
                     ease: OutExp
                     apply: {
                         draw_bg: {hover: 0.0}
-                    }
+                     }
                 }
                 on = {
                     ease: OutExp
@@ -188,7 +210,7 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {hover: 1.0}
-                    }
+                     }
                 }
             }
             down = {
@@ -198,7 +220,7 @@ live_design!{
                     ease: OutExp
                     apply: {
                         draw_bg: {down: 0.0}
-                    }
+                     }
                 }
                 on = {
                     ease: OutExp
@@ -207,20 +229,39 @@ live_design!{
                     }
                     apply: {
                        draw_bg: {down: 1.0}
-                    }
+                     }
                 }
             }
         }
-        prompt = <Label> {
-            walk: {width: Fill}
-            draw_label: {
-                text_style: <TEXT_BOLD> {},
-                fn get_color(self) -> vec4 {
-                    return #CCCCCC
+
+
+        <Frame> {
+            layout: {flow: Down},
+            walk: { width: Fill, height: Fit}
+
+            <DividerV> {}
+
+            prompt = <Button> {
+                walk: { width: Fill }
+                layout: { align: {x: 0.0, y: 0.5}, padding: {top: 5.0, right: 0.0, bottom: 5.0, left: 0.0} }
+                draw_bg: {
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                        let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
+                        sdf.fill_keep(body)
+                        return sdf.result
+                    }
                 }
-                wrap: Word,
+                draw_label: {
+                walk: { width: Fill }
+                    text_style: <TEXT_BOLD> {},
+                    fn get_color(self) -> vec4 {
+                        return mix(mix(#xFFFA, #xFFFF, self.hover), #xFFF8, self.pressed);
+                    }
+                    wrap: Word,
+                }
+                label: "Placeholder Lorem Ipsum dolor Sit amet"
             }
-            label: ""
         }
     }
 
@@ -348,43 +389,76 @@ live_design!{
                     
                     InputPanel = <Rect> {
                         walk: {height: Fill, width: Fill}
-                        layout: {flow: Down, padding: 0}
+                        layout: {flow: Down, padding: 5}
                         draw_bg: {color: (COLOR_PANEL_BG)}
                         <Frame> {
                             walk: {height: Fit, width: Fill}
+                            layout: { align: {x: 1.0, y: 0.5} }
                             
-                            render = <Button> {
-                                label: "Render"
+                            <Label> {
+                                walk: { margin: {left: 10} },
+                                label:"Workflow",
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                    fn get_color(self) -> vec4 {
+                                        return #CCCCCC
+                                    }
+                                }
                             }
+                            workflow_dropdown = <SdxlDropDown> {}
+                            <Label> {
+                                walk: { margin: {left: 10} },
+                                label:"Batch",
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                    fn get_color(self) -> vec4 {
+                                        return #CCCCCC
+                                    }
+                                }
+                            }
+                            batch_mode_dropdown = <SdxlDropDown> {
+                                selected_item: 0
+                                labels:["1","2","3","4","5","6","stepped"]
+                            }
+
                             progress1 = <ProgressCircle> {}
                             progress2 = <ProgressCircle> {}
                             progress3 = <ProgressCircle> {}
                             progress4 = <ProgressCircle> {}
                             progress5 = <ProgressCircle> {}
-                            progress6 = <ProgressCircle> {}
-                            <Label>{walk:{margin:{left:10,top:10}},label:"Workflow: "}
-                            workflow_dropdown = <SdxlDropDown> {}
-                            <Label>{walk:{margin:{left:10,top:10}},label:"Batch: "}
-                            batch_mode_dropdown = <SdxlDropDown> {
-                                selected_item: 0
-                                labels:["1","2","3","4","5","6","stepped"]
+                            progress6 = <ProgressCircle> {
+                                walk: { margin: {right: 5.0}}
                             }
+
+                            render = <Button> {
+                                layout: { padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5} }
+                                walk: { margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0} }
+                                label: "Render"
+                                draw_label: {
+                                    text_style: <TEXT_BOLD> {},
+                                }
+                            }
+
                         }
                         <Frame> {
                             positive = <TextInput> {
-                                walk: {width: Fill, height: Fill},
+                                walk: {width: Fill, height: Fill, margin: {top: 0.0, right: 5.0, bottom: 5.0, left: 5.0}},
                                 text: "Positive"
-                                draw_label: {text_style: {font_size: 12}}
+                                draw_label: {text_style: {font_size: (TEXT_BIG)}}
                                 draw_bg: {
-                                    color: #1113
+                                    color: (COLOR_TEXT_INPUT)
+                                    border_width: 1.0
+                                    border_color: #x00000044
                                 }
                             }
                             negative = <TextInput> {
-                                walk: {width: Fill, height: Fill, margin: {left: 10}},
-                                draw_label: {text_style: {font_size: 12}}
+                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 0.0, bottom: 5.0, right: 5.0}},
+                                draw_label: {text_style: {font_size: (TEXT_BIG)}}
                                 text: "text, watermark, cartoon"
                                 draw_bg: {
-                                    color: #1113
+                                    color: (COLOR_TEXT_INPUT)
+                                    border_width: 1.0
+                                    border_color: #x00000044
                                 }
                             }
                         }
@@ -401,15 +475,39 @@ live_design!{
                                 walk: {height: Fit, width: Fill}
                                 empty_message: "Search"
                                 draw_bg: {
-                                    color: #x00000066
+                                    color: (COLOR_TEXT_INPUT)
+                                    border_width: 1.0
+                                    border_color: #x00000044
+                                }
+                                draw_label: {
+                                    text_style: {font_size: (TEXT_BIG)}
+                                    fn get_color(self) -> vec4 {
+                                        return
+                                        mix(
+                                            mix(
+                                                mix(
+                                                    #xFFFFFF55,
+                                                    #xFFFFFF88,
+                                                    self.hover
+                                                ),
+                                                #xFFFFFFCC,
+                                                self.focus
+                                            ),
+                                            #xFFFFFF66,
+                                            self.is_empty
+                                        )
+                                    }
                                 }
                             }
                         }
                         image_list = <ListView> {
                             walk: {height: Fill, width: Fill}
                             layout: {flow: Down, padding: 10}
+
                             PromptGroup = <PromptGroup> {}
+
                             Empty = <Frame> {}
+
                             ImageRow1 = <Frame> {
                                 walk: {height: Fit, width: Fill, margin: {bottom: 10}}
                                 layout: {spacing: 20, flow: Right},
