@@ -222,10 +222,13 @@ impl<T> TagThreadPool<T>where T: Clone + Send + 'static + PartialEq {
                     tasks.pop()
                 }
                 else {
-                    panic!();
+                    panic!()
                 };
                 if let Some((tag, task)) = task {
                     task(tag);
+                }
+                else{
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             })
         }
