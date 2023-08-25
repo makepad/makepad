@@ -3,6 +3,18 @@ use std::collections::HashMap;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::PngDecoder;
 
+
+#[derive(Live, LiveHook)]
+#[live_ignore]
+pub enum ImageFit{
+    #[pick] Stretch,
+    Horizontal,
+    Vertical,
+    Smallest,
+    Biggest
+}
+
+
 #[derive(Default, Clone)] 
 pub struct ImageBuffer {
     pub width: usize,
