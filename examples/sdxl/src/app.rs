@@ -25,10 +25,6 @@ live_design!{
     
     TEXT_BIG = 12.0
     
-    TEXT_BOLD = {
-        font_size: 10.0,
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
-    }
     COLOR_UP_0 = #xFFFFFF00
     COLOR_DOWN_2 = #x00000022
     FONT_SIZE_H2 = 10.0
@@ -44,17 +40,30 @@ live_design!{
     SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
+
     H2_TEXT_BOLD = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
+
     H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
+
+    TEXT_BOLD = {
+        font_size: 10.0,
+        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+    }
+
+    TEXT_MONO = {
+        font_size: 10.0,
+        font: {path: dep("crate://makepad-widgets/resources/LiberationMono-Regular.ttf")}
+    }
     
     COLOR_PANEL_BG = (COLOR_DOWN_2)
     COLOR_TEXT_INPUT = (COLOR_DOWN_2)
+    COLOR_LABEL = #xFFF9
     
     
     SdxlDropDown = <DropDown> {
@@ -125,13 +134,14 @@ live_design!{
             }
         }
     }
+
     BarLabel = <Label> {
         walk: {margin: {left: 10}},
         label: "Workflow",
         draw_label: {
             text_style: <TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
-                return #CCCCCC
+                return (COLOR_LABEL)
             }
         }
     }
@@ -144,6 +154,50 @@ live_design!{
         label: "Cancel"
         draw_label: {
             text_style: <TEXT_BOLD> {},
+        }
+        draw_bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform border_radius: 3.0
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 1.0;
+                let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                let bot_gradient = mix(
+                    mix(body_transp, #5c, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+                
+                // the little drop shadow at the bottom
+                let shift_inward = self.border_radius + 4.0;
+                sdf.move_to(shift_inward, self.rect_size.y - self.border_radius);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - self.border_radius);
+                sdf.stroke(
+                    mix(mix(#0006, #1f, self.hover), #0000, self.pressed),
+                    self.border_radius
+                )
+                
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+                
+                sdf.stroke(
+                    bot_gradient,
+                    1.0
+                )
+                
+                return sdf.result
+            }
         }
     }
     
@@ -176,12 +230,12 @@ live_design!{
         <Rect> {
             walk: {height: 2, width: Fill, margin: 0.0}
             layout: {flow: Down, padding: 0.0},
-            draw_bg: {color: #x00000066}
+            draw_bg: {color: #x00000033}
         }
         <Rect> {
             walk: {height: 2, width: Fill, margin: 0.0}
             layout: {flow: Down, padding: 0.0},
-            draw_bg: {color: #xFFFFFF22}
+            draw_bg: {color: #xFFFFFF18}
         }
     }
     
@@ -191,12 +245,12 @@ live_design!{
         <Rect> {
             walk: {height: Fill, width: 2, margin: 0.0}
             layout: {flow: Down, padding: 0.0},
-            draw_bg: {color: #x00000066}
+            draw_bg: {color: #x00000033}
         }
         <Rect> {
             walk: {height: Fill, width: 2, margin: 0.0}
             layout: {flow: Down, padding: 0.0},
-            draw_bg: {color: #xFFFFFF22}
+            draw_bg: {color: #xFFFFFF18}
         }
     }
     
@@ -244,7 +298,9 @@ live_design!{
         }
         draw_label: {
             text_style: <TEXT_BOLD> {},
-            color: #xFFFA
+            fn get_color(self) -> vec4 {
+                return (COLOR_LABEL)
+            }
         }
         label: "Slideshow"
     }
@@ -516,6 +572,7 @@ live_design!{
                                 label: "Seed"
                             }
                             seed_input = <TextInput> {
+                                draw_label: {text_style: <TEXT_BOLD> {}}
                                 walk: {height: Fit, width: Fit, margin: {bottom: 0, left: 0}}
                                 label_walk: {width: Fit}
                             }
@@ -574,7 +631,9 @@ live_design!{
                             positive = <TextInput> {
                                 walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0}},
                                 text: "Positive"
-                                draw_label: {text_style: {font_size: (TEXT_BIG)}}
+                                draw_label: {
+                                    text_style: {font_size: (TEXT_BIG)}
+                                }
                                 draw_bg: {
                                     color: (COLOR_TEXT_INPUT)
                                     border_width: 1.0
@@ -654,7 +713,7 @@ live_design!{
                     }
                     
                     ImageLibrary = <Rect> {
-                        draw_bg: {color: (COLOR_PANEL_BG)}
+                        draw_bg: {color: (COLOR_PANEL_BG)} 
                         walk: {height: Fill, width: Fill}
                         layout: {flow: Down},
                         <Frame> {
