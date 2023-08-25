@@ -417,7 +417,6 @@ pub struct Frame { // draw info per UI element
     #[rust] draw_order: Vec<LiveId>,
     
     #[state] state: LiveState,
-    #[rust] state_action: Option<StateAction>
 }
 
 struct FrameTextureCache {
@@ -577,15 +576,6 @@ impl FrameRef {
         }
     }
     
-    pub fn is_animating(&self)->bool{
-        if let Some(mut inner) = self.borrow_mut() {
-            if let Some(state_action) = &inner.state_action{
-                return state_action.is_animating()
-            }
-        }
-        false
-    }
-    
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible
@@ -737,11 +727,9 @@ impl Widget for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        let state_action = self.state_handle_event(cx, event);
-        if state_action.must_redraw(){
+        if self.state_handle_event(cx, event).must_redraw(){
             self.redraw(cx);
         }
-        self.state_action = Some(state_action);
         
         if self.block_signal_event {
             if let Event::Signal = event {

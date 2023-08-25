@@ -136,12 +136,28 @@ live_design!{
         }
     }
     
+    
+    
     BarButton = <Button> {
         layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
         walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
         label: "Cancel"
         draw_label: {
             text_style: <TEXT_BOLD> {},
+        }
+    }
+    
+    SettingsInput = <Frame>{
+        walk: {width: 150, height: Fit,margin:{top:10}},
+        label = <BarLabel> {
+            walk: {width:Fit, margin: {left: 5}},
+            align:{x:1.0}
+        }
+        input = <TextInput> {
+            layout: {padding: 0}
+            walk: {height: Fit, width: 50, margin: {top: 1, left: 2}}
+            label_walk: {width: Fit}
+            text: "1344"
         }
     }
     
@@ -492,8 +508,8 @@ live_design!{
                                 label: "Batch size"
                             }
                             batch_mode_dropdown = <SdxlDropDown> {
-                                selected_item: 5
-                                labels: ["1", "2", "3", "4", "5", "6"]
+                                selected_item: 6
+                                labels: ["1", "2", "3", "4", "5", "6", "10000"]
                             }
                             
                             <BarLabel> {
@@ -566,7 +582,7 @@ live_design!{
                                 }
                             }
                             negative = <TextInput> {
-                                walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0}},
+                                walk: {width: 200, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0}},
                                 draw_label: {text_style: {font_size: (TEXT_BIG)}}
                                 text: "text, watermark, cartoon"
                                 draw_bg: {
@@ -574,6 +590,65 @@ live_design!{
                                     border_width: 1.0
                                     border_color: #x00000044
                                 }
+                            }
+                            <Frame> {
+                                walk: {width: Fill, height: Fill},
+                                layout: {flow: Right}
+                                <Frame> {
+                                    walk: {width: 100, height: Fit,  margin: {top: 10}},
+                                    layout:{flow:Down}
+                                    settings_width = <SettingsInput>{label={label:"width:"}, input={text:"1344"}}
+                                    settings_height = <SettingsInput>{label={label:"height:"}, input={text:"768"}}
+                                    settings_steps = <SettingsInput>{label={label:"steps:"}, input={text:"20"}}
+                                    settings_scale = <SettingsInput>{label={label:"scale:"}, input={text:"0.5"}}
+                                    settings_total_steps = <SettingsInput>{label={label:"total(0):"}, input={text:"32"}}
+                                }
+                                <Frame> {
+                                    walk: {width: Fit, height: Fit,  margin: {top: 10}},
+                                    layout:{flow:Down}
+                                    settings_base_cfg = <SettingsInput>{label={label:"base_cfg:"}, input={text:"8.5"}}
+                                    settings_refiner_cfg = <SettingsInput>{label={label:"refiner_cfg:"}, input={text:"9.5"}}
+                                    settings_pos_score = <SettingsInput>{label={label:"pos_score:"}, input={text:"6"}}
+                                    settings_neg_score = <SettingsInput>{label={label:"neg_score:"}, input={text:"2"}}
+                                }
+                                <Frame> {
+                                    walk: {width: Fit, height: Fit,  margin: {top: 10}},
+                                    layout:{flow:Down}
+                                    settings_base_start_step = <SettingsInput>{label={label:"base_start_step:"}, input={text:"0"}}
+                                    settings_base_end_step = <SettingsInput>{label={label:"base_end_step:"}, input={text:"20"}}
+                                    settings_refiner_start_step  = <SettingsInput>{label={label:"refiner_start_step:"}, input={text:"20"}}
+                                    settings_refiner_end_step = <SettingsInput>{label={label:"refiner_end_step:"}, input={text:"1000"}}
+                                }
+                                <Frame> {
+                                    walk: {width: Fit, height: Fit,  margin: {top: 10}},
+                                    layout:{flow:Down}
+                                    settings_upscale_steps  = <SettingsInput>{label={label:"upscale_steps:"}, input={text:"31"}}
+                                    settings_upscale_start_step  = <SettingsInput>{label={label:"upscale_start_step:"}, input={text:"29"}}
+                                    settings_upscale_end_step = <SettingsInput>{label={label:"upscale_end_step:"}, input={text:"1000"}}
+                                }
+                                /*
+                                <Frame> {
+                                    walk: {width: Fill, height: Fit, margin: {top: 10}},
+                                    <BarLabel> {label: "base_cfg:"}
+                                    base_cfg_input = <SettingsInput> {text: "1344"}
+                                    <BarLabel> {label: "refiner_cfg:"}
+                                    refiner_cfg_input = <SettingsInput> {text: "768"}
+                                    <BarLabel> {label: "pos_score:"}
+                                    positive_score_input = <SettingsInput> {text: "6.0"}
+                                    <BarLabel> {label: "neg_score:"}
+                                    negative_score_input = <SettingsInput> {text: "2.0"}
+                                }
+                                <Frame> {
+                                    walk: {width: Fill, height: Fit, margin: {top: 10}},
+                                    <BarLabel> {label: "base_start_step:"}
+                                    base_cfg_input = <SettingsInput> {text: "1344"}
+                                    <BarLabel> {label: "base_end_step:"}
+                                    refiner_cfg_input = <SettingsInput> {text: "768"}
+                                    <BarLabel> {label: "refiner_start_step:"}
+                                    positive_score_input = <SettingsInput> {text: "6.0"}
+                                    <BarLabel> {label: "refiner_end_step:"}
+                                    negative_score_input = <SettingsInput> {text: "2.0"}
+                                }*/
                             }
                         }
                     }
@@ -693,6 +768,27 @@ struct Workflow {
 impl Workflow {
     fn new(name: &str, total_steps: usize) -> Self {Self {name: name.to_string(), total_steps}}
 }
+/*
+const KEYWORD_CLOUD:[(&'static str,&'static str);18]=[
+   ("", "Beautiful woman"),
+   ("", "Beautiful man"),
+   ("", "Dog"),
+   ("", "Ugly woman"),
+   ("", "Ugly man"),
+   ("", "wearing intricate tattoos"),
+   ("", "wearing intricate lingerie"),
+   ("", "as an android"),
+   ("", "made of metal"),
+   ("", "made of wood"),
+   ("", "In a desert"),
+   ("", "On the moon"),
+   ("", "In a sunset"),
+   ("", "At burningman"),
+   ("", "covered in stars"),
+   ("", "covered in rainbows"),
+   ("", "photographic"),
+   ("", "cinematic"),
+];*/
 
 
 #[derive(Live)]
@@ -708,10 +804,7 @@ pub struct App {
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
-        Workflow::new("1024", 25),
-        Workflow::new("2048", 40),
-        Workflow::new("3000", 37),
-        Workflow::new("3840", 276)
+        Workflow::new("hd", 276)
     ])] workflows: Vec<Workflow>,
     
     #[rust] todo: Vec<PromptState>,
@@ -755,12 +848,29 @@ impl App {
             
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.workflow)).unwrap();
+            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.prompt.preset.workflow)).unwrap();
             let ws = ws.replace("CLIENT_ID", "1234");
             let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
             let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
             let ws = ws.replace("NEGATIVE_INPUT", &prompt_state.prompt.negative.replace("\n", "").replace("\"", ""));
             let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
+            
+            let ws = ws.replace("\"steps\": 23", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
+            let ws = ws.replace("\"scale_by\": 0.7117466517857182", &format!("\"scale_by\": {}", prompt_state.prompt.preset.scale));
+            let ws = ws.replace("\"cfg\": 8.5", &format!("\"cfg\": {}", prompt_state.prompt.preset.base_cfg));
+            let ws = ws.replace("\"ascore\": 6", &format!("\"ascore\": {}", prompt_state.prompt.preset.positive_score));
+            let ws = ws.replace("\"ascore\": 2", &format!("\"ascore\": {}", prompt_state.prompt.preset.negative_score));
+
+            let ws = ws.replace("\"start_at_step\": 0", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.base_start_step));
+            let ws = ws.replace("\"end_at_step\": 27", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.base_end_step));
+            let ws = ws.replace("\"start_at_step\": 27", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.refiner_start_step));
+            let ws = ws.replace("\"end_at_step\": 1000", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.refiner_end_step));
+
+            let ws = ws.replace("\"steps\": 30", &format!("\"steps\": {}", prompt_state.prompt.preset.upscale_steps));
+            let ws = ws.replace("\"start_at_step\": 29", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.upscale_start_step));
+            let ws = ws.replace("\"end_at_step\": 999", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.upscale_end_step));
+
+            
             // lets store that we queued this image
             request.set_metadata_id(machine.id);
             request.set_body(ws.as_bytes().to_vec());
@@ -782,7 +892,7 @@ impl App {
             for machine in &mut self.machines {
                 let url = format!("http://{}/queue", machine.ip);
                 let mut request = HttpRequest::new(url, HttpMethod::POST);
-                let ws = "{clear:true}";
+                let ws = "{\"clear\":true}";
                 request.set_metadata_id(machine.id);
                 request.set_body_string(ws);
                 cx.http_request(live_id!(clear_queue), request);
@@ -833,7 +943,6 @@ impl App {
         if let Some(current_image) = &self.current_image {
             if let Some(image) = self.db.image_files.iter().find( | v | v.image_id == *current_image) {
                 self.last_seed = image.seed;
-                self.ui.get_drop_down(id!(workflow_dropdown)).set_selected_by_label(&image.workflow);
                 self.update_seed_display(cx);
             }
         }
@@ -858,6 +967,7 @@ impl App {
             self.ui.get_text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
             self.ui.get_text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
             self.ui.redraw(cx);
+            self.load_preset(&prompt_file.prompt.preset)
         }
     }
     
@@ -905,23 +1015,69 @@ impl App {
         self.ui.redraw(cx);
     }
     
+    fn save_preset(&self)->PromptPreset{
+         PromptPreset{
+            workflow: self.ui.get_drop_down(id!(workflow_dropdown)).get_selected_label(), 
+            width: self.ui.get_text_input(id!(settings_width.input)).get_text().parse::<u32>().unwrap_or(1344),
+            height: self.ui.get_text_input(id!(settings_height.input)).get_text().parse::<u32>().unwrap_or(768),
+            steps: self.ui.get_text_input(id!(settings_steps.input)).get_text().parse::<u32>().unwrap_or(20),
+            base_cfg: self.ui.get_text_input(id!(settings_base_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
+            refiner_cfg: self.ui.get_text_input(id!(settings_refiner_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
+            positive_score: self.ui.get_text_input(id!(settings_pos_score.input)).get_text().parse::<f64>().unwrap_or(6.0),
+            negative_score: self.ui.get_text_input(id!(settings_neg_score.input)).get_text().parse::<f64>().unwrap_or(2.0),
+            base_start_step: self.ui.get_text_input(id!(settings_base_start_step.input)).get_text().parse::<u32>().unwrap_or(0),
+            base_end_step: self.ui.get_text_input(id!(settings_base_end_step.input)).get_text().parse::<u32>().unwrap_or(20),
+            refiner_start_step: self.ui.get_text_input(id!(settings_refiner_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
+            refiner_end_step: self.ui.get_text_input(id!(settings_refiner_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
+            upscale_start_step: self.ui.get_text_input(id!(settings_upscale_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
+            upscale_end_step: self.ui.get_text_input(id!(settings_upscale_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
+            upscale_steps: self.ui.get_text_input(id!(settings_upscale_steps.input)).get_text().parse::<u32>().unwrap_or(31),
+            scale: self.ui.get_text_input(id!(settings_scale.input)).get_text().parse::<f64>().unwrap_or(0.5),
+            total_steps: self.ui.get_text_input(id!(settings_total_steps.input)).get_text().parse::<u32>().unwrap_or(20),
+        }
+    }
+    
+    fn load_preset(&self, preset:&PromptPreset){
+        self.ui.get_drop_down(id!(workflow_dropdown)).set_selected_by_label(&preset.workflow);
+        self.ui.get_text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
+        self.ui.get_text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
+        self.ui.get_text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
+        self.ui.get_text_input(id!(settings_base_cfg.input)).set_text(&format!("{}", preset.base_cfg));
+        self.ui.get_text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
+        self.ui.get_text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
+        self.ui.get_text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
+        self.ui.get_text_input(id!(settings_base_start_step.input)).set_text(&format!("{}", preset.base_start_step));
+        self.ui.get_text_input(id!(settings_base_end_step.input)).set_text(&format!("{}", preset.base_end_step));
+        self.ui.get_text_input(id!(settings_refiner_start_step.input)).set_text(&format!("{}", preset.refiner_start_step));
+        self.ui.get_text_input(id!(settings_refiner_end_step.input)).set_text(&format!("{}", preset.refiner_end_step));
+        self.ui.get_text_input(id!(settings_upscale_start_step.input)).set_text(&format!("{}", preset.upscale_start_step));
+        self.ui.get_text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
+        self.ui.get_text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
+        self.ui.get_text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
+        self.ui.get_text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));
+    }
+    
     fn render(&mut self, cx: &mut Cx, batch_size: usize) {
         let positive = self.ui.get_text_input(id!(positive)).get_text();
         let negative = self.ui.get_text_input(id!(negative)).get_text();
+        
         let workflow_id = self.ui.get_drop_down(id!(workflow_dropdown)).get_selected();
         let workflow = self.workflows[workflow_id].name.clone();
         
+        self.todo.clear();
         if batch_size != 1 {
             self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
             self.update_seed_display(cx);
         }
         for i in 0..batch_size {
             self.send_prompt(cx, PromptState {
+                //total_steps: self.ui.get_text_input(id!(settings_total.input)).get_text().parse::<usize>().unwrap_or(32),
                 prompt: Prompt {
                     positive: positive.clone(),
                     negative: negative.clone(),
+                    preset: self.save_preset()
                 },
-                workflow: workflow.clone(),
+                //workflow: workflow.clone(),
                 seed: self.last_seed as u64
             });
             if batch_size != 1 {
@@ -960,7 +1116,7 @@ impl App {
         self.update_todo_display(cx);
     }
     
-    fn play(&mut self, cx:&mut Cx){
+    fn play(&mut self, cx: &mut Cx) {
         self.set_current_image_by_item_id_and_row(cx, 0, 0);
         self.ui.get_list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
         self.set_slide_show(cx, true);
@@ -997,6 +1153,7 @@ impl App {
                                         if let Some(image) = output.images.first() {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 if let Some(running) = machine.running.take() {
+                                                    self.ui.get_text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
                                                     machine.fetching = Some(running);
                                                     Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
                                                     self.fetch_image(cx, event.request_id, &image.filename);
@@ -1011,8 +1168,7 @@ impl App {
                                     if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                         if let Some(running) = &mut machine.running {
                                             running.steps_counter += 1;
-                                            let total = self.workflows.iter().find( | v | v.name == running.prompt_state.workflow).unwrap().total_steps;
-                                            Self::update_progress(cx, &self.ui, event.request_id, true, running.steps_counter, total);
+                                            Self::update_progress(cx, &self.ui, event.request_id, true, running.steps_counter, running.prompt_state.prompt.preset.total_steps as usize);
                                         }
                                     }
                                     //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
@@ -1034,10 +1190,11 @@ impl App {
                         }
                         live_id!(image) => if let Some(data) = res.get_body() {
                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
-                                if let Some(fetching) = machine.fetching.take() {
+                                if let Some(mut fetching) = machine.fetching.take() {
                                     
                                     // lets write our image to disk properly
                                     //self.current_image = Some(
+                                    fetching.prompt_state.prompt.preset.total_steps = fetching.steps_counter as u32;
                                     let image_id = self.db.add_png_and_prompt(fetching.prompt_state, data);
                                     // scroll by one item
                                     let first_id = image_list.first_id();
@@ -1126,11 +1283,8 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, modifiers, ..}) = event {
-            if modifiers.logo {
+            if modifiers.logo || modifiers.control {
                 self.clear_todo(cx);
-            }
-            if modifiers.control {
-                self.render(cx, 10000);
             }
             else if modifiers.shift {
                 self.render(cx, 1);
@@ -1167,33 +1321,49 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(play_button)).clicked(&actions){
+        if self.ui.get_button(id!(play_button)).clicked(&actions) {
             self.play(cx);
         }
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
                 self.play(cx);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
                 self.select_next_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
                 self.select_prev_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
+        
+        if let Some(ke) = self.ui.get_frame_set(ids!(image_view, big_image)).key_down(&actions) {
+            match ke.key_code {
+                KeyCode::ArrowDown => {
+                    self.select_next_image(cx);
+                    self.set_slide_show(cx, false);
+                }
+                KeyCode::ArrowUp => {
+                    self.select_prev_image(cx);
+                    self.set_slide_show(cx, false);
+                }
+                _ => ()
+            }
+        }
+        
+        
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo{
+            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, true);
             }
         }
