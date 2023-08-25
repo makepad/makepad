@@ -22,19 +22,58 @@ impl ImageId {
 #[derive(Clone)]
 pub struct PromptState {
     pub prompt: Prompt,
-    pub workflow: String,
     pub seed: u64
 }
+
+#[derive(Default, Clone, DeJson, SerJson)]
+pub struct PromptPreset {
+    pub workflow: String,
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+    pub base_cfg: f64,
+    pub refiner_cfg: f64,
+    pub positive_score: f64,
+    pub negative_score: f64,
+    pub base_start_step: u32,
+    pub base_end_step: u32,
+    pub refiner_start_step: u32,
+    pub refiner_end_step: u32,
+    pub upscale_steps: u32,
+    pub upscale_start_step: u32,
+    pub upscale_end_step: u32,
+    pub scale: f64,
+    pub total_steps: u32
+}
+
 
 #[derive(Default, Clone, DeJson, SerJson)]
 pub struct Prompt {
     pub positive: String,
     pub negative: String,
+    pub preset: PromptPreset
 }
 
 impl Prompt {
     fn hash(&self) -> LiveId {
-        LiveId::from_str(&self.positive).str_append(&self.negative)
+        LiveId::from_str(&self.positive)
+            .str_append(&self.negative)
+            .str_append(&self.preset.workflow)
+            .bytes_append(&self.preset.width.to_be_bytes())
+            .bytes_append(&self.preset.height.to_be_bytes())
+            .bytes_append(&self.preset.steps.to_be_bytes())
+            .bytes_append(&self.preset.base_cfg.to_be_bytes())
+            .bytes_append(&self.preset.refiner_cfg.to_be_bytes())
+            .bytes_append(&self.preset.positive_score.to_be_bytes())
+            .bytes_append(&self.preset.negative_score.to_be_bytes())
+            .bytes_append(&self.preset.base_start_step.to_be_bytes())
+            .bytes_append(&self.preset.base_end_step.to_be_bytes())
+            .bytes_append(&self.preset.refiner_start_step.to_be_bytes())
+            .bytes_append(&self.preset.refiner_end_step.to_be_bytes())
+            .bytes_append(&self.preset.upscale_steps.to_be_bytes())
+            .bytes_append(&self.preset.upscale_start_step.to_be_bytes())
+            .bytes_append(&self.preset.upscale_end_step.to_be_bytes())
+            .bytes_append(&self.preset.scale.to_be_bytes())
     }
 }
 
@@ -55,7 +94,6 @@ pub struct ImageFile {
     pub starred: bool,
     pub modified: SystemTime,
     pub image_id: ImageId,
-    pub workflow: String,
     pub seed: u64
 }
 
@@ -103,29 +141,28 @@ impl FilteredDb {
         self.flat.clear();
         
         for image in &db.image_files {
-            if let Some(prompt_file) = db.prompt_files.iter().find( | g | g.prompt_hash == image.prompt_hash) {
-                if search.len() == 0
-                    || prompt_file.prompt.positive.contains(search)
-                    || prompt_file.prompt.negative.contains(search) {
-                    self.flat.push(image.image_id.clone());
-                    /*if let Some(pos) = self.list.iter().find(|v|{if let ImageListItem::Prompt{prompt_hash} = v {*prompt_hash == image.prompt_hash}else{false} }).is_none(){
-                        self.list.push(ImageListItem::Prompt {
-                            prompt_hash: image.prompt_hash,
-                        });
-                    }
-                    if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.list.last_mut() {
-                        if *image_count<LIBRARY_ROWS {
-                            image_files[*image_count] = image.image_id.clone();
-                            *image_count += 1;
-                            continue;
-                        }
-                    }*/
-                    self.list.push(ImageListItem::ImageRow {
+            if search.len() == 0 || 
+            (if let Some(prompt_file) = db.prompt_files.iter().find( | g | g.prompt_hash == image.prompt_hash) {
+                prompt_file.prompt.positive.contains(search) || prompt_file.prompt.negative.contains(search) 
+            }else{false}){
+                self.flat.push(image.image_id.clone());
+                /*if let Some(pos) = self.list.iter().find(|v|{if let ImageListItem::Prompt{prompt_hash} = v {*prompt_hash == image.prompt_hash}else{false} }).is_none(){
+                    self.list.push(ImageListItem::Prompt {
                         prompt_hash: image.prompt_hash,
-                        image_count: 1,
-                        image_files: [image.image_id.clone()]
                     });
                 }
+                if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.list.last_mut() {
+                    if *image_count<LIBRARY_ROWS {
+                        image_files[*image_count] = image.image_id.clone();
+                        *image_count += 1;
+                        continue;
+                    }
+                }*/
+                self.list.push(ImageListItem::ImageRow {
+                    prompt_hash: image.prompt_hash,
+                    image_count: 1,
+                    image_files: [image.image_id.clone()]
+                });
             }
         }
     }
@@ -245,17 +282,15 @@ impl Database {
                 let name = if let Some(name) = name.strip_prefix("star_") {starred = true; name}else {name};
                 
                 let parts = name.split("_").collect::<Vec<&str >> ();
-                if parts.len() == 3 {
+                if parts.len() == 2{
                     if let Ok(prompt_hash) = parts[0].parse::<u64>() {
                         let prompt_hash = LiveId(prompt_hash);
-                        if let Ok(seed) = parts[2].parse::<u64>() {
-                            let workflow = parts[1].to_string();
+                        if let Ok(seed) = parts[1].parse::<u64>() {
                             self.image_files.push(ImageFile {
                                 prompt_hash,
                                 starred,
                                 seed,
                                 modified,
-                                workflow,
                                 image_id: ImageId::new(file_name)
                             });
                         }
@@ -278,7 +313,7 @@ impl Database {
         let prompt_hash = state.prompt.hash();
         let prompt_file = format!("{}/{:#016}.json", self.image_path, prompt_hash.0);
         let _ = fs::write(&prompt_file, state.prompt.serialize_json());
-        let file_name = format!("{:#016}_{}_{}.png", prompt_hash.0, state.workflow, state.seed);
+        let file_name = format!("{:#016}_{}.png", prompt_hash.0, state.seed);
         let full_path = format!("{}/{}", self.image_path, file_name);
         let _ = fs::write(&full_path, &image);
         // ok lets see if we need to add a group, or an image
@@ -288,7 +323,6 @@ impl Database {
             starred: false,
             seed: state.seed,
             modified: SystemTime::now(),
-            workflow: state.workflow,
             image_id: image_id.clone()
         });
         if self.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash).is_none() {
