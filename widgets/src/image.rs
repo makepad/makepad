@@ -32,16 +32,6 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_ignore]
-enum ImageFit{
-    #[pick] Stretch,
-    Horizontal,
-    Vertical,
-    Smallest,
-    Biggest
-}
-
 #[derive(Live)]
 pub struct Image {
     #[live] walk: Walk,
