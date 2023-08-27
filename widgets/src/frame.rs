@@ -778,7 +778,7 @@ impl Widget for Frame {
         }
         
         
-        if self.cursor.is_some() || self.state.live_ptr.is_some(){
+        if self.visible && (self.cursor.is_some() || self.state.live_ptr.is_some()){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area());
