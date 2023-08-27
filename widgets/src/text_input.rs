@@ -221,9 +221,10 @@ pub struct TextInput {
     #[live] label_walk: Walk,
 
     #[live] pub text: String,
-
+    #[live] ascii_only: bool,
     #[rust] double_tap_start: Option<(usize, usize)>,
     #[rust] undo_id: u64,
+    
     #[rust] last_undo: Option<UndoItem>,
     #[rust] undo_stack: Vec<UndoItem>,
     #[rust] redo_stack: Vec<UndoItem>,
@@ -429,23 +430,35 @@ impl TextInput {
         cx.set_key_focus(self.draw_bg.area());
     }
     
-    pub fn filter_numeric(&self, input:String)->String{
-        if self.numeric_only{
+    pub fn filter_input(&mut self, input:&str, output:Option<&mut String>){
+        let output = if let Some(output) = output{
+            output
+        }
+        else{
+            &mut self.text
+        };
+        output.clear();
+        if self.ascii_only{
+            for c in input.as_bytes(){
+                if *c>31 && *c<127{
+                    output.push(*c as char);
+                }
+            }
+        }
+        else if self.numeric_only{
             let mut output = String::new();
             for c in input.chars(){
                 if c.is_ascii_digit() ||c == '.'{
                     output.push(c);
                 }
-                else if c == ','{  
+                else if c == ','{
                     // some day someone is going to search for this for days
                     output.push('.');
                 }
-                
             }
-            output
         }
         else{
-            input
+            output.push_str(input);
         }
     }
     
@@ -475,7 +488,8 @@ impl TextInput {
                 dispatch_action(cx, TextInputAction::KeyFocus);
             }
             Hit::TextInput(te) => {
-                let input = self.filter_numeric(te.input);
+                let mut input = String::new();
+                self.filter_input(&te.input, Some(&mut input));
                 if input.len() == 0{
                     return
                 }
@@ -509,6 +523,7 @@ impl TextInput {
                 }
             }
             Hit::KeyDown(ke) => match ke.key_code {
+                
                 KeyCode::Tab => {
                     // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
                 }
@@ -791,8 +806,7 @@ impl TextInputRef {
     
     pub fn set_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.text.clear();
-            inner.text.push_str(text);
+            inner.filter_input(&text, None);
         }
     }
     
