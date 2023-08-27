@@ -34,7 +34,7 @@ live_design!{
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 2400,
+        max_iter: 400,
     }
 }
 
@@ -138,7 +138,7 @@ pub struct TileCache {
     tiles_in_flight: usize,
     
     // this holds a Wasm compatible threadpool
-    thread_pool: ThreadPool<BailTest>,
+    thread_pool: MessageThreadPool<BailTest>,
 }
 
 impl TileCache {
@@ -166,7 +166,7 @@ impl TileCache {
             current_zoom: 0.0,
             next_zoom: 0.0,
             tiles_in_flight: 0,
-            thread_pool: ThreadPool::new(cx, use_cores),
+            thread_pool: MessageThreadPool::new(cx, use_cores),
         }
     }
     
