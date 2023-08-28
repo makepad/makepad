@@ -30,3 +30,4 @@ key.ron
 .vscode
 
 /tools/cargo_makepad/android_33_macos_x64
+/tools/cargo_makepad/android_33_windows_x64
