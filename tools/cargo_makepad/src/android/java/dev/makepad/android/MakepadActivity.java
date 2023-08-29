@@ -353,20 +353,20 @@ Makepad.Callback{
         }
     }
 
-    public void requestHttp(long id, String url, String method, String headers, byte[] body) {
+    public void requestHttp(long requestId, long metadataId, String url, String method, String headers, byte[] body) {
         try {
             MakepadNetwork network = new MakepadNetwork();
 
             CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
 
             future.thenAccept(response -> {
-                runOnUiThread(() -> Makepad.onHttpResponse(mCx, id, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
+                runOnUiThread(() -> Makepad.onHttpResponse(mCx, requestId, metadataId, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
             }).exceptionally(ex -> {
-                runOnUiThread(() -> Makepad.onHttpRequestError(mCx, id, ex.toString(), (Makepad.Callback) mView.getContext()));
+                runOnUiThread(() -> Makepad.onHttpRequestError(mCx, requestId, metadataId, ex.toString(), (Makepad.Callback) mView.getContext()));
                 return null;
             });
         } catch (Exception e) {
-            Makepad.onHttpRequestError(mCx, id, e.toString(), (Makepad.Callback) mView.getContext());
+            Makepad.onHttpRequestError(mCx, requestId, metadataId, e.toString(), (Makepad.Callback) mView.getContext());
         }
     }
 

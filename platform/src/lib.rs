@@ -34,7 +34,6 @@ mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
-pub mod network;
 
 pub mod audio_stream;
 
@@ -62,7 +61,7 @@ pub use {
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
     makepad_shader_compiler::makepad_error_log,
-    makepad_image_formats::image,
+    //makepad_image_formats::image,
     makepad_derive_live::*,
     makepad_error_log::*,
     makepad_math::*,
@@ -143,6 +142,11 @@ pub use {
         },
         thread::Signal,
         event::{
+            HttpRequest,
+            HttpResponse,
+            HttpMethod,
+            NetworkResponse,
+            NetworkResponseEvent,
             Margin,
             KeyCode,
             Event,
@@ -150,7 +154,6 @@ pub use {
             DragHit,
             Trigger,
             //MidiInputListEvent,
-            AutoReconnect,
             Timer,
             NextFrame,
             KeyModifiers,

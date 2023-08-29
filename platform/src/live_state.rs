@@ -54,7 +54,7 @@ pub trait LiveStateImpl {
             }
         }
     }
-    
+    fn is_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
     fn apply_animating_state(&mut self, cx: &mut Cx);
     fn after_apply_state_changed(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]);
     fn state_handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction;
@@ -541,7 +541,7 @@ impl LiveNew for LiveState {
             live_type: LiveType::of::<Self>(),
             live_ignore: true,
             fields: Vec::new(),
-            type_name: LiveId::from_str("States").unwrap()
+            type_name: id_lut!(States)
         }
     }
 }

@@ -116,7 +116,7 @@ impl LiveNew for Texture {
             live_type: LiveType::of::<Self>(),
             live_ignore: true,
             fields: Vec::new(),
-            type_name: LiveId::from_str("Texture").unwrap()
+            type_name: id_lut!(Texture)
         }
     }
 }

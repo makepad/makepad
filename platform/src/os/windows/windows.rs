@@ -301,17 +301,17 @@ impl Cx {
                 },
                 CxOsOp::UpdateMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest(_) => {
+                CxOsOp::HttpRequest{request_id:_, request:_} => {
                     //todo!()
                 },
-                CxOsOp::WebSocketOpen{socket_id:_, request:_, auto_reconnect:_}=>{
-                    todo!()
+                CxOsOp::WebSocketOpen{request_id:_, request:_,}=>{
+                    //todo!()
                 }
-                CxOsOp::WebSocketSendBinary{socket_id:_, data:_}=>{
-                    todo!()
+                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
+                    //todo!()
                 }
-                CxOsOp::WebSocketSendString{socket_id:_, data:_}=>{
-                    todo!()
+                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
+                    //todo!()
                 }
             }
         }

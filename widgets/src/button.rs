@@ -99,6 +99,10 @@ live_design!{
             margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
         }
         
+        label_walk:{
+            width: Fit,
+            height: Fit
+        }
         layout: {
             align: {x: 0.5, y: 0.5},
             padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
@@ -157,6 +161,7 @@ pub struct Button {
     #[live] draw_label: DrawText,
     #[live] draw_icon: DrawIcon,
     #[live] icon_walk: Walk,
+    #[live] label_walk: Walk,
     #[live] walk: Walk,
     
     #[live] layout: Layout,
@@ -228,16 +233,16 @@ impl Button {
             _ => ()
         };
     }
-    
+    /*
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
-    }
+    }*/
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), &self.label);
+        self.draw_label.draw_walk(cx, self.label_walk, Align::default(), &self.label);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
     }
@@ -262,12 +267,30 @@ impl ButtonRef {
         }
         false
     }
+
+    pub fn pressed(&self, actions:&WidgetActions) -> bool {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let ButtonAction::Pressed = item.action() {
+                return true
+            }
+        }
+        false
+    }
+
 }
 
 #[derive(Clone, WidgetSet)]
 pub struct ButtonSet(WidgetSet);
 impl ButtonSet{
     pub fn clicked(&self, actions: &WidgetActions)->bool{
+        for button in self.iter(){
+            if button.clicked(actions){
+                return true
+            }
+        }
+        false
+    }
+    pub fn pressed(&self, actions: &WidgetActions)->bool{
         for button in self.iter(){
             if button.clicked(actions){
                 return true

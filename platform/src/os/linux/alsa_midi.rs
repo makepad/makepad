@@ -252,7 +252,7 @@ impl AlsaClient {
                         subscribed: false,
                         port_id: (*addr).port as _,
                         desc: MidiPortDesc {
-                            port_id: LiveId::from_str_unchecked(&format!("{} input", port_name)).into(),
+                            port_id: LiveId::from_str(&format!("{} input", port_name)).into(),
                             name: port_name.clone(),
                             port_type: MidiPortType::Input
                         }
@@ -264,7 +264,7 @@ impl AlsaClient {
                         subscribed: false,
                         port_id: (*addr).port as _,
                         desc: MidiPortDesc {
-                            port_id: LiveId::from_str_unchecked(&format!("{} output", port_name)).into(),
+                            port_id: LiveId::from_str(&format!("{} output", port_name)).into(),
                             name: port_name,
                             port_type: MidiPortType::Output
                         }
@@ -298,9 +298,10 @@ impl AlsaMidiAccess {
         if midi_access_clone.lock().unwrap().client.as_ref().is_err(){
             return  midi_access;
         }
-        let in_client = midi_access_clone.lock().unwrap().client.as_ref().unwrap().in_client.clone();
+        //let in_client = midi_access_clone.lock().unwrap().client.as_ref().unwrap().in_client.clone();
         
         std::thread::spawn(move || unsafe {
+            let in_client = midi_access_clone.lock().unwrap().client.as_ref().unwrap().in_client.clone();
             loop {
                 let mut ev: *mut snd_seq_event_t = 0 as *mut _;
                 snd_seq_event_input(in_client.0, &mut ev);
