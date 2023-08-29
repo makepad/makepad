@@ -2,7 +2,7 @@
 name = "makepad-web-server"
 version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
-edition = "2018"
+edition = "2021"
 description = "Makepad web server"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
@@ -11,7 +11,7 @@ metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 
 [dependencies]
 makepad-http = { path = "http", version = "0.3.0" }
-makepad-file-server = {path = "../../studio/file_server", version = "0.3.0"}
+#makepad-file-server = {path = "../../studio/file_server", version = "0.3.0"}
  
 [features]
 nightly=[]

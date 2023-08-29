@@ -1,0 +1,30 @@
+[package]
+name = "makepad-zune-png"
+version = "0.2.1"
+authors = ["caleb <etemesicaleb@gmail.com>"]
+edition = "2021"
+repository = "https://github.com/etemesi254/zune-image/tree/dev/zune-png"
+license = "MIT OR Apache-2.0 OR Zlib"
+keywords = ["png", "png-decoder", "decoder"]
+categories = ["multimedia::images"]
+exclude = ["/benches/images/*", "/tests/*", "/.idea/*", "/.gradle/*", "/test-images/*", "fuzz/*"]
+description = "A fast, correct and safe png decoder"
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+sse = []
+std = ["makepad-zune-core/std"]
+default = ["sse", "std"]
+
+[dependencies]
+makepad-zune-core = { path = "../zune-core", version = "0.2" }
+#log = "0.4.17"
+makepad-zune-inflate = { path = "../zune-inflate", version = "0.2", default-features = false, features = ["zlib"] }
+#bytemuck = { version = "1.13.1", default-features = false }
+
+#[dev-dependencies]
+#nanorand = { version = "0.7.0", default-features = false, features = ["wyrand"] } # testing purposes.
+#png = "0.17.8-rc"
+#spng = "0.1.0"

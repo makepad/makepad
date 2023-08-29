@@ -2,7 +2,7 @@
 name = "makepad-platform"
 version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
-edition = "2018"
+edition = "2021"
 description = "Makepad platform layer"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
@@ -11,7 +11,7 @@ metadata.makepad-auto-version = "wxHZD_56sR__1P12uohe4SoyRR8="
 
 [dependencies]
 makepad-futures = { path = "../libs/futures" }
-makepad-image-formats = { path = "../draw/image_formats", version = "0.3.0"}
+#makepad-image-formats = { path = "../draw/image_formats", version = "0.3.0"}
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.3.0" }
 
 [target.wasm32-unknown-unknown.dependencies]

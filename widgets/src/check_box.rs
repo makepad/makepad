@@ -257,7 +257,7 @@ impl CheckBox {
                 self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                if self.state.is_in_state(cx, id!(selected.on)) {
+                if self.is_in_state(cx, id!(selected.on)) {
                     self.animate_state(cx, id!(selected.off));
                     dispatch_action(cx, CheckBoxAction::Change(false));
                 }
@@ -327,10 +327,28 @@ impl Widget for CheckBox {
 pub struct CheckBoxRef(WidgetRef);
 
 impl CheckBoxRef {
+    pub fn changed(&self, actions: &WidgetActions)->Option<bool>{
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let CheckBoxAction::Change(b) = item.action() {
+                return Some(b)
+            }
+        }
+        None
+    }
+
     pub fn set_label_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
             inner.label.clear();
             inner.label.push_str(text);
+        }
+    }
+
+    pub fn selected(&self, cx: &Cx)->bool {
+        if let Some(inner) = self.borrow(){
+            inner.is_in_state(cx, id!(selected.on))
+        }
+        else{
+            false
         }
     }
 

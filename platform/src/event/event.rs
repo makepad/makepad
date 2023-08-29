@@ -77,15 +77,17 @@ pub enum Event {
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
-
+    NetworkResponses(Vec<NetworkResponseEvent>),
+    /*
     HttpResponse(HttpResponseEvent),
     HttpRequestError(HttpRequestErrorEvent),
     HttpResponseProgress(HttpProgressEvent),
     HttpUploadProgress(HttpProgressEvent),
 
+    */
     VideoStream(VideoStreamEvent),
     VideoDecodingInitialized(VideoDecodingInitializedEvent),
-    
+ 
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
@@ -205,12 +207,6 @@ pub struct Trigger{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriggerHitEvent(pub Vec<Trigger>);
-
-#[derive(PartialEq)]
-pub enum AutoReconnect{
-    Yes,
-    No
-}
 
 #[derive(Clone, Debug)]
 pub struct WebSocketErrorEvent {

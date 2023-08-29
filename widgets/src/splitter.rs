@@ -61,7 +61,6 @@ live_design!{
             hover = {
                 default: off
                 off = {
-                    cursor: Default,
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_splitter: {pressed: 0.0, hover: 0.0}
@@ -73,7 +72,6 @@ live_design!{
                         all: Forward {duration: 0.1}
                         state_down: Forward {duration: 0.01}
                     }
-                    cursor: EwResize,
                     apply: {
                         draw_splitter: {
                             pressed: 0.0,

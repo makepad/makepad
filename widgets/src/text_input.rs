@@ -13,13 +13,14 @@ live_design!{
     DrawLabel= {{DrawLabel}} {
         instance hover: 0.0
         instance focus: 0.0
+        wrap: Word,
         text_style: <FONT_LABEL> {}
         fn get_color(self) -> vec4 {
             return
             mix(
                 mix(
                     mix(
-                        #xFFFFFF33,
+                        #xFFFFFF55,
                         #xFFFFFF88,
                         self.hover
                     ),
@@ -76,6 +77,7 @@ live_design!{
         select_pad_edges: 3.0
         cursor_size: 2.0,
         numeric_only: false,
+        on_focus_select_all: false,
         empty_message: "0",
         draw_bg: {
             instance radius: 2.0
@@ -114,13 +116,12 @@ live_design!{
             align: {y: 0.}
         },
         walk: {
-            margin: {top: 5, right: 5}
             width: Fit,
             height: Fit,
             //margin: 0// {left: 0.0, right: 5.0, top: 0.0, bottom: 2.0},
         }
         label_walk: {
-            width: Fit,
+            width: Fill,
             height: Fit,
             //margin: 0//{left: 5.0, right: 5.0, top: 0.0, bottom: 2.0},
         }
@@ -214,15 +215,16 @@ pub struct TextInput {
     #[live] select_pad_edges: f64,
     #[live] empty_message: String,
     #[live] numeric_only: bool,
-
+    #[live] on_focus_select_all: bool,
     #[live] pub read_only: bool,
 
     #[live] label_walk: Walk,
 
     #[live] pub text: String,
-
+    #[live] ascii_only: bool,
     #[rust] double_tap_start: Option<(usize, usize)>,
     #[rust] undo_id: u64,
+    
     #[rust] last_undo: Option<UndoItem>,
     #[rust] undo_stack: Vec<UndoItem>,
     #[rust] redo_stack: Vec<UndoItem>,
@@ -428,23 +430,35 @@ impl TextInput {
         cx.set_key_focus(self.draw_bg.area());
     }
     
-    pub fn filter_numeric(&self, input:String)->String{
-        if self.numeric_only{
+    pub fn filter_input(&mut self, input:&str, output:Option<&mut String>){
+        let output = if let Some(output) = output{
+            output
+        }
+        else{
+            &mut self.text
+        };
+        output.clear();
+        if self.ascii_only{
+            for c in input.as_bytes(){
+                if *c>31 && *c<127{
+                    output.push(*c as char);
+                }
+            }
+        }
+        else if self.numeric_only{
             let mut output = String::new();
             for c in input.chars(){
                 if c.is_ascii_digit() ||c == '.'{
                     output.push(c);
                 }
-                else if c == ','{  
+                else if c == ','{
                     // some day someone is going to search for this for days
                     output.push('.');
                 }
-                
             }
-            output
         }
         else{
-            input
+            output.push_str(input);
         }
     }
     
@@ -467,12 +481,15 @@ impl TextInput {
                 self.undo_id += 1;
                 self.animate_state(cx, id!(focus.on));
                 // select all
-                self.select_all();
+                if self.on_focus_select_all{
+                    self.select_all();
+                }
                 self.draw_bg.redraw(cx);
                 dispatch_action(cx, TextInputAction::KeyFocus);
             }
             Hit::TextInput(te) => {
-                let input = self.filter_numeric(te.input);
+                let mut input = String::new();
+                self.filter_input(&te.input, Some(&mut input));
                 if input.len() == 0{
                     return
                 }
@@ -506,6 +523,7 @@ impl TextInput {
                 }
             }
             Hit::KeyDown(ke) => match ke.key_code {
+                
                 KeyCode::Tab => {
                     // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
                 }
@@ -536,7 +554,8 @@ impl TextInput {
                     self.cursor_head = self.text.chars().count();
                     self.draw_bg.redraw(cx);
                 }
-                KeyCode::ArrowLeft => {
+                KeyCode::ArrowLeft => if !ke.modifiers.logo{
+                    
                     self.undo_id += 1;
                     if self.cursor_head>0 {
                         self.cursor_head -= 1;
@@ -546,11 +565,54 @@ impl TextInput {
                     }
                     self.draw_bg.redraw(cx);
                 },
-                KeyCode::ArrowRight => {
+                KeyCode::ArrowRight => if !ke.modifiers.logo{
                     self.undo_id += 1;
                     if self.cursor_head < self.text.chars().count() {
                         self.cursor_head += 1;
                     }
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::ArrowDown => if !ke.modifiers.logo{
+                    self.undo_id += 1;
+                    // we need to figure out what is below our current cursor
+                    if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
+                        if let Some(pos) = self.draw_label.closest_offset(cx, dvec2(pos.x, pos.y + self.draw_label.get_line_spacing()*1.5)){
+                            self.cursor_head = pos;
+                            if !ke.modifiers.shift {
+                                self.cursor_tail = self.cursor_head;
+                            }
+                            self.draw_bg.redraw(cx);
+                        }
+                    }
+                },
+                KeyCode::ArrowUp =>if !ke.modifiers.logo{
+                    self.undo_id += 1;
+                    // we need to figure out what is below our current cursor
+                    if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
+                        if let Some(pos) = self.draw_label.closest_offset(cx, dvec2(pos.x, pos.y - self.draw_label.get_line_spacing()*0.5)){
+                            self.cursor_head = pos;
+                            if !ke.modifiers.shift {
+                                self.cursor_tail = self.cursor_head;
+                            }
+                            self.draw_bg.redraw(cx);
+                        }
+                    }
+                },
+                KeyCode::Home => if !ke.modifiers.logo{
+                    self.undo_id += 1;
+                    self.cursor_head = 0;
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::End => if !ke.modifiers.logo{
+                    self.undo_id += 1;
+                    self.cursor_head = self.text.chars().count();
+                    
                     if !ke.modifiers.shift {
                         self.cursor_tail = self.cursor_head;
                     }
@@ -591,6 +653,15 @@ impl TextInput {
                 if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
                     //log!("{} {}", pos, fe.abs);
                     let pos = pos.min(self.text.chars().count());
+                    if fe.tap_count == 1 {
+                        if pos != self.cursor_head {
+                            self.cursor_head = pos;
+                            if !fe.modifiers.shift{
+                                self.cursor_tail = pos;
+                            }
+                        }
+                        self.draw_bg.redraw(cx);
+                    }
                     if fe.tap_count == 2 {
                         // lets select the word.
                         self.select_word(pos);
@@ -676,35 +747,29 @@ impl TextInput {
         turtle.pos.y -= self.cursor_margin_top;
         turtle.size.y += self.cursor_margin_top + self.cursor_margin_bottom;
         // move the IME
-        
-        let head_x = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head)
-            .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
-        
+        let line_spacing = self.draw_label.get_line_spacing();
+        let top_drop = self.draw_label.get_font_size()*0.2;
+        let head = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head)
+            .unwrap_or(dvec2(turtle.pos.x, 0.0));
+
         if !self.read_only && self.cursor_head == self.cursor_tail {
             self.draw_cursor.draw_abs(cx, Rect {
-                pos: dvec2(head_x - 0.5 * self.cursor_size, turtle.pos.y),
-                size: dvec2(self.cursor_size, turtle.size.y)
+                pos: dvec2(head.x - 0.5 * self.cursor_size, head.y - top_drop),
+                size: dvec2(self.cursor_size, line_spacing)
             });
         }
         
-        // draw selection rect
+        // draw selection rects
+        
         if self.cursor_head != self.cursor_tail {
-            let tail_x = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_tail)
-                .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
-            
-            let (left_x, right_x, left, right) = if self.cursor_head < self.cursor_tail {
-                (head_x, tail_x, self.cursor_head, self.cursor_tail)
+            let top_drop = self.draw_label.get_font_size()*0.3;
+            let bottom_drop = self.draw_label.get_font_size()*0.1;
+
+            let (start, end) = self.sorted_cursor();
+            let rects = self.draw_label.get_selection_rects(cx, start, end, dvec2(0.0,-top_drop), dvec2(0.0,bottom_drop));
+            for rect in rects{
+                self.draw_select.draw_abs(cx,rect);
             }
-            else {
-                (tail_x, head_x, self.cursor_tail, self.cursor_head)
-            };
-            let char_count = self.draw_label.get_char_count(cx);
-            let pad = if left == 0 && right == char_count {self.select_pad_edges}else {0.0};
-            
-            self.draw_select.draw_abs(cx, Rect {
-                pos: dvec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
-                size: dvec2(right_x - left_x + self.cursor_size + 2.0 * pad, turtle.size.y)
-            });
         }
         self.draw_bg.end(cx);
         
@@ -730,19 +795,18 @@ impl TextInput {
 pub struct TextInputRef(WidgetRef);
 
 impl TextInputRef {
-    pub fn changed(&self, actions:&WidgetActions) -> String {
+    pub fn changed(&self, actions:&WidgetActions) -> Option<String> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let TextInputAction::Change(val) = item.action() {
-                return val;
+                return Some(val);
             }
         }
-        "".to_string()
+        None
     }
     
     pub fn set_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.text.clear();
-            inner.text.push_str(text);
+            inner.filter_input(&text, None);
         }
     }
     

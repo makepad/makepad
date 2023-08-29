@@ -262,7 +262,7 @@ impl WasapiAccess {
         for i in 0..count {
             let device = col.Item(i).unwrap();
             let (dev_name, dev_id) = Self::get_device_descs(&device);
-            let device_id = AudioDeviceId(LiveId::from_str_unchecked(&dev_id));
+            let device_id = AudioDeviceId(LiveId::from_str(&dev_id));
             out.push(AudioDeviceDesc {
                 has_failed: false,
                 device_id,
@@ -281,7 +281,7 @@ impl WasapiAccess {
         for i in 0..count {
             let device = col.Item(i).unwrap();
             let (_, dev_id) = Self::get_device_descs(&device);
-            let device_id = AudioDeviceId(LiveId::from_str_unchecked(&dev_id));
+            let device_id = AudioDeviceId(LiveId::from_str(&dev_id));
             if device_id == search_device_id {
                 return Some(device)
             }
