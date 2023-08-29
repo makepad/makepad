@@ -290,7 +290,7 @@ impl AndroidCameraAccess {
                     
                     if format == AIMAGE_FORMAT_YUV_420_888 ||
                        format == AIMAGE_FORMAT_JPEG {
-                        let format_id = LiveId::from_str_unchecked(&format!("{} {} {:?}", width, height, format)).into();
+                        let format_id = LiveId::from_str(&format!("{} {} {:?}", width, height, format)).into();
                         
                         formats.push(VideoFormat{
                             format_id,
@@ -307,7 +307,7 @@ impl AndroidCameraAccess {
                     }
                 }
                 if formats.len()>0{
-                    let input_id = LiveId::from_str_unchecked(&format!("{:?}", camera_id_str)).into();
+                    let input_id = LiveId::from_str(&format!("{:?}", camera_id_str)).into();
                     let desc = VideoInputDesc{
                         input_id,
                         name: name.to_string(),

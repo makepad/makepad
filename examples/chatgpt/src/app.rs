@@ -1,4 +1,4 @@
-use crate::{network::*, makepad_live_id::*};
+use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 
@@ -8,7 +8,6 @@ live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
-    import makepad_widgets::frame::Image;
     import makepad_widgets::text_input::TextInput;
     
     App = {{App}} {
@@ -74,19 +73,19 @@ impl App{
     // The response will be received and processed by AppMain's handle_event.
     fn send_message(cx: &mut Cx, message: String) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
-        let request_id = LiveId::from_str("SendChatMessage").unwrap();
-        let mut request = HttpRequest::new(request_id, completion_url, Method::POST);
+        let request_id = live_id!(SendChatMessage);
+        let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
         
         request.set_header("Content-Type".to_string(), "application/json".to_string());
         request.set_header("Authorization".to_string(), "Bearer <your-token>".to_string());
         
-        request.set_body(ChatPrompt {
+        request.set_json_body(ChatPrompt {
             messages: vec![ Message { content: message, role: "user".to_string() } ],
             model: "gpt-3.5-turbo".to_string(),
             max_tokens: 100
         });
 
-        cx.http_request(request);
+        cx.http_request(request_id, request);
     }
 }
 
@@ -95,36 +94,33 @@ impl AppMain for App{
         if let Event::Draw(event) = event {
             return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
         }
-
-        if let Event::HttpResponse(event) = event { 
-            let label = self.ui.get_label(id!(message_label));
-
-            event.response.id.as_string(|id: Option<&str>| {
-                match id {
-                     Some("SendChatMessage") => {
-                        if event.response.status_code == 200 {
-                            let chat_response = event.response.get_json_body_as::<ChatResponse>().unwrap();
-                            label.set_label(&chat_response.choices[0].message.content);
-                        } else {
-                            label.set_label("Failed to connect with OpenAI");
-                        }
-                        label.redraw(cx);
-                    },
-                    _ => (),
-                }
-            })
-        } else if let Event::HttpRequestError(event) = event {
-            crate::makepad_error_log::log!("Request failed {:?}", event);
-            let label = self.ui.get_label(id!(message_label));
-
-            label.set_label("Failed to connect with OpenAI");
-            label.redraw(cx);
-        } else if let Event::HttpResponseProgress(event) = event {
-            crate::makepad_error_log::log!("Request progress {:?}", event);
-        } else if let Event::HttpUploadProgress(event) = event {
-            crate::makepad_error_log::log!("Upload progress {:?}", event);
-        }
         
+        for event in event.network_responses(){
+            match &event.response{
+                NetworkResponse::HttpResponse(response)=>{
+                    let label = self.ui.get_label(id!(message_label));
+                    match event.request_id {
+                         live_id!(SendChatMessage) => {
+                            if response.status_code == 200 {
+                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
+                                label.set_label(&chat_response.choices[0].message.content);
+                            } else {
+                                label.set_label("Failed to connect with OpenAI");
+                            }
+                            label.redraw(cx);
+                        },
+                        _ => (),
+                    }
+                }
+                NetworkResponse::HttpRequestError(error)=>{
+                    let label = self.ui.get_label(id!(message_label));
+                    label.set_label(&format!("Failed to connect with OpenAI {:?}", error));
+                    label.redraw(cx);
+                }
+                _ => ()
+            }
+        }
+
         let actions = self.ui.handle_widget_event(cx, event);
         
         if self.ui.get_button(id!(send_button)).clicked(&actions) {

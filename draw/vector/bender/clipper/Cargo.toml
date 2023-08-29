@@ -2,7 +2,7 @@
 name = "bender_clipper"
 version = "0.1.0"
 authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 bender_arena = { path = "../arena" }

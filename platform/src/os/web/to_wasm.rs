@@ -602,7 +602,10 @@ pub struct ToWasmAppLostFocus {}
 
 #[derive(ToWasm)]
 pub struct ToWasmHTTPResponse {
-    pub id: String,
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub metadata_id_hi: u32,
+    pub metadata_id_lo: u32,
     pub status: u32,
     pub headers: String,
     pub body: WasmDataU8
@@ -610,47 +613,57 @@ pub struct ToWasmHTTPResponse {
 
 #[derive(ToWasm)]
 pub struct ToWasmHttpRequestError {
-    pub id: String,
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
     pub error: String
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmHttpResponseProgress {
-    pub id: String,
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
     pub loaded: u32,
     pub total: u32
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmHttpUploadProgress {
-    pub id: String,
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
     pub loaded: u32,
     pub total: u32
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
-    pub socket_id_lo: u32,
-    pub socket_id_hi: u32,
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketOpen {
-    pub socket_id_lo: u32,
-    pub socket_id_hi: u32,
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketError {
-    pub socket_id_lo: u32,
-    pub socket_id_hi: u32,
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
     pub error: String
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmWebSocketMessage {
-    pub socket_id_lo: u32,
-    pub socket_id_hi: u32,
+pub struct ToWasmWebSocketString {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub data: String
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmWebSocketBinary {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
     pub data: WasmDataU8
 }
 

@@ -4,7 +4,6 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        image_loading_widget::*,
         scroll_bars::ScrollBars,
     },
 };
@@ -297,7 +296,7 @@ live_design!{
             return Pal::premul(self.get_color())
         }
     }}
-
+/*
     // Legacy Image widget that is being replaced with the new Image widget
     ImageFrame = <Frame> {show_bg: true, draw_bg: {
         texture image: texture2d
@@ -312,10 +311,7 @@ live_design!{
             let color = self.get_color();
             return Pal::premul(vec4(color.xyz, color.w * self.image_alpha))
         }
-        
-        shape: Solid,
-        fill: Image
-    }}
+    }}*/
     
     CachedFrame = <Frame> {
         optimize: Texture,
@@ -335,9 +331,6 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
             }
-            
-            shape: Solid,
-            fill: Image
         }
     }
     CachedScrollXY = <CachedFrame> {
@@ -364,6 +357,16 @@ pub enum FrameOptimize{
     Texture    
 }
 
+
+#[derive(Live, LiveHook)]
+#[live_ignore]
+pub enum EventOrder{
+    Down,
+    #[pick] Up,
+    #[live(Default::default())] List(Vec<LiveId>),
+}
+
+
 impl FrameOptimize{
     fn is_texture(&self)->bool{
         if let Self::Texture = self{true} else{false}
@@ -386,14 +389,11 @@ pub struct Frame { // draw info per UI element
     
     #[live] walk: Walk,
     
-    #[live] image: LiveDependency,
-    #[live] image_texture: Option<Texture>,
-    #[live] image_scale: f64,
-    
     //#[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
     
     #[live] optimize: FrameOptimize,
+    #[live] event_order: EventOrder,
     
     #[live(true)] visible: bool,
     
@@ -425,20 +425,6 @@ struct FrameTextureCache {
     color_texture: Texture,
 }
 
-impl ImageLoadingWidget for Frame {
-    fn image_filename(&self) -> &LiveDependency {
-        &self.image
-    }
-
-    fn get_texture(&self) -> &Option<Texture> {
-        &self.image_texture
-    }
-
-    fn set_texture(&mut self, texture: Option<Texture>) {
-        self.image_texture = texture;
-    }
-}
-
 impl LiveHook for Frame {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, Frame)
@@ -452,7 +438,7 @@ impl LiveHook for Frame {
         }
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
@@ -461,9 +447,7 @@ impl LiveHook for Frame {
                 self.scroll_bars_obj = Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
-
-        self.after_apply_for_image_loading_widget(cx, from, index, nodes);
-
+/*
         if let Some(image_texture) = &mut self.image_texture {
             if self.image_scale != 0.0 {
                 let texture_desc = image_texture.get_desc(cx);
@@ -474,7 +458,7 @@ impl LiveHook for Frame {
                     }
                 );
             }
-        }
+        */
     }
     
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -523,10 +507,57 @@ pub enum FrameAction {
     None,
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
-    FingerMove(FingerMoveEvent)
+    FingerMove(FingerMoveEvent),
+    KeyDown(KeyEvent),
+    KeyUp(KeyEvent),
 }
 
 impl FrameRef {
+    pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::FingerDown(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::FingerUp(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::FingerMove(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::KeyDown(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
+    pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FrameAction::KeyUp(fd) = item.action() {
+                return Some(fd)
+            }
+        }
+        None
+    }
+
     pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.cut_state(cx, state);
@@ -548,6 +579,15 @@ impl FrameRef {
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible
+        }
+    }
+    
+    pub fn visible(&self)->bool {
+        if let Some(inner) = self.borrow() {
+            inner.visible 
+        }
+        else{
+            false
         }
     }
     
@@ -631,6 +671,52 @@ impl FrameSet {
             item.redraw(cx);
         }
     }
+    
+    pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_down(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_up(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+
+    pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_move(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.key_down(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.key_up(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
 }
 
 impl Widget for Frame {
@@ -641,7 +727,9 @@ impl Widget for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.state_handle_event(cx, event);
+        if self.state_handle_event(cx, event).must_redraw(){
+            self.redraw(cx);
+        }
         
         if self.block_signal_event {
             if let Event::Signal = event {
@@ -659,24 +747,54 @@ impl Widget for Frame {
             }
         }
         
-        for id in &self.draw_order {
-            if let Some(child) = self.children.get_mut(id) {
-                if child.is_visible() || !event.requires_visibility() {
-                    child.handle_widget_event_with(cx, event, dispatch_action);
+        match &self.event_order{
+            EventOrder::Up=>{
+                for id in self.draw_order.iter().rev() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }
+                }
+            }
+            EventOrder::Down=>{
+                for id in self.draw_order.iter() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }
+                }
+            }
+            EventOrder::List(list)=>{
+                for id in list{
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            child.handle_widget_event_with(cx, event, dispatch_action);
+                        }
+                    }                    
                 }
             }
         }
-        if self.cursor.is_some() || self.state.live_ptr.is_some(){
+        
+        
+        if self.visible && (self.cursor.is_some() || self.state.live_ptr.is_some()){
             match event.hits(cx, self.area()) {
-                Hit::FingerDown(d) => {
-                    cx.set_key_focus(Area::Empty);
-                    dispatch_action(cx, FrameAction::FingerDown(d).into_action(uid))
+                Hit::FingerDown(e) => {
+                    cx.set_key_focus(self.area());
+                    dispatch_action(cx, FrameAction::FingerDown(e).into_action(uid));
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(down.on));
+                    }
                 }
-                Hit::FingerMove(d) => {
-                    dispatch_action(cx, FrameAction::FingerMove(d).into_action(uid))
+                Hit::FingerMove(e) => {
+                    dispatch_action(cx, FrameAction::FingerMove(e).into_action(uid))
                 }
-                Hit::FingerUp(d) => {
-                    dispatch_action(cx, FrameAction::FingerUp(d).into_action(uid))
+                Hit::FingerUp(e) => {
+                    dispatch_action(cx, FrameAction::FingerUp(e).into_action(uid));
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(down.off));
+                    }
                 }
                 Hit::FingerHoverIn(_) => {
                     if let Some(cursor) = &self.cursor{
@@ -690,6 +808,12 @@ impl Widget for Frame {
                     if self.state.live_ptr.is_some(){
                         self.animate_state(cx, id!(hover.off));
                     }
+                }
+                Hit::KeyDown(e)=>{
+                    dispatch_action(cx, FrameAction::KeyDown(e).into_action(uid))
+                }
+                Hit::KeyUp(e)=>{
+                    dispatch_action(cx, FrameAction::KeyUp(e).into_action(uid))
                 }
                 _ => ()
             }
@@ -859,9 +983,9 @@ impl Frame {
             };
             
             if self.show_bg {
-                if let Some(image_texture) = &self.image_texture {
+                /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
-                }
+                }*/
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {

@@ -187,6 +187,20 @@ impl DesktopWindow {
             }
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
+                    match cx.os_type() {
+                        OsType::Macos => {
+                            if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen{
+                                self.frame.get_frame(id!(caption_bar)).set_visible(false);
+                                self.frame.redraw(cx);
+                            }
+                            else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen{
+                                self.frame.get_frame(id!(caption_bar)).set_visible(true);
+                                self.frame.redraw(cx);
+                            };
+                        }
+                        _ => ()
+                    }
+                    
                     return dispatch_action(cx, DesktopWindowAction::WindowGeomChange(ev.clone()))
                 }
                 true

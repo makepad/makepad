@@ -15,12 +15,14 @@ use {
         //libc_sys,
     },
     crate::{
-        network::*,
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
         thread::Signal,
         live_id::LiveId,
         event::{
+            NetworkResponseEvent,
+            NetworkResponse,
+            HttpResponse,
             TouchPoint,
             TouchUpdateEvent,
             WindowGeomChangeEvent,
@@ -32,8 +34,6 @@ use {
             KeyCode,
             Event,
             WindowGeom,
-            HttpResponseEvent,
-            HttpRequestErrorEvent,
             VideoDecodingInitializedEvent,
             VideoColorFormat,
             VideoStreamEvent,
@@ -355,26 +355,29 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_http_response(&mut self, id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
-        let e = Event::HttpResponse(
-            HttpResponseEvent { response: HttpResponse::new(
-                LiveId(id),
-                status_code,
-                headers,
-                Some(body)
-            ) }
-        );
+    pub fn from_java_on_http_response(&mut self, request_id: u64, metadata_id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
+        let e = Event::NetworkResponses(vec![
+            NetworkResponseEvent{
+                request_id: LiveId(request_id),
+                response: NetworkResponse::HttpResponse(HttpResponse::new(
+                    LiveId(metadata_id),
+                    status_code,
+                    headers,
+                    Some(body)
+                ))
+            }
+        ]);
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_http_request_error(&mut self, id: u64, error: String, to_java: AndroidToJava) {
-        let e = Event::HttpRequestError(
-            HttpRequestErrorEvent { 
-                id: LiveId(id),
-                error
+    pub fn from_java_on_http_request_error(&mut self, request_id: u64, _metadata_id: u64, error: String, to_java: AndroidToJava) {
+        let e = Event::NetworkResponses(vec![
+            NetworkResponseEvent{
+                request_id: LiveId(request_id),
+                response: NetworkResponse::HttpRequestError(error)
             }
-        );
+        ]);
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
@@ -550,8 +553,8 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(selected) => {
                     to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::HttpRequest(request) => {
-                    to_java.http_request(request)
+                CxOsOp::HttpRequest{request_id, request} => {
+                    to_java.http_request(request_id, request)
                 },
                 CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size) => { // TODO: ADD TODO FOR OTHER PLATFORMS
                     to_java.initialize_video_decoding(video_id, video, chunk_size);

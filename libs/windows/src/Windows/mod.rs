@@ -1755,11 +1755,13 @@ impl ::core::fmt::Debug for D3D11_BUFFER_DESC {
 }
 
 pub const D3D11_USAGE_DEFAULT: D3D11_USAGE = D3D11_USAGE(0i32);
+pub const D3D11_USAGE_DYNAMIC: D3D11_USAGE = D3D11_USAGE(2i32);
 
 pub const D3D11_BIND_CONSTANT_BUFFER: D3D11_BIND_FLAG = D3D11_BIND_FLAG(4u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]#[derive(Default)]
-pub struct D3D11_CPU_ACCESS_FLAG(pub u32);
+pub const D3D11_CPU_ACCESS_WRITE: D3D11_CPU_ACCESS_FLAG = D3D11_CPU_ACCESS_FLAG(0x10000u32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_CPU_ACCESS_FLAG(pub u32);
 impl ::core::marker::Copy for D3D11_CPU_ACCESS_FLAG {}
 impl ::core::clone::Clone for D3D11_CPU_ACCESS_FLAG {
     fn clone(&self) -> Self {
@@ -7420,8 +7422,9 @@ impl ::core::fmt::Debug for D3D11_TEX3D_RTV {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]#[derive(Default)]
-pub struct D3D11_MAP(pub i32);
+pub const D3D11_MAP_WRITE_DISCARD: D3D11_MAP = D3D11_MAP(4i32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_MAP(pub i32);
 impl ::core::marker::Copy for D3D11_MAP {}
 impl ::core::clone::Clone for D3D11_MAP {
     fn clone(&self) -> Self {

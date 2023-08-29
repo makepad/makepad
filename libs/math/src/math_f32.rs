@@ -33,6 +33,12 @@ impl Default for Mat4{
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Vec2Index{
+    X,
+    Y
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Transform {
     pub orientation: Quat,
@@ -90,7 +96,29 @@ impl Vec2 {
         Vec2::default()
     }
     
+    pub fn index(&self, index:Vec2Index)->f32{
+        match index{
+            Vec2Index::X=>self.x,
+            Vec2Index::Y=>self.y
+        }
+    }
+
+    pub fn set_index(&mut self, index:Vec2Index, v: f32){
+        match index{
+            Vec2Index::X=>{self.x = v},
+            Vec2Index::Y=>{self.y = v}
+        }
+    }
+
+
+    pub fn from_index_pair(index:Vec2Index, a: f32, b:f32)->Self{
+        match index{
+            Vec2Index::X=>{Self{x:a,y:b}},
+            Vec2Index::Y=>{Self{x:b,y:a}}
+        }
+    }
     
+
     pub fn into_dvec2(self)->DVec2{
         DVec2{x:self.x as f64, y:self.y as f64}
     }

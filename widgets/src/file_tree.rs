@@ -408,7 +408,7 @@ impl FileTreeNode {
             Hit::FingerDown(_) => {
                 self.animate_state(cx, id!(select.on));
                 if self.is_folder {
-                    if self.state.is_in_state(cx, id!(open.on)) {
+                    if self.is_in_state(cx, id!(open.on)) {
                         self.animate_state(cx, id!(open.off));
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }

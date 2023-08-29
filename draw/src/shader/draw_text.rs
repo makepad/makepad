@@ -206,10 +206,10 @@ impl<'a> WordIterator<'a> {
                 self.word_width += adv;
             }
             self.char_iter = None;
-
+            
             let mut buffer = [0; 4];
             let char_bytes_len = self.last_char.encode_utf8(&mut buffer).len();
-
+            
             return Some(WordIteratorItem {
                 start: self.word_start,
                 end: self.last_index + char_bytes_len,
@@ -276,14 +276,23 @@ impl DrawText {
     
     pub fn draw(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos + cx.turtle().origin(), val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
@@ -315,7 +324,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
-    pub fn draw_inner(&mut self, cx: &mut Cx2d, pos: DVec2, chunk: &str, fonts_atlas: &mut CxFontsAtlas) {
+    fn draw_inner(&mut self, cx: &mut Cx2d, pos: DVec2, chunk: &str, fonts_atlas: &mut CxFontsAtlas) {
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()
             || pos.y.is_nan()
@@ -323,15 +332,11 @@ impl DrawText {
             return
         }
         //self.draw_clip = cx.turtle().draw_clip().into();
-        let in_many = self.many_instances.is_some();
+        //let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
         
         if fonts_atlas.fonts[font_id].is_none() {
             return
-        }
-        
-        if !in_many {
-            self.begin_many_instances_internal(cx, fonts_atlas);
         }
         
         //cx.debug.rect_r(Rect{pos:dvec2(1.0,2.0), size:dvec2(200.0,300.0)});
@@ -340,6 +345,10 @@ impl DrawText {
             return
         }
         //let mut char_offset = char_offset;
+        
+        if !self.many_instances.is_some() {
+            self.begin_many_instances_internal(cx, fonts_atlas);
+        }
         
         let cxfont = fonts_atlas.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor();
@@ -459,9 +468,6 @@ impl DrawText {
             }
         }
         
-        if !in_many {
-            self.end_many_instances(cx)
-        }
     }
     pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom> {
         self.compute_geom_inner(cx, walk, text, &mut *cx.fonts_atlas_rc.0.borrow_mut())
@@ -591,10 +597,15 @@ impl DrawText {
         let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
+        
+        //let in_many = self.many_instances.is_some();
         // lets compute the geom
         if text.len() == 0 {
             return
         }
+        //if !in_many {
+        //    self.begin_many_instances_internal(cx, fonts_atlas);
+        //}
         if let Some(geom) = self.compute_geom_inner(cx, walk, text, fonts_atlas) {
             let height = if walk.height.is_fit() {
                 geom.measured_height
@@ -681,40 +692,92 @@ impl DrawText {
                 }
             }
         }
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
     }
     
-    // looks up text with the behavior of a text selection mouse cursor
     pub fn closest_offset(&self, cx: &Cx, pos: DVec2) -> Option<usize> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
             return None
         }
-        //let debug = cx.debug.clone();
-        //let scroll_pos = area.get_scroll_pos(cx);
-        //let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
+
+        let line_spacing = self.get_line_spacing();
+        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
+        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
+        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
+
+        let mut last_y = None;
+        for i in 0..rect_pos.repeat {
+            let index = rect_pos.stride * i;
+            let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
+            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            if last_y.is_none() {last_y = Some(y)}
+            let advance = advance.buffer[index + 0] as f64;
+            if i > 0 && y > last_y.unwrap() && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
+                return Some(i - 1)
+            }
+            if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64 {
+                return Some(i)
+            }
+            last_y = Some(y)
+        }
+        return Some(rect_pos.repeat);
+        
+    }
+    
+    pub fn get_selection_rects(&self, cx: &Cx, start: usize, end: usize, shift: DVec2, pad: DVec2) -> Vec<Rect> {
+        let area = &self.draw_vars.area;
+        
+        if !area.is_valid(cx) {
+            return Vec::new();
+        }
         
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
         let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
-        //let font_size = area.get_read_ref(cx, live_id!(font_size), ShaderTy::Float).unwrap();
         
-        //let line_spacing = self.text_style.line_spacing;
-        
-        // TODO add multiline support
-        for i in 0..rect_pos.repeat {
-            //let index = rect_pos.stride * i;
-            //let fs = font_size.buffer[index];
-            let index = rect_pos.stride * i;
-            let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
-            //let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-            let advance = advance.buffer[index + 0] as f64;
-            if pos.x < x + advance * 0.5 {
-                return Some(i)
-            }
+        if rect_pos.repeat == 0 || start >= rect_pos.repeat{
+            return Vec::new();
         }
-        return Some(rect_pos.repeat);
+        // alright now we go and walk from start to end and collect our selection rects
+        
+        let index = start * rect_pos.stride;
+        let start_x = rect_pos.buffer[index + 0] - delta.buffer[index + 0]; // + advance.buffer[index + 0] * pos;
+        let start_y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+        let line_spacing = self.get_line_spacing();
+        let mut last_y = start_y;
+        let mut min_x = start_x;
+        let mut last_x = start_x;
+        let mut last_advance = advance.buffer[index + 0];
+        let mut out = Vec::new();
+        for index in start..end {
+            if index >= rect_pos.repeat{
+                break;
+            }
+            let index = index * rect_pos.stride;
+            let end_x = rect_pos.buffer[index + 0] - delta.buffer[index + 0];
+            let end_y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            last_advance = advance.buffer[index + 0];
+            if end_y > last_y { // emit rect
+                out.push(Rect {
+                    pos: dvec2(min_x as f64, last_y as f64) + shift,
+                    size: dvec2((last_x - min_x + last_advance) as f64, line_spacing) + pad
+                });
+                min_x = end_x;
+                last_y = end_y;
+            }
+            last_x = end_x;
+        }
+        out.push(Rect {
+            pos: dvec2(min_x as f64, last_y as f64) + shift,
+            size: dvec2((last_x - min_x + last_advance) as f64, line_spacing) + pad
+        });
+        out
     }
+    
     
     pub fn get_char_count(&self, cx: &Cx) -> usize {
         let area = &self.draw_vars.area;
@@ -739,7 +802,6 @@ impl DrawText {
         if rect_pos.repeat == 0 {
             return None
         }
-        
         if index >= rect_pos.repeat {
             // lets get the last one and advance
             let index = (rect_pos.repeat - 1) * rect_pos.stride;
@@ -753,6 +815,14 @@ impl DrawText {
             let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             Some(dvec2(x as f64, y as f64))
         }
+    }
+    
+    pub fn get_line_spacing(&self) -> f64 {
+        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing
+    }
+    
+    pub fn get_font_size(&self) -> f64 {
+        self.text_style.font_size * self.font_scale
     }
     
     pub fn get_monospace_base(&self, cx: &Cx2d) -> DVec2 {

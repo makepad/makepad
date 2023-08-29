@@ -17,9 +17,9 @@ public class Makepad {
         void showClipboardActions(String selected);
         void copyToClipboard(String selected);
         void pasteFromClipboard();
-        void requestHttp(long id, String url, String method, String headers, byte[] body);
         void initializeVideoDecoding(long video_id, byte[] video, int chunkSize);
         void decodeVideoChunk(long video_id, long startTimestampUs, long endTimestampUs);
+        void requestHttp(long requestId, long metadataId, String url, String method, String headers, byte[] body);
     }
 
     static {
@@ -45,8 +45,8 @@ public class Makepad {
     static native void onCopyToClipboard(long cx, Callback callback);
     static native void onPasteFromClipboard(long cx, String content, Callback callback);
     static native void onCutToClipboard(long cx, Callback callback);
-    static native void onHttpResponse(long cx, long id, int statusCode, String headers, byte[] body, Callback callback);
-    static native void onHttpRequestError(long cx, long id, String error, Callback callback);
+    static native void onHttpResponse(long cx, long requestId, long metadataId, int statusCode, String headers, byte[] body, Callback callback);
+    static native void onHttpRequestError(long cx, long requestId, long metadataId, String error, Callback callback);
     static native void onVideoDecodingInitialized(long cx, long videoId, int frameRate, int videoWidth, int videoHeight, 
     String colorFormat, long duration, Callback callback);
     static native void onVideoStream(long cx, long videoId, byte[] video, int yStride, int uvStride, long timestamp, boolean isEoC, Callback callback); 
