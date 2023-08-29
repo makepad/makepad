@@ -189,7 +189,17 @@ impl Cx {
                     let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
                         texture_id
                     }else {
-                        continue;
+                        let () = unsafe {msg_send![
+                            encoder,
+                            setFragmentTexture: nil
+                            atIndex: i as u64
+                        ]};
+                        let () = unsafe {msg_send![
+                            encoder,
+                            setVertexTexture: nil
+                            atIndex: i as u64
+                        ]};
+                        continue
                     };
                     
                     let cxtexture = &mut self.textures[texture_id];
@@ -221,6 +231,7 @@ impl Cx {
                             atIndex: i as u64
                         ]};
                     }
+                    
                 }
                 self.os.draw_calls_done += 1;
                 if let Some(inner) = geometry.os.index_buffer.get().cpu_read().inner.as_ref() {

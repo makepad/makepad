@@ -85,6 +85,7 @@ pub enum Size {
     #[pick] Fill,
     #[live(200.0)] Fixed(f64),
     Fit,
+    All
 }
 
 #[derive(Clone, Debug)]
@@ -762,6 +763,7 @@ impl Turtle {
                     }
                 }
             },
+            Size::All=>self.width
         }
     }
     
@@ -783,6 +785,7 @@ impl Turtle {
                     }
                 }
             }
+            Size::All=>self.height
         }
     }
     

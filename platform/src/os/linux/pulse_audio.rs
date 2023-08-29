@@ -525,7 +525,7 @@ impl PulseAudioAccess {
             let mut out = Vec::new();
             let mut device_descs = Vec::new();
             for source in query.source_list {
-                let device_id = LiveId::from_str_unchecked(&source.name).into();
+                let device_id = LiveId::from_str(&source.name).into();
                 out.push(AudioDeviceDesc {
                     has_failed: self.failed_devices.contains(&device_id),
                     device_id,
@@ -540,7 +540,7 @@ impl PulseAudioAccess {
                 });
             }
             for sink in query.sink_list {
-                let device_id = LiveId::from_str_unchecked(&sink.name).into();
+                let device_id = LiveId::from_str(&sink.name).into();
                 out.push(AudioDeviceDesc {
                     has_failed: self.failed_devices.contains(&device_id),
                     device_id,

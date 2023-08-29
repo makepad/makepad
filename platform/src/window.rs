@@ -76,7 +76,7 @@ impl LiveNew for Window {
             live_type: LiveType::of::<Self>(),
             fields: Vec::new(),
             live_ignore: true,
-            type_name: LiveId::from_str("Window").unwrap()
+            type_name: id_lut!(Window)
         }
     }
 }

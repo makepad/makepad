@@ -189,8 +189,6 @@ live_design!{
                 profile_img = <Image> {
                     source: (IMG_PROFILE_A)
                     walk: {margin: 0, width: 50., height: 50.}
-                    layout: {padding: 0}
-
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -243,10 +241,9 @@ live_design!{
         layout: {flow: Down, padding: 0.0, spacing: 0.0}
         
         hero = <Image> {
-            image: (IMG_A),
+            source: (IMG_A),
             //image_scale: 1.0,
             walk: {margin: 0, width: Fill, height: 200}
-            layout: {padding: 0}
         }
         
         post = <Post> {
@@ -355,10 +352,10 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        for (item_id, item) in news_feeds.items_with_actions(&actions) {
+        for (_item_id, item) in news_feeds.items_with_actions(&actions) {
             // check for actions inside the list item
             if item.get_button(id!(likes)).clicked(&actions) {
-                log!("Live {}", item_id);
+                //log!("Live {}", item_id);
             }
         }
         

@@ -13,8 +13,8 @@ use {
             DragItem, 
             Timer,
             Trigger,
-            AutoReconnect,
             NextFrame,
+            HttpRequest,
         },
         draw_list::{
             DrawListId
@@ -37,7 +37,6 @@ use {
             CxPassRect,
             CxPassParent
         },
-        network::HttpRequest,
     }
 };
 
@@ -73,10 +72,13 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
-    HttpRequest(HttpRequest),
-    WebSocketOpen{socket_id: LiveId, request:HttpRequest, auto_reconnect:AutoReconnect},
-    WebSocketSendString{socket_id: LiveId, data:String},
-    WebSocketSendBinary{socket_id: LiveId, data:Vec<u8>},
+
+    HttpRequest{request_id: LiveId, request:HttpRequest},
+
+    WebSocketOpen{request_id: LiveId, request:HttpRequest},
+    WebSocketSendString{request_id: LiveId, data:String},
+    WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
+
     InitializeVideoDecoding(LiveId, Rc<Vec<u8>>, usize),
     DecodeVideoChunk(LiveId, u128, u128),
 }
@@ -394,21 +396,20 @@ impl Cx {
         &self.spawner
     }
 
-    pub fn http_request(&mut self, request: HttpRequest) {
-        self.platform_ops.push(CxOsOp::HttpRequest(request));
+    pub fn http_request(&mut self, request_id: LiveId, request: HttpRequest) {
+        self.platform_ops.push(CxOsOp::HttpRequest{request_id, request});
     }
            
-    pub fn web_socket_open(&mut self, socket_id:LiveId, request: HttpRequest, auto_reconnect: AutoReconnect) {
+    pub fn web_socket_open(&mut self, request_id: LiveId, request: HttpRequest) {
         self.platform_ops.push(CxOsOp::WebSocketOpen{
             request,
-            socket_id,
-            auto_reconnect
+            request_id,
         });
     }
     
-    pub fn web_socket_send_binary(&mut self, socket_id: LiveId, data: Vec<u8>) {
+    pub fn web_socket_send_binary(&mut self, request_id: LiveId, data: Vec<u8>) {
         self.platform_ops.push(CxOsOp::WebSocketSendBinary{
-            socket_id,
+            request_id,
             data,
         });
     }
@@ -420,6 +421,10 @@ impl Cx {
     pub fn decode_video_chunk(&mut self, video_id: LiveId, start_timestamp: u128, end_timestamp: u128) {
         makepad_error_log::log!("Decoding next chunk from {:?} to {:?}", start_timestamp, end_timestamp);
         self.platform_ops.push(CxOsOp::DecodeVideoChunk(video_id, start_timestamp, end_timestamp));
+    }
+    
+    pub fn println_resources(&self){
+        println!("Num textures: {}",self.textures.0.pool.len());
     }
 }
 
@@ -435,7 +440,7 @@ macro_rules!register_component_factory {
         $ cx.live_registry.borrow().components.get_or_create::< $ registry>().map.insert(
             LiveType::of::< $ ty>(),
             (LiveComponentInfo {
-                name: LiveId::from_str(stringify!( $ ty)).unwrap(),
+                name: LiveId::from_str_with_lut(stringify!( $ ty)).unwrap(),
                 module_id
             }, Box::new( $ factory()))
         );

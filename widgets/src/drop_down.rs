@@ -81,7 +81,7 @@ live_design!{
         popup_menu: <PopupMenu> {
         }
         
-        popup_shift: vec2(-6.0,4.0)
+        popup_shift: vec2(-6.0, 4.0)
         
         selected_item: 0
         state: {
@@ -155,7 +155,7 @@ pub struct DropDown {
     #[live] popup_shift: DVec2,
     
     #[rust] is_open: bool,
-   
+    
     #[live] selected_item: usize,
     
     #[live] layout: Layout,
@@ -175,7 +175,7 @@ struct DrawLabelText {
 }
 
 impl LiveHook for DropDown {
-    fn before_live_design(cx:&mut Cx){
+    fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, DropDown)
     }
     
@@ -193,6 +193,7 @@ impl LiveHook for DropDown {
         map.get_or_insert(cx, list_box, | cx | {
             PopupMenu::new_from_ptr(cx, Some(list_box))
         });
+         
     }
 }
 #[derive(Clone, WidgetAction)]
@@ -272,7 +273,7 @@ impl DropDown {
                 KeyCode::ArrowUp => {
                     if self.selected_item > 0 {
                         self.selected_item -= 1;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -280,7 +281,7 @@ impl DropDown {
                 KeyCode::ArrowDown => {
                     if self.values.len() > 0 && self.selected_item < self.values.len() - 1 {
                         self.selected_item += 1;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -309,7 +310,7 @@ impl DropDown {
                     self.animate_state(cx, id!(hover.off));
                 }
             }
-            _=>()
+            _ => ()
         };
     }
     
@@ -324,6 +325,7 @@ impl DropDown {
         
         self.draw_bg.begin(cx, walk, self.layout);
         //let start_pos = cx.turtle().rect().pos;
+       
         if let Some(val) = self.labels.get(self.selected_item) {
             self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
@@ -356,14 +358,14 @@ impl DropDown {
             }
             
             // ok we shift the entire menu. however we shouldnt go outside the screen area
-            popup_menu.end(cx, self.draw_bg.area(), -item_pos.unwrap_or(dvec2(0.0,0.0)));
+            popup_menu.end(cx, self.draw_bg.area(), -item_pos.unwrap_or(dvec2(0.0, 0.0)));
         }
     }
 }
 
 impl Widget for DropDown {
     
-    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+    fn widget_to_data(&self, _cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         match actions.single_action(self.widget_uid()) {
             DropDownAction::Select(_, value) => {
                 nodes.write_field_value(path, value.clone());
@@ -373,7 +375,7 @@ impl Widget for DropDown {
         }
     }
     
-   fn data_to_widget(&mut self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+    fn data_to_widget(&mut self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(value) = nodes.read_field_value(path) {
             if let Some(index) = self.values.iter().position( | v | v == value) {
                 if self.selected_item != index {
@@ -408,3 +410,51 @@ impl Widget for DropDown {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct DropDownRef(WidgetRef);
+
+impl DropDownRef {
+    pub fn set_labels(&self, labels: Vec<String>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.labels = labels
+        }
+    }
+    
+    pub fn selected(&self, actions: &WidgetActions) -> Option<usize> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let DropDownAction::Select(id, _) = item.action() {
+                return Some(id)
+            }
+        }
+        None
+    }
+    
+    pub fn set_selected(&self, item:usize){
+       
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.selected_item = item.min(inner.labels.len().max(1)-1)
+        }
+    }
+    
+    pub fn get_selected(&self)->usize{
+        if let Some(inner) = self.borrow() {
+            return inner.selected_item
+        }
+        0
+    }
+
+
+    pub fn get_selected_label(&self)->String{
+        if let Some(inner) = self.borrow() {
+            return inner.labels[inner.selected_item].clone()
+        }
+        "".to_string()
+    }
+    
+     pub fn set_selected_by_label(&self,label:&str){
+        if let Some(mut inner) = self.borrow_mut() {
+            if let Some(index) = inner.labels.iter().position(|v| v == label){
+                inner.selected_item = index
+            }
+        }
+    }
+        
+}

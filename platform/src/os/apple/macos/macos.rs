@@ -2,7 +2,6 @@ use {
     std::{
         rc::Rc,
         cell::{RefCell},
-        sync::mpsc::{channel, Receiver, Sender},
     },
     makepad_objc_sys::{
         msg_send,
@@ -32,8 +31,7 @@ use {
         event::{
             MouseUpEvent,
             Event,
-            HttpResponseEvent,
-            HttpRequestErrorEvent,
+            NetworkResponseChannel
         },
         window::CxWindowPool,
         cx_api::{CxOsApi, CxOsOp},
@@ -126,18 +124,12 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        match self.os.networking_channel.receiver.try_recv() {
-            Ok(message) => {
-                match message {
-                    NetworkingMessage::HttpResponse(event) => {
-                        self.call_event_handler(&Event::HttpResponse(event))
-                    },
-                    NetworkingMessage::HttpRequestError(event) => {
-                        self.call_event_handler(&Event::HttpRequestError(event))
-                    },
-                }
-            },
-            Err(_) => ()
+        let mut out = Vec::new();
+        while let Ok(event) = self.os.network_response.receiver.try_recv(){
+            out.push(event);
+        }
+        if out.len()>0{
+            self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
     
@@ -421,20 +413,19 @@ impl Cx {
                 CxOsOp::UpdateMenu(menu) => {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
                 },
-                CxOsOp::HttpRequest(request) => {
-                    cocoa_app.make_http_request(request, self.os.networking_channel.sender.clone());
+                CxOsOp::HttpRequest{request_id, request} => {
+                    cocoa_app.make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
+                    crate::log!("Show clipboard actions not supported yet");
+                }
+                CxOsOp::WebSocketOpen{request_id, request}=>{
+                    cocoa_app.web_socket_open(request_id, request, self.os.network_response.sender.clone());
+                }
+                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
                     todo!()
                 }
-                CxOsOp::WebSocketOpen{socket_id, request, auto_reconnect}=>{
-                    cocoa_app.web_socket_open(socket_id.0, request,auto_reconnect, self.os.networking_channel.sender.clone());
-                    todo!()
-                }
-                CxOsOp::WebSocketSendBinary{socket_id:_, data:_}=>{
-                    todo!()
-                }
-                CxOsOp::WebSocketSendString{socket_id:_, data:_}=>{
+                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
                     todo!()
                 }
             }
@@ -463,25 +454,6 @@ impl CxOsApi for Cx {
     }*/
 }
 
-pub enum NetworkingMessage {
-    HttpResponse(HttpResponseEvent),
-    HttpRequestError(HttpRequestErrorEvent),
-}
-
-pub struct NetworkingChannel {
-    receiver: Receiver<NetworkingMessage>,
-    sender: Sender<NetworkingMessage>,
-}
-
-impl Default for NetworkingChannel {
-    fn default() -> Self {
-        let (sender, receiver) = channel();
-        Self {
-            sender,
-            receiver
-        }
-    }
-}
 
 #[derive(Default)]
 pub struct CxOs {
@@ -489,6 +461,6 @@ pub struct CxOs {
     pub (crate) media: CxAppleMedia,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
-    pub (crate) networking_channel: NetworkingChannel,
+    pub (crate) network_response: NetworkResponseChannel,
 }
 

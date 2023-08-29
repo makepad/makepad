@@ -33,6 +33,7 @@ use {
         menu::{
             MenuCommand
         },
+        cursor::MouseCursor,
         event::{
             DragEvent,
             DropEvent,
@@ -459,6 +460,12 @@ pub fn define_cocoa_view_class() -> *const Class {
                 load_mouse_cursor(current_cursor.clone())
             });
             let bounds: NSRect = msg_send![this, bounds];
+            if let MouseCursor::Hidden = current_cursor{
+                let _: () = msg_send![
+                    cursor_id,
+                    setHiddenUntilMouseMoves: true
+                ];
+            }
             let _: () = msg_send![
                 this,
                 addCursorRect: bounds

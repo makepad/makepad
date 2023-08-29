@@ -140,7 +140,7 @@ impl SeqButton {
     }
     
     fn is_active(&self, cx: &Cx) -> bool {
-        self.state.is_in_state(cx, id!(active.on))
+        self.is_in_state(cx, id!(active.on))
     }
     
     pub fn handle_event_with(
@@ -166,7 +166,7 @@ impl SeqButton {
                 self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
-                if self.state.is_in_state(cx, id!(active.on)) {
+                if self.is_in_state(cx, id!(active.on)) {
                     self.animate_state(cx, id!(active.off));
                     dispatch_action(cx, SequencerAction::Change);
                 }
