@@ -58,7 +58,7 @@ live_design!{
     
     NumberBox= {{NumberBox}} {
        
-       layout:{padding:{left:14,top:1, bottom:1, right:5}}
+       padding:{left:14,top:1, bottom:1, right:5}
         draw_label:{text_style:{font_size: 12}}
         label_align: {
             y: 0.0
@@ -104,10 +104,10 @@ live_design!{
     
     NumberGrid= {{NumberGrid}} {
         number_box: <NumberBox> {}
-        walk: {
+        
             width: Fill,
             height: Fill
-        }
+        
     }
 }
 
@@ -134,7 +134,7 @@ pub struct NumberBox {
     #[live] draw_label: DrawLabel,
 
     #[layout] layout: Layout,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] label_align: Align,
 }

@@ -67,11 +67,10 @@ live_design!{
         button_size: vec2(25.0, 25.0),
         grid_x: 16,
         grid_y: 16,
-        walk: {
-            margin: {top: 3, right: 10, bottom: 3, left: 10},
-            width: Fit,
-            height: Fit
-        }
+        
+        margin: {top: 3, right: 10, bottom: 3, left: 10}
+        width: Fit,
+        height: Fit
     }
 }
 
@@ -86,7 +85,7 @@ struct DrawButton {
 #[derive(Live, LiveHook)]
 pub struct SeqButton {
     #[live] draw_button: DrawButton,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     #[live] x: usize,
     #[live] y: usize
 }
@@ -136,7 +135,7 @@ impl SeqButton {
     }
     
     fn set_is_active(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(active.on), id!(active.off))
+        self.animator_toggle(cx, is, animate, id!(active.on), id!(active.off))
     }
     
     fn is_active(&self, cx: &Cx) -> bool {

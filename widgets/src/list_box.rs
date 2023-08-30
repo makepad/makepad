@@ -43,8 +43,8 @@ live_design!{
     }
     
     ListBoxItem = {{ListBoxItem}} {
-        layout: {
-            align: {y: 0.5},
+        
+            align: {y: 0.5
             padding: {left: 5},
         }
         
@@ -90,8 +90,8 @@ live_design!{
     ListBox = {{ListBox}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
         list_item: ListBoxItem {}
-        walk: {width: Fill, height: Fit}
-        layout: {flow: Down}
+        width: Fill, height: Fit
+        flow: Down
         scroll_bars: {}
     }
 }

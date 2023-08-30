@@ -87,14 +87,12 @@ live_design!{
                 color: #5
                 radius: 2.0
             },
-            layout: {
-                padding:0,
-                align: {y: 0.}
-            },
-            walk: {
-                margin: {top: 3, right: 5}
-            }
+            
+            padding:0,
+            label_align: {y: 0.},
+            margin: {top: 3, right: 3}
         }
+        
         animator: {
             hover = {
                 default: off

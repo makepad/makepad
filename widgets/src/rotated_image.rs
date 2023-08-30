@@ -5,16 +5,16 @@ live_design! {
     import makepad_widgets::theme::*;
 
     RotatedImage = {{RotatedImage}} {
-        walk:{
+        
             width: Fit
             height: Fit
-        }
-        layout: {
+        
+        
             // This is important to avoid clipping the image, specially when it is rotated.
             // In any case, it can be override by the app developer.
             clip_x: false,
             clip_y: false
-        }
+        
         draw_bg: {
             texture image: texture2d
 

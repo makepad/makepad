@@ -34,10 +34,10 @@ live_design!{
         abs_size: vec2(32, 12)
         abs_offset: vec2(4., 0.)
         
-        walk: {
+        
             width: 12,
             height: 12,
-        }
+        
         
         animator: {
             

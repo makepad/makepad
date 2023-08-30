@@ -54,9 +54,9 @@ live_design!{
     COLOR_PROFILE_CIRCLE = #xfff8ee
     COLOR_P = #x999
     
-    FillerY = <Frame> {walk: {width: Fill}}
+    FillerY = <Frame> {width: Fill}
     
-    FillerX = <Frame> {walk: {height: Fill}}
+    FillerX = <Frame> {height: Fill}
     
     Logo = <Button> {
         draw_icon: {
@@ -72,7 +72,7 @@ live_design!{
                 return sdf.result
             }
         }
-        layout: {padding: 9.0}
+        padding: 9.0
         label: ""
     }
     
@@ -119,31 +119,31 @@ live_design!{
                 return sdf.result
             }
         }
-        layout: {padding: 9.0}
+        padding: 9.0
         label: "1"
     }
     
     
     Header = <BoxY> {
-        walk: {width: Fill, height: 70}
-        layout: {flow: Right, padding: 10.0, spacing: 10.0}
+        width: Fill, height: 70
+        flow: Right, padding: 10.0, spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: vec2(0.5, 4.5)}
         
         <Logo> {
-            walk: {height: Fit, width: Fill, margin: {top: 0.0}}
+            height: Fit, width: Fill, margin: {top: 0.0}
             icon_walk: {width: Fit, height: 27.0}
         }
         
     }
     
     Menu = <BoxY> {
-        walk: {width: Fill, height: 80}
-        layout: {flow: Right, padding: 10.0, spacing: 10.0}
+        width: Fill, height: 80
+        flow: Right, padding: 10.0, spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
         
         <Frame> {
-            walk: {width: Fill, height: Fit, margin: 0.0}
-            layout: {flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}}
+            width: Fill, height: Fit, margin: 0.0
+            flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}
             
             <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 30.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, label: ""}
@@ -154,18 +154,18 @@ live_design!{
     }
     
     LineH = <Box> {
-        walk: {width: Fill, height: 2, margin: 0.0}
-        layout: {padding: 0.0, spacing: 0.0}
+        width: Fill, height: 2, margin: 0.0
+        padding: 0.0, spacing: 0.0
         draw_bg: {color: (COLOR_DIVIDER)}
     }
     
     PostMenu = <Frame> {
-        walk: {width: Fill, height: Fit, margin: 0.0}
-        layout: {flow: Down, padding: 0.0, spacing: 0.0}
+        width: Fill, height: Fit, margin: 0.0
+        flow: Down, padding: 0.0, spacing: 0.0
         
         <Frame> {
-            walk: {width: Fill, height: Fit, margin: 0.0}
-            layout: {flow: Right, padding: 0.0, spacing: 10.0}
+            width: Fill, height: Fit, margin: 0.0
+            flow: Right, padding: 0.0, spacing: 10.0
             
             likes = <IconButton> {draw_icon: {svg_file: (ICO_FAV)} icon_walk: {width: 15.0, height: Fit}}
             comments = <IconButton> {draw_icon: {svg_file: (ICO_COMMENT)} icon_walk: {width: 15.0, height: Fit}, label: "7"}
@@ -176,19 +176,19 @@ live_design!{
     }
     
     Post = <Frame> {
-        walk: {width: Fill, height: Fit, margin: 0.0}
-        layout: {flow: Down, padding: 0.0, spacing: 0.0}
+        width: Fill, height: Fit, margin: 0.0
+        flow: Down, padding: 0.0, spacing: 0.0
         
         body = <Frame> {
-            walk: {width: Fill, height: Fit}
-            layout: {flow: Right, padding: 10.0, spacing: 10.0}
+            width: Fill, height: Fit
+            flow: Right, padding: 10.0, spacing: 10.0
             
             profile = <Frame> {
-                walk: {width: Fit, height: Fit, margin: {top: 7.5}}
-                layout: {flow: Down, padding: 0.0}
+                width: Fit, height: Fit, margin: {top: 7.5}
+                flow: Down, padding: 0.0
                 profile_img = <Image> {
                     source: (IMG_PROFILE_A)
-                    walk: {margin: 0, width: 50., height: 50.}
+                    margin: 0, width: 50., height: 50.
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -202,11 +202,11 @@ live_design!{
                 }
             }
             content = <Frame> {
-                walk: {width: Fill, height: Fit}
-                layout: {flow: Down, padding: 0.0}
+                width: Fill, height: Fit
+                flow: Down, padding: 0.0
                 
                 meta = <Label> {
-                    walk: {margin: {bottom: 10.0, top: 10.0}}
+                    margin: {bottom: 10.0, top: 10.0}
                     draw_label: {
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
@@ -214,7 +214,7 @@ live_design!{
                     label: "@username · 13h"
                 }
                 text = <Label> {
-                    walk: {width: Fill, height: Fit},
+                    width: Fill, height: Fit
                     draw_label: {
                         wrap: Word,
                         text_style: <TEXT_P> {},
@@ -224,7 +224,7 @@ live_design!{
                 }
                 
                 <LineH> {
-                    walk: {margin: {top: 10.0, bottom: 5.0}}
+                    margin: {top: 10.0, bottom: 5.0}
                 }
                 
                 <PostMenu> {}
@@ -237,21 +237,21 @@ live_design!{
     }
     
     PostImage = <Frame> {
-        walk: {width: Fill, height: Fit}
-        layout: {flow: Down, padding: 0.0, spacing: 0.0}
+        width: Fill, height: Fit
+        flow: Down, padding: 0.0, spacing: 0.0
         
         hero = <Image> {
             source: (IMG_A),
             //image_scale: 1.0,
-            walk: {margin: 0, width: Fill, height: 200}
+            margin: 0, width: Fill, height: 200
         }
         
         post = <Post> {
-            walk: {margin: {top: -45.0}}
+            margin: {top: -45.0}
             body = {
                 content = {
                     meta = {
-                        walk: {margin: {bottom: 30.0, top: 10.0}}
+                        margin: {bottom: 30.0, top: 10.0}
                         draw_label: {
                             color: (COLOR_META_INV)
                         }
@@ -266,14 +266,14 @@ live_design!{
         ui: <DesktopWindow> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
-            layout: {
+            
                 flow: Overlay,
                 padding: 0.0
                 spacing: 0,
                 align: {
                     x: 0.0,
                     y: 0.0
-                }
+                
             },
             draw_bg: {
                 fn pixel(self) -> vec4 {
@@ -282,17 +282,17 @@ live_design!{
             }
             
             news_feed = <ListView> {
-                walk: {height: Fill, width: Fill}
-                layout: {flow: Down}
-                TopSpace = <Frame> {walk: {height: 80}}
+                height: Fill, width: Fill
+                flow: Down
+                TopSpace = <Frame> {height: 80}
                 Post = <Post> {}
                 PostImage = <PostImage> {}
-                BottomSpace = <Frame> {walk: {height: 100}}
+                BottomSpace = <Frame> {height: 100}
             }
             
             <Frame> {
-                walk: {height: Fill, width: Fill}
-                layout: {flow: Down}
+                height: Fill, width: Fill
+                flow: Down
                 
                 <Header> {}
                 <FillerY> {}

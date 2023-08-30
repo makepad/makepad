@@ -68,8 +68,8 @@ live_design!{
     
     
     SdxlDropDown = <DropDown> {
-        walk: {width: Fit}
-        layout: {padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}}
+        width: Fit
+        padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
         
         draw_label: {
             text_style: <H2_TEXT_REGULAR> {},
@@ -93,10 +93,10 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                walk: {width: Fill, height: Fit}
+                width: Fill, height: Fit
                 
-                layout: {
-                    padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)},
+                
+                    padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)
                 }
                 
                 draw_bg: {
@@ -137,7 +137,7 @@ live_design!{
     }
     
     BarLabel = <Label> {
-        walk: {margin: {left: 10}},
+        margin: {left: 10},
         label: "Workflow",
         draw_label: {
             text_style: <TEXT_BOLD> {},
@@ -150,8 +150,8 @@ live_design!{
     
     
     BarButton = <Button> {
-        layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-        walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
+        padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
+        margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
         label: "Cancel"
         draw_label: {
             text_style: <TEXT_BOLD> {},
@@ -203,60 +203,61 @@ live_design!{
     }
     
     SettingsInput = <Frame> {
-        walk: {width: 150, height: Fit, margin: {top: 10}},
+        width: 150, height: Fit, margin: {top: 10},
         label = <BarLabel> {
-            walk: {width: Fit, margin: {left: 5}},
+            width: Fit, margin: {left: 5},
             align: {x: 1.0}
         }
         input = <TextInput> {
-            layout: {padding: 0}
-            walk: {height: Fit, width: 50, margin: {top: 1, left: 2}}
-            label_walk: {width: Fit}
+            padding: 0
+            height: Fit, width: 50, margin: {top: 1, left: 2}
             text: "1344"
         }
     }
     
     FillerH = <Frame> {
-        walk: {width: Fill, height: Fit}
+        width: Fill, height: Fit
     }
     
     FillerV = <Frame> {
-        walk: {width: Fit, height: Fill}
+        width: Fit, height: Fill
     }
     
     
     DividerV = <Frame> {
-        layout: {flow: Down, spacing: 0.0}
-        walk: {margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}, width: Fill, height: Fit}
+        flow: Down, spacing: 0.0
+        margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
+        width: Fill, height: Fit
         <Rect> {
-            walk: {height: 2, width: Fill, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+            height: 2, width: Fill, margin: 0.0
+            flow: Down, padding: 0.0
             draw_bg: {color: #x00000033}
         }
         <Rect> {
-            walk: {height: 2, width: Fill, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+            height: 2, width: Fill, margin: 0.0
+            flow: Down, padding: 0.0
             draw_bg: {color: #xFFFFFF18}
         }
     }
     
     DividerH = <Frame> {
-        layout: {flow: Right, spacing: 0.0}
-        walk: {margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}, width: Fit, height: Fill}
+        flow: Right, spacing: 0.0
+        margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}
+        width: Fit, height: Fill
         <Rect> {
-            walk: {height: Fill, width: 2, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+            height: Fill, width: 2, margin: 0.0
+            flow: Down, padding: 0.0
             draw_bg: {color: #x00000033}
         }
         <Rect> {
-            walk: {height: Fill, width: 2, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+            height: Fill, width: 2, margin: 0.0
+            flow: Down, padding: 0.0
             draw_bg: {color: #xFFFFFF18}
         }
     }
     
     SdxlCheckBox = <CheckBox> {
-        layout: {padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}}
+        padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}
         label_walk: {margin: {left: 20.0, top: 8, bottom: 8, right: 10}}
         animator: {
             selected = {
@@ -308,7 +309,7 @@ live_design!{
     
     ProgressCircle = <Frame> {
         show_bg: true,
-        walk: {width: 24, height: 24}
+        width: 24, height: 24
         draw_bg: {
             instance progress: 0.0
             instance active: 0.0
@@ -348,8 +349,8 @@ live_design!{
     
     PromptGroup = <Rect> {
         <DividerV> {}
-        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 0}}
-        layout: {flow: Down, spacing: 0, padding: 0}
+        height: Fit, width: Fill, margin: {bottom: 10, top: 0}
+        flow: Down, spacing: 0, padding: 0
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
@@ -405,7 +406,7 @@ live_design!{
             }
         }
         prompt = <Label> {
-            walk: {width: Fill}
+            width: Fill
             draw_label: {
                 text_style: <TEXT_BOLD> {},
                 instance hover: 0.0
@@ -420,7 +421,7 @@ live_design!{
     }
     
     ImageTile = <Frame> {
-        walk: {width: Fill, height: Fit},
+        width: Fill, height: Fit
         cursor: Hand
         animator: {
             hover = {
@@ -464,7 +465,7 @@ live_design!{
         }
         
         img = <Image> {
-            walk: {width: Fill, height: Fill}
+            width: Fill, height: Fill
             min_width: 1920,
             min_height: 1080,
             fit: Horizontal,
@@ -497,16 +498,16 @@ live_design!{
                 caption_bar = {visible: true, caption_label = {label = {label: "SDXL Surf"}}},
                 
                 <Frame> {
-                    layout: {
+                    
                         flow: Overlay,
-                    },
-                    walk: {
+                    
+                    
                         width: Fill,
                         height: Fill
-                    },
+                    
                     
                     dock = <Dock> {
-                        walk: {height: Fill, width: Fill}
+                        height: Fill, width: Fill
                         
                         root = Splitter {
                             axis: Horizontal,
@@ -539,22 +540,23 @@ live_design!{
                         
                         ImageView = <Rect> {
                             draw_bg: {color: #2}
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down, align: {x: 0.5, y: 0.5}}
+                            height: Fill, width: Fill
+                            flow: Down, align: {x: 0.5, y: 0.5}
                             cursor: Hand,
                             image = <Image> {
                                 fit: Smallest,
-                                walk: {width: Fill, height: Fill}
+                                width: Fill, height: Fill
                             }
                         }
                         
                         InputPanel = <Rect> {
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down, padding: 0.0}
+                            height: Fill, width: Fill
+                            flow: Down, padding: 0.0
                             draw_bg: {color: (COLOR_PANEL_BG)}
                             <Frame> {
-                                walk: {height: Fit, width: Fill}
-                                layout: {align: {x: 0.0, y: 0.5}, padding: 5}
+                                height: Fit, width: Fill
+                                align: {x: 0.0, y: 0.5}
+                                padding: 5
                                 
                                 <BarLabel> {
                                     label: "Workflow"
@@ -575,8 +577,7 @@ live_design!{
                                 }
                                 seed_input = <TextInput> {
                                     draw_label: {text_style: <TEXT_BOLD> {}}
-                                    walk: {height: Fit, width: Fit, margin: {bottom: 0, left: 0}}
-                                    label_walk: {width: Fit}
+                                    height: Fit, width: Fit, margin: {bottom: 0, left: 0}
                                 }
                                 
                                 render_batch = <BarButton> {
@@ -599,7 +600,7 @@ live_design!{
                                 
                                 slide_show_dropdown = <SdxlDropDown> {
                                     selected_item: 5
-                                    walk: {margin: 0},
+                                    margin: 0
                                     labels: ["0", "1", "2", "3", "4", "5", "7", "10"]
                                 }
                                 
@@ -609,11 +610,11 @@ live_design!{
                                 <FillerH> {}
                                 cluster_dropdown = <SdxlDropDown> {
                                     selected_item: 0
-                                    walk: {margin: 0},
+                                    margin: 0
                                     labels: ["All nodes", "Part 1", "Part 2"]
                                 }
                                 todo_label = <BarLabel> {
-                                    walk: {margin: {right: 5.0}}
+                                    margin: {right: 5.0}
                                     label: "Todo 0"
                                 }
                                 progress1 = <ProgressCircle> {}
@@ -622,14 +623,14 @@ live_design!{
                                 progress4 = <ProgressCircle> {}
                                 progress5 = <ProgressCircle> {}
                                 progress6 = <ProgressCircle> {
-                                    walk: {margin: {right: 5.0}}
+                                    margin: {right: 5.0}
                                 }
                                 
                             }
                             <Frame> {
                                 positive = <TextInput> {
                                     ascii_only: true,
-                                    walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0}},
+                                    width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
                                     text: "Positive"
                                     draw_label: {
                                         text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
@@ -642,7 +643,7 @@ live_design!{
                                 }
                                 negative = <TextInput> {
                                     ascii_only: true,
-                                    walk: {width: 200, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0}},
+                                    width: 200, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
                                     draw_label: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
                                     text: "text, watermark, cartoon"
                                     draw_bg: {
@@ -652,11 +653,11 @@ live_design!{
                                     }
                                 }
                                 <Frame> {
-                                    walk: {width: Fill, height: Fill},
-                                    layout: {flow: Right}
+                                    width: Fill, height: Fill
+                                    flow: Right
                                     <Frame> {
-                                        walk: {width: 100, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
+                                        width: 100, height: Fit, margin: {top: 10},
+                                        flow: Down
                                         settings_width = <SettingsInput> {label = {label: "width:"}, input = {text: "1344"}}
                                         settings_height = <SettingsInput> {label = {label: "height:"}, input = {text: "768"}}
                                         settings_steps = <SettingsInput> {label = {label: "steps:"}, input = {text: "20"}}
@@ -664,31 +665,31 @@ live_design!{
                                         settings_total_steps = <SettingsInput> {label = {label: "total(0):"}, input = {text: "32"}}
                                     }
                                     <Frame> {
-                                        walk: {width: Fit, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
+                                        width: Fit, height: Fit, margin: {top: 10},
+                                        flow: Down
                                         settings_base_cfg = <SettingsInput> {label = {label: "base_cfg:"}, input = {text: "8.5"}}
                                         settings_refiner_cfg = <SettingsInput> {label = {label: "refiner_cfg:"}, input = {text: "9.5"}}
                                         settings_pos_score = <SettingsInput> {label = {label: "pos_score:"}, input = {text: "6"}}
                                         settings_neg_score = <SettingsInput> {label = {label: "neg_score:"}, input = {text: "2"}}
                                     }
                                     <Frame> {
-                                        walk: {width: Fit, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
+                                        width: Fit, height: Fit, margin: {top: 10},
+                                        flow: Down
                                         settings_base_start_step = <SettingsInput> {label = {label: "base_start_step:"}, input = {text: "0"}}
                                         settings_base_end_step = <SettingsInput> {label = {label: "base_end_step:"}, input = {text: "20"}}
                                         settings_refiner_start_step = <SettingsInput> {label = {label: "refiner_start_step:"}, input = {text: "20"}}
                                         settings_refiner_end_step = <SettingsInput> {label = {label: "refiner_end_step:"}, input = {text: "1000"}}
                                     }
                                     <Frame> {
-                                        walk: {width: Fit, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
+                                        width: Fit, height: Fit, margin: {top: 10},
+                                        flow: Down
                                         settings_upscale_steps = <SettingsInput> {label = {label: "upscale_steps:"}, input = {text: "31"}}
                                         settings_upscale_start_step = <SettingsInput> {label = {label: "upscale_start_step:"}, input = {text: "29"}}
                                         settings_upscale_end_step = <SettingsInput> {label = {label: "upscale_end_step:"}, input = {text: "1000"}}
                                     }
                                     /*
                                     <Frame> {
-                                        walk: {width: Fill, height: Fit, margin: {top: 10}},
+                                        width: Fill, height: Fit, margin: {top: 10},
                                         <BarLabel> {label: "base_cfg:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
                                         <BarLabel> {label: "refiner_cfg:"}
@@ -699,7 +700,7 @@ live_design!{
                                         negative_score_input = <SettingsInput> {text: "2.0"}
                                     }
                                     <Frame> {
-                                        walk: {width: Fill, height: Fit, margin: {top: 10}},
+                                        width: Fill, height: Fit, margin: {top: 10},
                                         <BarLabel> {label: "base_start_step:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
                                         <BarLabel> {label: "base_end_step:"}
@@ -715,13 +716,13 @@ live_design!{
                         
                         ImageLibrary = <Rect> {
                             draw_bg: {color: (COLOR_PANEL_BG)}
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down},
+                            height: Fill, width: Fill
+                            flow: Down
                             <Frame> {
-                                walk: {height: Fit, width: Fill}
-                                layout: {flow: Right, padding: {left: 10, right: 10, top: 10, bottom: 10}},
+                                height: Fit, width: Fill
+                                flow: Right, padding: {left: 10, right: 10, top: 10, bottom: 10},
                                 search = <TextInput> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 0}}
+                                    height: Fit, width: Fill, margin: {bottom: 0}
                                     empty_message: "Search"
                                     draw_bg: {
                                         color: (COLOR_TEXT_INPUT)
@@ -750,27 +751,27 @@ live_design!{
                                 }
                             }
                             image_list = <ListView> {
-                                walk: {height: Fill, width: Fill, margin: {top: 0}}
-                                layout: {flow: Down, padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}}
+                                height: Fill, width: Fill, margin: {top: 0}
+                                flow: Down, padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}
                                 
                                 PromptGroup = <PromptGroup> {}
                                 
                                 Empty = <Frame> {}
                                 
                                 ImageRow1 = <Frame> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 10}}
-                                    layout: {spacing: 20, flow: Right},
+                                    height: Fit, width: Fill, margin: {bottom: 10}
+                                    spacing: 20, flow: Right
                                     row1 = <ImageTile> {}
                                 }
                                 ImageRow2 = <Frame> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 10}}
-                                    layout: {spacing: 20, flow: Right},
+                                    height: Fit, width: Fill, margin: {bottom: 10}
+                                    spacing: 20, flow: Right
                                     row1 = <ImageTile> {}
                                     row2 = <ImageTile> {}
                                 }
                                 ImageRow3 = <Frame> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 10}}
-                                    layout: {spacing: 20, flow: Right},
+                                    height: Fit, width: Fill, margin: {bottom: 10}
+                                    spacing: 20, flow: Right
                                     row1 = <ImageTile> {}
                                     row2 = <ImageTile> {}
                                     row3 = <ImageTile> {}
@@ -783,12 +784,12 @@ live_design!{
                         visible: false,
                         draw_bg: {draw_depth: 10.0}
                         draw_bg: {color: #0}
-                        walk: {height: All, width: All, abs_pos: vec2(0.0, 0.0)}
-                        layout: {flow: Overlay, align: {x: 0.5, y: 0.5}}
+                        height: All, width: All, abs_pos: vec2(0.0, 0.0)
+                        flow: Overlay, align: {x: 0.5, y: 0.5}
                         image1 = <Image> {
                             draw_bg: {draw_depth: 11.0}
                             fit: Smallest,
-                            walk: {width: Fill, height: Fill}
+                            width: Fill, height: Fill
                         }
                     }
                 }
@@ -797,17 +798,18 @@ live_design!{
                 window: {inner_size: vec2(960, 540)},
                 second_image = <Rect> {
                     draw_bg: {color: #0}
-                    walk: {height: Fill, width: Fill}
-                    layout: {flow: Overlay, align: {x: 0.5, y: 0.5}}
+                    height: Fill, width: Fill
+                    flow: Overlay, align: {x: 0.5, y: 0.5}
                     image1 = <Image> {
                         fit: Smallest,
-                        walk: {width: Fill, height: Fill}
+                        width: Fill, height: Fill
                     }
                     prompt_frame = <Frame> {
-                        walk: {width: Fill, height: Fill}
-                        layout: {align: {y: 1.0}, padding: {left: 120, bottom: 40,right:120}}
+                        width: Fill, height: Fill
+                        align: {y: 1.0}
+                        padding: {left: 120, bottom: 40,right:120}
                         prompt = <Label> {
-                            walk: {width: Fill, height: Fit},
+                            width: Fill, height: Fit
                             draw_label: {
                                 wrap: Word
                                 text_style: <TEXT_BOLD> {font_size: 20}
