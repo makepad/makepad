@@ -1122,22 +1122,22 @@ impl App {
     fn save_preset(&self) -> PromptPreset {
         PromptPreset {
             workflow: self.ui.drop_down(id!(workflow_dropdown)).get_selected_label(),
-            width: self.ui.text_input(id!(settings_width.input)).get_text().parse::<u32>().unwrap_or(1344),
-            height: self.ui.text_input(id!(settings_height.input)).get_text().parse::<u32>().unwrap_or(768),
-            steps: self.ui.text_input(id!(settings_steps.input)).get_text().parse::<u32>().unwrap_or(20),
-            base_cfg: self.ui.text_input(id!(settings_base_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
-            refiner_cfg: self.ui.text_input(id!(settings_refiner_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
-            positive_score: self.ui.text_input(id!(settings_pos_score.input)).get_text().parse::<f64>().unwrap_or(6.0),
-            negative_score: self.ui.text_input(id!(settings_neg_score.input)).get_text().parse::<f64>().unwrap_or(2.0),
-            base_start_step: self.ui.text_input(id!(settings_base_start_step.input)).get_text().parse::<u32>().unwrap_or(0),
-            base_end_step: self.ui.text_input(id!(settings_base_end_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            refiner_start_step: self.ui.text_input(id!(settings_refiner_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            refiner_end_step: self.ui.text_input(id!(settings_refiner_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
-            upscale_start_step: self.ui.text_input(id!(settings_upscale_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            upscale_end_step: self.ui.text_input(id!(settings_upscale_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
-            upscale_steps: self.ui.text_input(id!(settings_upscale_steps.input)).get_text().parse::<u32>().unwrap_or(31),
-            scale: self.ui.text_input(id!(settings_scale.input)).get_text().parse::<f64>().unwrap_or(0.5),
-            total_steps: self.ui.text_input(id!(settings_total_steps.input)).get_text().parse::<u32>().unwrap_or(20),
+            width: self.ui.text_input(id!(settings_width.input)).text().parse::<u32>().unwrap_or(1344),
+            height: self.ui.text_input(id!(settings_height.input)).text().parse::<u32>().unwrap_or(768),
+            steps: self.ui.text_input(id!(settings_steps.input)).text().parse::<u32>().unwrap_or(20),
+            base_cfg: self.ui.text_input(id!(settings_base_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
+            refiner_cfg: self.ui.text_input(id!(settings_refiner_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
+            positive_score: self.ui.text_input(id!(settings_pos_score.input)).text().parse::<f64>().unwrap_or(6.0),
+            negative_score: self.ui.text_input(id!(settings_neg_score.input)).text().parse::<f64>().unwrap_or(2.0),
+            base_start_step: self.ui.text_input(id!(settings_base_start_step.input)).text().parse::<u32>().unwrap_or(0),
+            base_end_step: self.ui.text_input(id!(settings_base_end_step.input)).text().parse::<u32>().unwrap_or(20),
+            refiner_start_step: self.ui.text_input(id!(settings_refiner_start_step.input)).text().parse::<u32>().unwrap_or(20),
+            refiner_end_step: self.ui.text_input(id!(settings_refiner_end_step.input)).text().parse::<u32>().unwrap_or(1000),
+            upscale_start_step: self.ui.text_input(id!(settings_upscale_start_step.input)).text().parse::<u32>().unwrap_or(20),
+            upscale_end_step: self.ui.text_input(id!(settings_upscale_end_step.input)).text().parse::<u32>().unwrap_or(1000),
+            upscale_steps: self.ui.text_input(id!(settings_upscale_steps.input)).text().parse::<u32>().unwrap_or(31),
+            scale: self.ui.text_input(id!(settings_scale.input)).text().parse::<f64>().unwrap_or(0.5),
+            total_steps: self.ui.text_input(id!(settings_total_steps.input)).text().parse::<u32>().unwrap_or(20),
         }
     }
     
@@ -1162,8 +1162,8 @@ impl App {
     }
     
     fn render(&mut self, cx: &mut Cx, batch_size: usize) {
-        let positive = self.ui.text_input(id!(positive)).get_text();
-        let negative = self.ui.text_input(id!(negative)).get_text();
+        let positive = self.ui.text_input(id!(positive)).text();
+        let negative = self.ui.text_input(id!(negative)).text();
         
         //self.todo.clear();
         if batch_size != 1 {

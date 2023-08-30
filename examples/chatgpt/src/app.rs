@@ -98,14 +98,14 @@ impl AppMain for App{
         for event in event.network_responses(){
             match &event.response{
                 NetworkResponse::HttpResponse(response)=>{
-                    let label = self.ui.get_label(id!(message_label));
+                    let label = self.ui.label(id!(message_label));
                     match event.request_id {
                          live_id!(SendChatMessage) => {
                             if response.status_code == 200 {
                                 let chat_response = response.get_json_body::<ChatResponse>().unwrap();
-                                label.set_label(&chat_response.choices[0].message.content);
+                                label.set_text_and_redraw(cx, &chat_response.choices[0].message.content);
                             } else {
-                                label.set_label("Failed to connect with OpenAI");
+                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
                             }
                             label.redraw(cx);
                         },
@@ -113,9 +113,8 @@ impl AppMain for App{
                     }
                 }
                 NetworkResponse::HttpRequestError(error)=>{
-                    let label = self.ui.get_label(id!(message_label));
-                    label.set_label(&format!("Failed to connect with OpenAI {:?}", error));
-                    label.redraw(cx);
+                    let label = self.ui.label(id!(message_label));
+                    label.set_text_and_redraw(cx, &format!("Failed to connect with OpenAI {:?}", error));
                 }
                 _ => ()
             }
@@ -123,8 +122,8 @@ impl AppMain for App{
 
         let actions = self.ui.handle_widget_event(cx, event);
         
-        if self.ui.get_button(id!(send_button)).clicked(&actions) {
-            let user_prompt = self.ui.get_text_input(id!(message_input)).get_text();
+        if self.ui.button(id!(send_button)).clicked(&actions) {
+            let user_prompt = self.ui.text_input(id!(message_input)).text();
             Self::send_message(cx, user_prompt);
         }
     }
