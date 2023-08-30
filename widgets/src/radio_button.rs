@@ -49,7 +49,7 @@ live_design!{
     }
     
     RadioButton = {{RadioButton}} {
-        draw_label: {
+        draw_text: {
             instance hover: 0.0
             instance focus: 0.0
             instance selected: 0.0
@@ -118,7 +118,7 @@ live_design!{
                     from: {all: Forward {duration: 0.15}}
                     apply: {
                         draw_radio: {hover: 0.0}
-                        draw_label: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
                 }
@@ -126,7 +126,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_radio: {hover: 1.0}
-                        draw_label: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     }
                 }
@@ -137,7 +137,7 @@ live_design!{
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_radio: {focus: 0.0}
-                        draw_label: {focus: 0.0}
+                        draw_text: {focus: 0.0}
                         draw_icon: {focus: 0.0}
                     }
                 }
@@ -145,7 +145,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_radio: {focus: 1.0}
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                         draw_icon: {focus: 1.0}
                     }
                 }
@@ -157,7 +157,7 @@ live_design!{
                     apply: {
                         draw_radio: {selected: 0.0}
                         draw_icon: {selected: 0.0}
-                        draw_label: {selected: 0.0}
+                        draw_text: {selected: 0.0}
                         draw_icon: {selected: 0.0}
                     }
                 }
@@ -167,7 +167,7 @@ live_design!{
                     apply: {
                         draw_radio: {selected: 1.0}
                         draw_icon: {selected: 1.0}
-                        draw_label: {selected: 1.0}
+                        draw_text: {selected: 1.0}
                         draw_icon: {selected: 1.0}
                     }
                 }
@@ -199,7 +199,7 @@ pub enum RadioType {
 pub struct RadioButton {
     #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
-    #[live] draw_label: DrawText,
+    #[live] draw_text: DrawText,
     
     #[live] icon_walk: Walk,
     #[walk] walk: Walk,
@@ -262,7 +262,7 @@ impl RadioButton {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
         self.draw_radio.end(cx);
     }
 }

@@ -26,7 +26,7 @@ live_design!{
                 width: Fill, height: Fit
                 padding:5
                 draw_bg:{color:#5}
-                label = <Label> {label: "HI", draw_label:{color:#f}}
+                label = <Label> {text: "HI", draw_text:{color:#f}}
             }
             inner = <HookWidget> {}
         }
@@ -139,7 +139,7 @@ impl Designer {
                         WidgetRef::new_from_ptr(cx, container_ptr),
                     )
                 });
-                container.label(id!(label)).set_label(&format!("{}=<{}>", name, class));
+                container.label(id!(label)).set_text(&format!("{}=<{}>", name, class));
                 // lets draw this thing in a neat little container box with a title bar
                 while let Some(_) = container.draw_widget(cx).hook_widget() {
                     widget.draw_widget_all(cx);

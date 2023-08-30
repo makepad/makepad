@@ -165,11 +165,11 @@ live_design!{
         padding: {top: (SSPACING_2), right: (SSPACING_1), bottom: (SSPACING_2), left: (SSPACING_1)}
         
         label = <Label> {
-            draw_label: {
+            draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
             }
-            label: "replace me!"
+            text: "replace me!"
         }
     }
     
@@ -229,7 +229,7 @@ live_design!{
         width: Fit
         padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_REGULAR> {},
             fn get_color(self) -> vec4 {
                 return mix(
@@ -315,14 +315,14 @@ live_design!{
             }
         }
         padding: 9.0
-        label: ""
+        text: ""
     }
     
     TextButton = <Button> {
         align: {x: 0.5, y: 0.5 padding: <SPACING_0> {}}
         margin: {left: 2.5, right: 2.5}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix(
@@ -353,7 +353,7 @@ live_design!{
         
         align: {x: 0.5, y: 0.5 padding: <SPACING_2> {}}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix(
@@ -414,8 +414,8 @@ live_design!{
     
     FishSlider = <Slider> {
         height: 36
-        label: "CutOff1"
-        label_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
+        text: "CutOff1"
+        draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
         text_input: {
             cursor_margin_bottom: (SSPACING_1),
             cursor_margin_top: (SSPACING_1),
@@ -499,7 +499,7 @@ live_design!{
         padding: <SPACING_0> {}
         checkbox = <CheckBox> {
             padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}
-            label: "CutOff1"
+            text: "CutOff1"
             animator: {
                 selected = {
                     default: off
@@ -548,7 +548,7 @@ live_design!{
                     return sdf.result
                 }
             }
-            draw_label: {
+            draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
             }
@@ -561,7 +561,7 @@ live_design!{
         flow: Right
         label = <Label> {
             width: Fit
-            draw_label: {
+            draw_text: {
                 color: (COLOR_UP_5)
                 text_style: <H2_TEXT_BOLD> {},
             }
@@ -622,11 +622,11 @@ live_design!{
         padding: <SPACING_2> {}
         label = <Label> {
             margin: {top: 1}
-            draw_label: {
+            draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_DOWN_6)
             }
-            label: "replace me!"
+            text: "replace me!"
         }
     }
     
@@ -657,7 +657,7 @@ live_design!{
             }
         }
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_REGULAR> {},
             fn get_color(self) -> vec4 {
                 return mix(
@@ -681,7 +681,7 @@ live_design!{
             width: 30,
             height: 30,
             margin: {right: -20}
-            label: ""
+            text: ""
             animator: {
                 hover = {
                     default: off
@@ -848,7 +848,7 @@ live_design!{
         
         label_walk: {margin: {left: 23.0}}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return (COLOR_UP_5)
@@ -890,7 +890,7 @@ live_design!{
                 return sdf.result;
             }
         },
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_REGULAR> {},
         }
     }
@@ -935,7 +935,7 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             color: (COLOR_UP_6)
         }
@@ -961,7 +961,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
-                    label: "A"
+                    text: "A"
                 }
             }
             
@@ -970,7 +970,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
-                    label: "H"
+                    text: "H"
                 }
             }
             
@@ -979,7 +979,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
-                    label: "D"
+                    text: "D"
                 }
             }
             
@@ -988,7 +988,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
-                    label: "S"
+                    text: "S"
                 }
             }
             
@@ -997,7 +997,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
-                    label: "R"
+                    text: "R"
                 }
             }
             
@@ -1032,8 +1032,8 @@ live_design!{
                     <FishSubTitle> {
                         width: Fill
                         label = {
-                            label: "Modulation",
-                            draw_label: {color: (COLOR_ENV)},
+                            text: "Modulation",
+                            draw_text: {color: (COLOR_ENV)},
                         }
                     }
                 }
@@ -1054,7 +1054,7 @@ live_design!{
                 draw_slider: {line_color: (COLOR_ENV)}
                 min: -1.0
                 max: 1.0
-                label: "Influence on Cutoff"
+                text: "Influence on Cutoff"
             }
         }
         
@@ -1123,8 +1123,8 @@ live_design!{
                 margin: <SPACING_0> {}
                 <FishSubTitle> {
                     label = {
-                        label: "Arp",
-                        draw_label: {color: (COLOR_DEFAULT)},
+                        text: "Arp",
+                        draw_text: {color: (COLOR_DEFAULT)},
                     }
                 }
                 
@@ -1134,7 +1134,7 @@ live_design!{
                     margin: <SPACING_0> {}
                     padding: <SPACING_0> {}
                     checkbox = {
-                        label: " "
+                        text: " "
                         padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}
                         margin: <SPACING_0> {}
                     }
@@ -1157,7 +1157,7 @@ live_design!{
                 max: 4.0
                 step: 1.0
                 precision: 0,
-                label: "Octaves"
+                text: "Octaves"
             }
         }
     }
@@ -1173,8 +1173,8 @@ live_design!{
             margin: <SPACING_0> {}
             <FishSubTitle> {
                 label = {
-                    label: "Settings",
-                    draw_label: {color: (COLOR_DEFAULT)},
+                    text: "Settings",
+                    draw_text: {color: (COLOR_DEFAULT)},
                 }
             }
         }
@@ -1188,7 +1188,7 @@ live_design!{
                 draw_slider: {line_color: (COLOR_DEFAULT)}
                 min: 0.0
                 max: 1.0
-                label: "Portamento"
+                text: "Portamento"
             }
         }
     }
@@ -1209,7 +1209,7 @@ live_design!{
                 title = {
                     width: Fill
                     label = {
-                        label: "Sequencer",
+                        text: "Sequencer",
                     },
                     draw_bg: {color: (COLOR_DEFAULT)}
                 }
@@ -1302,7 +1302,7 @@ live_design!{
                             draw_slider: {line_color: (COLOR_DEFAULT)}
                             min: 0.0
                             max: 240.0
-                            label: "BPM"
+                            text: "BPM"
                         }
                     }
                 }
@@ -1334,8 +1334,8 @@ live_design!{
                 margin: {top: (SSPACING_0)}
                 <FishSubTitle> {
                     label = {
-                        label: "Bitcrush",
-                        draw_label: {color: (COLOR_FX)},
+                        text: "Bitcrush",
+                        draw_text: {color: (COLOR_FX)},
                     }
                 }
                 
@@ -1345,7 +1345,7 @@ live_design!{
                     margin: <SPACING_0> {}
                     padding: <SPACING_0> {}
                     checkbox = {
-                        label: " "
+                        text: " "
                         padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}
                         margin: <SPACING_0> {}
                     }
@@ -1366,7 +1366,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
-                    label: "Amount"
+                    text: "Amount"
                     
                 }
             }
@@ -1377,8 +1377,8 @@ live_design!{
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
-                    label: "Delay",
-                    draw_label: {color: (COLOR_FX)},
+                    text: "Delay",
+                    draw_text: {color: (COLOR_FX)},
                 }
             }
         }
@@ -1398,7 +1398,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Delay Send"
+                        text: "Delay Send"
                     }
                 }
                 
@@ -1407,7 +1407,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Delay Feedback"
+                        text: "Delay Feedback"
                         
                     }
                 }
@@ -1425,7 +1425,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Delay Stereo"
+                        text: "Delay Stereo"
                     }
                 }
                 
@@ -1434,7 +1434,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Delay Cross"
+                        text: "Delay Cross"
                     }
                 }
                 
@@ -1447,8 +1447,8 @@ live_design!{
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
-                    label: "Chorus",
-                    draw_label: {color: (COLOR_FX)},
+                    text: "Chorus",
+                    draw_text: {color: (COLOR_FX)},
                 }
             }
         }
@@ -1468,7 +1468,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Mix"
+                        text: "Mix"
                     }
                 }
                 chorusdelay = <InstrumentSlider> {
@@ -1476,7 +1476,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Pre"
+                        text: "Pre"
                     }
                 }
             }
@@ -1490,7 +1490,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Depth"
+                        text: "Depth"
                     }
                 }
                 chorusrate = <InstrumentSlider> {
@@ -1498,7 +1498,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Rate"
+                        text: "Rate"
                         
                     }
                 }
@@ -1513,7 +1513,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Phasing"
+                        text: "Phasing"
                     }
                 }
                 
@@ -1522,7 +1522,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: -1
                         max: 1
-                        label: "Feedback"
+                        text: "Feedback"
                     }
                 }
             }
@@ -1534,8 +1534,8 @@ live_design!{
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
-                    label: "Reverb",
-                    draw_label: {color: (COLOR_FX)},
+                    text: "Reverb",
+                    draw_text: {color: (COLOR_FX)},
                 }
             }
         }
@@ -1554,7 +1554,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Mix"
+                        text: "Mix"
                     }
                 }
                 reverbfeedback = <InstrumentSlider> {
@@ -1562,7 +1562,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        label: "Feedback"
+                        text: "Feedback"
                     }
                 }
             }
@@ -1579,7 +1579,7 @@ live_design!{
                 title = {
                     width: Fit
                     label = {
-                        label: "Filter",
+                        text: "Filter",
                     },
                 }
                 
@@ -1590,7 +1590,7 @@ live_design!{
                         labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
                         values: [LowPass, HighPass, BandPass, BandReject]
                         
-                        draw_label: {
+                        draw_text: {
                             text_style: <H2_TEXT_REGULAR> {},
                             fn get_color(self) -> vec4 {
                                 return mix(
@@ -1662,7 +1662,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FILTER)}
                         min: 0.0
                         max: 1.0
-                        label: "Cutoff"
+                        text: "Cutoff"
                     }
                 }
                 
@@ -1671,7 +1671,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FILTER)}
                         min: 0.0
                         max: 1.0
-                        label: "Resonance"
+                        text: "Resonance"
                     }
                 }
             }
@@ -1686,19 +1686,19 @@ live_design!{
                         draw_slider: {line_color: (COLOR_FILTER)}
                         min: -1.0
                         max: 1.0
-                        label: "Cutoff LFO Amount"
+                        text: "Cutoff LFO Amount"
                     }
                 }
                 rate = <InstrumentSlider> {
                     slider = {
                         draw_slider: {line_color: (COLOR_FILTER)}
                         max: 1.0
-                        label: "Cutoff LFO Rate"
+                        text: "Cutoff LFO Rate"
                     }
                 }
             }
             
-            sync = <FishToggle> {checkbox = {label: "LFO Key sync"}}
+            sync = <FishToggle> {checkbox = {text: "LFO Key sync"}}
         }
     }
     
@@ -1713,7 +1713,7 @@ live_design!{
             height: Fit
             
                 <SubheaderContainer> {
-                <FishSubTitle> {label = {label: "Osc", draw_label: {color: (COLOR_OSC)}, width: Fit}}
+                <FishSubTitle> {label = {text: "Osc", draw_text: {color: (COLOR_OSC)}, width: Fit}}
                 type = <InstrumentDropdown> {
                     flow: Down
                     dropdown = {
@@ -1737,7 +1737,7 @@ live_design!{
                     max: 24.0
                     step: 1.0
                     precision: 0,
-                    label: "Transpose"
+                    text: "Transpose"
                 }
             }
             
@@ -1746,7 +1746,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_OSC)}
                     min: -1.0
                     max: 1.0
-                    label: "Detune"
+                    text: "Detune"
                 }
             }
         }
@@ -1764,7 +1764,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
-                        label: "Spread"
+                        text: "Spread"
                     }
                 }
                 diffuse = <InstrumentSlider> {
@@ -1772,7 +1772,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
-                        label: "Diffuse"
+                        text: "Diffuse"
                     }
                 }
             }
@@ -1786,7 +1786,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
-                        label: "Spread"
+                        text: "Spread"
                     }
                 }
                 diffuse = <InstrumentSlider> {
@@ -1794,7 +1794,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
-                        label: "Diffuse"
+                        text: "Diffuse"
                     }
                 }
             }
@@ -1808,7 +1808,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: 0
                         max: 1.0
-                        label: "Shift"
+                        text: "Shift"
                     }
                 }
                 harmonicenv = <InstrumentBipolarSlider> {
@@ -1816,7 +1816,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
-                        label: "Env mod"
+                        text: "Env mod"
                     }
                 }
                 harmoniclfo = <InstrumentBipolarSlider> {
@@ -1824,7 +1824,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
-                        label: "LFO mod"
+                        text: "LFO mod"
                     }
                 }
             }
@@ -1845,7 +1845,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
-                    label: "Noise"
+                    text: "Noise"
                 }
             }
             sub = <InstrumentSlider> {
@@ -1853,7 +1853,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
-                    label: "Sub"
+                    text: "Sub"
                 }
             }
         }
@@ -1866,7 +1866,7 @@ live_design!{
                     draw_slider: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
-                    label: "Oscillator Balance"
+                    text: "Oscillator Balance"
                 }
             }
         }
@@ -1885,7 +1885,7 @@ live_design!{
                 <FishHeader> {
                 title = {
                     label = {
-                        label: "Sound Sources",
+                        text: "Sound Sources",
                     },
                     draw_bg: {color: (COLOR_OSC)}
                 }
@@ -1895,8 +1895,8 @@ live_design!{
                 margin: {top: (SSPACING_0)}
                 <FishSubTitle> {
                     label = {
-                        label: "Mixer",
-                        draw_label: {color: (COLOR_OSC)},
+                        text: "Mixer",
+                        draw_text: {color: (COLOR_OSC)},
                     }
                 }
             }
@@ -1945,19 +1945,19 @@ live_design!{
                     
                     <Label> {
                         margin: {bottom: (SSPACING_1)}
-                        draw_label: {
+                        draw_text: {
                             text_style: <H2_TEXT_BOLD> {},
                             color: (COLOR_UP_5)
                         }
-                        label: "Preset"
+                        text: "Preset"
                     }
                     
                     <Label> {
-                        draw_label: {
+                        draw_text: {
                             text_style: <H2_TEXT_REGULAR> {font_size: 18},
                             color: (COLOR_UP_6)
                         }
-                        label: "Ironfish"
+                        text: "Ironfish"
                     }
                 }
                 <View> {
@@ -1992,8 +1992,8 @@ live_design!{
                 platformtoggle = <IconButton> {draw_icon: {svg_file: (ICO_PLAT_MOBILE)} icon_walk: {width: Fit, height: 18.5}}
                 
                 gitlink = <Label> {
-                    draw_label: {text_style: <H2_TEXT_REGULAR> {}, color: (COLOR_UP_5)}
-                    label: "Made with Makepad\ngithub.com/makepad/makepad"
+                    draw_text: {text_style: <H2_TEXT_REGULAR> {}, color: (COLOR_UP_5)}
+                    text: "Made with Makepad\ngithub.com/makepad/makepad"
                     margin: {top: 7.5, left: 5.0}
                 }
                 
@@ -2038,7 +2038,7 @@ live_design!{
             <FishHeader> {
                 title = {
                     label = {
-                        label: "Envelopes",
+                        text: "Envelopes",
                     },
                     draw_bg: {color: (COLOR_ENV)}
                 }
@@ -2048,8 +2048,8 @@ live_design!{
                 margin: {top: (SSPACING_0)}
                 <FishSubTitle> {
                     label = {
-                        label: "Volume",
-                        draw_label: {color: (COLOR_ENV)},
+                        text: "Volume",
+                        draw_text: {color: (COLOR_ENV)},
                     }
                 }
             }
@@ -2082,7 +2082,7 @@ live_design!{
             <FishHeader> {
                 title = {
                     label = {
-                        label: "Effects",
+                        text: "Effects",
                     },
                     draw_bg: {color: (COLOR_FX)}
                 }
@@ -2110,15 +2110,15 @@ live_design!{
             <FishSubTitle> {
                 width: Fill
                 label = {
-                    label: "Browse",
-                    draw_label: {color: (COLOR_UP_6)}
+                    text: "Browse",
+                    draw_text: {color: (COLOR_UP_6)}
                 }
             }
             
             <FillerH> {}
-            <CheckboxTextual> {label: "Synth", width: Fit}
-            <CheckboxTextual> {label: "Seq", width: Fit}
-            <CheckboxTextual> {label: "Fav", width: Fit}
+            <CheckboxTextual> {text: "Synth", width: Fit}
+            <CheckboxTextual> {text: "Seq", width: Fit}
+            <CheckboxTextual> {text: "Fav", width: Fit}
         }
         
         <FishInput> {}
@@ -2148,7 +2148,7 @@ live_design!{
                     width: Fill,
                     height: Fill
                     align: {x: 0.0, y: 0.5 padding: 0.0}
-                    draw_label: {
+                    draw_text: {
                         fn get_color(self) -> vec4 {
                             return mix(
                                 mix((COLOR_UP_5), (COLOR_UP_6), self.hover),
@@ -2165,7 +2165,7 @@ live_design!{
                             return sdf.result
                         }
                     }
-                    label: "Preset Name"
+                    text: "Preset Name"
                 }
                 
                 <View> {
@@ -2179,7 +2179,7 @@ live_design!{
                         height: 30.0,
                         margin: {top: 10.0, right: -10.0, bottom: 0.0, left: 0.0}
                         padding: 0.0
-                        label: ""
+                        text: ""
                     }
                     
                     share = <IconButton> {
@@ -2220,8 +2220,8 @@ live_design!{
         <FishHeader> {
             title = {
                 label = {
-                    label: "Presets",
-                    draw_label: {
+                    text: "Presets",
+                    draw_text: {
                         color: (COLOR_UP_6)
                     }
                 },
@@ -2234,15 +2234,15 @@ live_design!{
             <FishSubTitle> {
                 width: Fill
                 label = {
-                    label: "Save",
-                    draw_label: {color: (COLOR_UP_6)}
+                    text: "Save",
+                    draw_text: {color: (COLOR_UP_6)}
                 }
             }
             
             <FillerV> {}
             
-            <CheckboxTextual> {label: "Synth"}
-            <CheckboxTextual> {label: "Seq"}
+            <CheckboxTextual> {text: "Synth"}
+            <CheckboxTextual> {text: "Seq"}
         }
         
         <View> {
@@ -2276,20 +2276,20 @@ live_design!{
                 padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: (SSPACING_2)}
                 <Label> {
                     margin: {right: 2.5}
-                    label: "Overwrite preset?"
-                    draw_label: {
+                    text: "Overwrite preset?"
+                    draw_text: {
                         color: (COLOR_UP_5)
                     }
                 }
                 <FillerH> {}
-                confirm = <TextButton> {label: "Yes"}
+                confirm = <TextButton> {text: "Yes"}
                 <Label> {
-                    label: " · "
-                    draw_label: {
+                    text: " · "
+                    draw_text: {
                         color: (COLOR_UP_5)
                     }
                 }
-                cancel = <TextButton> {label: "No"}
+                cancel = <TextButton> {text: "No"}
             }
             
         }

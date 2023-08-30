@@ -71,7 +71,7 @@ live_design!{
         width: Fit
         padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_REGULAR> {},
             fn get_color(self) -> vec4 {
                 return mix(
@@ -138,8 +138,8 @@ live_design!{
     
     BarLabel = <Label> {
         margin: {left: 10},
-        label: "Workflow",
-        draw_label: {
+        text: "Workflow",
+        draw_text: {
             text_style: <TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return (COLOR_LABEL)
@@ -152,8 +152,8 @@ live_design!{
     BarButton = <Button> {
         padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
         margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
-        label: "Cancel"
-        draw_label: {
+        text: "Cancel"
+        draw_text: {
             text_style: <TEXT_BOLD> {},
         }
         draw_bg: {
@@ -298,13 +298,13 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return (COLOR_LABEL)
             }
         }
-        label: "Slideshow"
+        text: "Slideshow"
     }
     
     ProgressCircle = <View> {
@@ -369,7 +369,7 @@ live_design!{
                     ease: OutExp
                     apply: {
                         draw_bg: {hover: 0.0}
-                        prompt = {draw_label: {hover: 0.0}}
+                        prompt = {draw_text: {hover: 0.0}}
                     }
                 }
                 on = {
@@ -379,7 +379,7 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {hover: 1.0}
-                        prompt = {draw_label: {hover: 1.0}}
+                        prompt = {draw_text: {hover: 1.0}}
                     }
                 }
             }
@@ -390,7 +390,7 @@ live_design!{
                     ease: OutExp
                     apply: {
                         draw_bg: {down: 0.0}
-                        prompt = {draw_label: {down: 0.0}}
+                        prompt = {draw_text: {down: 0.0}}
                     }
                 }
                 on = {
@@ -400,14 +400,14 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {down: 1.0}
-                        prompt = {draw_label: {down: 1.0}}
+                        prompt = {draw_text: {down: 1.0}}
                     }
                 }
             }
         }
         prompt = <Label> {
             width: Fill
-            draw_label: {
+            draw_text: {
                 text_style: <TEXT_BOLD> {},
                 instance hover: 0.0
                 instance down: 0.0
@@ -416,7 +416,7 @@ live_design!{
                 }
                 wrap: Word,
             }
-            label: ""
+            text: ""
         }
     }
     
@@ -495,7 +495,7 @@ live_design!{
         ui: <MultiWindow> {
             <DesktopWindow> {
                 window: {inner_size: vec2(2000, 1024)},
-                caption_bar = {visible: true, caption_label = {label = {label: "SDXL Surf"}}},
+                caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
                 
                 <View> {
                     
@@ -559,13 +559,13 @@ live_design!{
                                 padding: 5
                                 
                                 <BarLabel> {
-                                    label: "Workflow"
+                                    text: "Workflow"
                                 }
                                 
                                 workflow_dropdown = <SdxlDropDown> {}
                                 
                                 <BarLabel> {
-                                    label: "Batch size"
+                                    text: "Batch size"
                                 }
                                 batch_mode_dropdown = <SdxlDropDown> {
                                     selected_item: 5
@@ -573,29 +573,29 @@ live_design!{
                                 }
                                 
                                 <BarLabel> {
-                                    label: "Seed"
+                                    text: "Seed"
                                 }
                                 seed_input = <TextInput> {
-                                    draw_label: {text_style: <TEXT_BOLD> {}}
+                                    draw_text: {text_style: <TEXT_BOLD> {}}
                                     height: Fit, width: Fit, margin: {bottom: 0, left: 0}
                                 }
                                 
                                 render_batch = <BarButton> {
-                                    label: "Batch"
+                                    text: "Batch"
                                 }
                                 render_single = <BarButton> {
-                                    label: "Single"
+                                    text: "Single"
                                 }
                                 cancel_todo = <BarButton> {
-                                    label: "Cancel"
+                                    text: "Cancel"
                                 }
                                 
                                 <DividerH> {}
                                 play_button = <BarButton> {
-                                    label: "Play"
+                                    text: "Play"
                                 }
                                 slide_show_check_box = <SdxlCheckBox> {
-                                    label: "Slideshow"
+                                    text: "Slideshow"
                                 }
                                 
                                 slide_show_dropdown = <SdxlDropDown> {
@@ -615,7 +615,7 @@ live_design!{
                                 }
                                 todo_label = <BarLabel> {
                                     margin: {right: 5.0}
-                                    label: "Todo 0"
+                                    text: "Todo 0"
                                 }
                                 progress1 = <ProgressCircle> {}
                                 progress2 = <ProgressCircle> {}
@@ -632,7 +632,7 @@ live_design!{
                                     ascii_only: true,
                                     width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
                                     text: "Positive"
-                                    draw_label: {
+                                    draw_text: {
                                         text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
                                     }
                                     draw_bg: {
@@ -644,7 +644,7 @@ live_design!{
                                 negative = <TextInput> {
                                     ascii_only: true,
                                     width: 200, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
-                                    draw_label: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
+                                    draw_text: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
                                     text: "text, watermark, cartoon"
                                     draw_bg: {
                                         color: (COLOR_TEXT_INPUT)
@@ -658,56 +658,56 @@ live_design!{
                                     <View> {
                                         width: 100, height: Fit, margin: {top: 10},
                                         flow: Down
-                                        settings_width = <SettingsInput> {label = {label: "width:"}, input = {text: "1344"}}
-                                        settings_height = <SettingsInput> {label = {label: "height:"}, input = {text: "768"}}
-                                        settings_steps = <SettingsInput> {label = {label: "steps:"}, input = {text: "20"}}
-                                        settings_scale = <SettingsInput> {label = {label: "scale:"}, input = {text: "0.5"}}
-                                        settings_total_steps = <SettingsInput> {label = {label: "total(0):"}, input = {text: "32"}}
+                                        settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
+                                        settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
+                                        settings_steps = <SettingsInput> {label = {text: "steps:"}, input = {text: "20"}}
+                                        settings_scale = <SettingsInput> {label = {text: "scale:"}, input = {text: "0.5"}}
+                                        settings_total_steps = <SettingsInput> {label = {text: "total(0):"}, input = {text: "32"}}
                                     }
                                     <View> {
                                         width: Fit, height: Fit, margin: {top: 10},
                                         flow: Down
-                                        settings_base_cfg = <SettingsInput> {label = {label: "base_cfg:"}, input = {text: "8.5"}}
-                                        settings_refiner_cfg = <SettingsInput> {label = {label: "refiner_cfg:"}, input = {text: "9.5"}}
-                                        settings_pos_score = <SettingsInput> {label = {label: "pos_score:"}, input = {text: "6"}}
-                                        settings_neg_score = <SettingsInput> {label = {label: "neg_score:"}, input = {text: "2"}}
+                                        settings_base_cfg = <SettingsInput> {label = {text: "base_cfg:"}, input = {text: "8.5"}}
+                                        settings_refiner_cfg = <SettingsInput> {label = {text: "refiner_cfg:"}, input = {text: "9.5"}}
+                                        settings_pos_score = <SettingsInput> {label = {text: "pos_score:"}, input = {text: "6"}}
+                                        settings_neg_score = <SettingsInput> {label = {text: "neg_score:"}, input = {text: "2"}}
                                     }
                                     <View> {
                                         width: Fit, height: Fit, margin: {top: 10},
                                         flow: Down
-                                        settings_base_start_step = <SettingsInput> {label = {label: "base_start_step:"}, input = {text: "0"}}
-                                        settings_base_end_step = <SettingsInput> {label = {label: "base_end_step:"}, input = {text: "20"}}
-                                        settings_refiner_start_step = <SettingsInput> {label = {label: "refiner_start_step:"}, input = {text: "20"}}
-                                        settings_refiner_end_step = <SettingsInput> {label = {label: "refiner_end_step:"}, input = {text: "1000"}}
+                                        settings_base_start_step = <SettingsInput> {label = {text: "base_start_step:"}, input = {text: "0"}}
+                                        settings_base_end_step = <SettingsInput> {label = {text: "base_end_step:"}, input = {text: "20"}}
+                                        settings_refiner_start_step = <SettingsInput> {label = {text: "refiner_start_step:"}, input = {text: "20"}}
+                                        settings_refiner_end_step = <SettingsInput> {label = {text: "refiner_end_step:"}, input = {text: "1000"}}
                                     }
                                     <View> {
                                         width: Fit, height: Fit, margin: {top: 10},
                                         flow: Down
-                                        settings_upscale_steps = <SettingsInput> {label = {label: "upscale_steps:"}, input = {text: "31"}}
-                                        settings_upscale_start_step = <SettingsInput> {label = {label: "upscale_start_step:"}, input = {text: "29"}}
-                                        settings_upscale_end_step = <SettingsInput> {label = {label: "upscale_end_step:"}, input = {text: "1000"}}
+                                        settings_upscale_steps = <SettingsInput> {label = {text: "upscale_steps:"}, input = {text: "31"}}
+                                        settings_upscale_start_step = <SettingsInput> {label = {text: "upscale_start_step:"}, input = {text: "29"}}
+                                        settings_upscale_end_step = <SettingsInput> {label = {text: "upscale_end_step:"}, input = {text: "1000"}}
                                     }
                                     /*
                                     <View> {
                                         width: Fill, height: Fit, margin: {top: 10},
-                                        <BarLabel> {label: "base_cfg:"}
+                                        <BarLabel> {text: "base_cfg:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
-                                        <BarLabel> {label: "refiner_cfg:"}
+                                        <BarLabel> {text: "refiner_cfg:"}
                                         refiner_cfg_input = <SettingsInput> {text: "768"}
-                                        <BarLabel> {label: "pos_score:"}
+                                        <BarLabel> {text: "pos_score:"}
                                         positive_score_input = <SettingsInput> {text: "6.0"}
-                                        <BarLabel> {label: "neg_score:"}
+                                        <BarLabel> {text: "neg_score:"}
                                         negative_score_input = <SettingsInput> {text: "2.0"}
                                     }
                                     <View> {
                                         width: Fill, height: Fit, margin: {top: 10},
-                                        <BarLabel> {label: "base_start_step:"}
+                                        <BarLabel> {text: "base_start_step:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
-                                        <BarLabel> {label: "base_end_step:"}
+                                        <BarLabel> {text: "base_end_step:"}
                                         refiner_cfg_input = <SettingsInput> {text: "768"}
-                                        <BarLabel> {label: "refiner_start_step:"}
+                                        <BarLabel> {text: "refiner_start_step:"}
                                         positive_score_input = <SettingsInput> {text: "6.0"}
-                                        <BarLabel> {label: "refiner_end_step:"}
+                                        <BarLabel> {text: "refiner_end_step:"}
                                         negative_score_input = <SettingsInput> {text: "2.0"}
                                     }*/
                                 }
@@ -729,7 +729,7 @@ live_design!{
                                         border_width: 1.0
                                         border_color: #x00000044
                                     }
-                                    draw_label: {
+                                    draw_text: {
                                         text_style: {font_size: (TEXT_BIG)}
                                         fn get_color(self) -> vec4 {
                                             return
@@ -810,13 +810,13 @@ live_design!{
                         padding: {left: 120, bottom: 40,right:120}
                         prompt = <Label> {
                             width: Fill, height: Fit
-                            draw_label: {
+                            draw_text: {
                                 wrap: Word
                                 text_style: <TEXT_BOLD> {font_size: 20}
                                 
                                 color: #c
                             },
-                            label: "HELLO WORLD"
+                            text: "HELLO WORLD"
                         }
                     }
                 }
@@ -1071,7 +1071,7 @@ impl App {
         self.current_image = Some(image_id);
         let prompt_hash = self.prompt_hash_from_current_image();
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.label(id!(second_image.prompt)).set_label(&prompt_file.prompt.positive);
+            self.ui.label(id!(second_image.prompt)).set_text(&prompt_file.prompt.positive);
         }
     }
     
@@ -1115,7 +1115,7 @@ impl App {
             }
         }
         todo += self.todo.len();
-        self.ui.label(id!(todo_label)).set_label(&format!("Todo {}", todo));
+        self.ui.label(id!(todo_label)).set_text(&format!("Todo {}", todo));
         self.ui.redraw(cx);
     }
     
@@ -1365,7 +1365,7 @@ impl AppMain for App {
                                 ImageListItem::Prompt {prompt_hash} => {
                                     let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
                                     let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
-                                    item.label(id!(prompt)).set_label(&group.prompt.positive);
+                                    item.label(id!(prompt)).set_text(&group.prompt.positive);
                                     item.draw_widget_all(cx);
                                 }
                                 ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {

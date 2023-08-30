@@ -156,7 +156,7 @@ live_design!{
             radio_type: Tab,
             color_inactive: (COLOR_UP_OFF),
         }
-        draw_label: {
+        draw_text: {
             color_selected: (COLOR_UP_FULL),
             color_unselected: (COLOR_UP_6),
             color_unselected_hover: (COLOR_UP_6),
@@ -168,7 +168,7 @@ live_design!{
         width: Fit
         padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return mix(
@@ -216,7 +216,7 @@ live_design!{
             padding: 10
         }
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
@@ -315,7 +315,7 @@ live_design!{
             }
         }
         icon_walk: {margin: {left: 0.0}, width: 16, height: Fit}
-        label: ""
+        text: ""
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -339,7 +339,7 @@ live_design!{
         
             height: 36,
         
-        label: "Change Me"
+        text: "Change Me"
         label_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_6)}
         text_input: {
             cursor_margin_bottom: 3.0,
@@ -417,7 +417,7 @@ live_design!{
     InstrumentCheckbox = <ElementBox> {
         checkbox = <CheckBox> {
             padding: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}
-            label: "CutOff1"
+            text: "CutOff1"
             draw_check: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -437,7 +437,7 @@ live_design!{
                     return sdf.result
                 }
             }
-            draw_label: {
+            draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_6)
             }
@@ -448,7 +448,7 @@ live_design!{
         align: {y: 0.5 padding: 0, flow: Right}
         label = <Label> {
             width: Fit
-            draw_label: {
+            draw_text: {
                 color: (COLOR_UP_6)
                 text_style: <H2_TEXT_BOLD> {},
             }
@@ -464,7 +464,7 @@ live_design!{
         draw_bg: {color: (COLOR_UP_OFF)}
         checkbox = {
             width: 20, height: 20
-            label: ""
+            text: ""
             draw_check: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -496,7 +496,7 @@ live_design!{
         padding: <SPACING_0> {}
         checkbox = <CheckBox> {
             padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}
-            label: "CutOff1"
+            text: "CutOff1"
             label_walk: {margin: {left: 45.0, top: 8, bottom: 8, right: 10}}
             animator: {
                 selected = {
@@ -537,7 +537,7 @@ live_design!{
                     return sdf.result
                 }
             }
-            draw_label: {
+            draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
             }
@@ -572,7 +572,7 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             color: (COLOR_UP_6)
         }
@@ -595,7 +595,7 @@ live_design!{
                 slider = {
                     min: 0.0
                     max: 240.0
-                    label: "BPM"
+                    text: "BPM"
                 }
             }
             
@@ -631,7 +631,7 @@ live_design!{
                 margin: 0.0
                 padding: <SPACING_0> {}
                 checkbox = {
-                    label: "Arp"
+                    text: "Arp"
                     padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}
                     margin: <SPACING_0> {}
                 }
@@ -744,11 +744,11 @@ live_design!{
                 flow: Right, align: {x: 0.0, y: 0.5}
                 
                 label = <Label> {
-                    draw_label: {
+                    draw_text: {
                         text_style: {font_size: (FONT_SIZE_H1)},
                         color: (COLOR_UP_6)
                     }
-                    label: "Preset Name"
+                    text: "Preset Name"
                 }
             }
             
@@ -765,7 +765,7 @@ live_design!{
         width: Fill, height: Fill, margin: 2.5
         align: {x: 0.5, y: 0.5 padding: 0.0}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
@@ -808,7 +808,7 @@ live_design!{
         width: Fill, height: Fill, margin: {top: 2.5, right: 0.0, bottom: 2.5, left: 0}
         align: {x: 0.5, y: 0.5 padding: 0.0}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
@@ -858,11 +858,11 @@ live_design!{
         
         label = <Label> {
             width: 40, height: Fill, margin: 5.0
-            draw_label: {
+            draw_text: {
                 text_style: <H3_TEXT_REGULAR> {},
                 color: (COLOR_UP_6)
             }
-            label: "change me"
+            text: "change me"
         }
         
         <ChordButtonA> {}
@@ -882,14 +882,14 @@ live_design!{
     ChordPiano = <View> {
         flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}
         
-        <ChordStrip> {label = {label: "Em"}}
-        <ChordStrip> {label = {label: "Am"}}
-        <ChordStrip> {label = {label: "Dm"}}
-        <ChordStrip> {label = {label: "G"}}
-        <ChordStrip> {label = {label: "C"}}
-        <ChordStrip> {label = {label: "F"}}
-        <ChordStrip> {label = {label: "Bb"}}
-        <ChordStrip> {label = {label: "Bdim"}}
+        <ChordStrip> {label = {text: "Em"}}
+        <ChordStrip> {label = {text: "Am"}}
+        <ChordStrip> {label = {text: "Dm"}}
+        <ChordStrip> {label = {text: "G"}}
+        <ChordStrip> {label = {text: "C"}}
+        <ChordStrip> {label = {text: "F"}}
+        <ChordStrip> {label = {text: "Bb"}}
+        <ChordStrip> {label = {text: "Bdim"}}
     }
     
     ModePlay = <View> {
@@ -918,11 +918,11 @@ live_design!{
                 draw_bg: {color: #f00}
                 
                 crushamount = <FishSlider> {
-                    label: "Crush"
+                    text: "Crush"
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Amount"
+                        text: "Amount"
                         
                     }
                 }
@@ -930,33 +930,33 @@ live_design!{
                 <FillerY> {}
                 
                 chorusmix = <FishSlider> {
-                    label: "Chorus"
+                    text: "Chorus"
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Mix"
+                        text: "Mix"
                     }
                 }
                 
                 <FillerY> {}
                 
                 delaysend = <FishSlider> {
-                    label: "Delay",
+                    text: "Delay",
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Delay Send"
+                        text: "Delay Send"
                     }
                 }
                 
                 <FillerY> {}
                 
                 porta = <FishSlider> {
-                    label: "Portamento",
+                    text: "Portamento",
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Portamento"
+                        text: "Portamento"
                     }
                 }
                 
@@ -994,7 +994,7 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             color: (COLOR_UP_6)
         }
@@ -1014,13 +1014,13 @@ live_design!{
                 label = <Button> {
                      width: Fill, height: Fill, margin: {top: 5 }
                     align: {x: 0.0, y: 0.5 padding: { left: 5 }}
-                    draw_label: {
+                    draw_text: {
                         fn get_color(self) -> vec4 {
                             return mix( (COLOR_UP_5), (COLOR_UP_3), self.pressed )
                         }
                         text_style: <H2_TEXT_REGULAR>{},
                     }
-                    label: "Preset Name"
+                    text: "Preset Name"
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1035,7 +1035,7 @@ live_design!{
                     align: {x: 0.0, y: 0.5}
                     // presetfavorite = <PresetFavorite> {
                     //     width: 30, height: 30, margin: {top: 15 }
-                    //     label: " "
+                    //     text: " "
                     // }
                     
                 <IconButton> {
@@ -1081,9 +1081,9 @@ live_design!{
     }
     
     PaginationButton = <FishButton> {
-        label: "1"
+        text: "1"
         width: 40, height: 40, margin: {top: 20}
-        draw_label: {text_style: {font_size: (FONT_SIZE_H2)}}
+        draw_text: {text_style: {font_size: (FONT_SIZE_H2)}}
         
         draw_bg: {
             // instance pressed: 0.0
@@ -1109,13 +1109,13 @@ live_design!{
         width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}
         flow: Right, align: {x: 0.5, y: 0.0 spacing: 10}
         
-        <PaginationButton> {label: "…"}
-        <PaginationButton> {label: "3"}
-        <PaginationButton> {label: "4"}
-        <PaginationButton> {label: "5"}
-        <PaginationButton> {label: "6"}
-        <PaginationButton> {label: "7"}
-        <PaginationButton> {label: "…"}
+        <PaginationButton> {text: "…"}
+        <PaginationButton> {text: "3"}
+        <PaginationButton> {text: "4"}
+        <PaginationButton> {text: "5"}
+        <PaginationButton> {text: "6"}
+        <PaginationButton> {text: "7"}
+        <PaginationButton> {text: "…"}
     }
     
     PresetList = <SwipeList> {
@@ -1146,7 +1146,7 @@ live_design!{
                     width: Fill, height: 50
                     align: {x: 0.0, y: 0.5}
                     text: "Search"
-                    draw_label: {
+                    draw_text: {
                         text_style: <H2_TEXT_BOLD> {font_size: (FONT_SIZE_H1)}
                     }
                 }
@@ -1155,15 +1155,15 @@ live_design!{
                     spacing: 10, align: {x: 0.0, y: 1.0}
                     
                     tab1 = <FishTab> {
-                        label: "All",
+                        text: "All",
                         height: Fit, margin: 10
                         animator: {selected = {default: on}},
-                        draw_label: {color_selected: (COLOR_UP_8)}
+                        draw_text: {color_selected: (COLOR_UP_8)}
                     }
                     tab2 = <FishTab> {
-                        label: "Favorites",
+                        text: "Favorites",
                         height: Fit, margin: 10
-                        draw_label: {color_selected: (COLOR_UP_8)}
+                        draw_text: {color_selected: (COLOR_UP_8)}
                     }
                 }
             }
@@ -1211,7 +1211,7 @@ live_design!{
                 mobile_modes = <View> {
                     tab1 = <FishTab> {
                         animator: {selected = {default: on}},
-                        label: "Sequencer"
+                        text: "Sequencer"
                         draw_icon: {
                             svg_file: (ICO_SEQ),
                             fn get_color(self) -> vec4 {
@@ -1227,7 +1227,7 @@ live_design!{
                         flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}
                     }
                     tab2 = <FishTab> {
-                        label: "Play",
+                        text: "Play",
                         draw_icon: {
                             svg_file: (ICO_LIVEPLAY),
                             fn get_color(self) -> vec4 {
@@ -1243,7 +1243,7 @@ live_design!{
                         flow: Down, spacing: 3.0, align: {x: 0.5, y: 0.5}
                     }
                     tab3 = <FishTab> {
-                        label: "Presets",
+                        text: "Presets",
                         draw_icon: {
                             svg_file: (ICO_PRESET),
                             fn get_color(self) -> vec4 {

@@ -62,7 +62,7 @@ live_design!{
     
     CheckBox = {{CheckBox}} {
         
-        draw_label: {
+        draw_text: {
             color: #9,
             instance focus: 0.0
             instance selected: 0.0
@@ -103,10 +103,9 @@ live_design!{
             }
         }
         
-        
-            width: Fit,
-            height: Fit
-        
+        width: Fit,
+        height: Fit
+    
         label_walk: {
             margin: {left: 20.0, top: 8, bottom: 8, right: 10}
             width: Fit,
@@ -127,7 +126,7 @@ live_design!{
                     from: {all: Forward {duration: 0.15}}
                     apply: {
                         draw_check: {hover: 0.0}
-                        draw_label: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
                 }
@@ -135,7 +134,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_check: {hover: 1.0}
-                        draw_label: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     }
                 }
@@ -146,7 +145,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_check: {focus: 0.0}
-                        draw_label: {focus: 0.0}
+                        draw_text: {focus: 0.0}
                         draw_icon: {focus: 0.0}
                     }
                 }
@@ -154,7 +153,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_check: {focus: 1.0}
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                         draw_icon: {focus: 1.0}
                     }
                 }
@@ -165,7 +164,7 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_check: {selected: 0.0},
-                        draw_label: {selected: 0.0},
+                        draw_text: {selected: 0.0},
                         draw_icon: {selected: 0.0},
                     }
                  }
@@ -174,7 +173,7 @@ live_design!{
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_check: {selected: 1.0}
-                        draw_label: {selected: 1.0}
+                        draw_text: {selected: 1.0}
                         draw_icon: {selected: 1.0},
                     }
                 }
@@ -207,19 +206,18 @@ pub enum CheckType {
 pub struct CheckBox {
     
     #[walk] walk: Walk,
-    #[live] icon_walk: Walk,
-
     #[layout] layout: Layout,
     #[animator] animator: Animator,
 
+    #[live] icon_walk: Walk,
     #[live] label_walk: Walk,
     #[live] label_align: Align,
     
     #[live] draw_check: DrawCheckBox,
-    #[live] draw_label: DrawText,
+    #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
 
-    #[live] label: RcStringMut,
+    #[live] text: RcStringMut,
     
     #[live] bind: String,
 }
@@ -278,7 +276,7 @@ impl CheckBox {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_check.begin(cx, walk, self.layout);
-        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, self.label.as_ref());
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_check.end(cx);
     }
@@ -336,9 +334,9 @@ impl CheckBoxRef {
         None
     }
 
-    pub fn set_label_text(&self, text:&str){
+    pub fn set_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            let s = inner.label.as_mut_empty();
+            let s = inner.text.as_mut_empty();
             s.push_str(text);
         }
     }

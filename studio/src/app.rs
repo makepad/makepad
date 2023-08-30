@@ -47,12 +47,12 @@ live_design!{
         }
          margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0 }
         layout: { padding: 0.0 }
-        label: ""
+        text: ""
     }
     
     App = {{App}} {
         ui: <DesktopWindow> { 
-            caption_bar = {visible: true, caption_label = {label = {label: "Makepad Studio"}}},
+            caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
             dock = <Dock> {
                 height: Fill, width: Fill
                 
@@ -129,7 +129,7 @@ live_design!{
                         <Label>{
                             label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
                             width: Fit, margin:{left:200}
-                            draw_label: {
+                            draw_text: {
                                 text_style: {
                                     font_size: 20.0,
                                     height_factor: 1.0,
