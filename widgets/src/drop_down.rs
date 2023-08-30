@@ -142,7 +142,7 @@ pub struct DropDown {
     #[live] draw_bg: DrawQuad,
     #[live] draw_label: DrawLabelText,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
     #[live] bind: String,
     #[live] bind_enum: String,
@@ -158,7 +158,7 @@ pub struct DropDown {
     
     #[live] selected_item: usize,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
 }
 
 #[derive(Default, Clone)]

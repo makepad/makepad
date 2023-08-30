@@ -52,8 +52,8 @@ pub struct FoldHeader {
     #[animator] animator: Animator,
 
     #[live] opened: f64,
-    #[live] layout: Layout,
-    #[live] walk: Walk,
+    #[layout] layout: Layout,
+    #[walk] walk: Walk,
     #[live] body_walk: Walk,
 }
 

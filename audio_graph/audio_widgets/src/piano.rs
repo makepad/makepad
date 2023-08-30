@@ -136,7 +136,7 @@ pub struct PianoKey {
 #[derive(Live)]
 pub struct Piano {
     #[rust] area: Area,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] piano_key: Option<LivePtr>,
     
     #[rust([0; 20])]

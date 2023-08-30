@@ -403,7 +403,7 @@ pub struct Mandelbrot {
     // thew view container that contains our mandelbrot UI
     #[rust] view_area: Area,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     // prepending #[rust] makes derive(Live) ignore these fields
     // and they dont get DSL accessors
     #[rust] next_frame: NextFrame,

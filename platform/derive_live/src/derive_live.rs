@@ -45,12 +45,14 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
 
         for field in &mut fields {
             if field.attrs.len() == 1 
+             && field.attrs[0].name != "walk"
+             && field.attrs[0].name != "layout" 
              && field.attrs[0].name != "live"
              && field.attrs[0].name != "calc" 
              && field.attrs[0].name != "animator" 
              && field.attrs[0].name != "rust"
              && field.attrs[0].name != "deref" {
-                return error_result(&format!("Field {} does not have a live, calc, rust, animator or deref attribute", field.name));
+                return error_result(&format!("Field {} does not have a live, calc, rust, animator, deref, walk, layout attribute", field.name));
             }
             if field.attrs.is_empty() { // need field def
                 return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[live] for live DSL mapped fields and #[deref] for a base class");
@@ -59,7 +61,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         let deref_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "deref"));
         let animator_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "animator"));
-        
+        /*
+        let walk_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "walk"));
+        let layout_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "layout"));
+        */
         if let Some(animator_field) = animator_field {
             
             tb.add("impl").stream(generic.clone());
@@ -158,6 +163,21 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         for field in &fields {
             if field.attrs[0].name == "live" || field.attrs[0].name == "animator" {
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
+            }
+            if field.attrs[0].name == "walk"{
+                tb.add("        live_id!(abs_pos)=>self.").ident(&field.name).add(".abs_pos.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(margin)=>self.").ident(&field.name).add(".margin.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(width)=>self.").ident(&field.name).add(".width.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(height)=>self.").ident(&field.name).add(".height.apply(cx, apply_from, index, nodes),");
+            }
+            if field.attrs[0].name == "layout"{
+                tb.add("        live_id!(scroll)=>self.").ident(&field.name).add(".scroll.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(clip_x)=>self.").ident(&field.name).add(".clip_x.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(clip_y)=>self.").ident(&field.name).add(".clip_y.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(padding)=>self.").ident(&field.name).add(".padding.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(align)=>self.").ident(&field.name).add(".align.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(flow)=>self.").ident(&field.name).add(".flow.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(spacing)=>self.").ident(&field.name).add(".spacing.apply(cx, apply_from, index, nodes),");
             }
         }
         // Unknown value handling

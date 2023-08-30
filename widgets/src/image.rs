@@ -38,7 +38,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct Image {
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] draw_bg: DrawQuad,
     #[live] min_width: i64,
     #[live] min_height: i64,
