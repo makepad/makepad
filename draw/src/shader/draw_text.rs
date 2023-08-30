@@ -16,7 +16,7 @@ live_design!{
         //debug: true;
         text_style: {
             font: {
-                path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")
+                path: dep("crate://makepad-widgets/resources/NotoSansTC-Medium.ttf")
             }
         }
         
