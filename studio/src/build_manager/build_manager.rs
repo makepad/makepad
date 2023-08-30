@@ -127,7 +127,7 @@ live_design!{
     
     LogItemWait = <LogItem> {
         icon = <WaitIcon> {},
-        label = <Label> {width: Fill draw_label: {wrap: Word}}
+        label = <Label> {width: Fill draw_text: {wrap: Word}}
         link_label = <LinkLabel> {}
     }
     

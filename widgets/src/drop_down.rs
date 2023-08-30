@@ -86,7 +86,7 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_label: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -97,7 +97,7 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
                 
@@ -105,7 +105,7 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
@@ -115,14 +115,14 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {focus: 0.0},
-                        draw_label: {focus: 0.0}
+                        draw_text: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_bg: {focus: 1.0},
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                     }
                 }
             }
@@ -135,7 +135,7 @@ pub struct DropDown {
     #[animator] animator: Animator,
     
     #[live] draw_bg: DrawQuad,
-    #[live] draw_label: DrawLabelText,
+    #[live] draw_text: DrawLabelText,
     
     #[walk] walk: Walk,
     
@@ -309,9 +309,9 @@ impl DropDown {
         };
     }
     
-    pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
+    pub fn draw_text(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
-        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
     }
     
@@ -322,10 +322,10 @@ impl DropDown {
         //let start_pos = cx.turtle().rect().pos;
        
         if let Some(val) = self.labels.get(self.selected_item) {
-            self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), val);
+            self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
         else {
-            self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), " ");
+            self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), " ");
         }
         self.draw_bg.end(cx);
         

@@ -11,7 +11,7 @@ live_design!{
     }
     
     NavControl= {{NavControl}} {
-        draw_label: {
+        draw_text: {
             text_style: {
                 font_size: 6
             },
@@ -30,7 +30,7 @@ pub struct DrawFocusRect {
 pub struct NavControl {
     #[live] draw_list: DrawList2d,
     #[live] draw_focus: DrawFocusRect,
-    #[live] draw_label: DrawText,
+    #[live] draw_text: DrawText,
     #[rust] _recent_focus: Area,
 }
 

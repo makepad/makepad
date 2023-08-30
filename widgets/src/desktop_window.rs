@@ -32,7 +32,7 @@ live_design!{
             caption_label = <View> {
                 width: Fill, height: Fill
                 align: {x: 0.5, y: 0.5},
-                label = <Label> {label: "Makepad", margin: {left: 100}}
+                label = <Label> {text: "Makepad", margin: {left: 100}}
             }
             windows_buttons = <View> {
                 visible: false,

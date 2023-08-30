@@ -59,7 +59,7 @@ live_design!{
     NumberBox= {{NumberBox}} {
        
        padding:{left:14,top:1, bottom:1, right:5}
-        draw_label:{text_style:{font_size: 12}}
+        draw_text:{text_style:{font_size: 12}}
         label_align: {
             y: 0.0
         }
@@ -70,14 +70,14 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_label: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                         draw_bg: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_label: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                         draw_bg: {hover: 1.0}
                     }
                 }
@@ -87,14 +87,14 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_label: {focus: 0.0}
+                        draw_text: {focus: 0.0}
                         draw_bg: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                         draw_bg: {focus: 1.0}
                     }
                 }
@@ -131,7 +131,7 @@ pub struct DrawLabel {
 #[derive(Live, LiveHook)]
 pub struct NumberBox {
     #[live] draw_bg: DrawBg,
-    #[live] draw_label: DrawLabel,
+    #[live] draw_text: DrawLabel,
 
     #[layout] layout: Layout,
     #[animator] animator: Animator,
@@ -214,11 +214,11 @@ impl NumberBox {
         
         self.draw_bg.last_number = self.draw_bg.number;
         self.draw_bg.number = number;
-        self.draw_label.last_number = self.draw_label.number;
-        self.draw_label.number = number;
+        self.draw_text.last_number = self.draw_text.number;
+        self.draw_text.number = number;
         
         self.draw_bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
-        self.draw_label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
+        self.draw_text.draw_walk(cx, Walk::fit(),self.label_align, fmt);
         self.draw_bg.end(cx);
     }
 }

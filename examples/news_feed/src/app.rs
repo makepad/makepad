@@ -73,11 +73,11 @@ live_design!{
             }
         }
         padding: 9.0
-        label: ""
+        text: ""
     }
     
     IconButton = <Button> {
-        draw_label: {
+        draw_text: {
             instance hover: 0.0
             instance pressed: 0.0
             text_style: {
@@ -120,7 +120,7 @@ live_design!{
             }
         }
         padding: 9.0
-        label: "1"
+        text: "1"
     }
     
     
@@ -145,11 +145,11 @@ live_design!{
             width: Fill, height: Fit, margin: 0.0
             flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}
             
-            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 30.0, height: Fit}, label: ""}
-            <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, label: ""}
-            <IconButton> {draw_icon: {svg_file: (ICO_ADD)} icon_walk: {width: 40.0, height: Fit}, label: ""}
-            <IconButton> {draw_icon: {svg_file: (ICO_LIKES)} icon_walk: {width: 20.0, height: Fit}, label: ""}
-            <IconButton> {draw_icon: {svg_file: (ICO_USER)} icon_walk: {width: 15.0, height: Fit}, label: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 30.0, height: Fit}, text: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, text: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_ADD)} icon_walk: {width: 40.0, height: Fit}, text: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_LIKES)} icon_walk: {width: 20.0, height: Fit}, text: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_USER)} icon_walk: {width: 15.0, height: Fit}, text: ""}
         }
     }
     
@@ -168,10 +168,10 @@ live_design!{
             flow: Right, padding: 0.0, spacing: 10.0
             
             likes = <IconButton> {draw_icon: {svg_file: (ICO_FAV)} icon_walk: {width: 15.0, height: Fit}}
-            comments = <IconButton> {draw_icon: {svg_file: (ICO_COMMENT)} icon_walk: {width: 15.0, height: Fit}, label: "7"}
+            comments = <IconButton> {draw_icon: {svg_file: (ICO_COMMENT)} icon_walk: {width: 15.0, height: Fit}, text: "7"}
             
             <FillerX> {}
-            reply = <IconButton> {draw_icon: {svg_file: (ICO_REPLY)} icon_walk: {width: 15.0, height: Fit}, label: ""}
+            reply = <IconButton> {draw_icon: {svg_file: (ICO_REPLY)} icon_walk: {width: 15.0, height: Fit}, text: ""}
         }
     }
     
@@ -207,20 +207,20 @@ live_design!{
                 
                 meta = <Label> {
                     margin: {bottom: 10.0, top: 10.0}
-                    draw_label: {
+                    draw_text: {
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    label: "@username · 13h"
+                    text: "@username · 13h"
                 }
                 text = <Label> {
                     width: Fill, height: Fit
-                    draw_label: {
+                    draw_text: {
                         wrap: Word,
                         text_style: <TEXT_P> {},
                         color: (COLOR_P)
                     }
-                    label: ""
+                    text: ""
                 }
                 
                 <LineH> {
@@ -252,7 +252,7 @@ live_design!{
                 content = {
                     meta = {
                         margin: {bottom: 30.0, top: 10.0}
-                        draw_label: {
+                        draw_text: {
                             color: (COLOR_META_INV)
                         }
                     }

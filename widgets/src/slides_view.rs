@@ -14,13 +14,13 @@ live_design!{
     const SLIDE_WIDTH = 1920
     
     SlideBody = <Label> {
-        draw_label: {
+        draw_text: {
             color: #D
             text_style: {
                 font_size: 35
             }
         }
-        label: ""
+        text: ""
     }
     
     Slide = <RoundedView> {
@@ -28,13 +28,13 @@ live_design!{
         width: (SLIDE_WIDTH), height: Fill
         align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50 }
         title = <Label> {
-            draw_label: {
+            draw_text: {
                 color: #f
                 text_style: {
                     font_size: 84
                 }
             }
-            label: "SlideTitle"
+            text: "SlideTitle"
         }
     }
 
@@ -43,13 +43,13 @@ live_design!{
         width: (SLIDE_WIDTH), height: Fill
         align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50 }
         title = <Label> {
-            draw_label: {
+            draw_text: {
                 color: #x181818
                 text_style: {
                     font_size: 120
                 }
             }
-            label: "SlideTitle"
+            text: "SlideTitle"
         }
     }
     
