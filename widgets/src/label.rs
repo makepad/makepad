@@ -50,6 +50,14 @@ impl Widget for Label {
         self.draw_text.draw_walk(cx, walk, self.align, self.text.as_ref());
         WidgetDraw::done()
     }
+    
+    fn text(&self)->String{
+        self.text.as_ref().to_string()
+    }
+    
+    fn set_text(&mut self, v:&str){
+        self.text.as_mut_empty().push_str(v);
+    }
 }
 
 
@@ -57,10 +65,5 @@ impl Widget for Label {
 pub struct LabelRef(WidgetRef); 
 
 impl LabelRef{
-    pub fn set_text(&self, text:&str){
-        if let Some(mut inner) = self.borrow_mut(){
-            let s = inner.text.as_mut_empty();
-            s.push_str(text);
-        }
-    }
+  
 }

@@ -259,6 +259,15 @@ impl Widget for TextInput {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
+    
+        
+    fn text(&self)->String{
+        self.text.clone()
+    }
+    
+    fn set_text(&mut self, v:&str){
+        self.filter_input(&v, None);
+    }
 }
 
 #[derive(Clone, PartialEq, WidgetAction)]
@@ -800,18 +809,5 @@ impl TextInputRef {
         }
         None
     }
-    
-    pub fn set_text(&self, text:&str){
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.filter_input(&text, None);
-        }
-    }
-    
-    pub fn get_text(&self) -> String {
-        if let Some(inner) = self.borrow(){
-            inner.text.clone()
-        } else {
-            "".to_string()
-        }
-    }
+
 }
