@@ -48,10 +48,10 @@ live_design!{
             }
         }
         
-        walk: {
+        
             height: 10.0,
             width: 10.0,
-            margin: {right: 5},
+            margin: {right: 5
         },
     }
 }

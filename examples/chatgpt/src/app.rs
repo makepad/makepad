@@ -14,18 +14,18 @@ live_design!{
         ui: <DesktopWindow>{
             
             show_bg: true
-            layout: {
+            
                 flow: Down,
                 spacing: 20,
                 align: {
                     x: 0.5,
                     y: 0.5
-                }
+                
             },
-            walk: {
+            
                 width: Fill,
                 height: Fill
-            },
+            
             draw_bg: {
                 
                 fn pixel(self) -> vec4 {
@@ -33,7 +33,7 @@ live_design!{
                 }
             }
             message_label = <Label> {
-                walk: {width: 300, height: Fit},
+                width: 300, height: Fit
                 draw_label: {
                     color: #f
                 },
@@ -41,7 +41,7 @@ live_design!{
             }
             message_input = <TextInput> {
                 text: "Hi!"
-                walk: {width: 300, height: Fit},
+                width: 300, height: Fit
                 draw_bg: {
                     color: #1
                 }

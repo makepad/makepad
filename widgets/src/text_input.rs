@@ -109,25 +109,19 @@ live_design!{
                 return sdf.result;
             }
         },
-        layout: {
-            clip_x: false,
-            clip_y: false,
-            padding: {left:10,top:11, right:10, bottom:10}
-            align: {y: 0.}
-        },
-        walk: {
+        clip_x: false,
+        clip_y: false,
+        padding: {left:10,top:11, right:10, bottom:10}
+        label_align: {y: 0.}
+        //margin: {top: 5, right: 5}
+        width: Fit,
+        height: Fit,
+        
+        /*label_walk: {
             width: Fit,
             height: Fit,
-            //margin: 0// {left: 0.0, right: 5.0, top: 0.0, bottom: 2.0},
-        }
-        label_walk: {
-            width: Fill,
-            height: Fit,
             //margin: 0//{left: 5.0, right: 5.0, top: 0.0, bottom: 2.0},
-        }
-        align: {
-            y: 0.0
-        }
+        }*/
         
         animator: {
             hover = {
@@ -206,8 +200,9 @@ pub struct TextInput {
     #[live] draw_label: DrawLabel,
 
     #[walk] walk: Walk,
-    #[live] align: Align,
     #[layout] layout: Layout,
+
+    #[live] label_align: Align,
 
     #[live] cursor_size: f64,
     #[live] cursor_margin_bottom: f64,
@@ -218,7 +213,7 @@ pub struct TextInput {
     #[live] on_focus_select_all: bool,
     #[live] pub read_only: bool,
 
-    #[live] label_walk: Walk,
+    //#[live] label_walk: Walk,
 
     #[live] pub text: String,
     #[live] ascii_only: bool,
@@ -736,11 +731,13 @@ impl TextInput {
         
         if self.text.len() == 0 {
             self.draw_label.is_empty = 1.0;
-            self.draw_label.draw_walk(cx, self.label_walk, self.align, &self.empty_message);
+            self.draw_label.draw_walk(cx, Walk::size(self.walk.width,self.walk.height), self.label_align, &self.empty_message);
         }
         else {
             self.draw_label.is_empty = 0.0;
-            self.draw_label.draw_walk(cx, self.label_walk, self.align, &self.text);
+            self.draw_label.draw_walk(cx, Walk::size(
+                self.walk.width,
+                self.walk.height), self.label_align, &self.text);
         }
         
         let mut turtle = cx.turtle().padded_rect_used();

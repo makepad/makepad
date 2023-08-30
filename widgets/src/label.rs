@@ -10,10 +10,10 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     Label= {{Label}} {
-        walk:{
+        
             width:Fit
             height:Fit
-        }
+        
         draw_label:{
             color:#8,
             wrap: Word

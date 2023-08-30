@@ -93,19 +93,15 @@ live_design!{
             }
         }
         
-        walk: {
-            width: Fit,
-            height: Fit,
-            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
-        }
+        width: Fit,
+        height: Fit,
+        margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
+        align: {x: 0.5, y: 0.5}
+        padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
         
         label_walk:{
             width: Fit,
             height: Fit
-        }
-        layout: {
-            align: {x: 0.5, y: 0.5},
-            padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
         }
         
         animator: {

@@ -13,11 +13,11 @@ live_design!{
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::Frame;
     ListView = {{ListView}} {
-        walk: {
+        
             width: Fill
             height: Fill
-        }
-        layout: {flow: Down}
+        
+        flow: Down
         Entry = <Frame> {}
     }
 }

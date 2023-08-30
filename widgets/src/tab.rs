@@ -50,13 +50,13 @@ live_design!{
                 return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)*/
             }
         }
-        walk: {
+        
             width: Fit,
             height: Fill, //Fixed((DIM_TAB_HEIGHT)),
-        }
         
-        layout: {
-            align: {x: 0.0, y: 0.5},
+        
+        
+            align: {x: 0.0, y: 0.5
             padding: {
                 left: 10.0,
                 top: 2.0,

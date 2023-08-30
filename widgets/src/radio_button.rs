@@ -95,10 +95,10 @@ live_design!{
             }
         }
         
-        walk: {
+        
             width: Fit,
             height: Fit
-        }
+        
 
         label_walk: {
             margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}

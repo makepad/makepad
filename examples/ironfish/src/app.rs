@@ -60,7 +60,7 @@ live_design!{
                 window: {position: vec2(0, 400), inner_size: vec2(800, 800)},
                 pass: {clear_color: #2A}
                 block_signal_event: true;
-                layout: {padding: {top: 30}},
+                padding: {top: 30},
                 <Designer> {}
             }
             <DesktopWindow> {
@@ -104,29 +104,29 @@ live_design!{
                     <SlideBody> {label: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
                 }
                 <Slide> {title = {label: "Rust is fast: SIMD Mandelbrot"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        padding: 0, align:{x:0.5 spacing: 20}
                         <Box>{
                             draw_bg: { color: #x2A } 
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <Mandelbrot> {walk:{width:Fill, height:Fill}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <Mandelbrot> {width:Fill, height:Fill}
                         }
                     }
                 }
 
                 <Slide> {title = {label: "Instanced rendering"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        padding: 0, align:{x:0.5 spacing: 20}
                         <Box>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <NumberGrid> {walk:{width:Fill, height:Fill}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <NumberGrid> {width:Fill, height:Fill}
                         }
                     }
                 }
@@ -139,53 +139,53 @@ live_design!{
                 <Slide> {title = {label: "Ironfish Desktop"}, 
                     <Box>{
                         draw_bg: { color: #x2A }
-                        walk: { margin: 10.0, width: 1600 }
-                        layout:{ padding: 0.0 }
+                         margin: 10.0, width: 1600 
+                         padding: 0.0 
                         <AppDesktop> {}
                     }
                 }
                 
                 <Slide> {title = {label: "Ironfish Mobile"}, 
                     <Frame>{
-                        layout:{padding: 0, align:{x:0.5}}
-                        walk: { margin: { top: 0 }}
-                        <AppMobile> {walk:{width:400, height: Fill}}
+                        padding: 0, align:{x:0.5}
+                         margin: { top: 0 }
+                        <AppMobile> {width:400, height: Fill}
                     }
                 }
                 
                 <Slide> {title = {label: "Multi modal"}, 
                     <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        padding: 0, align:{x:0.5 spacing: 20}
 
-                        <AppMobile> {walk:{width:400, height: Fill}}
+                        <AppMobile> {width:400, height: Fill}
 
                         <Box>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
+                             margin: 0.0
+                             padding: 0.0 
                             <AppDesktop> {
-                                walk:{width: Fill, height: Fill}
+                                width: Fill, height: Fill
                             }
                         }
                     }
                 }
                 
                 <Slide> {title = {label: "Visual design"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        padding: 0, align:{x:0.5 spacing: 20}
                         <Box>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <AppDesktop> {walk:{width:900}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <AppDesktop> {width:900}
                         }
 
                         <Box>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <Designer> {walk:{width:900}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <Designer> {width:900}
                         } 
                     }
                 }

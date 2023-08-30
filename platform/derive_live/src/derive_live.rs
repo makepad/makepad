@@ -42,16 +42,16 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         };
         
         // alright now. we have a field
-
+        
         for field in &mut fields {
-            if field.attrs.len() == 1 
-             && field.attrs[0].name != "walk"
-             && field.attrs[0].name != "layout" 
-             && field.attrs[0].name != "live"
-             && field.attrs[0].name != "calc" 
-             && field.attrs[0].name != "animator" 
-             && field.attrs[0].name != "rust"
-             && field.attrs[0].name != "deref" {
+            if field.attrs.len() == 1
+                && field.attrs[0].name != "walk"
+                && field.attrs[0].name != "layout"
+                && field.attrs[0].name != "live"
+                && field.attrs[0].name != "calc"
+                && field.attrs[0].name != "animator"
+                && field.attrs[0].name != "rust"
+                && field.attrs[0].name != "deref" {
                 return error_result(&format!("Field {} does not have a live, calc, rust, animator, deref, walk, layout attribute", field.name));
             }
             if field.attrs.is_empty() { // need field def
@@ -59,8 +59,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             }
         }
         
-        let deref_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "deref"));
-        let animator_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "animator"));
+        let deref_field = fields.iter().find( | field | field.attrs.iter().any( | a | a.name == "deref"));
+        let animator_field = fields.iter().find( | field | field.attrs.iter().any( | a | a.name == "animator"));
         /*
         let walk_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "walk"));
         let layout_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "layout"));
@@ -152,7 +152,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.").ident(&deref_field.name).add("}");
             tb.add("}");
         }
-
+        
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
@@ -164,13 +164,32 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             if field.attrs[0].name == "live" || field.attrs[0].name == "animator" {
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
-            if field.attrs[0].name == "walk"{
+            else if field.attrs[0].name == "walk" {
+                for field in &fields {
+                    if field.name == "abs_pos" ||
+                      field.name == "margin" ||
+                      field.name == "width" ||
+                      field.name == "height" {
+                          return error_result(&format!("Name collision between walk splat and {}", field.name));
+                      }
+                }
                 tb.add("        live_id!(abs_pos)=>self.").ident(&field.name).add(".abs_pos.apply(cx, apply_from, index, nodes),");
                 tb.add("        live_id!(margin)=>self.").ident(&field.name).add(".margin.apply(cx, apply_from, index, nodes),");
                 tb.add("        live_id!(width)=>self.").ident(&field.name).add(".width.apply(cx, apply_from, index, nodes),");
                 tb.add("        live_id!(height)=>self.").ident(&field.name).add(".height.apply(cx, apply_from, index, nodes),");
             }
-            if field.attrs[0].name == "layout"{
+            else if field.attrs[0].name == "layout" {
+                for field in &fields {
+                    if field.name == "scroll" ||
+                      field.name == "clip_x" ||
+                      field.name == "clip_y" ||
+                      field.name == "padding" ||
+                      field.name == "align" ||
+                      field.name == "flow" ||
+                      field.name == "spacing"{
+                          return error_result(&format!("Name collision between layout splat and {}", field.name));
+                      }
+                }
                 tb.add("        live_id!(scroll)=>self.").ident(&field.name).add(".scroll.apply(cx, apply_from, index, nodes),");
                 tb.add("        live_id!(clip_x)=>self.").ident(&field.name).add(".clip_x.apply(cx, apply_from, index, nodes),");
                 tb.add("        live_id!(clip_y)=>self.").ident(&field.name).add(".clip_y.apply(cx, apply_from, index, nodes),");
@@ -181,7 +200,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             }
         }
         // Unknown value handling
-        if let Some(deref_field) = deref_field{
+        if let Some(deref_field) = deref_field {
             tb.add("            _=> self.").ident(&deref_field.name).add(".apply_value(cx, apply_from, index, nodes)");
         }
         else {
@@ -189,17 +208,17 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         }
         tb.add("            }");
         tb.add("        } else {");
-             
+        
         if let Some(deref_field) = deref_field {
             tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply_from, index, nodes)");
         }
-        else{
+        else {
             tb.add("        self.apply_value_instance(cx, apply_from, index, nodes)");
         }
         tb.add("        }");
         tb.add("    }");
         tb.add("}");
-
+        
         tb.add("impl").stream(generic.clone());
         tb.add("LiveHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         tb.add("    fn deref_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
@@ -209,15 +228,15 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("    self.").ident(&deref_field.name).add(".deref_before_apply(cx, apply_from, index, nodes);");
         }
         tb.add("    }");
-
+        
         tb.add("    fn deref_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
         tb.add("        self.after_apply(cx, apply_from, index, nodes);");
-
+        
         if let Some(deref_field) = deref_field {
             tb.add("    self.").ident(&deref_field.name).add(".deref_after_apply(cx, apply_from, index, nodes);");
         }
         tb.add("        self.after_apply_from(cx, apply_from);");
-        tb.add("    }");              
+        tb.add("    }");
         tb.add("}");
         
         tb.add("impl").stream(generic.clone());
@@ -242,7 +261,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("                    index += 1;");
         tb.add("                    break;");
         tb.add("                }");
-   
+        
         if let Some(animator_field) = animator_field { // apply the default states
             tb.add("            if nodes[index].id == live_id!(").ident(&animator_field.name).add("){animator_index = Some(index);}");
         }
@@ -250,7 +269,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            }");
         tb.add("            index");
         tb.add("        };");
-
+        
         if animator_field.is_some() { // apply the default states
             tb.add("    if let Some(animator_index) = animator_index{self.animator_after_apply(cx, apply_from, animator_index, nodes);}");
         }
@@ -270,7 +289,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         for field in &fields {
             let attr = &field.attrs[0];
-            if attr.name == "animator" || attr.name == "live" || attr.name == "calc" || attr.name == "deref"{
+            if attr.name == "animator" || attr.name == "live" || attr.name == "calc" || attr.name == "deref" {
                 tb.add("fields.push(LiveTypeField{id:LiveId::from_str_with_lut(").string(&field.name).add(").unwrap(),");
                 // ok so what do we do if we have an Option<..>
                 // how about LiveOrCalc becomes LiveFieldType::Option
@@ -293,7 +312,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                         else if attr.name == "deref" {
                             tb.add("live_field_kind: LiveFieldKind::Deref");
                         }
-                        else{
+                        else {
                             tb.add("live_field_kind: LiveFieldKind::Calc");
                         }
                     }
@@ -337,7 +356,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             let attr = &field.attrs[0];
             tb.ident(&field.name).add(":");
             if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                if attr.name == "live" || attr.name == "deref"{
+                if attr.name == "live" || attr.name == "deref" {
                     tb.add("LiveNew::new(cx)");
                 }
                 else {
@@ -385,18 +404,18 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         impl EnumItem {
             
-            fn gen_new(&self, tb: &mut TokenBuilder) -> Result<(), TokenStream>{
+            fn gen_new(&self, tb: &mut TokenBuilder) -> Result<(), TokenStream> {
                 tb.add("Self::").ident(&self.name);
                 match &self.kind {
                     EnumKind::Bare => (),
                     EnumKind::Named(_) => {
-                        if self.attributes.len() != 1{
+                        if self.attributes.len() != 1 {
                             return error_result("For named and typle enums please provide default values");
                         }
                         tb.add("{").stream(self.attributes[0].args.clone()).add("}");
                     },
                     EnumKind::Tuple(_) => {
-                        if self.attributes.len() != 1{
+                        if self.attributes.len() != 1 {
                             return error_result("For named and typle enums please provide default values");
                         }
                         tb.add("(").stream(self.attributes[0].args.clone()).add(")");
@@ -441,7 +460,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         tb.add("    fn new(cx:&mut Cx) -> Self {");
         tb.add("        let mut ret = ");
-        items[pick.unwrap()].gen_new(tb)?;
+        items[pick.unwrap()].gen_new(tb) ?;
         tb.add("        ;ret.after_new_before_apply(cx);ret");
         tb.add("    }");
         
@@ -460,7 +479,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("    fn live_design_with(cx: &mut Cx) {");
         
         
-        let is_u32_enum = main_attribs.iter().any(| attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32");
+        let is_u32_enum = main_attribs.iter().any( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32");
         if is_u32_enum {
             tb.add("        let mut variants = Vec::new();");
             for item in &items {
@@ -493,7 +512,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        let mut index = start_index;");
         tb.add("        let enum_id = LiveId(").suf_u64(LiveId::from_str(&enum_name).0).add(");");
         tb.add("        match &nodes[start_index].value{");
-
+        
         tb.add("            LiveValue::BareEnum(variant)=>{");
         tb.add("                match variant{");
         for item in &items {
@@ -515,7 +534,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).0).add(")=>{");
                 tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
                 tb.add("                else{*self = ");
-                item.gen_new(tb)?;
+                item.gen_new(tb) ?;
                 tb.add("                }");
                 tb.add("                if let Self::").ident(&item.name).add("{");
                 for field in fields {
@@ -558,7 +577,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 
                 tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
                 tb.add("                else{*self = ");
-                item.gen_new(tb)?;
+                item.gen_new(tb) ?;
                 tb.add("                }");
                 
                 tb.add("                if let Self::").ident(&item.name).add("(");

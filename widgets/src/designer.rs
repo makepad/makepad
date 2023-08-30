@@ -17,14 +17,14 @@ live_design!{
     
     Designer = {{Designer}} {
         has_view: true,
-        layout: {flow: Right},
+        flow: Right
         container: <Box> {
             draw_bg: {color: #3}
-            walk: {width: Fill, height: 400},
-            layout: {flow: Down, spacing: 10, padding:10}
+            width: Fill, height: 400
+            flow: Down, spacing: 10, padding:10
             <Box>{
-                walk: {width: Fill, height: Fit},
-                layout:{padding:5}
+                width: Fill, height: Fit
+                padding:5
                 draw_bg:{color:#5}
                 label = <Label> {label: "HI", draw_label:{color:#f}}
             }
@@ -39,8 +39,8 @@ live_design!{
             b: <CachedScrollXY> {
                 dpi_factor: 1.5
                 draw_bg: {color: #4}
-                walk: {width: Fill, height: Fill}
-                layout: {flow: Down},
+                width: Fill, height: Fill
+                flow: Down
                 design = <HookWidget> {}
             },
         }

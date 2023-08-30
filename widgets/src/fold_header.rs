@@ -7,17 +7,17 @@ use crate::{
 
 live_design!{
     FoldHeader= {{FoldHeader}} {
-        walk: {
+        
             width: Fill,
             height: Fit
-        }
+        
         body_walk: {
             width: Fill,
             height: Fit
         }
-        layout: {
+        
             flow: Down,
-        }
+        
         animator: {
             open = {
                 default: on

@@ -110,10 +110,8 @@ live_design!{
         piano_key: <PianoKey> {}
         white_size: vec2(20.0, 75.0),
         black_size: vec2(15.0, 50.0),
-        walk: {
-            width: Fit,
-            height: Fit
-        }
+        width: Fit,
+        height: Fit
     }
 }
 
@@ -130,7 +128,7 @@ struct DrawKey {
 #[derive(Live, LiveHook)]
 pub struct PianoKey {
     #[live] draw_key: DrawKey,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
 }
 
 #[derive(Live)]
@@ -196,11 +194,11 @@ impl PianoKey {
     }
     
     fn set_is_pressed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(pressed.on), id!(pressed.off))
+        self.animator_toggle(cx, is, animate, id!(pressed.on), id!(pressed.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(focus.on), id!(focus.off))
+        self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
     pub fn handle_event_with(
