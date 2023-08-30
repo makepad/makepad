@@ -12,7 +12,7 @@ use crate::{
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design!{  
-    import makepad_widgets::frame::*
+    import makepad_widgets::view::*
     import makepad_widgets::button::Button;
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
@@ -106,7 +106,7 @@ live_design!{
                 <Slide> {title = {label: "Rust is fast: SIMD Mandelbrot"}, 
                     align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
-                    <Frame>{
+                    <View>{
                         padding: 0, align:{x:0.5 spacing: 20}
                         <Box>{
                             draw_bg: { color: #x2A } 
@@ -120,7 +120,7 @@ live_design!{
                 <Slide> {title = {label: "Instanced rendering"}, 
                     align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
-                    <Frame>{
+                    <View>{
                         padding: 0, align:{x:0.5 spacing: 20}
                         <Box>{
                             draw_bg: { color: #x2A }
@@ -146,7 +146,7 @@ live_design!{
                 }
                 
                 <Slide> {title = {label: "Ironfish Mobile"}, 
-                    <Frame>{
+                    <View>{
                         padding: 0, align:{x:0.5}
                          margin: { top: 0 }
                         <AppMobile> {width:400, height: Fill}
@@ -154,7 +154,7 @@ live_design!{
                 }
                 
                 <Slide> {title = {label: "Multi modal"}, 
-                    <Frame>{
+                    <View>{
                         padding: 0, align:{x:0.5 spacing: 20}
 
                         <AppMobile> {width:400, height: Fill}
@@ -172,7 +172,7 @@ live_design!{
                 
                 <Slide> {title = {label: "Visual design"}, 
                     align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
-                    <Frame>{
+                    <View>{
                         padding: 0, align:{x:0.5 spacing: 20}
                         <Box>{
                             draw_bg: { color: #x2A }

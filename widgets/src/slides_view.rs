@@ -1,13 +1,13 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    frame::*,
+    view::*,
     widget::*,
 };
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::label::Label;
     //registry Widget::*;
     
@@ -70,7 +70,7 @@ pub struct SlidesView {
     #[live] goal_pos: f64,
     #[live] current_pos: f64,
     #[live] anim_speed: f64,
-    #[deref] frame: Frame,
+    #[deref] frame: View,
     #[rust] next_frame: NextFrame
 }
 
