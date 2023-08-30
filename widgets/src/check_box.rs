@@ -206,10 +206,10 @@ pub enum CheckType {
 #[derive(Live)]
 pub struct CheckBox {
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] icon_walk: Walk,
 
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[animator] animator: Animator,
 
     #[live] label_walk: Walk,

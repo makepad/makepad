@@ -38,8 +38,8 @@ enum ScrollState {
 #[derive(Live)]
 pub struct ListView {
     #[rust] area: Area,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     
     #[rust] range_start: u64,
     #[rust(u64::MAX)] range_end: u64,

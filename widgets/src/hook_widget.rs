@@ -22,8 +22,8 @@ live_design!{
 
 #[derive(Live)]
 pub struct HookWidget {
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[rust] draw_state: DrawStateWrap<DrawState>,
 }
 

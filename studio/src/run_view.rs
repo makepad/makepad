@@ -37,7 +37,7 @@ pub struct DrawApp {
 
 #[derive(Live)]
 pub struct RunView {
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[live] draw_bg: DrawApp,
     #[state] state: LiveState,

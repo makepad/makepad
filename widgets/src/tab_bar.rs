@@ -43,7 +43,7 @@ pub struct TabBar {
     #[live] draw_drag: DrawColor,
 
     #[live] draw_fill: DrawColor,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] tab: Option<LivePtr>,
     
     #[rust] view_area: Area,

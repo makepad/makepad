@@ -205,9 +205,9 @@ pub struct TextInput {
     #[live] draw_cursor: DrawQuad,
     #[live] draw_label: DrawLabel,
 
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] align: Align,
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
 
     #[live] cursor_size: f64,
     #[live] cursor_margin_bottom: f64,

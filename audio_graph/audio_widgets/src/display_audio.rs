@@ -64,7 +64,7 @@ struct DrawWave {
 
 #[derive(Live)]
 pub struct DisplayAudio {
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] draw_wave: DrawWave,
     #[live] wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
