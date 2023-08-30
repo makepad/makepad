@@ -68,6 +68,7 @@ live_design!{
         draw_bg: {
             instance is_even: 0.0
             instance selected: 0.0
+            instance hover: 0.0
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(

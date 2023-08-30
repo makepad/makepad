@@ -166,7 +166,7 @@ pub struct Button {
     
     #[live] layout: Layout,
 
-    #[live] label: RcStringMut,
+    #[live] pub label: RcStringMut,
 }
 
 impl LiveHook for Button{

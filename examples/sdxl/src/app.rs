@@ -477,7 +477,7 @@ live_design!{
                     let max_scale = vec2(0.92);
                     let scale = mix(vec2(1.0), max_scale, self.hover);
                     let pan = mix(vec2(0.0), (vec2(1.0) - max_scale) * 0.5, self.hover);
-                    let color = self.get_color(scale, pan) + mix(vec4(0.0), vec4(0.1), self.down);
+                    let color = self.get_color_scale_pan(scale, pan) + mix(vec4(0.0), vec4(0.1), self.down);
                     sdf.fill_keep(color);
                     sdf.stroke(
                         mix(mix(#x0000, #x0006, self.hover), #xfff2, self.down),
