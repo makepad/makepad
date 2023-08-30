@@ -61,7 +61,7 @@ pub struct TabCloseButton {
     #[live] draw_button: DrawQuad,
     #[animator] animator: Animator,
 
-    #[live] walk: Walk
+    #[walk] walk: Walk
 }
 
 impl TabCloseButton {

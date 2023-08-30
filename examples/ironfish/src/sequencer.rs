@@ -97,7 +97,7 @@ pub struct SeqButtonId(pub LiveId);
 #[derive(Live)]
 pub struct Sequencer {
     #[rust] area: Area,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] button: Option<LivePtr>,
     
     #[live] grid_x: usize,

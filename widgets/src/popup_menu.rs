@@ -169,9 +169,9 @@ pub struct PopupMenuItem {
     #[live] draw_bg: DrawBg,
     #[live] draw_name: DrawName,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[animator] animator: Animator,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
     #[live] indent_width: f32,
     #[live] icon_walk: Walk,
@@ -187,8 +187,8 @@ pub struct PopupMenu {
     #[live] menu_item: Option<LivePtr>,
     
     #[live] draw_bg: DrawQuad,
-    #[live] layout: Layout,
-    #[live] walk: Walk,
+    #[layout] layout: Layout,
+    #[walk] walk: Walk,
     #[live] items: Vec<String>,
     #[rust] first_tap: bool,
     #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,

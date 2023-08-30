@@ -385,9 +385,9 @@ pub struct Frame { // draw info per UI element
     
     #[live(false)] show_bg: bool,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
     //#[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
@@ -986,10 +986,10 @@ impl Frame {
                 /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }*/
-                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));//.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll));//.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
         }
         

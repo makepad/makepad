@@ -202,11 +202,11 @@ pub struct RadioButton {
     #[live] draw_label: DrawText,
     
     #[live] icon_walk: Walk,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
     #[live] value: LiveValue,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[animator] animator: Animator,
     
     #[live] label_walk: Walk,

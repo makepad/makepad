@@ -167,9 +167,9 @@ pub struct DrawSlider {
 pub struct Slider {
     #[live] draw_slider: DrawSlider,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[animator] animator: Animator,
     
     #[live] label_walk: Walk,
