@@ -29,7 +29,7 @@ mod pass;
 mod texture;
 mod cursor;
 mod menu;
-mod live_state;
+mod animator;
 mod gpu_info;
 mod geometry;
 mod debug;
@@ -225,13 +225,13 @@ pub use {
             ToLiveValue,
             ApplyFrom,
         },
-        live_state::{
+        animator::{
             Ease,
             Play,
             Animate,
-            LiveState,
-            LiveStateImpl,
-            StateAction,
+            Animator,
+            AnimatorImpl,
+            AnimatorAction,
         },
         draw_vars::{
             shader_enum,

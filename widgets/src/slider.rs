@@ -95,14 +95,14 @@ live_design!{
                 margin: {top: 3, right: 5}
             }
         }
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_slider: {hover: 0.0}
-                        //text_input: {state: {hover = off}}
+                        //text_input: {animator: {hover = off}}
                     }
                 }
                 on = {
@@ -110,7 +110,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_slider: {hover: 1.0}
-                        //text_input: {state: {hover = on}}
+                        //text_input: {animator: {hover = on}}
                     }
                 }
             }
@@ -170,7 +170,7 @@ pub struct Slider {
     #[live] walk: Walk,
     
     #[live] layout: Layout,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
@@ -226,14 +226,14 @@ impl Slider {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         for action in self.text_input.handle_event(cx, event) {
             match action {
                 TextInputAction::KeyFocus => {
-                    self.animate_state(cx, id!(focus.on));
+                    self.animator_play(cx, id!(focus.on));
                 }
                 TextInputAction::KeyFocusLost => {
-                    self.animate_state(cx, id!(focus.off));
+                    self.animator_play(cx, id!(focus.off));
                 }
                 TextInputAction::Return(value) => {
                     if let Ok(v) = value.parse::<f64>() {
@@ -251,10 +251,10 @@ impl Slider {
         match event.hits(cx, self.draw_slider.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
                 // cx.set_key_focus(self.slider.area());
@@ -263,7 +263,7 @@ impl Slider {
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
                 
-                self.animate_state(cx, id!(drag.on));
+                self.animator_play(cx, id!(drag.on));
                 self.dragging = Some(self.value);
                 dispatch_action(cx, SliderAction::StartSlide);
             },
@@ -271,12 +271,12 @@ impl Slider {
                 self.text_input.read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.create_external_undo();
-                self.animate_state(cx, id!(drag.off));
+                self.animator_play(cx, id!(drag.off));
                 if fe.is_over && fe.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
                 self.dragging = None;
                 dispatch_action(cx, SliderAction::EndSlide);

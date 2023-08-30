@@ -129,7 +129,7 @@ live_design!{
             y: 0.0
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -198,7 +198,7 @@ pub struct DrawLabel {
 
 #[derive(Live)]
 pub struct TextInput {
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
 
     #[live] draw_bg: DrawColor,
     #[live] draw_select: DrawQuad,
@@ -469,17 +469,17 @@ impl TextInput {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animate_state(cx, id!(focus.off));
+                self.animator_play(cx, id!(focus.off));
                 cx.hide_text_ime();
                 dispatch_action(cx, TextInputAction::Return(self.text.clone()));
                 dispatch_action(cx, TextInputAction::KeyFocusLost);
             }
             Hit::KeyFocus(_) => {
                 self.undo_id += 1;
-                self.animate_state(cx, id!(focus.on));
+                self.animator_play(cx, id!(focus.on));
                 // select all
                 if self.on_focus_select_all{
                     self.select_all();
@@ -640,10 +640,10 @@ impl TextInput {
             }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Text);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) => {
                 cx.set_cursor(MouseCursor::Text);
@@ -687,10 +687,10 @@ impl TextInput {
                     cx.show_clipboard_actions(self.selected_text());
                 }
                 if fe.is_over && fe.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
             Hit::FingerMove(fe) => {

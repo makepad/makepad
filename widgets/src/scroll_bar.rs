@@ -48,7 +48,7 @@ live_design!{
         bar_side_margin: 3.0
         min_handle_size: 30.0
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -98,7 +98,7 @@ pub struct ScrollBar {
     #[live] use_vertical_finger_scroll: bool,
     #[live] smoothing: Option<f64>,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
@@ -346,7 +346,7 @@ impl ScrollBar {
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if self.visible {
-            self.state_handle_event(cx, event);
+            self.animator_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some() {
                 if self.move_towards_scroll_target(cx) {
                     self.next_frame = cx.new_next_frame();
@@ -356,7 +356,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.draw_bar.area()) {
                 Hit::FingerDown(fe) => {
-                    self.animate_state(cx, id!(hover.pressed));
+                    self.animator_play(cx, id!(hover.pressed));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         Axis::Horizontal => rel.x,
@@ -375,18 +375,18 @@ impl ScrollBar {
                     }
                 },
                 Hit::FingerHoverIn(_) => {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 },
                 Hit::FingerHoverOut(_) => {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 },
                 Hit::FingerUp(fe) => {
                     self.drag_point = None;
                     if fe.is_over && fe.device.has_hovers() {
-                        self.animate_state(cx, id!(hover.on));
+                        self.animator_play(cx, id!(hover.on));
                     }
                     else {
-                        self.animate_state(cx, id!(hover.off));
+                        self.animator_play(cx, id!(hover.off));
                     }
                     return;
                 },

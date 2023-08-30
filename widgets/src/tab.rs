@@ -65,7 +65,7 @@ live_design!{
             },
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -119,7 +119,7 @@ pub struct Tab {
     #[live] draw_name: DrawText,
     //#[live] draw_drag: DrawColor,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] close_button: TabCloseButton,
     
@@ -151,7 +151,7 @@ impl Tab {
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.is_selected = is_selected;
-        self.toggle_state(cx, is_selected, animate, id!(selected.on), id!(selected.off));
+        self.animator_toggle(cx, is_selected, animate, id!(selected.on), id!(selected.off));
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
@@ -179,22 +179,22 @@ impl Tab {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabAction),
     ) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         
         let mut block_hover_out = false;
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animate_state(cx, id!(hover.off)),
+            TabCloseButtonAction::HoverOut => self.animator_play(cx, id!(hover.off)),
             _ => ()
         };
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => if !block_hover_out {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerMove(e) => {
                 if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {

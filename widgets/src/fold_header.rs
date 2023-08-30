@@ -18,7 +18,7 @@ live_design!{
         layout: {
             flow: Down,
         }
-        state: {
+        animator: {
             open = {
                 default: on
                 off = {
@@ -49,7 +49,8 @@ pub struct FoldHeader {
     #[rust] area: Area,
     #[live] header: WidgetRef,
     #[live] body: WidgetRef,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
+
     #[live] opened: f64,
     #[live] layout: Layout,
     #[live] walk: Walk,
@@ -75,8 +76,8 @@ impl Widget for FoldHeader {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
-            if self.state.is_track_animating(cx, id!(open)) {
+        if self.animator_handle_event(cx, event).must_redraw() {
+            if self.animator.is_track_animating(cx, id!(open)) {
                 self.area.redraw(cx);
             }
         };
@@ -85,10 +86,10 @@ impl Widget for FoldHeader {
             if item.widget_uid == self.header.get_widget(id!(fold_button)).widget_uid(){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
-                        self.animate_state(cx, id!(open.on))
+                        self.animator_play(cx, id!(open.on))
                     }
                     FoldButtonAction::Closing => {
-                        self.animate_state(cx, id!(open.off))
+                        self.animator_play(cx, id!(open.off))
                     }
                     _ => ()
                 }

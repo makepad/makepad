@@ -39,7 +39,7 @@ live_design!{
             height: 12,
         }
         
-        state: {
+        animator: {
             
             hover = {
                 default: off
@@ -81,7 +81,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct FoldButton {
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] opened: f32,
     
@@ -113,48 +113,48 @@ impl FoldButton {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
     ) {
-        if self.state_handle_event(cx, event).is_animating() {
-            if self.state.is_track_animating(cx, id!(open)) {
+        if self.animator_handle_event(cx, event).is_animating() {
+            if self.animator.is_track_animating(cx, id!(open)) {
                 dispatch_action(cx, FoldButtonAction::Animating(self.opened))
             }
         };
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
-                if self.is_in_state(cx, id!(open.yes)) {
-                    self.animate_state(cx, id!(open.no));
+                if self.animator_in_state(cx, id!(open.yes)) {
+                    self.animator_play(cx, id!(open.no));
                     dispatch_action(cx, FoldButtonAction::Closing)
                 }
                 else {
-                    self.animate_state(cx, id!(open.yes));
+                    self.animator_play(cx, id!(open.yes));
                     dispatch_action(cx, FoldButtonAction::Opening)
                 }
-                self.animate_state(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                 self.animate_state(cx, id!(hover.on));
+                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
                 if fe.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else{
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
             else {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             _ => ()
         };
     }
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.toggle_state(cx, is_open, animate, id!(open.yes), id!(open.no))
+        self.animator_toggle(cx, is_open, animate, id!(open.yes), id!(open.no))
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
