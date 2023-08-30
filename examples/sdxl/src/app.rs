@@ -566,7 +566,7 @@ live_design!{
                                     label: "Batch size"
                                 }
                                 batch_mode_dropdown = <SdxlDropDown> {
-                                    selected_item: 6
+                                    selected_item: 5
                                     labels: ["1", "2", "3", "4", "5", "6", "10000"]
                                 }
                                 
@@ -1389,7 +1389,7 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, modifiers, ..}) = event {
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey|KeyCode::NumpadEnter, modifiers, ..}) = event {
             if modifiers.logo || modifiers.control {
                 self.clear_todo(cx);
             }

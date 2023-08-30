@@ -28,7 +28,7 @@ pub struct Label {
     #[live] align: Align,
 
     //margin: Margin,
-    #[live] label: String,
+    #[live] label: RcStringMut,
 } 
 
 impl LiveHook for Label{
@@ -47,7 +47,7 @@ impl Widget for Label {
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
-        self.draw_label.draw_walk(cx, walk, self.align, &self.label);
+        self.draw_label.draw_walk(cx, walk, self.align, self.label.as_ref());
         WidgetDraw::done()
     }
 }
@@ -59,8 +59,9 @@ pub struct LabelRef(WidgetRef);
 impl LabelRef{
     pub fn set_label(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.label.clear();
-            inner.label.push_str(text);
+            let s = inner.label.as_mut();
+            s.clear();
+            s.push_str(text);
         }
     }
 }
