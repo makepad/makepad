@@ -258,7 +258,7 @@ live_design!{
     SdxlCheckBox = <CheckBox> {
         layout: {padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}}
         label_walk: {margin: {left: 20.0, top: 8, bottom: 8, right: 10}}
-        state: {
+        animator: {
             selected = {
                 default: off
                 off = {
@@ -360,7 +360,7 @@ live_design!{
                 return sdf.result
             }
         }
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -422,7 +422,7 @@ live_design!{
     ImageTile = <Frame> {
         walk: {width: Fill, height: Fit},
         cursor: Hand
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {

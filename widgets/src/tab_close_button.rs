@@ -28,7 +28,7 @@ live_design!{
             }
         }
         
-        state:{
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -59,7 +59,7 @@ live_design!{
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
     #[live] draw_button: DrawQuad,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
 
     #[live] walk: Walk
 }
@@ -78,14 +78,14 @@ impl TabCloseButton {
         cx: &mut Cx,
         event: &Event,
     ) -> TabCloseButtonAction {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_button.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
                 return TabCloseButtonAction::HoverIn;
             }
             Hit::FingerHoverOut(_)=>{
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
                 return TabCloseButtonAction::HoverOut;
             }
             Hit::FingerDown(_) => return TabCloseButtonAction::WasPressed,

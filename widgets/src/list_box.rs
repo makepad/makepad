@@ -48,7 +48,7 @@ live_design!{
             padding: {left: 5},
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -120,7 +120,7 @@ pub struct ListBoxItem {
     #[live] draw_name: DrawName,
     
     #[live] layout: Layout,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] indent_width: f64,
     #[live] icon_walk: Walk,
@@ -202,7 +202,7 @@ impl ListBoxItem {
     }
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
-        self.toggle_state(cx, is_selected, animate, id!(select.on), id!(select.off))
+        self.animator_toggle(cx, is_selected, animate, id!(select.on), id!(select.off))
     }
     
     pub fn handle_event_with(
@@ -211,16 +211,16 @@ impl ListBoxItem {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxNodeAction),
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.area().redraw(cx);
         }
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -228,7 +228,7 @@ impl ListBoxItem {
                 }
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, id!(select.on));
+                self.animator_play(cx, id!(select.on));
                 dispatch_action(cx, ListBoxNodeAction::WasClicked);
             }
             _ => {}

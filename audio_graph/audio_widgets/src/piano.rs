@@ -64,7 +64,7 @@ live_design!{
     
     PianoKey= {{PianoKey}} {
         
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -210,30 +210,30 @@ impl PianoKey {
         sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_key.area().redraw(cx);
         }
         match event.hits_with_sweep_area(cx, self.draw_key.area(), sweep_area) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, id!(hover.on));
-                self.animate_state(cx, id!(pressed.on));
+                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, id!(pressed.on));
                 dispatch_action(cx, PianoKeyAction::Pressed(127));
             }
             Hit::FingerUp(e) => {
                 if !e.is_sweep && e.device.has_hovers(){
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else{
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
-                self.animate_state(cx, id!(pressed.off));
+                self.animator_play(cx, id!(pressed.off));
                 dispatch_action(cx, PianoKeyAction::Up);
             }
             _ => {}
