@@ -9,7 +9,7 @@ live_design!{
     App = {{App}} {
         ui: <DesktopWindow> {
             <Mandelbrot> {
-                walk: {width: Fill, height: Fill}
+                width: Fill, height: Fill
             }
         }
     }

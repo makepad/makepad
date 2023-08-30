@@ -13,22 +13,22 @@ live_design!{
     import makepad_widgets::theme::*;
     
     SwipeListEntry = {{SwipeListEntry}} {
-        layout: {
+        
             flow: Overlay
-        }
-        walk: {
+        
+        
             height: 60,
             width: Fill
-        }
+        
     }
     
     SwipeList = {{SwipeList}} {
-        walk: {
-            margin: {top: 3, right: 10, bottom: 3, left: 10},
+        
+            margin: {top: 3, right: 10, bottom: 3, left: 10
             width: Fill
             height: 400
         }
-        layout: {flow: Down, padding: 10, spacing: 2}
+        flow: Down, padding: 10, spacing: 2
         Entry = <SwipeListEntry> {}
     }
 }

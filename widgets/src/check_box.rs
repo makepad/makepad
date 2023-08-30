@@ -103,10 +103,10 @@ live_design!{
             }
         }
         
-        walk: {
+        
             width: Fit,
             height: Fit
-        }
+        
         label_walk: {
             margin: {left: 20.0, top: 8, bottom: 8, right: 10}
             width: Fit,

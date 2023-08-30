@@ -43,9 +43,9 @@ live_design!{
     
     Dock = {{Dock}} {
         border_size: (BORDER_SIZE)
-        layout: {
+        
             flow: Down
-            padding: {left: (BORDER_SIZE), top: (BORDER_SIZE), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
+            padding: {left: (BORDER_SIZE), top: (BORDER_SIZE), right: (BORDER_SIZE), bottom: (BORDER_SIZE)
         }
         padding_fill: {color: (COLOR_BG_APP)}
         drag_quad: {

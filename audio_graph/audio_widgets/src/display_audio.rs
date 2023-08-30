@@ -46,10 +46,10 @@ live_design!{
     }
     
     DisplayAudio = {{DisplayAudio}} {
-        walk: {
+        
             width: Fill,
             height: Fill
-        }
+        
     }
 }
 

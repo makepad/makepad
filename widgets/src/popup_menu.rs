@@ -55,14 +55,12 @@ live_design!{
     }
     
     PopupMenuItem = {{PopupMenuItem}} {
-        layout: {
-            align: {y: 0.5},
-            padding: {left: 15, top: 5, bottom: 5},
-        }
-        walk: {
-            width: Fill,
-            height: Fit
-        }
+        
+        align: {y: 0.5}
+        padding: {left: 15, top: 5, bottom: 5},
+        width: Fill,
+        height: Fit
+        
         animator: {
             hover = {
                 default: off
@@ -106,14 +104,14 @@ live_design!{
     
     PopupMenu = {{PopupMenu}} {
         menu_item: <PopupMenuItem> {}
-        layout: {
+        
             flow: Down,
             padding: 5
-        }
-        walk:{
+        
+        
             width:100,
             height:Fit
-        }
+        
         draw_bg: {
             
             instance color: #0

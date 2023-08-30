@@ -10,10 +10,10 @@ live_design!{
     import makepad_widgets::theme::*;
     
     Image = {{Image}} {
-        walk: {
+        
             width: 100
             height: 100
-        }
+        
         draw_bg: {
             texture image: texture2d
             instance opacity: 1.0

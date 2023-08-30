@@ -44,7 +44,7 @@ live_design!{
     import makepad_widgets::list_view::ListView;
     
     WaitIcon = <Frame> {
-        walk: {width: 10, height: 10}
+        width: 10, height: 10
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -63,7 +63,7 @@ live_design!{
     }
     
     LogItem = <Rect> {
-        walk: {height: Fit, width: Fill}
+        height: Fit, width: Fill
         layout: {padding: {top: 5, bottom: 5}}
         draw_bg: {
             instance is_even: 0.0
@@ -127,12 +127,12 @@ live_design!{
     
     LogItemWait = <LogItem> {
         icon = <WaitIcon> {},
-        label = <Label> {walk: {width: Fill}, draw_label: {wrap: Word}}
+        label = <Label> {width: Fill draw_label: {wrap: Word}}
         link_label = <LinkLabel> {}
     }
     
     LogItemEmpty = <Rect> {
-        walk: {height: 20, width: Fill}
+        height: 20, width: Fill
         draw_bg: {
             instance is_even: 0.0
             fn pixel(self) -> vec4 {
@@ -146,7 +146,7 @@ live_design!{
     }
     
     LogList = <ListView> {
-        walk: {height: Fill, width: Fill}
+        height: Fill, width: Fill
         layout: {flow: Down}
         WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
         WaitOdd = <LogItemWait> {draw_bg: {is_even: 0.0}}

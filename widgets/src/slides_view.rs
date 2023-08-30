@@ -25,8 +25,8 @@ live_design!{
     
     Slide = <Box> {
         draw_bg: { color: #x1A, radius: 5.0 }
-        walk: {width: (SLIDE_WIDTH), height: Fill}
-        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
+        width: (SLIDE_WIDTH), height: Fill
+        align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50 }
         title = <Label> {
             draw_label: {
                 color: #f
@@ -40,8 +40,8 @@ live_design!{
 
     SlideChapter = <Slide> {
         draw_bg: { color: #xFF5C39, radius: 5.0 }
-        walk: {width: (SLIDE_WIDTH), height: Fill}
-        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
+        width: (SLIDE_WIDTH), height: Fill
+        align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50 }
         title = <Label> {
             draw_label: {
                 color: #x181818
@@ -58,7 +58,7 @@ live_design!{
         goal_pos: 0.0
         anim_speed: 0.9
         <ScrollX> {
-            walk: {width: Fill, height: Fill}
+            width: Fill, height: Fill
         }
     }
 }

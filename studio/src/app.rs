@@ -45,7 +45,7 @@ live_design!{
                 return sdf.result
             }
         }
-        walk: { margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0} }
+         margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0 }
         layout: { padding: 0.0 }
         label: ""
     }
@@ -54,7 +54,7 @@ live_design!{
         ui: <DesktopWindow> { 
             caption_bar = {visible: true, caption_label = {label = {label: "Makepad Studio"}}},
             dock = <Dock> {
-                walk: {height: Fill, width: Fill}
+                height: Fill, width: Fill
                 
                 root = Splitter {
                     axis: Horizontal,
@@ -115,7 +115,7 @@ live_design!{
                 Welcome = <Rect> {
                     draw_bg: {color: #052329}
                     <Frame> {
-                        walk: { width: Fill, height: Fill}
+                         width: Fill, height: Fill
                         layout: {
                             align: {
                                 x: 0.5,
@@ -128,7 +128,7 @@ live_design!{
 
                         <Label>{
                             label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
-                            walk: {width: Fit, margin:{left:200}}
+                            width: Fit, margin:{left:200}
                             draw_label: {
                                 text_style: {
                                     font_size: 20.0,
