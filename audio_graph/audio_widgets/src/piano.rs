@@ -452,7 +452,7 @@ impl Widget for Piano{
         });
     }
 
-    fn get_walk(&self)->Walk{self.walk}
+    fn walk(&self)->Walk{self.walk}
     
     fn redraw(&mut self, cx:&mut Cx){
         self.area.redraw(cx)

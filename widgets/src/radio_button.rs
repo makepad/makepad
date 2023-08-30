@@ -280,7 +280,7 @@ impl Widget for RadioButton {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
@@ -326,7 +326,7 @@ impl RadioButtonSet{
         if let Some(index) = self.selected(cx, actions){
             // ok now we set visible
             for (i,path) in paths.iter().enumerate(){
-                let mut widget = ui.get_widget(path);
+                let mut widget = ui.widget(path);
                 widget.apply_over(cx, live!{visible:(i == index)});
                 widget.redraw(cx);
             }

@@ -363,14 +363,14 @@ impl App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
-        let preset_lists = self.ui.get_swipe_list_set(ids!(preset_list));
+        let preset_lists = self.ui.swipe_list_set(ids!(preset_list));
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 if let Some(mut list) = preset_lists.has_widget(&next).borrow_mut() {
                     for i in 0..10 {
                         if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {
-                            item.get_button(id!(label)).set_label(&format!("Button id {i}"));
+                            item.button(id!(label)).set_label(&format!("Button id {i}"));
                             item.draw_widget_all(cx);
                         }
                     }
@@ -386,7 +386,7 @@ impl AppMain for App {
         for list in preset_lists.iter() {
             for item in list.items_with_actions(&actions).iter() {
                 // check for actions inside the list item
-                if item.get_button(id!(delete)).clicked(&actions) {
+                if item.button(id!(delete)).clicked(&actions) {
                     // delete the item in the data
                     list.redraw(cx); 
                 }
@@ -396,7 +396,7 @@ impl AppMain for App {
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             synth_db.nodes = ironfish.settings.live_read();
-            ui.get_piano(id!(piano)).set_key_focus(cx);
+            ui.piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
         }
         
@@ -408,7 +408,7 @@ impl AppMain for App {
             cx.use_audio_outputs(&devices.default_output());
         }
         
-        ui.get_radio_button_set(ids!(
+        ui.radio_button_set(ids!(
             oscillators.tab1,
             oscillators.tab2,
         )).selected_to_visible(cx, &ui, &actions, ids!(
@@ -416,7 +416,7 @@ impl AppMain for App {
             oscillators.osc2,
         ));
         
-        ui.get_radio_button_set(ids!(
+        ui.radio_button_set(ids!(
             filter_modes.tab1,
             filter_modes.tab2,
         )).selected_to_visible(cx, &ui, &actions, ids!(
@@ -424,7 +424,7 @@ impl AppMain for App {
             preset_pages.tab2_frame,
         ));
         
-        ui.get_radio_button_set(ids!(
+        ui.radio_button_set(ids!(
             mobile_modes.tab1,
             mobile_modes.tab2,
             mobile_modes.tab3,
@@ -434,7 +434,7 @@ impl AppMain for App {
             application_pages.tab3_frame,
         ));
         
-        let display_audio = ui.get_display_audio_set(ids!(display_audio));
+        let display_audio = ui.display_audio_set(ids!(display_audio));
         
         let mut buffers = 0;
         self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
@@ -449,7 +449,7 @@ impl AppMain for App {
             };
         });
         
-        let piano = ui.get_piano_set(ids!(piano));
+        let piano = ui.piano_set(ids!(piano));
         
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
@@ -467,23 +467,23 @@ impl AppMain for App {
             }.into());
         }
         
-        if ui.get_button_set(ids!(panic)).clicked(&actions) {
+        if ui.button_set(ids!(panic)).clicked(&actions) {
             cx.midi_reset();
             self.audio_graph.all_notes_off();
         }
         
-        let sequencer = ui.get_sequencer(id!(sequencer));
+        let sequencer = ui.sequencer(id!(sequencer));
         // lets fetch and update the tick.
         
-        if ui.get_button_set(ids!(clear_grid)).clicked(&actions) {
+        if ui.button_set(ids!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx, &mut actions);
         }
         
-        if ui.get_button_set(ids!(grid_down)).clicked(&actions) {
+        if ui.button_set(ids!(grid_down)).clicked(&actions) {
             sequencer.grid_down(cx, &mut actions);
         }
         
-        if ui.get_button_set(ids!(grid_up)).clicked(&actions) {
+        if ui.button_set(ids!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx, &mut actions);
         }
         

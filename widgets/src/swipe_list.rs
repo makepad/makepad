@@ -61,7 +61,7 @@ pub struct SwipeListEntrySet(WidgetSet);
 pub struct SwipeListEntryId(pub LiveId);
 
 impl Widget for SwipeListEntry {
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, EntryDrawState::LeftDrawer) {
@@ -260,7 +260,7 @@ impl Widget for SwipeList {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ListDrawState::Hook) {

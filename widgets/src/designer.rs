@@ -139,7 +139,7 @@ impl Designer {
                         WidgetRef::new_from_ptr(cx, container_ptr),
                     )
                 });
-                container.get_label(id!(label)).set_label(&format!("{}=<{}>", name, class));
+                container.label(id!(label)).set_label(&format!("{}=<{}>", name, class));
                 // lets draw this thing in a neat little container box with a title bar
                 while let Some(_) = container.draw_widget(cx).hook_widget() {
                     widget.draw_widget_all(cx);
@@ -191,12 +191,12 @@ impl Widget for Designer {
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
-        let outline = self.ui.get_file_tree(id!(outline));
+        let outline = self.ui.file_tree(id!(outline));
         while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
             if let Some(mut outline) = outline.has_widget(&next).borrow_mut() {
                 self.draw_outline(cx, &mut *outline);
             }
-            else if next == self.ui.get_widget(id!(design)) {
+            else if next == self.ui.widget(id!(design)) {
                 self.draw_design(cx);
             }
         }

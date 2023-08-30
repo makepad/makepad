@@ -83,7 +83,7 @@ impl Widget for FoldHeader {
         };
         
         for item in self.header.handle_widget_event(cx, event) {
-            if item.widget_uid == self.header.get_widget(id!(fold_button)).widget_uid(){
+            if item.widget_uid == self.header.widget(id!(fold_button)).widget_uid(){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
                         self.animator_play(cx, id!(open.on))
@@ -105,7 +105,7 @@ impl Widget for FoldHeader {
         self.body.redraw(cx);
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
 
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.header.find_widgets(path, cached, results);

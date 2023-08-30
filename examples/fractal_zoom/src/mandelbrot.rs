@@ -454,7 +454,7 @@ impl Widget for Mandelbrot {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.view_area.redraw(cx)
