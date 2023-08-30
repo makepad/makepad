@@ -1,4 +1,4 @@
-/*use {
+use {
     crate::{
         makepad_derive_widget::*,
         widget::*,
@@ -84,8 +84,9 @@ pub struct LinkLabelRef(WidgetRef);
 impl LinkLabelRef {
     pub fn set_label(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.button.label.clear();
-            inner.button.label.push_str(text);
+            let s = inner.button.label.as_mut();
+            s.clear();
+            s.push_str(text);
         }
     }
-}*/
+}
