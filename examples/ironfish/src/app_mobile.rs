@@ -115,7 +115,7 @@ live_design!{
     DividerX = <View> {
         width: Fit, height: Fill, margin: {top: 2.5, right: 1.0, bottom: 2.5, left: 1.0}
         flow: Right
-        <Box> {
+        <RoundedView> {
             width: 4.0, height: Fill
             draw_bg: {color: (COLOR_UP_2)}
         }
@@ -124,7 +124,7 @@ live_design!{
     DividerY = <View> {
         width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
         flow: Down
-        <Box> {
+        <RoundedView> {
             width: Fill, height: 1.0
             draw_bg: {color: (COLOR_DOWN_5)}
         }
@@ -134,7 +134,7 @@ live_design!{
         width: Fill, height: Fit
     }
     
-    FillerY = <Box> {
+    FillerY = <RoundedView> {
         width: Fit, height: 10
         draw_bg: {color: #f00}
     }
@@ -847,7 +847,7 @@ live_design!{
         
     }
     
-    ChordStrip = <Box> {
+    ChordStrip = <RoundedView> {
         width: Fill, height: Fill
         flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5 align: {x: 0.5, y: 0.5}}
         draw_bg: {
@@ -902,7 +902,7 @@ live_design!{
             flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS) spacing: 10}
             width: Fill, height: Fit
             
-            <Box> {
+            <RoundedView> {
                 flow: Down
                 width: Fill, height: 200
                 draw_bg: {
@@ -1029,7 +1029,7 @@ live_design!{
                     }
                 }
                 
-                <Box> {
+                <RoundedView> {
                     width: Fit, height: Fit
                     
                     align: {x: 0.0, y: 0.5}
@@ -1123,17 +1123,17 @@ live_design!{
         Entry = <PresetListEntry> {}
     }
     
-    PresetListFavs = <ScrollY> {
+    PresetListFavs = <ScrollYView> {
         
         width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}
         flow: Down, align: {x: 0.5, y: 0.0}
     }
     
-    ModePresetmanager = <Box> {
+    ModePresetmanager = <RoundedView> {
         width: Fill, height: Fill
         flow: Down
         
-        <GradientY> {
+        <GradientYView> {
             draw_bg: {color: (COLOR_DOWN_OFF), color2: (COLOR_DOWN_2)}
             width: Fill, height: 50
             flow: Right
@@ -1182,11 +1182,11 @@ live_design!{
         width: Fill, height: Fill
         padding: 0, align: {x: 0.0, y: 0.0 spacing: 0., flow: Down}
         
-        <GradientY> {
+        <GradientYView> {
             draw_bg: {color: (GRADIENT_A), color2: (GRADIENT_B)}
             flow: Down, spacing: (SPACING_BASE_PADDING)
             
-            os_header_placeholder = <Box> {
+            os_header_placeholder = <RoundedView> {
                 width: Fill, height: 50, margin: 0
                 flow: Right, spacing: (SPACING_BASE_PADDING), padding: 0
                 draw_bg: {color: (COLOR_DOWN_1)}
@@ -1203,7 +1203,7 @@ live_design!{
                 tab3_frame = <ModePresetmanager> {visible: false} // TODO: enable again
             }
             
-            mobile_menu = <Box> {
+            mobile_menu = <RoundedView> {
                 width: Fill, height: 120
                 flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20
                 draw_bg: {color: (COLOR_DOWN_2)}

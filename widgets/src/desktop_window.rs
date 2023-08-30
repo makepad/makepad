@@ -22,7 +22,7 @@ live_design!{
         
             flow: Down
         
-        caption_bar = <Solid> {
+        caption_bar = <SolidView> {
             visible: false,
             
                 flow: Right

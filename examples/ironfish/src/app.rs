@@ -108,7 +108,7 @@ live_design!{
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <View>{
                         padding: 0, align:{x:0.5 spacing: 20}
-                        <Box>{
+                        <RoundedView>{
                             draw_bg: { color: #x2A } 
                              margin: 0.0
                              padding: 0.0 
@@ -122,7 +122,7 @@ live_design!{
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <View>{
                         padding: 0, align:{x:0.5 spacing: 20}
-                        <Box>{
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
                              margin: 0.0
                              padding: 0.0 
@@ -137,7 +137,7 @@ live_design!{
                 }
 
                 <Slide> {title = {label: "Ironfish Desktop"}, 
-                    <Box>{
+                    <RoundedView>{
                         draw_bg: { color: #x2A }
                          margin: 10.0, width: 1600 
                          padding: 0.0 
@@ -159,7 +159,7 @@ live_design!{
 
                         <AppMobile> {width:400, height: Fill}
 
-                        <Box>{
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
                              margin: 0.0
                              padding: 0.0 
@@ -174,14 +174,14 @@ live_design!{
                     align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     <View>{
                         padding: 0, align:{x:0.5 spacing: 20}
-                        <Box>{
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
                              margin: 0.0
                              padding: 0.0 
                             <AppDesktop> {width:900}
                         }
 
-                        <Box>{
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
                              margin: 0.0
                              padding: 0.0 

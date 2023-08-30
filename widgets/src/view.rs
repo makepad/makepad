@@ -14,7 +14,7 @@ live_design!{
     import makepad_draw::shader::draw_color::DrawColor;
     View = {{View}} {}
     
-    Solid = <View> {show_bg: true, draw_bg: {
+    SolidView = <View> {show_bg: true, draw_bg: {
         fn get_color(self) -> vec4 {
             return self.color
         }
@@ -31,7 +31,7 @@ live_design!{
         }
     }}*/
     
-    Rect = <View> {show_bg: true, draw_bg: {
+    RectView = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -60,7 +60,7 @@ live_design!{
         }
     }}
     
-    Box = <View> {show_bg: true, draw_bg: {
+    RoundedView = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -91,7 +91,7 @@ live_design!{
         }
     }}
     
-    BoxX = <View> {show_bg: true, draw_bg: {
+    RoundedXView = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -123,7 +123,7 @@ live_design!{
         }
     }}
     
-    BoxY = <View> {show_bg: true, draw_bg: {
+    RoundedYView = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -155,7 +155,7 @@ live_design!{
         }
     }}
     
-    BoxAll = <View> {show_bg: true, draw_bg: {
+    RoundedAllView = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -189,7 +189,7 @@ live_design!{
         }
     }}
     
-    Circle = <View> {show_bg: true, draw_bg: {
+    CircleView = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -230,7 +230,7 @@ live_design!{
         }
     }}
     
-    Hexagon = <View> {show_bg: true, draw_bg: {
+    HexagonView = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -271,7 +271,7 @@ live_design!{
         }
     }}
     
-    GradientX = <View> {show_bg: true, draw_bg: {
+    GradientXView = <View> {show_bg: true, draw_bg: {
         instance color2: #f00
         instance dither: 1.0
         fn get_color(self) -> vec4 {
@@ -284,7 +284,7 @@ live_design!{
         }
     }}
     
-    GradientY = <View> {show_bg: true, draw_bg: {
+    GradientYView = <View> {show_bg: true, draw_bg: {
         instance color2: #f00
         instance dither: 1.0
         fn get_color(self) -> vec4 {
@@ -342,9 +342,9 @@ live_design!{
     CachedScrollY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
-    ScrollXY = <View> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
-    ScrollX = <View> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
-    ScrollY = <View> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
+    ScrollXYView = <View> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
+    ScrollXView = <View> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
+    ScrollYView = <View> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 }
 
 // maybe we should put an enum on the bools like
