@@ -59,7 +59,7 @@ live_design!{
         max: 1.0,
         step: 0.0,
         
-        label_text: {
+        draw_text: {
             color: #9
         }
         
@@ -172,8 +172,8 @@ pub struct Slider {
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] label_text: DrawText,
-    #[live] label: String,
+    #[live] draw_text: DrawText,
+    #[live] text: String,
     
     #[live] text_input: TextInput,
     
@@ -317,7 +317,7 @@ impl Slider {
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.walk());
-            self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
+            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
         }
         
         self.draw_slider.end(cx);

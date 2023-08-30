@@ -90,7 +90,7 @@ live_design!{
                         //path:"M0,0 L20.0,0.0 L20.0,20.0 Z"
                     }
                     icon_walk:{margin:{left:10}, width:16,height:Fit}
-                    label: "Click to count"
+                    text: "Click to count"
                 }
                 input1 = <TextInput> {
                     width: 100, height: 30
@@ -99,10 +99,10 @@ live_design!{
                 
                 // A label to display the counter.
                 label1 = <Label> {
-                    draw_label: {
+                    draw_text: {
                         color: #f
                     },
-                    label: "Counter: 0"
+                    text: "Counter: 0"
                 }
             }
         }

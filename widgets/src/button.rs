@@ -10,7 +10,7 @@ live_design!{
     
     
     Button= {{Button}} {
-        draw_label: {
+        draw_text: {
             instance hover: 0.0
             instance pressed: 0.0
             text_style: {
@@ -112,7 +112,7 @@ live_design!{
                     apply: {
                         draw_bg: {pressed: 0.0, hover: 0.0}
                         draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_label: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -124,7 +124,7 @@ live_design!{
                     apply: {
                         draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                         draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
                 
@@ -133,7 +133,7 @@ live_design!{
                     apply: {
                         draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
@@ -154,7 +154,7 @@ pub struct Button {
     #[animator] animator: Animator,
 
     #[live] draw_bg: DrawQuad,
-    #[live] draw_label: DrawText,
+    #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     #[live] icon_walk: Walk,
     #[live] label_walk: Walk,
@@ -162,7 +162,7 @@ pub struct Button {
     
     #[layout] layout: Layout,
 
-    #[live] pub label: RcStringMut,
+    #[live] pub text: RcStringMut,
 }
 
 impl LiveHook for Button{
@@ -231,15 +231,15 @@ impl Button {
         };
     }
     /*
-    pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
+    pub fn draw_text(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
-        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
     }*/
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_label.draw_walk(cx, self.label_walk, Align::default(), self.label.as_ref());
+        self.draw_text.draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
     }
@@ -249,9 +249,9 @@ impl Button {
 pub struct ButtonRef(WidgetRef); 
 
 impl ButtonRef {
-    pub fn set_label(&self, text:&str){
+    pub fn set_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            let s = inner.label.as_mut_empty();
+            let s = inner.text.as_mut_empty();
             s.push_str(text);
         }
     }
