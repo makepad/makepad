@@ -225,6 +225,7 @@ impl Cx {
     
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
+        let dt = profile_start();
         let mut errs = Vec::new();
         let mut live_registry = self.live_registry.borrow_mut();
         /*
@@ -232,6 +233,7 @@ impl Cx {
             log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
         }*/
         live_registry.expand_all_documents(&mut errs);
+        profile_end!(dt);
         for err in errs {
             error!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }

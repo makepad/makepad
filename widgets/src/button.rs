@@ -165,7 +165,8 @@ pub struct Button {
     #[live] walk: Walk,
     
     #[live] layout: Layout,
-    #[live] pub label: String
+
+    #[live] label: RcStringMut,
 }
 
 impl LiveHook for Button{
@@ -242,7 +243,7 @@ impl Button {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_label.draw_walk(cx, self.label_walk, Align::default(), &self.label);
+        self.draw_label.draw_walk(cx, self.label_walk, Align::default(), self.label.as_ref());
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
     }
@@ -254,8 +255,9 @@ pub struct ButtonRef(WidgetRef);
 impl ButtonRef {
     pub fn set_label(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.label.clear();
-            inner.label.push_str(text);
+            let s = inner.label.as_mut();
+            s.clear();
+            s.push_str(text);
         }
     }
     
