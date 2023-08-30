@@ -11,14 +11,14 @@ use {
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
-    import makepad_widgets::frame::Frame;
+    import makepad_widgets::view::View;
     ListView = {{ListView}} {
         
             width: Fill
             height: Fill
         
         flow: Down
-        Entry = <Frame> {}
+        Entry = <View> {}
     }
 }
 

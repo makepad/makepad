@@ -155,7 +155,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
 
-            //let frame_ext = format!("{}FrameRefExt", clean_name);
+            //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
             let widget_ext = format!("{}WidgetExt", clean_name);
             let get_fn = format!("get_{}", snake_name);

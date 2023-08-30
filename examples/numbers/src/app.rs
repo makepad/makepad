@@ -1,7 +1,7 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::desktop_window::DesktopWindow
     import makepad_example_numbers::number_grid::NumberGrid
 

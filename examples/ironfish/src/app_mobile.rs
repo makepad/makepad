@@ -2,7 +2,7 @@ use crate::makepad_widgets::*;
 
 live_design!{
     import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_draw::shader::std::*;
     
     import makepad_widgets::image::Image;
@@ -112,7 +112,7 @@ live_design!{
     
     // WIDGETS
     
-    DividerX = <Frame> {
+    DividerX = <View> {
         width: Fit, height: Fill, margin: {top: 2.5, right: 1.0, bottom: 2.5, left: 1.0}
         flow: Right
         <Box> {
@@ -121,7 +121,7 @@ live_design!{
         }
     }
     
-    DividerY = <Frame> {
+    DividerY = <View> {
         width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
         flow: Down
         <Box> {
@@ -130,7 +130,7 @@ live_design!{
         }
     }
     
-    FillerX = <Frame> {
+    FillerX = <View> {
         width: Fill, height: Fit
     }
     
@@ -139,12 +139,12 @@ live_design!{
         draw_bg: {color: #f00}
     }
     
-    ElementBox = <Frame> {
+    ElementBox = <View> {
         width: Fill, height: Fit
         flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS) spacing: (SPACING_CONTROLS)}
     }
     
-    FishPanelContainer = <Frame> {
+    FishPanelContainer = <View> {
         flow: Down
         width: Fill, height: Fit
     }
@@ -579,11 +579,11 @@ live_design!{
     }
     
     
-    SequencerControls = <Frame> {
+    SequencerControls = <View> {
         flow: Down, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}
         width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}
         
-        <Frame> {
+        <View> {
             width: Fill, height: Fit, margin: 0.0
             align: {x: 0.0, y: 0.5 spacing: (SPACING_CONTROLS), padding: 0.0}
 
@@ -623,7 +623,7 @@ live_design!{
             
         }
         
-        <Frame> {
+        <View> {
             width: Fill, height: Fit, margin: 0.0
             align: {x: 0.0, y: 0.5 spacing: 0.0, padding: 0.0}
             
@@ -670,7 +670,7 @@ live_design!{
         
     }
     
-    SequencerPanel = <Frame> {
+    SequencerPanel = <View> {
         width: Fill, height: Fill, margin: 0.0
         flow: Down, spacing: 0.0
         
@@ -722,13 +722,13 @@ live_design!{
         }
     }
     
-    ModeSequencer = <Frame> {
+    ModeSequencer = <View> {
         width: Fill, height: Fill, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}
         flow: Down
         
         <SequencerPanel> {height: Fill, width: Fill}
         
-        PresetNavigation = <Frame> {
+        PresetNavigation = <View> {
             width: Fill, height: Fit
             flow: Right, align: {x: 0.0, y: 0.5}
             
@@ -737,9 +737,9 @@ live_design!{
                 icon_walk: {width: 10, height: Fit}
             }
             
-            <Frame> {}
+            <View> {}
             
-            <Frame> {
+            <View> {
                 width: Fit, height: Fit
                 flow: Right, align: {x: 0.0, y: 0.5}
                 
@@ -752,7 +752,7 @@ live_design!{
                 }
             }
             
-            <Frame> {}
+            <View> {}
             
             <IconButton> {
                 draw_icon: {svg_file: (ICO_NEXT)}
@@ -879,7 +879,7 @@ live_design!{
         
     }
     
-    ChordPiano = <Frame> {
+    ChordPiano = <View> {
         flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}
         
         <ChordStrip> {label = {label: "Em"}}
@@ -892,13 +892,13 @@ live_design!{
         <ChordStrip> {label = {label: "Bdim"}}
     }
     
-    ModePlay = <Frame> {
+    ModePlay = <View> {
         flow: Down, spacing: (SPACING_CONTROLS)
         width: Fill, height: Fill, margin: {top: 20}
         
         <ChordPiano> {}
         
-        <Frame> {
+        <View> {
             flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS) spacing: 10}
             width: Fill, height: Fit
             
@@ -912,7 +912,7 @@ live_design!{
                 
             }
             
-            <Frame> {
+            <View> {
                 flow: Down
                 width: Fill, height: Fill
                 draw_bg: {color: #f00}
@@ -1004,10 +1004,10 @@ live_design!{
         flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5 align: {x: 0.5, y: 0.5}}
          width: Fill, height: Fit, margin: 0 
         
-        center: <Frame> {
+        center: <View> {
             flow: Down, align: {x: 0.5, y: 0.0 padding: {top: 0, right: 0, bottom: 0, left: 0}}
             width: Fill, height: Fit, margin: 0.0
-            <Frame> {
+            <View> {
                 flow: Right, align: {x: 0.5, y: 0.0 padding: 0.0}
                  width: Fill, height: Fit, margin: {top: 2.5, right: 0, bottom: 7.5, left: 0}
                 
@@ -1105,7 +1105,7 @@ live_design!{
         }
     }
     
-    Pagination = <Frame> {
+    Pagination = <View> {
         width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}
         flow: Right, align: {x: 0.5, y: 0.0 spacing: 10}
         
@@ -1138,7 +1138,7 @@ live_design!{
             width: Fill, height: 50
             flow: Right
             
-            <Frame> {
+            <View> {
                 width: Fill, margin: {top: 0, right: (SPACING_OS), bottom: 0, left: (SPACING_OS)}
                 align: {x: 0.0, y: 1.0}
                 
@@ -1150,7 +1150,7 @@ live_design!{
                         text_style: <H2_TEXT_BOLD> {font_size: (FONT_SIZE_H1)}
                     }
                 }
-                filter_modes = <Frame> {
+                filter_modes = <View> {
                     width: Fit
                     spacing: 10, align: {x: 0.0, y: 1.0}
                     
@@ -1169,7 +1169,7 @@ live_design!{
             }
             
         }
-        preset_pages = <Frame> {
+        preset_pages = <View> {
             preset_list = <PresetList> {}
             tab2_frame = <PresetListFavs> {visible: false}
         }
@@ -1177,7 +1177,7 @@ live_design!{
         // <Pagination> {}
     }
     
-    AppMobile = <Frame> {
+    AppMobile = <View> {
         design_mode: false,
         width: Fill, height: Fill
         padding: 0, align: {x: 0.0, y: 0.0 spacing: 0., flow: Down}
@@ -1194,7 +1194,7 @@ live_design!{
             
             <SequencerControls> {}
             
-            application_pages = <Frame> {
+            application_pages = <View> {
                 margin: 0.0
                 padding: 0.0
                 
@@ -1208,7 +1208,7 @@ live_design!{
                 flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20
                 draw_bg: {color: (COLOR_DOWN_2)}
                 
-                mobile_modes = <Frame> {
+                mobile_modes = <View> {
                     tab1 = <FishTab> {
                         animator: {selected = {default: on}},
                         label: "Sequencer"

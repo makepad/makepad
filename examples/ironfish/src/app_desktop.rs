@@ -2,7 +2,7 @@ use crate::makepad_widgets::*;
 
 live_design!{
     import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_draw::shader::std::*;
     
     import makepad_widgets::image::Image;
@@ -108,15 +108,15 @@ live_design!{
     
     
     // HELPERS
-    FillerH = <Frame> {
+    FillerH = <View> {
         width: Fill
     }
     
-    FillerV = <Frame> {
+    FillerV = <View> {
         height: Fill
     }
     
-    Divider = <Frame> {
+    Divider = <View> {
         width: Fill,
         height: Fit,
         margin: {top: (SSPACING_3), right: 0, bottom: (SSPACING_3), left: (SSPACING_0)}
@@ -135,7 +135,7 @@ live_design!{
     
     
     // WIDGETS
-    ElementBox = <Frame> {
+    ElementBox = <View> {
         draw_bg: {color: (COLOR_DOWN_0)}
         width: Fill,
         height: Fit
@@ -144,7 +144,7 @@ live_design!{
         spacing: (SSPACING_1)
     }
     
-    FishPanelContainer = <Frame> {
+    FishPanelContainer = <View> {
         flow: Down
         width: Fill,
         height: Fit
@@ -158,7 +158,7 @@ live_design!{
         padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_1)}
     }
     
-    FishSubTitle = <Frame> {
+    FishSubTitle = <View> {
         width: Fit,
         height: Fit,
         margin: {top: 1}
@@ -641,7 +641,7 @@ live_design!{
             margin: <SPACING_0> {}
             padding: <SPACING_2> {}
         }
-        menu = <Frame> {
+        menu = <View> {
             flow: Right
             height: Fit,
             width: Fit
@@ -951,7 +951,7 @@ live_design!{
         
         display = <GraphPaper> {}
         
-        <Frame> {
+        <View> {
             width: Fill,
             height: Fit
             flow: Right,
@@ -1005,7 +1005,7 @@ live_design!{
         
     }
     
-    VolumeEnvelopePanel = <Frame> {
+    VolumeEnvelopePanel = <View> {
         vol_env = <EnvelopePanel> {
             flow: Down
             width: Fill,
@@ -1013,16 +1013,16 @@ live_design!{
         }
     }
     
-    ModEnvelopePanel = <Frame> {
+    ModEnvelopePanel = <View> {
         width: Fill,
         height: Fit
         flow: Down
         
-            <Frame> {
+            <View> {
             flow: Down
             width: Fill,
             height: Fit
-                <Frame> {
+                <View> {
                 flow: Right,
                 align: {x: 0.0, y: 0.0}
                 width: Fill,
@@ -1060,14 +1060,14 @@ live_design!{
         
     }
     
-    SequencerControls = <Frame> {
+    SequencerControls = <View> {
         height: Fit,
         width: Fill,
         margin: <SPACING_1> {}
         flow: Down,
         padding: <SPACING_2> {}
         
-        <Frame> {
+        <View> {
             height: Fit,
             width: Fill
             flow: Right,
@@ -1093,7 +1093,7 @@ live_design!{
                 }
             }
             
-            <Frame> {
+            <View> {
                 width: Fill
             }
             
@@ -1112,7 +1112,7 @@ live_design!{
         margin: <SPACING_0> {}
         draw_bg: {color: (COLOR_UP_0), color2: (COLOR_UP_0)}
         
-        <Frame> {
+        <View> {
             flow: Right,
             align: {x: 0.0, y: 0.0} padding: <SPACING_0> {}
             width: Fill,
@@ -1162,7 +1162,7 @@ live_design!{
         }
     }
     
-    PianoSettings = <Frame> {
+    PianoSettings = <View> {
         flow: Down,
         padding: <SPACING_0> {} spacing: (SSPACING_2)
         height: Fit,
@@ -1262,7 +1262,7 @@ live_design!{
                     }
                 }
                 
-                <Frame> {
+                <View> {
                     height: Fit,
                     width: Fill
                     flow: Right,
@@ -1319,12 +1319,12 @@ live_design!{
         }
     }
     
-    CrushFXPanel = <Frame> {
+    CrushFXPanel = <View> {
         width: Fill,
         height: Fit
         flow: Down
         
-            <Frame> {
+            <View> {
             flow: Right,
             align: {x: 0.0, y: 0.0}
             width: Fill,
@@ -1356,7 +1356,7 @@ live_design!{
             }
         }
         
-        <Frame> {
+        <View> {
             width: Fill,
             height: Fit
             crushamount = <InstrumentSlider> {
@@ -1382,12 +1382,12 @@ live_design!{
                 }
             }
         }
-        <Frame> {
+        <View> {
             flow: Down
             width: Fill,
             height: Fit
             
-                <Frame> {
+                <View> {
                 flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
@@ -1414,7 +1414,7 @@ live_design!{
                 
             }
             
-            <Frame> {
+            <View> {
                 flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
@@ -1452,12 +1452,12 @@ live_design!{
                 }
             }
         }
-        <Frame> {
+        <View> {
             flow: Down
             width: Fill,
             height: Fit
             
-                <Frame> {
+                <View> {
                 flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
@@ -1480,7 +1480,7 @@ live_design!{
                     }
                 }
             }
-            <Frame> {
+            <View> {
                 flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
@@ -1503,7 +1503,7 @@ live_design!{
                     }
                 }
             }
-            <Frame> {
+            <View> {
                 flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
@@ -1539,12 +1539,12 @@ live_design!{
                 }
             }
         }
-        <Frame> {
+        <View> {
             flow: Down
             width: Fill,
             height: Fit
             
-                <Frame> {
+                <View> {
                 flow: Right
                 width: Fill,
                 height: Fit
@@ -1583,7 +1583,7 @@ live_design!{
                     },
                 }
                 
-                menu = <Frame> {
+                menu = <View> {
                     filter_type = <FishDropDown> {
                         width: Fill
                         
@@ -1652,7 +1652,7 @@ live_design!{
                 }
             }
             
-            <Frame> {
+            <View> {
                 flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
@@ -1675,7 +1675,7 @@ live_design!{
                     }
                 }
             }
-            <Frame> {
+            <View> {
                 flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
@@ -1702,12 +1702,12 @@ live_design!{
         }
     }
     
-    OscPanel = <Frame> {
+    OscPanel = <View> {
         width: Fill,
         height: Fit
         flow: Down
         
-            <Frame> {
+            <View> {
             flow: Right
             width: Fill,
             height: Fit
@@ -1726,7 +1726,7 @@ live_design!{
             }
         }
         
-        twocol = <Frame> {
+        twocol = <View> {
             flow: Down
             width: Fill,
             height: Fit
@@ -1751,11 +1751,11 @@ live_design!{
             }
         }
         
-        <Frame> {
+        <View> {
             flow: Down
             width: Fill,
             height: Fit
-            supersaw = <Frame> {
+            supersaw = <View> {
                 flow: Down
                 width: Fill,
                 height: Fit
@@ -1777,7 +1777,7 @@ live_design!{
                 }
             }
             
-            hypersaw = <Frame> {
+            hypersaw = <View> {
                 flow: Down
                 width: Fill,
                 height: Fit
@@ -1799,7 +1799,7 @@ live_design!{
                 }
             }
             
-            harmonic = <Frame> {
+            harmonic = <View> {
                 flow: Down
                 width: Fill,
                 height: Fit
@@ -1831,11 +1831,11 @@ live_design!{
         }
     }
     
-    MixerPanel = <Frame> {
+    MixerPanel = <View> {
         width: Fill,
         height: Fit
         flow: Down
-            <Frame> {
+            <View> {
             flow: Right,
             spacing: (SSPACING_1)
             width: Fill,
@@ -1857,7 +1857,7 @@ live_design!{
                 }
             }
         }
-        <Frame> {
+        <View> {
             flow: Right
             width: Fill,
             height: Fit
@@ -1903,7 +1903,7 @@ live_design!{
             
             <MixerPanel> {width: Fill, height: Fit}
             
-            <Frame> {
+            <View> {
                 width: Fill,
                 height: Fit
                 flow: Right,
@@ -1917,7 +1917,7 @@ live_design!{
         }
     }
     
-    HeaderMenu = <Frame> {
+    HeaderMenu = <View> {
         width: Fill,
         height: Fit,
         margin: {top: -150}
@@ -1925,7 +1925,7 @@ live_design!{
         spacing: (SSPACING_0),
         align: {x: 0.0, y: 0.0}
         
-        <Frame> { // TODO: Remove excessive nesting?
+        <View> { // TODO: Remove excessive nesting?
             flow: Down,
             align: {x: 0.0, y: 0.0}
             spacing: 0,
@@ -1934,12 +1934,12 @@ live_design!{
             width: Fill,
             margin: <SPACING_2> {}
             
-            <Frame> {
+            <View> {
                 width: Fill
                 flow: Right,
                 align: {x: 0.0, y: 0.0}
                 
-                <Frame> {
+                <View> {
                     flow: Down,
                     align: {x: 0.0, y: 0.0}
                     
@@ -1960,7 +1960,7 @@ live_design!{
                         label: "Ironfish"
                     }
                 }
-                <Frame> {
+                <View> {
                     width: Fill,
                     height: Fit,
                     margin: <SPACING_4> {}
@@ -1978,7 +1978,7 @@ live_design!{
             
             <FillerV> {}
             
-            <Frame> {
+            <View> {
                 width: Fill,
                 height: 35
                 spacing: (SSPACING_1)
@@ -2098,7 +2098,7 @@ live_design!{
     }
     
     
-    PresetHeader = <Frame> {
+    PresetHeader = <View> {
         width: Fill,
         height: Fit,
         margin: {top: 0, right: (SSPACING_4), bottom: 0, left: (SSPACING_4)}
@@ -2131,13 +2131,13 @@ live_design!{
         width: Fill,
         height: Fit
         
-        center: <Frame> {
+        center: <View> {
             flow: Down,
             padding: 0.0
             width: Fill,
             height: Fit
             
-                <Frame> {
+                <View> {
                 flow: Right,
                 align: {x: 0.0, y: 0.5 padding: 0.0}
                 width: Fill,
@@ -2168,7 +2168,7 @@ live_design!{
                     label: "Preset Name"
                 }
                 
-                <Frame> {
+                <View> {
                     width: Fit,
                     height: Fit,
                     margin: 0.0
@@ -2210,7 +2210,7 @@ live_design!{
         }
     }
     
-    PresetSaver = <Frame> {
+    PresetSaver = <View> {
         width: Fill,
         height: Fit,
         margin: {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_0), left: (SSPACING_4)}
@@ -2245,14 +2245,14 @@ live_design!{
             <CheckboxTextual> {label: "Seq"}
         }
         
-        <Frame> {
+        <View> {
             width: Fill,
             height: Fit
             flow: Down,
             spacing: (SSPACING_2),
             align: {x: 0.0, y: 0.5}
             
-            <Frame> {
+            <View> {
                 width: Fill,
                 height: Fit
                 flow: Right,
@@ -2270,7 +2270,7 @@ live_design!{
                 }
             }
             
-            <Frame> {
+            <View> {
                 width: Fill,
                 height: Fit
                 padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: (SSPACING_2)}
@@ -2318,13 +2318,13 @@ live_design!{
         preset_list = <PresetList> {}
     }
     
-    AppDesktop = <Frame> {
+    AppDesktop = <View> {
         flow: Right
         width: Fill,
         height: Fill
         // padding: <SPACING_0> { align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
         
-            <Frame> {
+            <View> {
             width: Fill,
             height: Fill
             padding: <SPACING_0> {}
@@ -2349,14 +2349,14 @@ live_design!{
             <HeaderMenu> {}
             
             // CONTROLS
-            <Frame> {
+            <View> {
                 width: Fill,
                 height: Fill
                 flow: Right,
                 spacing: (SSPACING_1),
                 padding: <SPACING_3> {}
                 oscillators = <FishPanelSoundSources> {}
-                <Frame> {
+                <View> {
                     flow: Down,
                     spacing: (SSPACING_1)
                     height: Fill,

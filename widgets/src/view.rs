@@ -12,9 +12,9 @@ live_design!{
     import crate::scroll_bars::ScrollBars;
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
-    Frame = {{Frame}} {}
+    View = {{View}} {}
     
-    Solid = <Frame> {show_bg: true, draw_bg: {
+    Solid = <View> {show_bg: true, draw_bg: {
         fn get_color(self) -> vec4 {
             return self.color
         }
@@ -23,15 +23,15 @@ live_design!{
             return Pal::premul(self.get_color())
         }
     }}
-    
-    Debug = <Frame> {show_bg: true, draw_bg: {
+    /*
+    Debug = <View> {show_bg: true, draw_bg: {
         color: #f00
         fn pixel(self) -> vec4 {
             return self.color
         }
-    }}
+    }}*/
     
-    Rect = <Frame> {show_bg: true, draw_bg: {
+    Rect = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -60,7 +60,7 @@ live_design!{
         }
     }}
     
-    Box = <Frame> {show_bg: true, draw_bg: {
+    Box = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -91,7 +91,7 @@ live_design!{
         }
     }}
     
-    BoxX = <Frame> {show_bg: true, draw_bg: {
+    BoxX = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -123,7 +123,7 @@ live_design!{
         }
     }}
     
-    BoxY = <Frame> {show_bg: true, draw_bg: {
+    BoxY = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -155,7 +155,7 @@ live_design!{
         }
     }}
     
-    BoxAll = <Frame> {show_bg: true, draw_bg: {
+    BoxAll = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -189,7 +189,7 @@ live_design!{
         }
     }}
     
-    Circle = <Frame> {show_bg: true, draw_bg: {
+    Circle = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -230,7 +230,7 @@ live_design!{
         }
     }}
     
-    Hexagon = <Frame> {show_bg: true, draw_bg: {
+    Hexagon = <View> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -271,7 +271,7 @@ live_design!{
         }
     }}
     
-    GradientX = <Frame> {show_bg: true, draw_bg: {
+    GradientX = <View> {show_bg: true, draw_bg: {
         instance color2: #f00
         instance dither: 1.0
         fn get_color(self) -> vec4 {
@@ -284,7 +284,7 @@ live_design!{
         }
     }}
     
-    GradientY = <Frame> {show_bg: true, draw_bg: {
+    GradientY = <View> {show_bg: true, draw_bg: {
         instance color2: #f00
         instance dither: 1.0
         fn get_color(self) -> vec4 {
@@ -298,7 +298,7 @@ live_design!{
     }}
 /*
     // Legacy Image widget that is being replaced with the new Image widget
-    ImageFrame = <Frame> {show_bg: true, draw_bg: {
+    ImageView = <View> {show_bg: true, draw_bg: {
         texture image: texture2d
         instance image_scale: vec2(1.0, 1.0)
         instance image_pan: vec2(0.0, 0.0)
@@ -313,7 +313,7 @@ live_design!{
         }
     }}*/
     
-    CachedFrame = <Frame> {
+    CachedView = <View> {
         optimize: Texture,
         draw_bg: {
             texture image: texture2d
@@ -333,25 +333,25 @@ live_design!{
             }
         }
     }
-    CachedScrollXY = <CachedFrame> {
+    CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
     }
-    CachedScrollX = <CachedFrame> {
+    CachedScrollX = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
     }
-    CachedScrollY = <CachedFrame> {
+    CachedScrollY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
-    ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
-    ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
-    ScrollY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
+    ScrollXY = <View> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
+    ScrollX = <View> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
+    ScrollY = <View> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 }
 
 // maybe we should put an enum on the bools like
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
-pub enum FrameOptimize{
+pub enum ViewOptimize{
     #[pick] None,
     DrawList,
     Texture    
@@ -367,7 +367,7 @@ pub enum EventOrder{
 }
 
 
-impl FrameOptimize{
+impl ViewOptimize{
     fn is_texture(&self)->bool{
         if let Self::Texture = self{true} else{false}
     }
@@ -380,7 +380,7 @@ impl FrameOptimize{
 }
 
 #[derive(Live)]
-pub struct Frame { // draw info per UI element
+pub struct View { // draw info per UI element
     #[live] draw_bg: DrawColor,
     
     #[live(false)] show_bg: bool,
@@ -392,7 +392,7 @@ pub struct Frame { // draw info per UI element
     //#[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
     
-    #[live] optimize: FrameOptimize,
+    #[live] optimize: ViewOptimize,
     #[live] event_order: EventOrder,
     
     #[live(true)] visible: bool,
@@ -410,7 +410,7 @@ pub struct Frame { // draw info per UI element
     #[rust] area: Area,
     #[rust] draw_list: Option<DrawList2d>,
     
-    #[rust] texture_cache: Option<FrameTextureCache>,
+    #[rust] texture_cache: Option<ViewTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
@@ -419,15 +419,15 @@ pub struct Frame { // draw info per UI element
     #[animator] animator: Animator,
 }
 
-struct FrameTextureCache {
+struct ViewTextureCache {
     pass: Pass,
     _depth_texture: Texture,
     color_texture: Texture,
 }
 
-impl LiveHook for Frame {
+impl LiveHook for View {
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Frame)
+        register_widget!(cx, View)
     }
     
     fn before_apply(&mut self,  _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
@@ -496,14 +496,14 @@ impl LiveHook for Frame {
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
-pub struct FrameRef(WidgetRef);
+pub struct ViewRef(WidgetRef);
 
 
 #[derive(Clone, WidgetSet)]
-pub struct FrameSet(WidgetSet);
+pub struct ViewSet(WidgetSet);
 
 #[derive(Clone, WidgetAction)]
-pub enum FrameAction {
+pub enum ViewAction {
     None,
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
@@ -512,10 +512,10 @@ pub enum FrameAction {
     KeyUp(KeyEvent),
 }
 
-impl FrameRef {
+impl ViewRef {
     pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::FingerDown(fd) = item.action() {
+            if let ViewAction::FingerDown(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -524,7 +524,7 @@ impl FrameRef {
 
     pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::FingerUp(fd) = item.action() {
+            if let ViewAction::FingerUp(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -533,7 +533,7 @@ impl FrameRef {
 
     pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::FingerMove(fd) = item.action() {
+            if let ViewAction::FingerMove(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -542,7 +542,7 @@ impl FrameRef {
 
     pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::KeyDown(fd) = item.action() {
+            if let ViewAction::KeyDown(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -551,7 +551,7 @@ impl FrameRef {
 
     pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::KeyUp(fd) = item.action() {
+            if let ViewAction::KeyUp(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -628,7 +628,7 @@ impl FrameRef {
     }
 }
 
-impl FrameSet {
+impl ViewSet {
     
     pub fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
@@ -719,7 +719,7 @@ impl FrameSet {
     }
 }
 
-impl Widget for Frame {
+impl Widget for View {
     fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
@@ -782,16 +782,16 @@ impl Widget for Frame {
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area());
-                    dispatch_action(cx, FrameAction::FingerDown(e).into_action(uid));
+                    dispatch_action(cx, ViewAction::FingerDown(e).into_action(uid));
                     if self.animator.live_ptr.is_some(){
                         self.animator_play(cx, id!(down.on));
                     }
                 }
                 Hit::FingerMove(e) => {
-                    dispatch_action(cx, FrameAction::FingerMove(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::FingerMove(e).into_action(uid))
                 }
                 Hit::FingerUp(e) => {
-                    dispatch_action(cx, FrameAction::FingerUp(e).into_action(uid));
+                    dispatch_action(cx, ViewAction::FingerUp(e).into_action(uid));
                     if self.animator.live_ptr.is_some(){
                         self.animator_play(cx, id!(down.off));
                     }
@@ -810,10 +810,10 @@ impl Widget for Frame {
                     }
                 }
                 Hit::KeyDown(e)=>{
-                    dispatch_action(cx, FrameAction::KeyDown(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::KeyDown(e).into_action(uid))
                 }
                 Hit::KeyUp(e)=>{
-                    dispatch_action(cx, FrameAction::KeyUp(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::KeyUp(e).into_action(uid))
                 }
                 _ => ()
             }
@@ -897,7 +897,7 @@ enum DrawState {
     DeferWalk(usize)
 }
 
-impl Frame {
+impl View {
     
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: DVec2) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
@@ -933,7 +933,7 @@ impl Frame {
             self.defer_walks.clear();
             
             match self.optimize{
-                FrameOptimize::Texture=>{
+                ViewOptimize::Texture=>{
                     let walk = self.walk_from_previous_size(walk);
                     if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
@@ -948,7 +948,7 @@ impl Frame {
                     }
                     // lets start a pass
                     if self.texture_cache.is_none() {
-                        self.texture_cache = Some(FrameTextureCache {
+                        self.texture_cache = Some(ViewTextureCache {
                             pass: Pass::new(cx),
                             _depth_texture: Texture::new(cx),
                             color_texture: Texture::new(cx)
@@ -962,7 +962,7 @@ impl Frame {
                     cx.begin_pass(&texture_cache.pass, self.dpi_factor);
                     self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
-                FrameOptimize::DrawList=>{
+                ViewOptimize::DrawList=>{
                     let walk = self.walk_from_previous_size(walk);
                     if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
                         cx.walk_turtle_with_area(&mut self.area, walk);

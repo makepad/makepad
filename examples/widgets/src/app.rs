@@ -5,7 +5,7 @@ live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::slider::Slider;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::drop_down::DropDown;
