@@ -109,7 +109,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::frame::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
-    //crate::link_label::live_design(cx);
+    crate::link_label::live_design(cx);
     crate::scroll_shadow::live_design(cx);
     crate::button::live_design(cx);
     crate::desktop_button::live_design(cx);
