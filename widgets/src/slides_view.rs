@@ -23,7 +23,7 @@ live_design!{
         label: ""
     }
     
-    Slide = <Box> {
+    Slide = <RoundedView> {
         draw_bg: { color: #x1A, radius: 5.0 }
         width: (SLIDE_WIDTH), height: Fill
         align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50 }
@@ -57,7 +57,7 @@ live_design!{
         slide_width: (SLIDE_WIDTH)
         goal_pos: 0.0
         anim_speed: 0.9
-        <ScrollX> {
+        <ScrollXView> {
             width: Fill, height: Fill
         }
     }
