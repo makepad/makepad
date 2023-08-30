@@ -228,12 +228,12 @@ live_design!{
         flow: Down, spacing: 0.0
         margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
         width: Fill, height: Fit
-        <Rect> {
+        <RectView> {
             height: 2, width: Fill, margin: 0.0
             flow: Down, padding: 0.0
             draw_bg: {color: #x00000033}
         }
-        <Rect> {
+        <RectView> {
             height: 2, width: Fill, margin: 0.0
             flow: Down, padding: 0.0
             draw_bg: {color: #xFFFFFF18}
@@ -244,12 +244,12 @@ live_design!{
         flow: Right, spacing: 0.0
         margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}
         width: Fit, height: Fill
-        <Rect> {
+        <RectView> {
             height: Fill, width: 2, margin: 0.0
             flow: Down, padding: 0.0
             draw_bg: {color: #x00000033}
         }
-        <Rect> {
+        <RectView> {
             height: Fill, width: 2, margin: 0.0
             flow: Down, padding: 0.0
             draw_bg: {color: #xFFFFFF18}
@@ -347,7 +347,7 @@ live_design!{
         }
     }
     
-    PromptGroup = <Rect> {
+    PromptGroup = <RectView> {
         <DividerV> {}
         height: Fit, width: Fill, margin: {bottom: 10, top: 0}
         flow: Down, spacing: 0, padding: 0
@@ -538,7 +538,7 @@ live_design!{
                             kind: ImageView
                         }
                         
-                        ImageView = <Rect> {
+                        ImageView = <RectView> {
                             draw_bg: {color: #2}
                             height: Fill, width: Fill
                             flow: Down, align: {x: 0.5, y: 0.5}
@@ -549,7 +549,7 @@ live_design!{
                             }
                         }
                         
-                        InputPanel = <Rect> {
+                        InputPanel = <RectView> {
                             height: Fill, width: Fill
                             flow: Down, padding: 0.0
                             draw_bg: {color: (COLOR_PANEL_BG)}
@@ -714,7 +714,7 @@ live_design!{
                             }
                         }
                         
-                        ImageLibrary = <Rect> {
+                        ImageLibrary = <RectView> {
                             draw_bg: {color: (COLOR_PANEL_BG)}
                             height: Fill, width: Fill
                             flow: Down
@@ -780,7 +780,7 @@ live_design!{
                         }
                     }
                     
-                    big_image = <Rect> {
+                    big_image = <RectView> {
                         visible: false,
                         draw_bg: {draw_depth: 10.0}
                         draw_bg: {color: #0}
@@ -796,7 +796,7 @@ live_design!{
             }
             <DesktopWindow> {
                 window: {inner_size: vec2(960, 540)},
-                second_image = <Rect> {
+                second_image = <RectView> {
                     draw_bg: {color: #0}
                     height: Fill, width: Fill
                     flow: Overlay, align: {x: 0.5, y: 0.5}

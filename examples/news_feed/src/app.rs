@@ -124,7 +124,7 @@ live_design!{
     }
     
     
-    Header = <BoxY> {
+    Header = <RoundedYView> {
         width: Fill, height: 70
         flow: Right, padding: 10.0, spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: vec2(0.5, 4.5)}
@@ -136,7 +136,7 @@ live_design!{
         
     }
     
-    Menu = <BoxY> {
+    Menu = <RoundedYView> {
         width: Fill, height: 80
         flow: Right, padding: 10.0, spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
@@ -153,7 +153,7 @@ live_design!{
         }
     }
     
-    LineH = <Box> {
+    LineH = <RoundedView> {
         width: Fill, height: 2, margin: 0.0
         padding: 0.0, spacing: 0.0
         draw_bg: {color: (COLOR_DIVIDER)}

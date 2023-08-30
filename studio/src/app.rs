@@ -112,7 +112,7 @@ live_design!{
                     kind: RunView
                 }
                 CodeEditor = <CodeEditor> {}
-                Welcome = <Rect> {
+                Welcome = <RectView> {
                     draw_bg: {color: #052329}
                     <View> {
                          width: Fill, height: Fill
