@@ -162,9 +162,9 @@ pub struct Button {
     #[live] draw_icon: DrawIcon,
     #[live] icon_walk: Walk,
     #[live] label_walk: Walk,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
 
     #[live] pub label: RcStringMut,
 }

@@ -37,11 +37,11 @@ live_design!{
 pub struct SwipeListEntry {
     #[animator] animator: Animator,
 
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] left_drawer: WidgetRef,
     #[live] center: WidgetRef,
     #[live] right_drawer: WidgetRef,
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[rust] draw_state: DrawStateWrap<EntryDrawState>,
 }
 #[derive(Clone)]
@@ -105,8 +105,8 @@ impl Widget for SwipeListEntry {
 #[derive(Live)]
 pub struct SwipeList {
     #[rust] area: Area,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[live] scroll_bars: ScrollBars,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,

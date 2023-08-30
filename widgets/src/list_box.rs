@@ -119,7 +119,7 @@ pub struct ListBoxItem {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_name: DrawName,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[animator] animator: Animator,
     
     #[live] indent_width: f64,
@@ -137,11 +137,11 @@ pub struct ListBox {
     #[live] list_item: Option<LivePtr>,
     
     #[live] draw_filler: DrawBgQuad,
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[live] node_height: f64,
     #[live] multi_select: bool,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
     #[live] items: Vec<String>,
     

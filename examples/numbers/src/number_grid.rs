@@ -133,7 +133,7 @@ pub struct NumberBox {
     #[live] draw_bg: DrawBg,
     #[live] draw_label: DrawLabel,
 
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     #[state] state: LiveState,
     
     #[live] label_align: Align,
@@ -164,8 +164,8 @@ impl Widget for NumberGrid {
 #[derive(Live)]
 pub struct NumberGrid {
     #[live] scroll_bars: ScrollBars,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[live] seed: u32,
     #[live] fast_path: bool,
     #[live] number_box: Option<LivePtr>,

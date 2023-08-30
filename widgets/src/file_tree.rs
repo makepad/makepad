@@ -250,7 +250,7 @@ pub struct FileTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
     #[live] draw_name: DrawNameText,
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     
     #[animator] animator: Animator,
     
@@ -272,8 +272,8 @@ pub struct FileTree {
     #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
     #[live] folder_node: Option<LivePtr>,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[live] filler: DrawBgQuad,
     
     #[live] node_height: f64,

@@ -88,7 +88,7 @@ pub struct FoldButton {
     #[live] draw_bg: DrawQuad,
     #[live] abs_size: DVec2,
     #[live] abs_offset: DVec2,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
 }
 
 impl LiveHook for FoldButton{

@@ -130,8 +130,8 @@ pub struct Tab {
     
     #[live(10.0)] min_drag_dist: f64,
     
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     
 }
 

@@ -125,7 +125,7 @@ pub struct Splitter {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[live] a: WidgetRef,
     #[live] b: WidgetRef,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
 }
 
 impl LiveHook for Splitter{
