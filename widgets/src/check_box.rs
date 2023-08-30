@@ -219,7 +219,7 @@ pub struct CheckBox {
     #[live] draw_label: DrawText,
     #[live] draw_icon: DrawIcon,
 
-    #[live] label: String,
+    #[live] label: RcStringMut,
     
     #[live] bind: String,
 }
@@ -278,7 +278,7 @@ impl CheckBox {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_check.begin(cx, walk, self.layout);
-        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, self.label.as_ref());
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_check.end(cx);
     }
@@ -338,8 +338,8 @@ impl CheckBoxRef {
 
     pub fn set_label_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.label.clear();
-            inner.label.push_str(text);
+            let s = inner.label.as_mut_empty();
+            s.push_str(text);
         }
     }
 
