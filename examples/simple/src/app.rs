@@ -170,16 +170,15 @@ impl AppMain for App{
         
         // Get a reference to our button from the frame, and check if one of the actions returned by
         // the frame was a notification that the button was clicked.
-        if self.ui.get_button(id!(button1)).clicked(&actions) {
+        if self.ui.button(id!(button1)).clicked(&actions) {
             //cx.spawn_async(Self::do_network_request(cx.get_ref(), self.ui.clone()))
             // Increment the counter.
             self.counter += 1;
             
             // Get a reference to our label from the frame, update its text, and schedule a redraw
             // for it.
-            let label = self.ui.get_label(id!(label1));
-            label.set_label(&format!("Counter: {}", self.counter));
-            label.redraw(cx);
+            let label = self.ui.label(id!(label1));
+            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
         }
     }
 }

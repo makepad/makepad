@@ -317,7 +317,7 @@ impl LiveHook for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let news_feeds = self.ui.get_list_view_set(ids!(news_feed));
+        let news_feeds = self.ui.list_view_set(ids!(news_feed));
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
@@ -340,9 +340,9 @@ impl AppMain for App {
                             3 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
                         };
-                        item.get_label(id!(content.text)).set_label(&text);
-                        item.get_button(id!(likes)).set_label(&format!("{}", item_id % 23));
-                        item.get_button(id!(comments)).set_label(&format!("{}", item_id % 6));
+                        item.label(id!(content.text)).set_text(&text);
+                        item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
+                        item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
                         item.draw_widget_all(cx);
                     }
                 }
@@ -354,12 +354,12 @@ impl AppMain for App {
         
         for (_item_id, item) in news_feeds.items_with_actions(&actions) {
             // check for actions inside the list item
-            if item.get_button(id!(likes)).clicked(&actions) {
+            if item.button(id!(likes)).clicked(&actions) {
                 //log!("Live {}", item_id);
             }
         }
         
-        if self.ui.get_button(id!(button1)).clicked(&actions) {
+        if self.ui.button(id!(button1)).clicked(&actions) {
         }
     }
 }
