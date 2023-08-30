@@ -89,7 +89,7 @@ live_design!{
             },
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -252,7 +252,7 @@ pub struct FileTreeNode {
     #[live] draw_name: DrawNameText,
     #[live] layout: Layout,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] indent_width: f64,
     
@@ -373,15 +373,15 @@ impl FileTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(select.on), id!(select.off))
+        self.animator_toggle(cx, is, animate, id!(select.on), id!(select.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(focus.on), id!(focus.off))
+        self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(open.on), id!(open.off));
+        self.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
     }
     
     pub fn handle_event_with(
@@ -390,15 +390,15 @@ impl FileTreeNode {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -406,14 +406,14 @@ impl FileTreeNode {
                 }
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, id!(select.on));
+                self.animator_play(cx, id!(select.on));
                 if self.is_folder {
-                    if self.is_in_state(cx, id!(open.on)) {
-                        self.animate_state(cx, id!(open.off));
+                    if self.animator_in_state(cx, id!(open.on)) {
+                        self.animator_play(cx, id!(open.off));
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
-                        self.animate_state(cx, id!(open.on));
+                        self.animator_play(cx, id!(open.on));
                         dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
                     

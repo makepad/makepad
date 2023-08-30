@@ -498,7 +498,7 @@ live_design!{
             layout: {padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}}
             label: "CutOff1"
             label_walk: {margin: {left: 45.0, top: 8, bottom: 8, right: 10}}
-            state: {
+            animator: {
                 selected = {
                     default: off
                     off = {
@@ -1157,7 +1157,7 @@ live_design!{
                     tab1 = <FishTab> {
                         label: "All",
                         walk: {height: Fit, margin: 10}
-                        state: {selected = {default: on}},
+                        animator: {selected = {default: on}},
                         draw_label: {color_selected: (COLOR_UP_8)}
                     }
                     tab2 = <FishTab> {
@@ -1210,7 +1210,7 @@ live_design!{
                 
                 mobile_modes = <Frame> {
                     tab1 = <FishTab> {
-                        state: {selected = {default: on}},
+                        animator: {selected = {default: on}},
                         label: "Sequencer"
                         draw_icon: {
                             svg_file: (ICO_SEQ),

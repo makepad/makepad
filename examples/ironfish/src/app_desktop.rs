@@ -490,7 +490,7 @@ live_design!{
         checkbox = <CheckBox> {
             layout: {padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}}
             label: "CutOff1"
-            state: {
+            animator: {
                 selected = {
                     default: off
                     off = {
@@ -658,7 +658,7 @@ live_design!{
         checkbox = {
             walk: {width: 30, height: 30, margin: {right: -20}}
             label: ""
-            state: {
+            animator: {
                 hover = {
                     default: off
                     off = {

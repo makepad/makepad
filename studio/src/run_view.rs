@@ -63,7 +63,7 @@ impl LiveHook for RunView {
 impl RunView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, manager: &mut BuildManager) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
             self.frame += 1;

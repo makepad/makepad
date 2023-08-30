@@ -416,7 +416,7 @@ pub struct Frame { // draw info per UI element
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
 }
 
 struct FrameTextureCache {
@@ -560,19 +560,19 @@ impl FrameRef {
 
     pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.cut_state(cx, state);
+            inner.animator_cut(cx, state);
         }
     }
     
-    pub fn animate_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_play(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animate_state(cx, state);
+            inner.animator_play(cx, state);
         }
     }
     
     pub fn toggle_state(&self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.toggle_state(cx, is_state_1, animate, state1, state2);
+            inner.animator_toggle(cx, is_state_1, animate, state1, state2);
         }
     }
     
@@ -636,9 +636,9 @@ impl FrameSet {
         }
     }
     
-    pub fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
-            item.animate_state(cx, state);
+            item.animator_play(cx, state);
         }
     }
     
@@ -727,7 +727,7 @@ impl Widget for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        if self.state_handle_event(cx, event).must_redraw(){
+        if self.animator_handle_event(cx, event).must_redraw(){
             self.redraw(cx);
         }
         
@@ -778,13 +778,13 @@ impl Widget for Frame {
         }
         
         
-        if self.visible && (self.cursor.is_some() || self.state.live_ptr.is_some()){
+        if self.visible && (self.cursor.is_some() || self.animator.live_ptr.is_some()){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area());
                     dispatch_action(cx, FrameAction::FingerDown(e).into_action(uid));
-                    if self.state.live_ptr.is_some(){
-                        self.animate_state(cx, id!(down.on));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(down.on));
                     }
                 }
                 Hit::FingerMove(e) => {
@@ -792,21 +792,21 @@ impl Widget for Frame {
                 }
                 Hit::FingerUp(e) => {
                     dispatch_action(cx, FrameAction::FingerUp(e).into_action(uid));
-                    if self.state.live_ptr.is_some(){
-                        self.animate_state(cx, id!(down.off));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(down.off));
                     }
                 }
                 Hit::FingerHoverIn(_) => {
                     if let Some(cursor) = &self.cursor{
                         cx.set_cursor(*cursor);
                     }
-                    if self.state.live_ptr.is_some(){
-                        self.animate_state(cx, id!(hover.on));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(hover.on));
                     }
                 }
                 Hit::FingerHoverOut(_)=>{
-                    if self.state.live_ptr.is_some(){
-                        self.animate_state(cx, id!(hover.off));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(hover.off));
                     }
                 }
                 Hit::KeyDown(e)=>{
