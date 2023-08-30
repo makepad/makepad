@@ -188,7 +188,7 @@ impl LiveHook for DropDown {
         map.get_or_insert(cx, list_box, | cx | {
             PopupMenu::new_from_ptr(cx, Some(list_box))
         });
-         
+        
     }
 }
 #[derive(Clone, WidgetAction)]
@@ -320,7 +320,7 @@ impl DropDown {
         
         self.draw_bg.begin(cx, walk, self.layout);
         //let start_pos = cx.turtle().rect().pos;
-       
+        
         if let Some(val) = self.labels.get(self.selected_item) {
             self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
@@ -413,6 +413,13 @@ impl DropDownRef {
         }
     }
     
+    pub fn set_labels_and_redraw(&self, cx: &mut Cx, labels: Vec<String>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.labels = labels;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+    
     pub fn selected(&self, actions: &WidgetActions) -> Option<usize> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let DropDownAction::Select(id, _) = item.action() {
@@ -422,34 +429,52 @@ impl DropDownRef {
         None
     }
     
-    pub fn set_selected(&self, item:usize){
-       
+    pub fn set_selected_item(&self, item: usize) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.selected_item = item.min(inner.labels.len().max(1)-1)
+            inner.selected_item = item.min(inner.labels.len().max(1) - 1)
         }
     }
     
-    pub fn get_selected(&self)->usize{
+    pub fn set_selected_item_and_redraw(&self, cx: &mut Cx, item: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let new_selected = item.min(inner.labels.len().max(1) - 1);
+            if new_selected != inner.selected_item{
+                inner.selected_item = new_selected;
+                inner.draw_bg.redraw(cx);
+            }
+        }
+    }
+    pub fn selected_item(&self) -> usize {
         if let Some(inner) = self.borrow() {
             return inner.selected_item
         }
         0
     }
-
-
-    pub fn get_selected_label(&self)->String{
+    
+    pub fn get_selected_label(&self) -> String {
         if let Some(inner) = self.borrow() {
             return inner.labels[inner.selected_item].clone()
         }
         "".to_string()
     }
     
-     pub fn set_selected_by_label(&self,label:&str){
+    pub fn set_selected_by_label(&self, label: &str) {
         if let Some(mut inner) = self.borrow_mut() {
-            if let Some(index) = inner.labels.iter().position(|v| v == label){
+            if let Some(index) = inner.labels.iter().position( | v | v == label) {
                 inner.selected_item = index
             }
         }
     }
-        
+    
+    pub fn set_selected_by_label_and_redraw(&self, label: &str, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if let Some(index) = inner.labels.iter().position( | v | v == label) {
+                if inner.selected_item != index{
+                    inner.selected_item = index;
+                    inner.draw_bg.redraw(cx);
+                }
+            }
+        }
+    }
+    
 }
