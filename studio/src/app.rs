@@ -20,7 +20,7 @@ use {
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::file_tree::FileTree;
     import makepad_widgets::button::Button;
     import makepad_widgets::label::Label;
@@ -114,7 +114,7 @@ live_design!{
                 CodeEditor = <CodeEditor> {}
                 Welcome = <Rect> {
                     draw_bg: {color: #052329}
-                    <Frame> {
+                    <View> {
                          width: Fill, height: Fill
                         layout: {
                             align: {

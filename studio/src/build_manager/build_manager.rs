@@ -38,12 +38,12 @@ use {
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::label::Label;
     import makepad_widgets::link_label::LinkLabel;
     import makepad_widgets::list_view::ListView;
     
-    WaitIcon = <Frame> {
+    WaitIcon = <View> {
         width: 10, height: 10
         draw_bg: {
             fn pixel(self) -> vec4 {

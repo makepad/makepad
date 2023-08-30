@@ -27,7 +27,7 @@ live_design!{
     import makepad_widgets::multi_window::MultiWindow
     import makepad_audio_widgets::display_audio::DisplayAudio
     
-    VideoFrame = <Frame> {
+    VideoFrame = <View> {
         show_bg: true,
         width: Fill, height: Fill
         draw_bg: {
@@ -90,7 +90,7 @@ live_design!{
     }
     AudioMixer = {{AudioMixer}} {}
     
-    MainSlides = <Frame> {
+    MainSlides = <View> {
         flow: Overlay, align: {x: 1.0, y: 1.0 padding: 0}
         slides_view = <SlidesView> {
             slide_width: 1920.0
@@ -118,11 +118,11 @@ live_design!{
         ui: <MultiWindow> {
             window1 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), dpi_override: 1.0},
-                <Frame> {
+                <View> {
                     flow: Overlay
                     <MainSlides> {}
                     meetup_overlay = <MeetupOverlay> {}
-                    <Frame> {
+                    <View> {
                         align: {y: 1.0 spacing: 5, padding: 40}
                         chan1 = <DisplayChannel> {}
                         chan2 = <DisplayChannel> {}
@@ -143,11 +143,11 @@ live_design!{
             }
             window3 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
-                <Frame> {
+                <View> {
                     flow: Overlay
                     <MainSlides> {
                     }
-                    <Frame> {
+                    <View> {
                         video_input1 = <VideoFrameRound> {
                             width: 480, height: 270
                         }

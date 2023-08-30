@@ -46,7 +46,7 @@ pub mod window_menu;
 pub mod debug_view;
 pub mod nav_control;
 
-pub mod frame;
+pub mod view;
 pub mod widget;
 
 #[macro_use]
@@ -58,7 +58,7 @@ pub mod image_cache;
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
-    frame::*,
+    view::*,
     image::*,
     label::*,
     slider::*,
@@ -106,7 +106,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
     crate::rotated_image::live_design(cx);
-    crate::frame::live_design(cx);
+    crate::view::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
     crate::link_label::live_design(cx);

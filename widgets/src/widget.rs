@@ -382,24 +382,7 @@ impl WidgetRef {
     pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
         Self (Rc::new(RefCell::new(Some(widget))))
     }
-    /*
-    pub fn create_child(
-        &self,
-        cx: &mut Cx,
-        live_ptr: LivePtr,
-        at: CreateAt,
-        new_id: LiveId,
-        nodes: &[LiveNode]
-    ) -> WidgetRef {
-        let mut inner = self.0.borrow_mut();
-        if let Some(inner) = &mut *inner {
-            inner.create_child(cx, live_ptr, at, new_id, nodes)
-        }
-        else {
-            WidgetRef::empty()
-        }
-    }*/
-    
+
     pub fn handle_widget_event_with(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.handle_widget_event_with(cx, event, dispatch_action)
@@ -457,15 +440,6 @@ impl WidgetRef {
         }
         WidgetSet::default()
     }
-/*
-    pub fn find_template(&self, id: &[LiveId; 1]) -> Option<LivePtr> {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.find_template(id)
-        }
-        else {
-            None
-        }
-    }*/
     
     pub fn draw_walk_widget(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {

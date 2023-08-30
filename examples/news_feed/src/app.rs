@@ -7,7 +7,7 @@ live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::image::Image;
     import makepad_widgets::slider::Slider;
     import makepad_widgets::text_input::TextInput;
@@ -54,9 +54,9 @@ live_design!{
     COLOR_PROFILE_CIRCLE = #xfff8ee
     COLOR_P = #x999
     
-    FillerY = <Frame> {width: Fill}
+    FillerY = <View> {width: Fill}
     
-    FillerX = <Frame> {height: Fill}
+    FillerX = <View> {height: Fill}
     
     Logo = <Button> {
         draw_icon: {
@@ -141,7 +141,7 @@ live_design!{
         flow: Right, padding: 10.0, spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
         
-        <Frame> {
+        <View> {
             width: Fill, height: Fit, margin: 0.0
             flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}
             
@@ -159,11 +159,11 @@ live_design!{
         draw_bg: {color: (COLOR_DIVIDER)}
     }
     
-    PostMenu = <Frame> {
+    PostMenu = <View> {
         width: Fill, height: Fit, margin: 0.0
         flow: Down, padding: 0.0, spacing: 0.0
         
-        <Frame> {
+        <View> {
             width: Fill, height: Fit, margin: 0.0
             flow: Right, padding: 0.0, spacing: 10.0
             
@@ -175,15 +175,15 @@ live_design!{
         }
     }
     
-    Post = <Frame> {
+    Post = <View> {
         width: Fill, height: Fit, margin: 0.0
         flow: Down, padding: 0.0, spacing: 0.0
         
-        body = <Frame> {
+        body = <View> {
             width: Fill, height: Fit
             flow: Right, padding: 10.0, spacing: 10.0
             
-            profile = <Frame> {
+            profile = <View> {
                 width: Fit, height: Fit, margin: {top: 7.5}
                 flow: Down, padding: 0.0
                 profile_img = <Image> {
@@ -201,7 +201,7 @@ live_design!{
                     }
                 }
             }
-            content = <Frame> {
+            content = <View> {
                 width: Fill, height: Fit
                 flow: Down, padding: 0.0
                 
@@ -236,7 +236,7 @@ live_design!{
         }
     }
     
-    PostImage = <Frame> {
+    PostImage = <View> {
         width: Fill, height: Fit
         flow: Down, padding: 0.0, spacing: 0.0
         
@@ -284,13 +284,13 @@ live_design!{
             news_feed = <ListView> {
                 height: Fill, width: Fill
                 flow: Down
-                TopSpace = <Frame> {height: 80}
+                TopSpace = <View> {height: 80}
                 Post = <Post> {}
                 PostImage = <PostImage> {}
-                BottomSpace = <Frame> {height: 100}
+                BottomSpace = <View> {height: 100}
             }
             
-            <Frame> {
+            <View> {
                 height: Fill, width: Fill
                 flow: Down
                 
