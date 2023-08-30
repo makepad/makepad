@@ -319,6 +319,14 @@ impl Widget for CheckBox {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
+    
+    fn text(&self)->String{
+        self.text.as_ref().to_string()
+    }
+    
+    fn set_text(&mut self,v:&str){
+        self.text.as_mut_empty().push_str(v);
+    }
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]

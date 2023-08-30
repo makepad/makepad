@@ -3,7 +3,6 @@ use crate::{
     file_tree::*,
     view::View,
     widget::*,
-    label::*,
 };
 
 live_design!{
@@ -139,7 +138,7 @@ impl Designer {
                         WidgetRef::new_from_ptr(cx, container_ptr),
                     )
                 });
-                container.label(id!(label)).set_text(&format!("{}=<{}>", name, class));
+                container.widget(id!(label)).set_text(&format!("{}=<{}>", name, class));
                 // lets draw this thing in a neat little container box with a title bar
                 while let Some(_) = container.draw_widget(cx).hook_widget() {
                     widget.draw_widget_all(cx);
