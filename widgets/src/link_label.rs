@@ -26,7 +26,7 @@ live_design!{
                 ), mix(0.0, THICKNESS, self.hover));
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <FONT_META> {}
             fn get_color(self) -> vec4 {
                 return mix(
@@ -41,15 +41,10 @@ live_design!{
             }
         }
         
-        
-            width: Fit,
-            height: Fit,
-            margin: {left: 5.0, top: 0.0, right: 0.0
-        }
-        
-        
-            padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0
-        }
+        width: Fit,
+        height: Fit,
+        margin: {left: 5.0, top: 0.0, right: 0.0}
+        padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
     }
 }
 
@@ -58,33 +53,33 @@ pub struct LinkLabel {
     #[deref] button: Button
 }
 
-impl LiveHook for LinkLabel{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,LinkLabel)
+impl LiveHook for LinkLabel {
+    fn before_live_design(cx: &mut Cx) {
+        register_widget!(cx, LinkLabel)
     }
 }
 
 impl Widget for LinkLabel {
-    fn redraw(&mut self, cx:&mut Cx){
+    fn redraw(&mut self, cx: &mut Cx) {
         self.button.redraw(cx)
     }
     
-    fn walk(&self)->Walk{
+    fn walk(&self) -> Walk {
         self.button.walk()
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.button.draw_walk_widget(cx, walk)
     }
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
-pub struct LinkLabelRef(WidgetRef); 
+pub struct LinkLabelRef(WidgetRef);
 
 impl LinkLabelRef {
-    pub fn set_label(&self, text:&str){
-        if let Some(mut inner) = self.borrow_mut(){
-            let s = inner.button.label.as_mut_empty();
+    pub fn set_text(&self, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let s = inner.button.text.as_mut_empty();
             s.push_str(text);
         }
     }

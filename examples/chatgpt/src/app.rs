@@ -34,10 +34,10 @@ live_design!{
             }
             message_label = <Label> {
                 width: 300, height: Fit
-                draw_label: {
+                draw_text: {
                     color: #f
                 },
-                label: "hi! how may I assist you today?",
+                text: "hi! how may I assist you today?",
             }
             message_input = <TextInput> {
                 text: "Hi!"
@@ -48,7 +48,7 @@ live_design!{
             }
             send_button = <Button> {
                icon_walk:{margin:{left:10}, width:16,height:Fit}
-               label: "send"
+               text: "send"
             }
         }
     }

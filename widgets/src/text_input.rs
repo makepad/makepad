@@ -130,14 +130,14 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_select: {hover: 0.0}
-                        draw_label: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_select: {hover: 1.0}
-                        draw_label: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                     }
                 }
             }
@@ -148,7 +148,7 @@ live_design!{
                     apply: {
                         draw_cursor: {focus: 0.0},
                         draw_select: {focus: 0.0}
-                        draw_label: {focus: 0.0}
+                        draw_text: {focus: 0.0}
                     }
                 }
                 on = {
@@ -156,7 +156,7 @@ live_design!{
                     apply: {
                         draw_cursor: {focus: 1.0},
                         draw_select: {focus: 1.0}
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                     }
                 }
             }
@@ -197,7 +197,7 @@ pub struct TextInput {
     #[live] draw_bg: DrawColor,
     #[live] draw_select: DrawQuad,
     #[live] draw_cursor: DrawQuad,
-    #[live] draw_label: DrawLabel,
+    #[live] draw_text: DrawLabel,
 
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -573,8 +573,8 @@ impl TextInput {
                 KeyCode::ArrowDown => if !ke.modifiers.logo{
                     self.undo_id += 1;
                     // we need to figure out what is below our current cursor
-                    if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
-                        if let Some(pos) = self.draw_label.closest_offset(cx, dvec2(pos.x, pos.y + self.draw_label.get_line_spacing()*1.5)){
+                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head){
+                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y + self.draw_text.get_line_spacing()*1.5)){
                             self.cursor_head = pos;
                             if !ke.modifiers.shift {
                                 self.cursor_tail = self.cursor_head;
@@ -586,8 +586,8 @@ impl TextInput {
                 KeyCode::ArrowUp =>if !ke.modifiers.logo{
                     self.undo_id += 1;
                     // we need to figure out what is below our current cursor
-                    if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
-                        if let Some(pos) = self.draw_label.closest_offset(cx, dvec2(pos.x, pos.y - self.draw_label.get_line_spacing()*0.5)){
+                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head){
+                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y - self.draw_text.get_line_spacing()*0.5)){
                             self.cursor_head = pos;
                             if !ke.modifiers.shift {
                                 self.cursor_tail = self.cursor_head;
@@ -645,7 +645,7 @@ impl TextInput {
                 self.set_key_focus(cx);
                 // ok so we need to calculate where we put the cursor down.
                 //elf.
-                if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
                     //log!("{} {}", pos, fe.abs);
                     let pos = pos.min(self.text.chars().count());
                     if fe.tap_count == 1 {
@@ -670,7 +670,7 @@ impl TextInput {
             },
             Hit::FingerUp(fe) => {
                 self.double_tap_start = None;
-                if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
                     let pos = pos.min(self.text.chars().count());
                     if !fe.mod_shift() && fe.tap_count == 1 && fe.was_tap() {
                         self.cursor_head = pos;
@@ -689,7 +689,7 @@ impl TextInput {
                 }
             }
             Hit::FingerMove(fe) => {
-                if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
                     let pos = pos.min(self.text.chars().count());
                     if fe.tap_count == 2 {
                         let (head, tail) = self.double_tap_start.unwrap();
@@ -704,7 +704,7 @@ impl TextInput {
                         self.draw_bg.redraw(cx);
                     }
                     else if fe.tap_count == 1 {
-                        if let Some(pos_start) = self.draw_label.closest_offset(cx, fe.abs_start) {
+                        if let Some(pos_start) = self.draw_text.closest_offset(cx, fe.abs_start) {
                             let pos_start = pos_start.min(self.text.chars().count());
 
                             self.cursor_head = pos_start;
@@ -730,12 +730,12 @@ impl TextInput {
         self.draw_select.append_to_draw_call(cx);
         
         if self.text.len() == 0 {
-            self.draw_label.is_empty = 1.0;
-            self.draw_label.draw_walk(cx, Walk::size(self.walk.width,self.walk.height), self.label_align, &self.empty_message);
+            self.draw_text.is_empty = 1.0;
+            self.draw_text.draw_walk(cx, Walk::size(self.walk.width,self.walk.height), self.label_align, &self.empty_message);
         }
         else {
-            self.draw_label.is_empty = 0.0;
-            self.draw_label.draw_walk(cx, Walk::size(
+            self.draw_text.is_empty = 0.0;
+            self.draw_text.draw_walk(cx, Walk::size(
                 self.walk.width,
                 self.walk.height), self.label_align, &self.text);
         }
@@ -744,9 +744,9 @@ impl TextInput {
         turtle.pos.y -= self.cursor_margin_top;
         turtle.size.y += self.cursor_margin_top + self.cursor_margin_bottom;
         // move the IME
-        let line_spacing = self.draw_label.get_line_spacing();
-        let top_drop = self.draw_label.get_font_size()*0.2;
-        let head = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head)
+        let line_spacing = self.draw_text.get_line_spacing();
+        let top_drop = self.draw_text.get_font_size()*0.2;
+        let head = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head)
             .unwrap_or(dvec2(turtle.pos.x, 0.0));
 
         if !self.read_only && self.cursor_head == self.cursor_tail {
@@ -759,11 +759,11 @@ impl TextInput {
         // draw selection rects
         
         if self.cursor_head != self.cursor_tail {
-            let top_drop = self.draw_label.get_font_size()*0.3;
-            let bottom_drop = self.draw_label.get_font_size()*0.1;
+            let top_drop = self.draw_text.get_font_size()*0.3;
+            let bottom_drop = self.draw_text.get_font_size()*0.1;
 
             let (start, end) = self.sorted_cursor();
-            let rects = self.draw_label.get_selection_rects(cx, start, end, dvec2(0.0,-top_drop), dvec2(0.0,bottom_drop));
+            let rects = self.draw_text.get_selection_rects(cx, start, end, dvec2(0.0,-top_drop), dvec2(0.0,bottom_drop));
             for rect in rects{
                 self.draw_select.draw_abs(cx,rect);
             }
@@ -772,7 +772,7 @@ impl TextInput {
         
         if cx.has_key_focus(self.draw_bg.area()) {
             // ok so. if we have the IME we should inject a tracking point
-            let ime_x = self.draw_label.get_cursor_pos(cx, 0.5, self.cursor_head)
+            let ime_x = self.draw_text.get_cursor_pos(cx, 0.5, self.cursor_head)
                 .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
             
             if self.numeric_only{
