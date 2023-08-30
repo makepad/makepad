@@ -33,13 +33,13 @@ live_design!{
     
     TEXT_SUB = {
         font_size: (FONT_SIZE_SUB),
-        font: {path: dep("crate://makepad-widgets/resources/NotoSansTC-Medium.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
     
     TEXT_P = {
         font_size: (FONT_SIZE_P),
         height_factor: 1.65,
-        font: {path: dep("crate://makepad-widgets/resources/NotoSansTC-Medium.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
     
     COLOR_BG = #xfff8ee
