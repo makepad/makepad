@@ -45,7 +45,7 @@ live_design!{
                 labels: ["Item1", "Item2"]
             }
             
-            <Box> {
+            <RoundedView> {
                 width:Fill, height:Fit
                 draw_bg:{color:#f00}
                 label1 = <Label> {

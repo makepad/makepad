@@ -62,7 +62,7 @@ live_design!{
         }
     }
     
-    LogItem = <Rect> {
+    LogItem = <RectView> {
         height: Fit, width: Fill
         layout: {padding: {top: 5, bottom: 5}}
         draw_bg: {
@@ -131,7 +131,7 @@ live_design!{
         link_label = <LinkLabel> {}
     }
     
-    LogItemEmpty = <Rect> {
+    LogItemEmpty = <RectView> {
         height: 20, width: Fill
         draw_bg: {
             instance is_even: 0.0

@@ -18,11 +18,11 @@ live_design!{
     Designer = {{Designer}} {
         has_view: true,
         flow: Right
-        container: <Box> {
+        container: <RoundedView> {
             draw_bg: {color: #3}
             width: Fill, height: 400
             flow: Down, spacing: 10, padding:10
-            <Box>{
+            <RoundedView>{
                 width: Fill, height: Fit
                 padding:5
                 draw_bg:{color:#5}

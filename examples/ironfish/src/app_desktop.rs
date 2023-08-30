@@ -121,12 +121,12 @@ live_design!{
         height: Fit,
         margin: {top: (SSPACING_3), right: 0, bottom: (SSPACING_3), left: (SSPACING_0)}
         flow: Down
-            <Box> {
+            <RoundedView> {
             width: Fill,
             height: 1.0
             draw_bg: {color: (COLOR_DIVIDER)}
         }
-        <Box> {
+        <RoundedView> {
             width: Fill,
             height: 1.0
             draw_bg: {color: (COLOR_UP_4)}
@@ -150,7 +150,7 @@ live_design!{
         height: Fit
     }
     
-    SubheaderContainer = <Box> {
+    SubheaderContainer = <RoundedView> {
         draw_bg: {color: (COLOR_UP_2)}
         width: Fill,
         height: Fit,
@@ -173,7 +173,7 @@ live_design!{
         }
     }
     
-    FishPanel = <GradientY> {
+    FishPanel = <GradientYView> {
         flow: Down,
         padding: <SPACING_2> {}
         width: Fill,
@@ -571,7 +571,7 @@ live_design!{
         }
     }
     
-    GraphPaper = <Box> {
+    GraphPaper = <RoundedView> {
         width: Fill,
         height: 120
         draw_bg: {
@@ -615,7 +615,7 @@ live_design!{
         }
     }
     
-    FishTitle = <Box> {
+    FishTitle = <RoundedView> {
         width: Fit,
         height: Fit,
         margin: {bottom: (SSPACING_1)}
@@ -630,7 +630,7 @@ live_design!{
         }
     }
     
-    FishHeader = <Box> {
+    FishHeader = <RoundedView> {
         flow: Right
         height: Fit,
         width: Fill,
@@ -943,7 +943,7 @@ live_design!{
     
     
     // PANELS
-    EnvelopePanel = <Box> {
+    EnvelopePanel = <RoundedView> {
         flow: Down,
         padding: <SPACING_0> {}
         width: Fill,
@@ -1103,7 +1103,7 @@ live_design!{
         }
     }
     
-    Arp = <GradientY> {
+    Arp = <GradientYView> {
         flow: Down,
         padding: <SPACING_0> {}
         spacing: (SSPACING_2)
@@ -1193,7 +1193,7 @@ live_design!{
         }
     }
     
-    SequencerPanel = <Box> {
+    SequencerPanel = <RoundedView> {
         flow: Down
         margin: <SPACING_0> {}
         
@@ -1218,7 +1218,7 @@ live_design!{
                 }
             }
             
-            <GradientY> {
+            <GradientYView> {
                 height: Fit
                 flow: Down
                 draw_bg: {
@@ -2017,7 +2017,7 @@ live_design!{
         draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
         
         <Arp> {}
-        <ScrollX> {
+        <ScrollXView> {
             piano = <Piano> {height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_2); bottom: (SSPACING_3), left: (SSPACING_2)}}
         }
         <PianoSettings> {}
@@ -2295,7 +2295,7 @@ live_design!{
         }
     }
     
-    Presets = <GradientX> {
+    Presets = <GradientXView> {
         width: 250,
         height: Fill
         flow: Down,
@@ -2333,7 +2333,7 @@ live_design!{
             flow: Down
             
             // APPLICATION HEADER
-                <GradientY> {
+                <GradientYView> {
                 width: Fill,
                 height: (HEIGHT_AUDIOVIZ)
                 draw_bg: {color: (COLOR_VIZ_1), color2: (COLOR_VIZ_2)}
