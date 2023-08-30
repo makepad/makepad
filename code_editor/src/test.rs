@@ -276,7 +276,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -4294,7 +4294,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -8312,7 +8312,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -12330,7 +12330,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -16348,7 +16348,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 

@@ -162,7 +162,7 @@ impl Widget for Splitter {
         }
     }
     
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
     

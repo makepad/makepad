@@ -40,13 +40,13 @@ pub trait Widget: LiveApply {
     fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results:&mut WidgetSet){
     }
     
-    fn get_widget(&mut self, path: &[LiveId]) -> WidgetRef {
+    fn widget(&mut self, path: &[LiveId]) -> WidgetRef {
         let mut results = WidgetSet::default();
         self.find_widgets(path, WidgetCache::Yes, &mut results);
         return results.into_first()
     }
     
-    fn get_widgets(&mut self, paths: &[&[LiveId]]) -> WidgetSet {
+    fn widgets(&mut self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         for path in paths{
             self.find_widgets(path, WidgetCache::Yes, &mut results);
@@ -61,7 +61,7 @@ pub trait Widget: LiveApply {
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes:&[LiveNode], _path: &[LiveId]){}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw;
-    fn get_walk(&self)->Walk{Walk::default()}
+    fn walk(&self)->Walk{Walk::default()}
     fn redraw(&mut self, _cx: &mut Cx);
     
     fn is_visible(&self)->bool{
@@ -69,7 +69,7 @@ pub trait Widget: LiveApply {
     }
     
     fn draw_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
-        self.draw_walk_widget(cx, self.get_walk())
+        self.draw_walk_widget(cx, self.walk())
     }
     
     fn draw_widget_all(&mut self, cx: &mut Cx2d) {
@@ -285,7 +285,7 @@ impl WidgetSet{
         }
     }
     
-    pub fn get_widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
+    pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         for widget in self.iter(){
             if let Some(inner) = widget.0.borrow_mut().as_mut() {
@@ -427,16 +427,16 @@ impl WidgetRef {
         }
     }
     
-    pub fn get_widget(&self, path: &[LiveId]) -> WidgetRef {
+    pub fn widget(&self, path: &[LiveId]) -> WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.get_widget(path);
+            return inner.widget(path);
         }
         WidgetRef::empty()
     }
     
-    pub fn get_widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
+    pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.get_widgets(paths);
+            return inner.widgets(paths);
         }
         WidgetSet::default()
     }
@@ -453,9 +453,9 @@ impl WidgetRef {
         WidgetDraw::done()
     }
     
-    pub fn get_walk(&self) -> Walk {
+    pub fn walk(&self) -> Walk {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.get_walk()
+            return inner.walk()
         }
         Walk::default()
     }

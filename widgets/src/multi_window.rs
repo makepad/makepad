@@ -72,7 +72,7 @@ impl Widget for MultiWindow {
         }
     }
     
-    fn get_walk(&self) -> Walk {Walk::default()}
+    fn walk(&self) -> Walk {Walk::default()}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
         self.draw_state.begin(cx, DrawState::Window(0));

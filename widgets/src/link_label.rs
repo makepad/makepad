@@ -69,8 +69,8 @@ impl Widget for LinkLabel {
         self.button.redraw(cx)
     }
     
-    fn get_walk(&self)->Walk{
-        self.button.get_walk()
+    fn walk(&self)->Walk{
+        self.button.walk()
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{

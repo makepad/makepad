@@ -158,7 +158,7 @@ impl Widget for RotatedImage {
         self.draw_bg.redraw(cx)
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 

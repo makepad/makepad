@@ -42,7 +42,7 @@ impl Widget for Label {
         self.draw_label.redraw(cx)
     }
     
-    fn get_walk(&self)->Walk{
+    fn walk(&self)->Walk{
         self.walk
     }
     
