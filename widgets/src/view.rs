@@ -828,7 +828,7 @@ impl Widget for View {
         self.visible
     }
     
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
     
@@ -998,7 +998,7 @@ impl View {
                 let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id) {
                     if child.is_visible() {
-                        let walk = child.get_walk();
+                        let walk = child.walk();
                         if resume {
                             child.draw_walk_widget(cx, walk) ?;
                         }

@@ -58,8 +58,8 @@ pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn redraw(&mut self, cx:&mut Cx) {");
             tb.add("        self.area().redraw(cx)");
             tb.add("    }");
-            tb.add("    fn get_walk(&self) -> Walk {");
-            tb.add("        self.get_widget_walk()");
+            tb.add("    fn walk(&self) -> Walk {");
+            tb.add("        self.get_widwalk()");
             tb.add("    }");
             tb.add("    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {");
             tb.add("        let _= self.draw_walk(cx, walk);");
@@ -158,7 +158,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
             let widget_ext = format!("{}WidgetExt", clean_name);
-            let get_fn = format!("get_{}", snake_name);
+            let get_fn = format!("{}", snake_name);
             let as_fn = format!("as_{}", snake_name);
 
             tb.add("pub trait").ident(&widget_ref_ext).add("{");
@@ -168,7 +168,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
 
             tb.add("impl ").ident(&widget_ref_ext).add(" for WidgetRef{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
-            tb.add("        ").ident(&ref_name).add("(self.get_widget(path))");
+            tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.clone())");
@@ -181,7 +181,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             
             tb.add("impl<T> ").ident(&widget_ext).add(" for T where T: Widget{");
             tb.add("    fn ").ident(&get_fn).add("(&mut self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
-            tb.add("        ").ident(&ref_name).add("(self.get_widget(path))");
+            tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("}");
             
@@ -233,7 +233,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             let set_ext = format!("{}SetWidgetSetExt", clean_name);
             let ref_ext = format!("{}SetWidgetRefExt", clean_name);
             let widget_ext = format!("{}SetWidgetExt", clean_name);
-            let get_fn = format!("get_{}_set", snake_name);
+            let get_fn = format!("{}_set", snake_name);
             let as_fn = format!("as_{}_set", snake_name);
             let ref_name = format!("{}Ref", clean_name);
             
@@ -254,7 +254,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             
             tb.add("impl ").ident(&set_ext).add(" for WidgetSet{");
             tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&set_name).add("{");
-            tb.add("        ").ident(&set_name).add("(self.get_widgets(paths))");
+            tb.add("        ").ident(&set_name).add("(self.widgets(paths))");
             tb.add("    }");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&set_name).add("{");
             tb.add("        ").ident(&set_name).add("(self.clone())");
@@ -267,7 +267,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
 
             tb.add("impl ").ident(&ref_ext).add(" for WidgetRef{");
             tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&set_name).add("{");
-            tb.add("        ").ident(&set_name).add("(self.get_widgets(paths))");
+            tb.add("        ").ident(&set_name).add("(self.widgets(paths))");
             tb.add("    }");
             tb.add("}");
             
@@ -278,7 +278,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
 
             tb.add("impl<T> ").ident(&widget_ext).add(" for T where T: Widget{");
             tb.add("    fn ").ident(&get_fn).add("(&mut self, paths: &[&[LiveId]]) -> ").ident(&set_name).add("{");
-            tb.add("        ").ident(&set_name).add("(self.get_widgets(paths))");
+            tb.add("        ").ident(&set_name).add("(self.widgets(paths))");
             tb.add("    }");
             tb.add("}");
             

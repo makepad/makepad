@@ -922,7 +922,7 @@ impl LiveHook for App {
         let _ = self.db.load_database();
         self.filtered.filter_db(&self.db, "", false);
         let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
-        let dd = self.ui.get_drop_down(id!(workflow_dropdown));
+        let dd = self.ui.drop_down(id!(workflow_dropdown));
         dd.set_labels(workflows);
         cx.start_interval(0.016);
         self.update_seed_display(cx);
@@ -1028,7 +1028,7 @@ impl App {
             live_id!(m6) => id!(progress6),
             _ => panic!()
         };
-        ui.get_view(progress_id).apply_over(cx, live!{
+        ui.view(progress_id).apply_over(cx, live!{
             draw_bg: {active: (if active {1.0}else {0.0}), progress: (steps as f64 / total as f64)}
         });
         ui.redraw(cx);
@@ -1054,14 +1054,14 @@ impl App {
     }
     
     fn update_seed_display(&mut self, cx: &mut Cx) {
-        self.ui.get_text_input(id!(seed_input)).set_text(&format!("{}", self.last_seed));
+        self.ui.text_input(id!(seed_input)).set_text(&format!("{}", self.last_seed));
         self.ui.redraw(cx);
     }
     
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.get_text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
-            self.ui.get_text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
+            self.ui.text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
+            self.ui.text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
             self.ui.redraw(cx);
             self.load_preset(&prompt_file.prompt.preset)
         }
@@ -1071,7 +1071,7 @@ impl App {
         self.current_image = Some(image_id);
         let prompt_hash = self.prompt_hash_from_current_image();
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.get_label(id!(second_image.prompt)).set_label(&prompt_file.prompt.positive);
+            self.ui.label(id!(second_image.prompt)).set_label(&prompt_file.prompt.positive);
         }
     }
     
@@ -1115,55 +1115,55 @@ impl App {
             }
         }
         todo += self.todo.len();
-        self.ui.get_label(id!(todo_label)).set_label(&format!("Todo {}", todo));
+        self.ui.label(id!(todo_label)).set_label(&format!("Todo {}", todo));
         self.ui.redraw(cx);
     }
     
     fn save_preset(&self) -> PromptPreset {
         PromptPreset {
-            workflow: self.ui.get_drop_down(id!(workflow_dropdown)).get_selected_label(),
-            width: self.ui.get_text_input(id!(settings_width.input)).get_text().parse::<u32>().unwrap_or(1344),
-            height: self.ui.get_text_input(id!(settings_height.input)).get_text().parse::<u32>().unwrap_or(768),
-            steps: self.ui.get_text_input(id!(settings_steps.input)).get_text().parse::<u32>().unwrap_or(20),
-            base_cfg: self.ui.get_text_input(id!(settings_base_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
-            refiner_cfg: self.ui.get_text_input(id!(settings_refiner_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
-            positive_score: self.ui.get_text_input(id!(settings_pos_score.input)).get_text().parse::<f64>().unwrap_or(6.0),
-            negative_score: self.ui.get_text_input(id!(settings_neg_score.input)).get_text().parse::<f64>().unwrap_or(2.0),
-            base_start_step: self.ui.get_text_input(id!(settings_base_start_step.input)).get_text().parse::<u32>().unwrap_or(0),
-            base_end_step: self.ui.get_text_input(id!(settings_base_end_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            refiner_start_step: self.ui.get_text_input(id!(settings_refiner_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            refiner_end_step: self.ui.get_text_input(id!(settings_refiner_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
-            upscale_start_step: self.ui.get_text_input(id!(settings_upscale_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            upscale_end_step: self.ui.get_text_input(id!(settings_upscale_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
-            upscale_steps: self.ui.get_text_input(id!(settings_upscale_steps.input)).get_text().parse::<u32>().unwrap_or(31),
-            scale: self.ui.get_text_input(id!(settings_scale.input)).get_text().parse::<f64>().unwrap_or(0.5),
-            total_steps: self.ui.get_text_input(id!(settings_total_steps.input)).get_text().parse::<u32>().unwrap_or(20),
+            workflow: self.ui.drop_down(id!(workflow_dropdown)).get_selected_label(),
+            width: self.ui.text_input(id!(settings_width.input)).get_text().parse::<u32>().unwrap_or(1344),
+            height: self.ui.text_input(id!(settings_height.input)).get_text().parse::<u32>().unwrap_or(768),
+            steps: self.ui.text_input(id!(settings_steps.input)).get_text().parse::<u32>().unwrap_or(20),
+            base_cfg: self.ui.text_input(id!(settings_base_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
+            refiner_cfg: self.ui.text_input(id!(settings_refiner_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
+            positive_score: self.ui.text_input(id!(settings_pos_score.input)).get_text().parse::<f64>().unwrap_or(6.0),
+            negative_score: self.ui.text_input(id!(settings_neg_score.input)).get_text().parse::<f64>().unwrap_or(2.0),
+            base_start_step: self.ui.text_input(id!(settings_base_start_step.input)).get_text().parse::<u32>().unwrap_or(0),
+            base_end_step: self.ui.text_input(id!(settings_base_end_step.input)).get_text().parse::<u32>().unwrap_or(20),
+            refiner_start_step: self.ui.text_input(id!(settings_refiner_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
+            refiner_end_step: self.ui.text_input(id!(settings_refiner_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
+            upscale_start_step: self.ui.text_input(id!(settings_upscale_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
+            upscale_end_step: self.ui.text_input(id!(settings_upscale_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
+            upscale_steps: self.ui.text_input(id!(settings_upscale_steps.input)).get_text().parse::<u32>().unwrap_or(31),
+            scale: self.ui.text_input(id!(settings_scale.input)).get_text().parse::<f64>().unwrap_or(0.5),
+            total_steps: self.ui.text_input(id!(settings_total_steps.input)).get_text().parse::<u32>().unwrap_or(20),
         }
     }
     
     fn load_preset(&self, preset: &PromptPreset) {
-        self.ui.get_drop_down(id!(workflow_dropdown)).set_selected_by_label(&preset.workflow);
-        self.ui.get_text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
-        self.ui.get_text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
-        self.ui.get_text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
-        self.ui.get_text_input(id!(settings_base_cfg.input)).set_text(&format!("{}", preset.base_cfg));
-        self.ui.get_text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
-        self.ui.get_text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
-        self.ui.get_text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
-        self.ui.get_text_input(id!(settings_base_start_step.input)).set_text(&format!("{}", preset.base_start_step));
-        self.ui.get_text_input(id!(settings_base_end_step.input)).set_text(&format!("{}", preset.base_end_step));
-        self.ui.get_text_input(id!(settings_refiner_start_step.input)).set_text(&format!("{}", preset.refiner_start_step));
-        self.ui.get_text_input(id!(settings_refiner_end_step.input)).set_text(&format!("{}", preset.refiner_end_step));
-        self.ui.get_text_input(id!(settings_upscale_start_step.input)).set_text(&format!("{}", preset.upscale_start_step));
-        self.ui.get_text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
-        self.ui.get_text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
-        self.ui.get_text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
-        self.ui.get_text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));
+        self.ui.drop_down(id!(workflow_dropdown)).set_selected_by_label(&preset.workflow);
+        self.ui.text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
+        self.ui.text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
+        self.ui.text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
+        self.ui.text_input(id!(settings_base_cfg.input)).set_text(&format!("{}", preset.base_cfg));
+        self.ui.text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
+        self.ui.text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
+        self.ui.text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
+        self.ui.text_input(id!(settings_base_start_step.input)).set_text(&format!("{}", preset.base_start_step));
+        self.ui.text_input(id!(settings_base_end_step.input)).set_text(&format!("{}", preset.base_end_step));
+        self.ui.text_input(id!(settings_refiner_start_step.input)).set_text(&format!("{}", preset.refiner_start_step));
+        self.ui.text_input(id!(settings_refiner_end_step.input)).set_text(&format!("{}", preset.refiner_end_step));
+        self.ui.text_input(id!(settings_upscale_start_step.input)).set_text(&format!("{}", preset.upscale_start_step));
+        self.ui.text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
+        self.ui.text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
+        self.ui.text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
+        self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));
     }
     
     fn render(&mut self, cx: &mut Cx, batch_size: usize) {
-        let positive = self.ui.get_text_input(id!(positive)).get_text();
-        let negative = self.ui.get_text_input(id!(negative)).get_text();
+        let positive = self.ui.text_input(id!(positive)).get_text();
+        let negative = self.ui.text_input(id!(negative)).get_text();
         
         //self.todo.clear();
         if batch_size != 1 {
@@ -1191,7 +1191,7 @@ impl App {
     }
     
     fn set_slide_show(&mut self, cx: &mut Cx, check: bool) {
-        let check_box = self.ui.get_check_box(id!(slide_show_check_box));
+        let check_box = self.ui.check_box(id!(slide_show_check_box));
         check_box.set_selected(cx, check);
         if check {
             self.last_flip = Instant::now();
@@ -1200,8 +1200,8 @@ impl App {
     
     fn handle_slide_show(&mut self, cx: &mut Cx) {
         // lets get the slideshow values
-        if self.ui.get_check_box(id!(slide_show_check_box)).selected(cx) {
-            let time = self.ui.get_drop_down(id!(slide_show_dropdown)).get_selected_label().parse::<f64>().unwrap_or(0.0);
+        if self.ui.check_box(id!(slide_show_check_box)).selected(cx) {
+            let time = self.ui.drop_down(id!(slide_show_dropdown)).get_selected_label().parse::<f64>().unwrap_or(0.0);
             // ok lets check our last-change instant
             if Instant::now() - self.last_flip > Duration::from_millis((time * 1000.0)as u64) {
                 self.select_prev_image(cx);
@@ -1219,13 +1219,13 @@ impl App {
     
     fn play(&mut self, cx: &mut Cx) {
         self.set_current_image_by_item_id_and_row(cx, 0, 0);
-        self.ui.get_list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
+        self.ui.list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
         self.set_slide_show(cx, true);
         
     }
     
     fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.get_list_view(id!(image_list));
+        let image_list = self.ui.list_view(id!(image_list));
         for event in event.network_responses() {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => {
@@ -1254,7 +1254,7 @@ impl App {
                                         if let Some(image) = output.images.first() {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 if let Some(running) = machine.running.take() {
-                                                    self.ui.get_text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
+                                                    self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
                                                     machine.fetching = Some(running);
                                                     Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
                                                     self.fetch_image(cx, event.request_id, &image.filename);
@@ -1327,7 +1327,7 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.get_list_view(id!(image_list));
+        let image_list = self.ui.list_view(id!(image_list));
         
         if self.db.handle_decoded_images(cx) {
             self.ui.redraw(cx);
@@ -1348,9 +1348,9 @@ impl AppMain for App {
             if let Some(current_image) = &self.current_image {
                 let tex = self.db.get_image_texture(current_image);
                 if tex.is_some() {
-                    self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
-                    self.ui.get_image(id!(big_image.image1)).set_texture(tex.clone());
-                    self.ui.get_image(id!(second_image.image1)).set_texture(tex);
+                    self.ui.image(id!(image_view.image)).set_texture(tex.clone());
+                    self.ui.image(id!(big_image.image1)).set_texture(tex.clone());
+                    self.ui.image(id!(second_image.image1)).set_texture(tex);
                 }
             }
             
@@ -1365,17 +1365,17 @@ impl AppMain for App {
                                 ImageListItem::Prompt {prompt_hash} => {
                                     let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
                                     let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
-                                    item.get_label(id!(prompt)).set_label(&group.prompt.positive);
+                                    item.label(id!(prompt)).set_label(&group.prompt.positive);
                                     item.draw_widget_all(cx);
                                 }
                                 ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
                                     let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
-                                    let rows = item.get_view_set(ids!(row1, row2, row3));
+                                    let rows = item.view_set(ids!(row1, row2, row3));
                                     for (index, row) in rows.iter().enumerate() {
                                         if index >= *image_count {break}
                                         // alright we need to query our png cache for an image.
                                         let tex = self.db.get_image_texture(&image_files[index]);
-                                        row.get_image(id!(img)).set_texture(tex);
+                                        row.image(id!(img)).set_texture(tex);
                                     }
                                     item.draw_widget_all(cx);
                                 }
@@ -1399,7 +1399,7 @@ impl AppMain for App {
                 self.render(cx, 1);
             }
             else {
-                let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+                let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
                 self.render(cx, batch_size);
             }
         }
@@ -1427,7 +1427,7 @@ impl AppMain for App {
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyP, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
-                let prompt_frame = self.ui.get_view(id!(second_image.prompt_frame));
+                let prompt_frame = self.ui.view(id!(second_image.prompt_frame));
                 if prompt_frame.visible() {
                     prompt_frame.set_visible(false);
                 }
@@ -1441,7 +1441,7 @@ impl AppMain for App {
         
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) = event {
-            let big_image = self.ui.get_view(id!(big_image));
+            let big_image = self.ui.view(id!(big_image));
             if big_image.visible() {
                 big_image.set_visible(false);
             }
@@ -1452,28 +1452,28 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(play_button)).clicked(&actions) {
+        if self.ui.button(id!(play_button)).clicked(&actions) {
             self.play(cx);
         }
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) = event {
-            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.play(cx);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..}) = event {
-            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.select_next_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..}) = event {
-            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.select_prev_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
         
-        if let Some(ke) = self.ui.get_view_set(ids!(image_view, big_image)).key_down(&actions) {
+        if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.select_next_image(cx);
@@ -1489,33 +1489,33 @@ impl AppMain for App {
         
         
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) = event {
-            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, modifiers, ..}) = event {
-            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, true);
             }
         }
         
-        if self.ui.get_button(id!(render_batch)).clicked(&actions) {
-            let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+        if self.ui.button(id!(render_batch)).clicked(&actions) {
+            let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
             self.render(cx, batch_size);
             self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(render_single)).clicked(&actions) {
+        if self.ui.button(id!(render_single)).clicked(&actions) {
             self.render(cx, 1);
             self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(cancel_todo)).clicked(&actions) {
+        if self.ui.button(id!(cancel_todo)).clicked(&actions) {
             self.clear_todo(cx);
             self.ui.redraw(cx);
         }
         
-        if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions) {
+        if let Some(change) = self.ui.text_input(id!(search)).changed(&actions) {
             self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
             image_list.set_first_id_and_scroll(0, 0.0);
@@ -1523,23 +1523,23 @@ impl AppMain for App {
         
         
         
-        if let Some(e) = self.ui.get_view(id!(image_view)).finger_down(&actions) {
+        if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.get_view(id!(big_image)).set_visible(true);
+                self.ui.view(id!(big_image)).set_visible(true);
                 self.ui.redraw(cx);
             }
         }
         
-        if let Some(e) = self.ui.get_view(id!(big_image)).finger_down(&actions) {
+        if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.get_view(id!(big_image)).set_visible(false);
+                self.ui.view(id!(big_image)).set_visible(false);
                 self.ui.redraw(cx);
             }
         }
         
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
-            let rows = item.get_view_set(ids!(row1, row2));
+            let rows = item.view_set(ids!(row1, row2));
             for (row_index, row) in rows.iter().enumerate() {
                 if let Some(fd) = row.finger_down(&actions) {
                     self.set_current_image_by_item_id_and_row(cx, item_id, row_index);

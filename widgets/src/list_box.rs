@@ -354,7 +354,7 @@ impl Widget for ListBox {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.begin(cx, walk);
