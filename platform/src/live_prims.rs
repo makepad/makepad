@@ -776,6 +776,18 @@ impl RcStringMut{
             }
         }
     }
+    pub fn as_mut_empty(&mut self)->&mut String{
+        match self{
+            Self::Rc(_)=>{
+                *self = Self::String(String::new());
+                return self.as_mut();
+            }
+            Self::String(s)=>{
+                s.clear();
+                return s
+            }
+        }
+    }
     pub fn as_ref(&self)->&str{
         match self{
             Self::Rc(rc)=>{
