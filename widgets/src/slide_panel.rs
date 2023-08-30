@@ -12,7 +12,7 @@ live_design!{
     //registry Widget::*;
     
     SlidePanel = {{SlidePanel}} {
-        state: {
+        animator: {
             closed = {
                 default: off,
                 on = {
@@ -45,7 +45,7 @@ live_design!{
 #[derive(Live)]
 pub struct SlidePanel {
     #[deref] frame: Frame,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     #[live] closed: f64,
     #[live] side: SlideSide,
     #[rust] next_frame: NextFrame
@@ -113,7 +113,7 @@ pub enum SlideSide{
 impl SlidePanel {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidePanelAction)) {
         // lets handle mousedown, setfocus
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.frame.redraw(cx);
         }
         match event {
@@ -143,21 +143,21 @@ pub struct SlidePanelRef(WidgetRef);
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animate_state(cx, id!(closed.on))
+            inner.animator_play(cx, id!(closed.on))
         }
     }
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animate_state(cx, id!(closed.off))
+            inner.animator_play(cx, id!(closed.off))
         }
     }
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.is_in_state(cx, id!(closed.on)){
-                inner.animate_state(cx, id!(closed.off))
+            if inner.animator_in_state(cx, id!(closed.on)){
+                inner.animator_play(cx, id!(closed.off))
             }
             else{
-                inner.animate_state(cx, id!(closed.on))
+                inner.animator_play(cx, id!(closed.on))
             }
         }
     }

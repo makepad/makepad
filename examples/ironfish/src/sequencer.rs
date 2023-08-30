@@ -33,7 +33,7 @@ live_design!{
     }
     
     SeqButton = {{SeqButton}} {
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -140,7 +140,7 @@ impl SeqButton {
     }
     
     fn is_active(&self, cx: &Cx) -> bool {
-        self.is_in_state(cx, id!(active.on))
+        self.animator_in_state(cx, id!(active.on))
     }
     
     pub fn handle_event_with(
@@ -150,7 +150,7 @@ impl SeqButton {
         sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_button.area().redraw(cx);
         }
         match event.hits_with_options(
@@ -160,29 +160,29 @@ impl SeqButton {
         ) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
-                if self.is_in_state(cx, id!(active.on)) {
-                    self.animate_state(cx, id!(active.off));
+                if self.animator_in_state(cx, id!(active.on)) {
+                    self.animator_play(cx, id!(active.off));
                     dispatch_action(cx, SequencerAction::Change);
                 }
                 else {
-                    self.animate_state(cx, id!(active.on));
+                    self.animator_play(cx, id!(active.on));
                     dispatch_action(cx, SequencerAction::Change);
                     
                 }
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerUp(se) => {
                 if !se.is_sweep && se.is_over && se.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
             _ => {}

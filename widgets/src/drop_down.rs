@@ -84,7 +84,7 @@ live_design!{
         popup_shift: vec2(-6.0, 4.0)
         
         selected_item: 0
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -137,7 +137,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct DropDown {
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] draw_bg: DrawQuad,
     #[live] draw_label: DrawLabelText,
@@ -223,7 +223,7 @@ impl DropDown {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DropDownAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         
         if self.is_open && self.popup_menu.is_some() {
             // ok so how will we solve this one
@@ -254,20 +254,20 @@ impl DropDown {
             if let Event::MouseDown(e) = event {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
         }
         
         match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animate_state(cx, id!(focus.off));
+                self.animator_play(cx, id!(focus.off));
                 self.set_closed(cx);
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyFocus(_) => {
-                self.animate_state(cx, id!(focus.on));
+                self.animator_play(cx, id!(focus.on));
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowUp => {
@@ -291,23 +291,23 @@ impl DropDown {
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.draw_bg.area());
                 self.set_open(cx);
-                self.animate_state(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over {
                     if fe.device.has_hovers() {
-                        self.animate_state(cx, id!(hover.on));
+                        self.animator_play(cx, id!(hover.on));
                     }
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
             _ => ()

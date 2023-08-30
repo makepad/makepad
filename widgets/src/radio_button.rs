@@ -111,7 +111,7 @@ live_design!{
             y: 0.0
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -207,7 +207,7 @@ pub struct RadioButton {
     #[live] value: LiveValue,
     
     #[live] layout: Layout,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
@@ -232,20 +232,20 @@ pub enum RadioButtonAction {
 impl RadioButton {
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, RadioButtonAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_radio.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                if self.is_in_state(cx, id!(selected.off)) {
-                    self.animate_state(cx, id!(selected.on));
+                if self.animator_in_state(cx, id!(selected.off)) {
+                    self.animator_play(cx, id!(selected.on));
                     dispatch_action(cx, RadioButtonAction::Clicked);
                 }
             },
@@ -294,7 +294,7 @@ pub struct RadioButtonRef(WidgetRef);
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.animate_state(cx, id!(selected.off));
+            inner.animator_play(cx, id!(selected.off));
         }
     }
 }

@@ -57,7 +57,7 @@ live_design!{
         min_vertical: (DIM_SPLITTER_MIN_VERTICAL)
         max_vertical: (DIM_SPLITTER_MAX_VERTICAL)
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -111,7 +111,7 @@ pub struct Splitter {
     #[rust] drag_start_align: Option<SplitterAlign>,
     #[rust] area_a: Area,
     #[rust] area_b: Area,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] min_vertical: f64,
     #[live] max_vertical: f64,
@@ -268,33 +268,33 @@ impl Splitter {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
         Hit::FingerHoverIn(_) => {
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                 Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
-            self.animate_state(cx, id!(hover.on));
+            self.animator_play(cx, id!(hover.on));
         }
         Hit::FingerHoverOut(_) => {
-            self.animate_state(cx, id!(hover.off));
+            self.animator_play(cx, id!(hover.off));
         },
         Hit::FingerDown(_) => {
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                 Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
-            self.animate_state(cx, id!(hover.pressed));
+            self.animator_play(cx, id!(hover.pressed));
             self.drag_start_align = Some(self.align);
         }
         Hit::FingerUp(f) => {
             self.drag_start_align = None;
             if f.is_over && f.device.has_hovers() {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             else {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
         }
         Hit::FingerMove(f) => {

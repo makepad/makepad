@@ -108,7 +108,7 @@ live_design!{
             padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -155,8 +155,8 @@ pub enum ButtonAction {
 
 #[derive(Live)]
 pub struct Button {
-    #[state] state: LiveState,
-    
+    #[animator] animator: Animator,
+
     #[live] draw_bg: DrawQuad,
     #[live] draw_label: DrawText,
     #[live] draw_icon: DrawIcon,
@@ -205,31 +205,31 @@ impl Widget for Button{
 impl Button {
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 dispatch_action(cx, ButtonAction::Pressed);
-                self.animate_state(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                 self.animate_state(cx, id!(hover.on));
+                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
                 dispatch_action(cx, ButtonAction::Clicked);
                 if fe.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else{
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
             else {
                 dispatch_action(cx, ButtonAction::Released);
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             _ => ()
         };

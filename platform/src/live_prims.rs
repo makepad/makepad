@@ -5,7 +5,7 @@ use {
         makepad_math::*,
         cx::Cx,
         live_traits::*,
-        live_state::LiveState
+        animator::Animator
     }
 };
 
@@ -60,7 +60,7 @@ live_primitive!(
     LiveValue::None,
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].is_array() {
-            if let Some(_) = LiveState::last_keyframe_value_from_array(index, nodes) {
+            if let Some(_) = Animator::last_keyframe_value_from_array(index, nodes) {
                 self.apply(cx, from, index, nodes);
             }
             nodes.skip_node(index)
@@ -92,7 +92,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -122,7 +122,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -185,7 +185,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -233,7 +233,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -281,7 +281,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -329,7 +329,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -377,7 +377,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -425,7 +425,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -465,7 +465,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -522,7 +522,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -583,7 +583,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -655,7 +655,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -732,7 +732,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -819,7 +819,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -875,7 +875,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Array => {
-                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)

@@ -35,7 +35,8 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct SwipeListEntry {
-    #[live] state: LiveState,
+    #[animator] animator: Animator,
+
     #[live] walk: Walk,
     #[live] left_drawer: WidgetRef,
     #[live] center: WidgetRef,
@@ -156,7 +157,7 @@ impl SwipeListEntry {
         _dispatch_action: &mut dyn FnMut(&mut Cx, SwipeListAction),
     ) {
         /*
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_button.area().redraw(cx);
         }
         match event.hits_with_options(
@@ -166,29 +167,29 @@ impl SwipeListEntry {
         ) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
-                if self.state.is_in_state(cx, id!(active.on)) {
-                    self.animate_state(cx, id!(active.off));
+                if self.state.animator_in_state(cx, id!(active.on)) {
+                    self.animator_play(cx, id!(active.off));
                     dispatch_action(cx, SequencerAction::Change);
                 }
                 else {
-                    self.animate_state(cx, id!(active.on));
+                    self.animator_play(cx, id!(active.on));
                     dispatch_action(cx, SequencerAction::Change);
                     
                 }
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerUp(se) => {
                 if !se.is_sweep && se.is_over && se.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
             _ => {}

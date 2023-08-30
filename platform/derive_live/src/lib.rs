@@ -35,7 +35,7 @@ use crate::derive_live_registry::*;
     live,
     rust,
     pick,
-    state,
+    animator,
     deref,
     live_ignore,
     live_debug

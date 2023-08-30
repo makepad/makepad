@@ -81,7 +81,7 @@ live_design!{
                 );
             }
         }
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {

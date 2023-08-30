@@ -63,7 +63,7 @@ live_design!{
             width: Fill,
             height: Fit
         }
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -170,7 +170,7 @@ pub struct PopupMenuItem {
     #[live] draw_name: DrawName,
     
     #[live] layout: Layout,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     #[live] walk: Walk,
     
     #[live] indent_width: f32,
@@ -244,7 +244,7 @@ impl PopupMenuItem {
         sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuItemAction),
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.area().redraw(cx);
         }
         
@@ -254,15 +254,15 @@ impl PopupMenuItem {
             HitOptions::new().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
-                self.animate_state(cx, id!(hover.on));
-                self.animate_state(cx, id!(select.on));
+                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, id!(select.on));
             }
             Hit::FingerUp(se) => {
                 if !se.is_sweep {
@@ -275,8 +275,8 @@ impl PopupMenuItem {
                     //}
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
-                    self.animate_state(cx, id!(select.off));
+                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, id!(select.off));
                 }
             }
             _ => {}
@@ -347,12 +347,12 @@ impl PopupMenu {
     fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
         for (id, item) in &mut *self.menu_items {
             if *id == which_id {
-                item.cut_state(cx, id!(select.on));
-                item.cut_state(cx, id!(hover.on));
+                item.animator_cut(cx, id!(select.on));
+                item.animator_cut(cx, id!(hover.on));
             }
             else {
-                item.cut_state(cx, id!(select.off));
-                item.cut_state(cx, id!(hover.off));
+                item.animator_cut(cx, id!(select.off));
+                item.animator_cut(cx, id!(hover.off));
             }
         }
     }

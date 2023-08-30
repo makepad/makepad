@@ -64,7 +64,7 @@ live_design!{
             y: 0.0
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -189,15 +189,15 @@ impl LiveHook for NumberGrid{
 
 impl NumberBox {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
             },
