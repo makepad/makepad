@@ -20,10 +20,10 @@ live_design!{
         draw_fill: {
             color: (COLOR_BG_HEADER)
         }
-        walk: {
+        
             width: Fill
             height: Fixed((DIM_TAB_HEIGHT))
-        }
+        
         scroll_bars: {
             show_scroll_x: true
             show_scroll_y: false

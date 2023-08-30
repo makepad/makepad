@@ -207,11 +207,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -4225,11 +4225,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -8243,11 +8243,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -12261,11 +12261,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -16279,11 +16279,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}

@@ -19,36 +19,36 @@ live_design!{
     DesktopWindow = {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         
-        layout: {
+        
             flow: Down
-        },
+        
         caption_bar = <Solid> {
             visible: false,
-            layout: {
+            
                 flow: Right
-            },
+            
             draw_bg: {color: (COLOR_BG_APP)}
-            walk: {height: 29},
+            height: 29
             caption_label = <Frame> {
-                walk: {width: Fill, height: Fill}
-                layout: {align: {x: 0.5, y: 0.5}},
-                label = <Label> {label: "Makepad", walk: {margin: {left: 100}}}
+                width: Fill, height: Fill
+                align: {x: 0.5, y: 0.5},
+                label = <Label> {label: "Makepad", margin: {left: 100}}
             }
             windows_buttons = <Frame> {
                 visible: false,
-                walk: {width: Fit, height: Fit}
+                width: Fit, height: Fit
                 min = <DesktopButton> {draw_bg:{button_type: WindowsMin}}
                 max = <DesktopButton> {draw_bg:{button_type: WindowsMax}}
                 close = <DesktopButton> {draw_bg:{button_type: WindowsClose}}
             }
             web_fullscreen = <Frame> {
                 visible: false,
-                walk: {width: Fit, height: Fit}
+                width: Fit, height: Fit
                 fullscreen = <DesktopButton> {draw_bg:{button_type: Fullscreen}}
             }
             web_xr = <Frame> {
                 visible: false,
-                walk: {width: Fit, height: Fit}
+                width: Fit, height: Fit
                 xr_on = <DesktopButton> {draw_bg:{button_type: XRMode}}
             }
         }

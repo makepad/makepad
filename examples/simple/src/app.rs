@@ -31,10 +31,10 @@ live_design!{
             
             // The `walk` property determines how the frame widget itself is laid out. In this
             // case, the frame widget takes up the entire window.
-            walk: {
+            
                 width: Fill,
                 height: Fill
-            },
+            
             draw_bg: {
                 
                 
@@ -75,13 +75,13 @@ live_design!{
             // differently. In this case, children are centered vertically with respect to the
             // remainder of the frame after the previous children have been drawn.
             <Frame>{
-                layout: {
+                
                     flow: Down,
                     spacing: 20,
                     align: {
                         x: 0.5,
                         y: 0.5
-                    }
+                    
                 },
                 button1 = <Button> {
                     draw_icon:{
@@ -93,7 +93,7 @@ live_design!{
                     label: "Click to count"
                 }
                 input1 = <TextInput> {
-                    walk: {width: 100, height: 30},
+                    width: 100, height: 30
                     text: "Click to count"
                 }
                 

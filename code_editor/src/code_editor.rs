@@ -79,11 +79,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_bg:{
             draw_depth: 0.0,
             color:#3

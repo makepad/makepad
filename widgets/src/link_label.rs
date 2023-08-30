@@ -41,14 +41,14 @@ live_design!{
             }
         }
         
-        walk: {
+        
             width: Fit,
             height: Fit,
-            margin: {left: 5.0, top: 0.0, right: 0.0}
+            margin: {left: 5.0, top: 0.0, right: 0.0
         }
         
-        layout: {
-            padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
+        
+            padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0
         }
     }
 }

@@ -14,13 +14,13 @@ live_design!{
         ui: <DesktopWindow> {
             
             show_bg: true
-            layout: {
+            
                 flow: Down,
                 spacing: 20,
                 align: {
                     x: 0.0,
                     y: 0.0
-                }
+                
             },
             draw_bg: {
                 fn pixel(self) -> vec4 {
@@ -37,19 +37,19 @@ live_design!{
             }
             
             input1 = <TextInput> {
-                walk: {width: 100, height: 30},
+                width: 100, height: 30
             }
             */
             dropdown1 = <DropDown> {
-                walk: {width: 100}
+                width: 100
                 labels: ["Item1", "Item2"]
             }
             
             <Box> {
-                walk:{width:Fill, height:Fit}
+                width:Fill, height:Fit
                 draw_bg:{color:#f00}
                 label1 = <Label> {
-                    walk: {width: Fill}
+                    width: Fill
                     draw_label: {
                         wrap: Word,
                         color: #f
@@ -59,7 +59,7 @@ live_design!{
             }
             /*
             slider1 = <Slider>{
-                walk:{width:100, height: 50}
+                width:100, height: 50
             }*/
         }
     }

@@ -73,8 +73,8 @@ live_design!{
     
     FileTreeNode = {{FileTreeNode}} {
         
-        layout: {
-            align: {y: 0.5},
+        
+            align: {y: 0.5
             padding: {left: 5.0, bottom: 0,},
         }
         
@@ -203,7 +203,7 @@ live_design!{
             draw_bg: {is_folder: 1.0}
             draw_name: {is_folder: 1.0}
         }
-        layout: {flow: Down, clip_x: true, clip_y: true},
+        flow: Down, clip_x: true, clip_y: true
         scroll_bars: {}
     }
 }

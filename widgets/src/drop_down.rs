@@ -67,16 +67,11 @@ live_design!{
             }
         }
         
-        walk: {
-            width: Fill,
-            height: Fit,
-            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
-        }
-        
-        layout: {
-            align: {x: 0., y: 0.},
-            padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
-        }
+        width: Fill,
+        height: Fit,
+        margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
+        align: {x: 0., y: 0.}
+        padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
         
         popup_menu: <PopupMenu> {
         }
