@@ -18,7 +18,7 @@ live_design!{
     import makepad_widgets::drop_down::DropDown;
     import makepad_widgets::slide_panel::SlidePanel;
     import makepad_widgets::check_box::CheckBox;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::theme::*;
     import makepad_draw::shader::std::*;
     import makepad_widgets::dock::*;
@@ -202,7 +202,7 @@ live_design!{
         }
     }
     
-    SettingsInput = <Frame> {
+    SettingsInput = <View> {
         width: 150, height: Fit, margin: {top: 10},
         label = <BarLabel> {
             width: Fit, margin: {left: 5},
@@ -215,16 +215,16 @@ live_design!{
         }
     }
     
-    FillerH = <Frame> {
+    FillerH = <View> {
         width: Fill, height: Fit
     }
     
-    FillerV = <Frame> {
+    FillerV = <View> {
         width: Fit, height: Fill
     }
     
     
-    DividerV = <Frame> {
+    DividerV = <View> {
         flow: Down, spacing: 0.0
         margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
         width: Fill, height: Fit
@@ -240,7 +240,7 @@ live_design!{
         }
     }
     
-    DividerH = <Frame> {
+    DividerH = <View> {
         flow: Right, spacing: 0.0
         margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}
         width: Fit, height: Fill
@@ -307,7 +307,7 @@ live_design!{
         label: "Slideshow"
     }
     
-    ProgressCircle = <Frame> {
+    ProgressCircle = <View> {
         show_bg: true,
         width: 24, height: 24
         draw_bg: {
@@ -420,7 +420,7 @@ live_design!{
         }
     }
     
-    ImageTile = <Frame> {
+    ImageTile = <View> {
         width: Fill, height: Fit
         cursor: Hand
         animator: {
@@ -497,7 +497,7 @@ live_design!{
                 window: {inner_size: vec2(2000, 1024)},
                 caption_bar = {visible: true, caption_label = {label = {label: "SDXL Surf"}}},
                 
-                <Frame> {
+                <View> {
                     
                         flow: Overlay,
                     
@@ -553,7 +553,7 @@ live_design!{
                             height: Fill, width: Fill
                             flow: Down, padding: 0.0
                             draw_bg: {color: (COLOR_PANEL_BG)}
-                            <Frame> {
+                            <View> {
                                 height: Fit, width: Fill
                                 align: {x: 0.0, y: 0.5}
                                 padding: 5
@@ -627,7 +627,7 @@ live_design!{
                                 }
                                 
                             }
-                            <Frame> {
+                            <View> {
                                 positive = <TextInput> {
                                     ascii_only: true,
                                     width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
@@ -652,10 +652,10 @@ live_design!{
                                         border_color: #x00000044
                                     }
                                 }
-                                <Frame> {
+                                <View> {
                                     width: Fill, height: Fill
                                     flow: Right
-                                    <Frame> {
+                                    <View> {
                                         width: 100, height: Fit, margin: {top: 10},
                                         flow: Down
                                         settings_width = <SettingsInput> {label = {label: "width:"}, input = {text: "1344"}}
@@ -664,7 +664,7 @@ live_design!{
                                         settings_scale = <SettingsInput> {label = {label: "scale:"}, input = {text: "0.5"}}
                                         settings_total_steps = <SettingsInput> {label = {label: "total(0):"}, input = {text: "32"}}
                                     }
-                                    <Frame> {
+                                    <View> {
                                         width: Fit, height: Fit, margin: {top: 10},
                                         flow: Down
                                         settings_base_cfg = <SettingsInput> {label = {label: "base_cfg:"}, input = {text: "8.5"}}
@@ -672,7 +672,7 @@ live_design!{
                                         settings_pos_score = <SettingsInput> {label = {label: "pos_score:"}, input = {text: "6"}}
                                         settings_neg_score = <SettingsInput> {label = {label: "neg_score:"}, input = {text: "2"}}
                                     }
-                                    <Frame> {
+                                    <View> {
                                         width: Fit, height: Fit, margin: {top: 10},
                                         flow: Down
                                         settings_base_start_step = <SettingsInput> {label = {label: "base_start_step:"}, input = {text: "0"}}
@@ -680,7 +680,7 @@ live_design!{
                                         settings_refiner_start_step = <SettingsInput> {label = {label: "refiner_start_step:"}, input = {text: "20"}}
                                         settings_refiner_end_step = <SettingsInput> {label = {label: "refiner_end_step:"}, input = {text: "1000"}}
                                     }
-                                    <Frame> {
+                                    <View> {
                                         width: Fit, height: Fit, margin: {top: 10},
                                         flow: Down
                                         settings_upscale_steps = <SettingsInput> {label = {label: "upscale_steps:"}, input = {text: "31"}}
@@ -688,7 +688,7 @@ live_design!{
                                         settings_upscale_end_step = <SettingsInput> {label = {label: "upscale_end_step:"}, input = {text: "1000"}}
                                     }
                                     /*
-                                    <Frame> {
+                                    <View> {
                                         width: Fill, height: Fit, margin: {top: 10},
                                         <BarLabel> {label: "base_cfg:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
@@ -699,7 +699,7 @@ live_design!{
                                         <BarLabel> {label: "neg_score:"}
                                         negative_score_input = <SettingsInput> {text: "2.0"}
                                     }
-                                    <Frame> {
+                                    <View> {
                                         width: Fill, height: Fit, margin: {top: 10},
                                         <BarLabel> {label: "base_start_step:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
@@ -718,7 +718,7 @@ live_design!{
                             draw_bg: {color: (COLOR_PANEL_BG)}
                             height: Fill, width: Fill
                             flow: Down
-                            <Frame> {
+                            <View> {
                                 height: Fit, width: Fill
                                 flow: Right, padding: {left: 10, right: 10, top: 10, bottom: 10},
                                 search = <TextInput> {
@@ -756,20 +756,20 @@ live_design!{
                                 
                                 PromptGroup = <PromptGroup> {}
                                 
-                                Empty = <Frame> {}
+                                Empty = <View> {}
                                 
-                                ImageRow1 = <Frame> {
+                                ImageRow1 = <View> {
                                     height: Fit, width: Fill, margin: {bottom: 10}
                                     spacing: 20, flow: Right
                                     row1 = <ImageTile> {}
                                 }
-                                ImageRow2 = <Frame> {
+                                ImageRow2 = <View> {
                                     height: Fit, width: Fill, margin: {bottom: 10}
                                     spacing: 20, flow: Right
                                     row1 = <ImageTile> {}
                                     row2 = <ImageTile> {}
                                 }
-                                ImageRow3 = <Frame> {
+                                ImageRow3 = <View> {
                                     height: Fit, width: Fill, margin: {bottom: 10}
                                     spacing: 20, flow: Right
                                     row1 = <ImageTile> {}
@@ -804,7 +804,7 @@ live_design!{
                         fit: Smallest,
                         width: Fill, height: Fill
                     }
-                    prompt_frame = <Frame> {
+                    prompt_frame = <View> {
                         width: Fill, height: Fill
                         align: {y: 1.0}
                         padding: {left: 120, bottom: 40,right:120}
@@ -1028,7 +1028,7 @@ impl App {
             live_id!(m6) => id!(progress6),
             _ => panic!()
         };
-        ui.get_frame(progress_id).apply_over(cx, live!{
+        ui.get_view(progress_id).apply_over(cx, live!{
             draw_bg: {active: (if active {1.0}else {0.0}), progress: (steps as f64 / total as f64)}
         });
         ui.redraw(cx);
@@ -1370,7 +1370,7 @@ impl AppMain for App {
                                 }
                                 ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
                                     let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
-                                    let rows = item.get_frame_set(ids!(row1, row2, row3));
+                                    let rows = item.get_view_set(ids!(row1, row2, row3));
                                     for (index, row) in rows.iter().enumerate() {
                                         if index >= *image_count {break}
                                         // alright we need to query our png cache for an image.
@@ -1427,7 +1427,7 @@ impl AppMain for App {
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyP, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
-                let prompt_frame = self.ui.get_frame(id!(second_image.prompt_frame));
+                let prompt_frame = self.ui.get_view(id!(second_image.prompt_frame));
                 if prompt_frame.visible() {
                     prompt_frame.set_visible(false);
                 }
@@ -1441,7 +1441,7 @@ impl AppMain for App {
         
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) = event {
-            let big_image = self.ui.get_frame(id!(big_image));
+            let big_image = self.ui.get_view(id!(big_image));
             if big_image.visible() {
                 big_image.set_visible(false);
             }
@@ -1456,24 +1456,24 @@ impl AppMain for App {
             self.play(cx);
         }
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
                 self.play(cx);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
                 self.select_next_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
                 self.select_prev_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
         
-        if let Some(ke) = self.ui.get_frame_set(ids!(image_view, big_image)).key_down(&actions) {
+        if let Some(ke) = self.ui.get_view_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.select_next_image(cx);
@@ -1489,12 +1489,12 @@ impl AppMain for App {
         
         
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.get_view(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, true);
             }
         }
@@ -1523,23 +1523,23 @@ impl AppMain for App {
         
         
         
-        if let Some(e) = self.ui.get_frame(id!(image_view)).finger_down(&actions) {
+        if let Some(e) = self.ui.get_view(id!(image_view)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.get_frame(id!(big_image)).set_visible(true);
+                self.ui.get_view(id!(big_image)).set_visible(true);
                 self.ui.redraw(cx);
             }
         }
         
-        if let Some(e) = self.ui.get_frame(id!(big_image)).finger_down(&actions) {
+        if let Some(e) = self.ui.get_view(id!(big_image)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.get_frame(id!(big_image)).set_visible(false);
+                self.ui.get_view(id!(big_image)).set_visible(false);
                 self.ui.redraw(cx);
             }
         }
         
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
-            let rows = item.get_frame_set(ids!(row1, row2));
+            let rows = item.get_view_set(ids!(row1, row2));
             for (row_index, row) in rows.iter().enumerate() {
                 if let Some(fd) = row.finger_down(&actions) {
                     self.set_current_image_by_item_id_and_row(cx, item_id, row_index);
@@ -1552,7 +1552,7 @@ impl AppMain for App {
                     }
                 }
             }
-            if let Some(fd) = item.as_frame().finger_down(&actions) {
+            if let Some(fd) = item.as_view().finger_down(&actions) {
                 if fd.tap_count == 2 {
                     if let ImageListItem::Prompt {prompt_hash} = self.filtered.list[item_id as usize] {
                         self.load_inputs_from_prompt_hash(cx, prompt_hash);

@@ -6,12 +6,12 @@ use crate::{
    // window_menu::*,
     button::*,
     widget::*,
-    frame::*,
+    view::*,
 };
 
 live_design!{
     import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_draw::shader::std::*;
     import makepad_widgets::label::Label;
     import makepad_widgets::desktop_button::DesktopButton;
@@ -29,24 +29,24 @@ live_design!{
             
             draw_bg: {color: (COLOR_BG_APP)}
             height: 29
-            caption_label = <Frame> {
+            caption_label = <View> {
                 width: Fill, height: Fill
                 align: {x: 0.5, y: 0.5},
                 label = <Label> {label: "Makepad", margin: {left: 100}}
             }
-            windows_buttons = <Frame> {
+            windows_buttons = <View> {
                 visible: false,
                 width: Fit, height: Fit
                 min = <DesktopButton> {draw_bg:{button_type: WindowsMin}}
                 max = <DesktopButton> {draw_bg:{button_type: WindowsMax}}
                 close = <DesktopButton> {draw_bg:{button_type: WindowsClose}}
             }
-            web_fullscreen = <Frame> {
+            web_fullscreen = <View> {
                 visible: false,
                 width: Fit, height: Fit
                 fullscreen = <DesktopButton> {draw_bg:{button_type: Fullscreen}}
             }
-            web_xr = <Frame> {
+            web_xr = <View> {
                 visible: false,
                 width: Fit, height: Fit
                 xr_on = <DesktopButton> {draw_bg:{button_type: XRMode}}
@@ -103,7 +103,7 @@ pub struct DesktopWindow {
     #[live] pass: Pass,
     #[live] depth_texture: Texture,
     
-    #[deref] frame: Frame,
+    #[deref] view: View,
     
    // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
     /*#[rust(Menu::main(vec![
@@ -137,24 +137,24 @@ impl LiveHook for DesktopWindow {
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
             // lets show a VR button
-            self.frame.get_frame(id!(web_xr)).set_visible(true);
+            self.view.get_view(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
         match cx.os_type() {
             OsType::Windows => {
-                self.frame.get_frame(id!(caption_bar)).set_visible(true);
-                self.frame.get_frame(id!(windows_buttons)).set_visible(true);
+                self.view.get_view(id!(caption_bar)).set_visible(true);
+                self.view.get_view(id!(windows_buttons)).set_visible(true);
             }
             OsType::Macos => {
-               // self.frame.get_frame(id!(caption_bar)).set_visible(false);
+               // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
             OsType::LinuxDirect |
             OsType::Android(_) => {
-                //self.frame.get_frame(id!(caption_bar)).set_visible(false);
+                //self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             OsType::Web(_) => {
-               // self.frame.get_frame(id!(caption_bar)).set_visible(false);
+               // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             _ => ()
         }
@@ -166,7 +166,7 @@ pub enum DesktopWindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
-    FrameActions(Vec<WidgetActionItem>),
+    ViewActions(Vec<WidgetActionItem>),
     None
 }
 
@@ -190,12 +190,12 @@ impl DesktopWindow {
                     match cx.os_type() {
                         OsType::Macos => {
                             if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen{
-                                self.frame.get_frame(id!(caption_bar)).set_visible(false);
-                                self.frame.redraw(cx);
+                                self.view.get_view(id!(caption_bar)).set_visible(false);
+                                self.view.redraw(cx);
                             }
                             else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen{
-                                self.frame.get_frame(id!(caption_bar)).set_visible(true);
-                                self.frame.redraw(cx);
+                                self.view.get_view(id!(caption_bar)).set_visible(true);
+                                self.view.redraw(cx);
                             };
                         }
                         _ => ()
@@ -232,12 +232,12 @@ impl DesktopWindow {
             return dispatch_action(cx, DesktopWindowAction::EventForOtherWindow)
         }
         else {
-            let actions = self.frame.handle_widget_event(cx, event);
+            let actions = self.view.handle_widget_event(cx, event);
             if actions.not_empty() {
-                if self.frame.get_button(id!(min)).clicked(&actions) {
+                if self.view.get_button(id!(min)).clicked(&actions) {
                     self.window.minimize(cx);
                 }
-                if self.frame.get_button(id!(max)).clicked(&actions) {
+                if self.view.get_button(id!(max)).clicked(&actions) {
                     if self.window.is_fullscreen(cx) {
                         self.window.restore(cx);
                     }
@@ -245,13 +245,13 @@ impl DesktopWindow {
                         self.window.maximize(cx);
                     }
                 }
-                if self.frame.get_button(id!(close)).clicked(&actions) {
+                if self.view.get_button(id!(close)).clicked(&actions) {
                     self.window.close(cx);
                 }
-                if self.frame.get_button(id!(xr_on)).clicked(&actions) {
+                if self.view.get_button(id!(xr_on)).clicked(&actions) {
                     cx.xr_start_presenting();
                 }
-                dispatch_action(cx, DesktopWindowAction::FrameActions(actions));
+                dispatch_action(cx, DesktopWindowAction::ViewActions(actions));
             }
         }
         
@@ -318,7 +318,7 @@ impl Widget for DesktopWindow{
     ) {
         let uid = self.widget_uid();
         self.handle_event_with(cx, event, &mut | cx, action | {
-            if let DesktopWindowAction::FrameActions(actions) = action{
+            if let DesktopWindowAction::ViewActions(actions) = action{
                for action in actions{
                    dispatch_action(cx, action)
                } 
@@ -332,11 +332,11 @@ impl Widget for DesktopWindow{
     fn get_walk(&self)->Walk{Walk::default()}
     
     fn redraw(&mut self, cx:&mut Cx){
-        self.frame.redraw(cx)
+        self.view.redraw(cx)
     }
         
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.frame.find_widgets(path, cached, results);
+        self.view.find_widgets(path, cached, results);
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
@@ -348,7 +348,7 @@ impl Widget for DesktopWindow{
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get(){
-            self.frame.draw_widget(cx)?;
+            self.view.draw_widget(cx)?;
             self.draw_state.end();
             self.end(cx);
         }        

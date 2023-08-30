@@ -1,13 +1,13 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    frame::*,
+    view::*,
     widget::*,
 };
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::view::*;
     import makepad_widgets::label::Label;
     //registry Widget::*;
     
@@ -44,7 +44,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct SlidePanel {
-    #[deref] frame: Frame,
+    #[deref] frame: View,
     #[animator] animator: Animator,
     #[live] closed: f64,
     #[live] side: SlideSide,

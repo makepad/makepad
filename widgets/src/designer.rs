@@ -1,14 +1,14 @@
 use crate::{
     makepad_draw::*,
     file_tree::*,
-    frame::Frame,
+    view::View,
     widget::*,
     label::*,
 };
 
 live_design!{
     import makepad_widgets::theme::*
-    import makepad_widgets::frame::*
+    import makepad_widgets::view::*
     import makepad_widgets::splitter::Splitter
     import makepad_widgets::file_tree::FileTree
     import makepad_widgets::hook_widget::HookWidget
@@ -32,7 +32,7 @@ live_design!{
         }
         <Splitter> {
             align: FromStart(300),
-            a: <Frame> {
+            a: <View> {
                 outline = <FileTree> {
                 }
             },
@@ -69,7 +69,7 @@ pub struct Designer {
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,
     #[rust] components: ComponentMap<LivePtr, (WidgetRef, WidgetRef)>,
-    #[deref] ui: Frame,
+    #[deref] ui: View,
 }
 
 impl LiveHook for Designer {

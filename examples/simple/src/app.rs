@@ -13,7 +13,7 @@ live_design!{
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
     import makepad_widgets::image::Image;
-    import makepad_widgets::frame::Frame;
+    import makepad_widgets::view::View;
     import makepad_widgets::text_input::TextInput;
     
     // The `{{App}}` syntax is used to inherit a DSL object from a Rust struct. This tells the
@@ -21,7 +21,7 @@ live_design!{
     // instance of `App` is initialized, the Makepad runtime will obtain its initial values from
     // this DSL object.
     App = {{App}} {
-        // The `ui` field on the struct `App` defines a frame widget. Frames are used as containers
+        // The `ui` field on the struct `App` defines a frame widget. Views are used as containers
         // for other widgets. Since the `ui` property on the DSL object `App` corresponds with the
         // `ui` field on the Rust struct `App`, the latter will be initialized from the DSL object
         // here below.
@@ -74,7 +74,7 @@ live_design!{
             // Because the child widgets flow downward, vertical alignment works somewhat
             // differently. In this case, children are centered vertically with respect to the
             // remainder of the frame after the previous children have been drawn.
-            <Frame>{
+            <View>{
                 
                     flow: Down,
                     spacing: 20,
