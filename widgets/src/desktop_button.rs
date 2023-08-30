@@ -145,7 +145,7 @@ impl Widget for DesktopButton{
         });
     }
 
-    fn get_walk(&self)->Walk{self.walk}
+    fn walk(&self)->Walk{self.walk}
     
     fn redraw(&mut self, cx:&mut Cx){
         self.draw_bg.redraw(cx)
@@ -232,7 +232,7 @@ impl DesktopButton {
     pub fn area(&mut self)->Area{
         self.draw_bg.area()
     }
-    pub fn get_widget_walk(&self)->Walk{self.walk}
+    pub fn get_widwalk(&self)->Walk{self.walk}
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.draw_bg.draw_walk(cx, walk);

@@ -172,7 +172,7 @@ impl RunView {
 }
 
 impl Widget for RunView{
-    fn get_walk(&self)->Walk{
+    fn walk(&self)->Walk{
         self.walk
     }
     

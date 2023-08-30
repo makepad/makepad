@@ -316,7 +316,7 @@ impl Slider {
         
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
-            self.text_input.draw_walk(cx, self.text_input.get_walk());
+            self.text_input.draw_walk(cx, self.text_input.walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
         }
         
@@ -337,7 +337,7 @@ impl Widget for Slider {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);

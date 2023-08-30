@@ -76,8 +76,8 @@ impl Widget for SlidePanel {
         });
     }
     
-    fn get_walk(&self) -> Walk {
-        self.frame.get_walk()
+    fn walk(&self) -> Walk {
+        self.frame.walk()
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
