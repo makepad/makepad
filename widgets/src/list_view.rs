@@ -231,7 +231,7 @@ impl ListView {
         }
     }
     
-    pub fn get_item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
@@ -455,9 +455,9 @@ impl ListViewRef {
         }
     }
     
-    pub fn get_item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.get_item(cx, entry_id, template)
+            inner.item(cx, entry_id, template)
         }
         else {
             None

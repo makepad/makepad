@@ -79,11 +79,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        
-            width: Fill,
-            height: Fill,
-            margin: 0,
-        
+    
+        width: Fill,
+        height: Fill,
+        margin: 0,
+    
         draw_bg:{
             draw_depth: 0.0,
             color:#3
@@ -106,7 +106,7 @@ live_design! {
 pub struct CodeEditor {
     #[live]
     scroll_bars: ScrollBars,
-    #[live]
+    #[walk]
     walk: Walk,
     #[rust]
     draw_state: DrawStateWrap<Walk>,

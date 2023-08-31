@@ -40,7 +40,7 @@ pub struct RunView {
     #[walk] walk: Walk,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[live] draw_bg: DrawApp,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     #[live] frame_delta: f64,
     #[rust] last_size: (usize, usize),
     #[rust] tick: Timer,

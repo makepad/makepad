@@ -64,7 +64,8 @@ live_design!{
     
     LogItem = <RectView> {
         height: Fit, width: Fill
-        layout: {padding: {top: 5, bottom: 5}}
+        padding: {top: 5, bottom: 5}
+        
         draw_bg: {
             instance is_even: 0.0
             instance selected: 0.0
@@ -147,7 +148,7 @@ live_design!{
     
     LogList = <ListView> {
         height: Fill, width: Fill
-        layout: {flow: Down}
+        flow: Down
         WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
         WaitOdd = <LogItemWait> {draw_bg: {is_even: 0.0}}
         EmptyEven = <LogItemEmpty> {draw_bg: {is_even: 1.0}}
@@ -200,15 +201,15 @@ impl BuildManager {
                 match msg {
                     BuildMsg::Bare(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
-                        let item = list.get_item(cx, item_id, template).unwrap().as_frame();
-                        item.get_label(id!(label)).set_label(&msg.line);
+                        let item = list.item(cx, item_id, template).unwrap().as_view();
+                        item.label(id!(label)).set_text(&msg.line);
                         item.draw_widget_all(cx);
                     }
                     BuildMsg::Location(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
-                        let item = list.get_item(cx, item_id, template).unwrap().as_frame();
-                        item.get_label(id!(link_label)).set_label(&msg.file_name);
-                        item.get_label(id!(label)).set_label(&msg.msg);
+                        let item = list.item(cx, item_id, template).unwrap().as_view();
+                        item.label(id!(link_label)).set_text(&msg.file_name);
+                        item.label(id!(label)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
                     _=>()
@@ -216,7 +217,7 @@ impl BuildManager {
             }
             else{ // draw empty items
                 let template = if is_even{live_id!(EmptyEven)}else{live_id!(EmptyOdd)};
-                let item = list.get_item(cx, item_id, template).unwrap().as_frame();
+                let item = list.item(cx, item_id, template).unwrap().as_view();
                 item.draw_widget_all(cx);
             }
         }
