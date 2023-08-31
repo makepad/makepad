@@ -1,5 +1,8 @@
 pub use {
     std::{
+        borrow::Borrow,
+        collections::VecDeque,
+        hash::{Hash, Hasher},
         rc::Rc,
         cell::RefCell,
         io::prelude::*,
@@ -18,7 +21,8 @@ pub use {
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
         makepad_vector::internal_iter::ExtendFromInternalIterator,
         makepad_vector::path::PathIterator,
-    }
+    },
+    rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
 };
 
 pub struct CxFontsAtlas {
@@ -312,6 +316,132 @@ pub struct CxFont {
     pub ttf_font: makepad_vector::font::TTFFont,
     pub owned_font_face: crate::owned_font_face::OwnedFace,
     pub atlas_pages: Vec<CxFontAtlasPage>,
+    pub shape_cache: ShapeCache,
+}
+
+pub struct ShapeCache {
+    pub keys: VecDeque<(Direction, Rc<str>)>,
+    pub glyph_ids: HashMap<(Direction, Rc<str>), Vec<usize>>,
+}
+
+impl ShapeCache {
+    // The maximum number of keys that can be stored in the cache.
+    const MAX_SIZE: usize = 4096;
+
+    pub fn new() -> Self {
+        Self {
+            keys: VecDeque::new(),
+            glyph_ids: HashMap::new(),
+        }
+    }
+
+    // If there is an entry for the given key in the cache, returns the corresponding list of
+    // glyph indices for that key. Otherwise, uses the given UnicodeBuffer and OwnedFace to
+    // compute the list of glyph indices for the key, inserts that in the cache and then returns
+    // the corresponding list.
+    //
+    // This method takes a UnicodeBuffer by value, and then returns the same buffer by value. This
+    // is necessary because rustybuzz::shape consumes the UnicodeBuffer and then returns a
+    // GlyphBuffer that reuses the same storage. Once we are done with the GlyphBuffer, we consume
+    // it and then return yet another UnicodeBuffer that reuses the same storage. This allows us to
+    // avoid unnecessary heap allocations.
+    //
+    // Note that owned_font_face should be the same as the CxFont to which this cache belongs,
+    // otherwise you will not get correct results.
+    pub fn get_or_compute_glyph_ids(
+        &mut self, 
+        key: (Direction, &str),
+        mut rustybuzz_buffer: UnicodeBuffer,
+        owned_font_face: &crate::owned_font_face::OwnedFace
+    ) -> (&[usize], UnicodeBuffer) {
+        if !self.glyph_ids.contains_key(&key as &dyn ShapeCacheKey) {
+            if self.keys.len() == Self::MAX_SIZE {
+                for run in self.keys.drain(..Self::MAX_SIZE / 2) {
+                    self.glyph_ids.remove(&run);
+                }
+            }
+
+            let (direction, string) = key;
+            rustybuzz_buffer.set_direction(direction);
+            rustybuzz_buffer.push_str(string);
+            let glyph_buffer = owned_font_face.with_ref( | face | rustybuzz::shape(face, &[], rustybuzz_buffer));
+            let glyph_ids: Vec<_> = glyph_buffer.glyph_infos().iter().map( | glyph | glyph.glyph_id as usize).collect();
+            rustybuzz_buffer = glyph_buffer.clear();
+
+            let owned_string: Rc<str> = string.into();
+            self.keys.push_back((direction, owned_string.clone()));
+            self.glyph_ids.insert((direction, owned_string), glyph_ids);
+        }
+        (&self.glyph_ids[&key as &dyn ShapeCacheKey], rustybuzz_buffer)
+    }
+}
+
+// When doing inserts on the shape cache, we want to use (Direction, Rc<str>) as our key type. When
+// doing lookups on the shape cache, we want to use (Direction, &str) as our key type.
+// Unfortunately, Rust does not allow this, since (Direction, Rc<str>) can only be borrowed as
+// &(Direction, Rc<str>). So we'd have to create a temporary key, and then borrow from that.
+//
+// This is unacceptable, because creating a temporary key requires us to do a heap allocation every
+// time we want to do a lookup on the shape cache, which is on a very hot path. Instead, we resort
+// to a bit of trickery, inspired by the following post on Stackoverflow:
+// https://stackoverflow.com/questions/45786717/how-to-implement-hashmap-with-two-keys/46044391#46044391
+//
+// The idea is that we cannot borrow (Direction, Rc<str>) as a (Direction, &str). But what we *can* do is
+// define a trait ShapeCacheKey to represent our key, with methods to access both the direction and the
+// string, implement that for both (Direction, Rc<str>) and (Direction, &str), and then borrow
+// (Direction, Rc<str>) as &dyn ShapeCacheKey (that is, a reference to a trait object). We can turn a
+// (Direction, &str) into a &dyn ShapeCacheKey without creating a temporary key or doing any heap
+// allocations, so this allows us to do what we want.
+pub trait ShapeCacheKey {
+    fn direction(&self) -> Direction;
+    fn string(&self) -> &str;
+}
+
+impl<'a> Borrow<dyn ShapeCacheKey + 'a> for (Direction, Rc<str>) {
+    fn borrow(&self) -> &(dyn ShapeCacheKey + 'a) {
+        self
+    }
+}
+
+impl Eq for dyn ShapeCacheKey + '_ {}
+
+impl Hash for dyn ShapeCacheKey + '_ {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.direction().hash(hasher);
+        self.string().hash(hasher);
+    }
+}
+
+impl PartialEq for dyn ShapeCacheKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        if self.direction() != other.direction() {
+            return false;
+        }
+        if self.string() != other.string() {
+            return false;
+        }
+        true
+    }
+}
+
+impl ShapeCacheKey for (Direction, &str) {
+    fn direction(&self) -> Direction {
+        self.0
+    }
+
+    fn string(&self) -> &str {
+        self.1
+    }
+}
+
+impl ShapeCacheKey for (Direction, Rc<str>) {
+    fn direction(&self) -> Direction {
+        self.0
+    }
+
+    fn string(&self) -> &str {
+        &self.1
+    }
 }
 
 pub const ATLAS_SUBPIXEL_SLOTS: usize = 64;
@@ -346,7 +476,8 @@ impl CxFont {
         Ok(Self {
             ttf_font,
             owned_font_face,
-            atlas_pages: Vec::new()
+            atlas_pages: Vec::new(),
+            shape_cache: ShapeCache::new(),
         })
     }
     
