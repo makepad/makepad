@@ -572,7 +572,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onTouch(
         } as f64;
         
         touches.push(TouchPoint {
-            animator: {
+            state: {
                 if action_index == touch_index {
                     match action_masked {
                         0 | 5 => TouchState::Start,
