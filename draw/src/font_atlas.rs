@@ -150,7 +150,7 @@ impl CxFontsAtlas {
 impl DrawTrapezoidVector {
     
     // atlas drawing function used by CxAfterDraw
-    fn draw_todo(&mut self, fonts_atlas: &CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
+    fn draw_todo(&mut self, fonts_atlas: &mut CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
         //let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         let mut size = 1.0;
         for i in 0..3 {
@@ -161,10 +161,10 @@ impl DrawTrapezoidVector {
                 size = 0.6;
             }
             let trapezoids = {
-                let cxfont = fonts_atlas.fonts[todo.font_id].as_ref().unwrap();
-                let font = &cxfont.ttf_font;
+                let cxfont = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
+                let units_per_em = cxfont.ttf_font.units_per_em;
                 let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
-                let glyph = &font.glyphs[todo.glyph_id];
+                let glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
                 
                 let is_one_of_tab_lf_cr = ['\t', '\n', '\r'].iter().any(|&c| {
                     Some(todo.glyph_id) == cxfont.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
@@ -177,7 +177,7 @@ impl DrawTrapezoidVector {
                 let tx = glyphtc.t1.x as f64 * fonts_atlas.alloc.texture_size.x + todo.subpixel_x_fract * atlas_page.dpi_factor;
                 let ty = 1.0 + glyphtc.t1.y as f64 * fonts_atlas.alloc.texture_size.y - todo.subpixel_y_fract * atlas_page.dpi_factor;
                 
-                let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
+                let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
                 let mut trapezoids = Vec::new();
                 //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
@@ -470,9 +470,9 @@ pub struct CxFontsAtlasTodo {
 }
 
 impl CxFont {
-    pub fn load_from_ttf_bytes(bytes: Rc<Vec<u8>>) -> makepad_vector::ttf_parser::Result<Self> {
-        let owned_font_face = crate::owned_font_face::OwnedFace::parse(bytes, 0).map_err(|_| makepad_vector::ttf_parser::Error)?;
-        let ttf_font = owned_font_face.with_ref(|face| makepad_vector::ttf_parser::from_ttf_parser_face(face))?;
+    pub fn load_from_ttf_bytes(bytes: Rc<Vec<u8>>) -> Result<Self, crate::owned_font_face::FaceParsingError> {
+        let owned_font_face = crate::owned_font_face::OwnedFace::parse(bytes, 0)?;
+        let ttf_font = owned_font_face.with_ref(|face| makepad_vector::ttf_parser::from_ttf_parser_face(face));
         Ok(Self {
             ttf_font,
             owned_font_face,
@@ -493,18 +493,22 @@ impl CxFont {
             font_size: font_size,
             atlas_glyphs: {
                 let mut v = Vec::new();
-                v.resize(self.ttf_font.glyphs.len(), [None; ATLAS_SUBPIXEL_SLOTS]);
+                v.resize(self.owned_font_face.with_ref(|face| face.number_of_glyphs() as usize), [None; ATLAS_SUBPIXEL_SLOTS]);
                 v
             }
         });
         self.atlas_pages.len() - 1
     }
 
-    pub fn get_glyph(&self, c:char)->Option<&Glyph>{
+    pub fn get_glyph(&mut self, c:char)->Option<&Glyph>{
         if c < '\u{10000}' {
-            Some(&self.ttf_font.glyphs[self.owned_font_face.with_ref(|face| face.glyph_index(c))?.0 as usize])
+            Some(self.get_glyph_by_id(self.owned_font_face.with_ref(|face| face.glyph_index(c))?.0 as usize).unwrap())
         } else {
             None
         }
+    }
+
+    pub fn get_glyph_by_id(&mut self, id: usize) -> makepad_vector::ttf_parser::Result<&Glyph> {
+        self.owned_font_face.with_ref(|face| self.ttf_font.get_glyph_by_id(face, id))
     }
 }
