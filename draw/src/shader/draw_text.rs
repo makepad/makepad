@@ -163,7 +163,7 @@ impl<'a> WordIterator<'a> {
             font_size_total
         }
     }
-    fn next_word(&mut self, font: &CxFont) -> Option<WordIteratorItem> {
+    fn next_word(&mut self, font: &mut CxFont) -> Option<WordIteratorItem> {
         if let Some(char_iter) = &mut self.char_iter {
             while let Some((i, c)) = char_iter.next() {
                 self.last_index = i;
@@ -404,7 +404,7 @@ impl DrawText {
                     );
                 rustybuzz_buffer = new_rustybuzz_buffer;
                 for &glyph_id in glyph_ids {
-                    let glyph = &font.glyphs[glyph_id];
+                    let glyph = owned_font_face.with_ref(|face| font.get_glyph_by_id(face, glyph_id).unwrap());
                     
                     let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                     
@@ -493,7 +493,7 @@ impl DrawText {
         
         match if walk.width.is_fit() {&TextWrap::Line}else {&self.wrap} {
             TextWrap::Ellipsis => {
-                let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph('.') {
+                let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_mut().unwrap().get_glyph('.') {
                     glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale
                 }
                 else {
@@ -507,7 +507,7 @@ impl DrawText {
                     if measured_width + ellip_width * 3.0 < eval_width {
                         ellip_pt = Some((i, measured_width, 3));
                     }
-                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph(c) {
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_mut().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                         // ok so now what.
                         if measured_width + adv >= eval_width { // we have to drop back to ellip_pt
@@ -545,7 +545,7 @@ impl DrawText {
                 let mut measured_height = line_height;
                 
                 let mut iter = WordIterator::new(text.char_indices(), eval_width, font_size_logical * self.font_scale);
-                while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
+                while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
                     if measured_width + word.width >= eval_width {
                         measured_height += line_height * self.text_style.line_spacing;
                         measured_width = word.width;
@@ -577,7 +577,7 @@ impl DrawText {
                     if c == '\n' {
                         measured_height += line_height * self.text_style.line_spacing;
                     }
-                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph(c) {
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_mut().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                         measured_width += adv;
                     }
@@ -664,7 +664,7 @@ impl DrawText {
                     let mut pos = dvec2(0.0, 0.0);
                     
                     let mut iter = WordIterator::new(text.char_indices(), geom.eval_width, font_size_logical * self.font_scale);
-                    while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
+                    while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
                         if pos.x + word.width >= geom.eval_width {
                             pos.y += line_height * self.text_style.line_spacing;
                             pos.x = 0.0;
@@ -831,7 +831,7 @@ impl DrawText {
     }
     
     pub fn get_monospace_base(&self, cx: &Cx2d) -> DVec2 {
-        let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
+        let mut fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         if self.text_style.font.font_id.is_none() {
             return DVec2::default();
         }
@@ -839,9 +839,9 @@ impl DrawText {
         if fonts_atlas.fonts[font_id].is_none() {
             return DVec2::default();
         }
-        let font = fonts_atlas.fonts[font_id].as_ref().unwrap();
+        let font = fonts_atlas.fonts[font_id].as_mut().unwrap();
         let slot = font.owned_font_face.with_ref( | face | face.glyph_index('!').map_or(0, | id | id.0 as usize));
-        let glyph = &font.ttf_font.glyphs[slot];
+        let glyph = font.get_glyph_by_id(slot).unwrap();
         
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
