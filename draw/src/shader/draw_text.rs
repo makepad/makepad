@@ -388,15 +388,22 @@ impl DrawText {
             for (run_level, run_range) in runs_with_level_and_range {
                 // FIXME(eddyb) UBA/`unicode_bidi` only offers a LTR/RTL distinction,
                 // even if `rustybuzz` has vertical `Direction`s as well.
-                rustybuzz_buffer.set_direction(if run_level.is_rtl() {
-                    rustybuzz::Direction::RightToLeft
-                } else {
-                    rustybuzz::Direction::LeftToRight
-                });
-                rustybuzz_buffer.push_str(&bidi_info.text[run_range]);
-                let glyph_buffer = owned_font_face.with_ref( | face | rustybuzz::shape(face, &[], rustybuzz_buffer));
-                let glyphs = glyph_buffer.glyph_infos().iter().map( | glyph | glyph.glyph_id as usize);
-                for glyph_id in glyphs {
+                let (glyph_ids, new_rustybuzz_buffer) = cxfont
+                    .shape_cache
+                    .get_or_compute_glyph_ids(
+                    (
+                            if run_level.is_rtl() {
+                                rustybuzz::Direction::RightToLeft
+                            } else {
+                                rustybuzz::Direction::LeftToRight
+                            },
+                            &bidi_info.text[run_range]
+                        ),
+                        rustybuzz_buffer,
+                        owned_font_face
+                    );
+                rustybuzz_buffer = new_rustybuzz_buffer;
+                for &glyph_id in glyph_ids {
                     let glyph = &font.glyphs[glyph_id];
                     
                     let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -463,8 +470,6 @@ impl DrawText {
                     mi.instances.extend_from_slice(self.draw_vars.as_slice());
                     walk_x += advance;
                 }
-                
-                rustybuzz_buffer = glyph_buffer.clear();
             }
         }
         
