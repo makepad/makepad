@@ -451,7 +451,7 @@ impl DropDownRef {
         0
     }
     
-    pub fn get_selected_label(&self) -> String {
+    pub fn selected_label(&self) -> String {
         if let Some(inner) = self.borrow() {
             return inner.labels[inner.selected_item].clone()
         }

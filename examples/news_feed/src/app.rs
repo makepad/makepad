@@ -211,7 +211,7 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    text: "@username · 13h"
+                    text: "@whatup · 13h"
                 }
                 text = <Label> {
                     width: Fill, height: Fit
@@ -333,7 +333,7 @@ impl AppMain for App {
                             x if x % 5 == 0 => live_id!(PostImage),
                             _ => live_id!(Post)
                         };
-                        let item = list.get_item(cx, item_id, template).unwrap();
+                        let item = list.item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
                             1 => format!("TOPLEVEL {} Requires recompile", item_id),
                             2 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),

@@ -567,6 +567,11 @@ impl WidgetRef {
             None
         }
     }
+
+    pub fn apply_over_and_redraw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+        self.redraw(cx);
+    }
 }
 
 impl LiveHook for WidgetRef {}

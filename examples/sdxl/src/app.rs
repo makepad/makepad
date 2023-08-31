@@ -11,6 +11,7 @@ live_design!{
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::multi_window::MultiWindow;
     import makepad_widgets::label::Label;
+    import makepad_widgets::button::Button;
     import makepad_widgets::image::Image;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::image::Image;
@@ -149,7 +150,7 @@ live_design!{
     
     
     
-    BarButton = <Button2> {
+    BarButton = <Button> {
         padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
         margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
         text: "Cancel"
@@ -855,28 +856,6 @@ struct Workflow {
 impl Workflow {
     fn new(name: &str) -> Self {Self {name: name.to_string()}}
 }
-/*
-const KEYWORD_CLOUD:[(&'static str,&'static str);18]=[
-   ("", "Beautiful woman"),
-   ("", "Beautiful man"),
-   ("", "Dog"),
-   ("", "Ugly woman"),
-   ("", "Ugly man"),
-   ("", "wearing intricate tattoos"),
-   ("", "wearing intricate lingerie"),
-   ("", "as an android"),
-   ("", "made of metal"),
-   ("", "made of wood"),
-   ("", "In a desert"),
-   ("", "On the moon"),
-   ("", "In a sunset"),
-   ("", "At burningman"),
-   ("", "covered in stars"),
-   ("", "covered in rainbows"),
-   ("", "photographic"),
-   ("", "cinematic"),
-];*/
-
 
 #[derive(Live)]
 pub struct App {
@@ -887,13 +866,7 @@ pub struct App {
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
         Machine::new("DESKTOP-4:8188", id_lut!(m4)),
         Machine::new("DESKTOP-7:8188", id_lut!(m5)),
-        Machine::new("DESKTOP-8:8188", id_lut!(m6))/*
-        Machine::new("192.168.0.69:8188", id_lut!(m1)),
-        Machine::new("192.168.0.127:8188", id_lut!(m2)),
-        Machine::new("192.168.0.116:8188", id_lut!(m3)),
-        Machine::new("192.168.0.80:8188", id_lut!(m4)),
-        Machine::new("192.168.0.81:8188", id_lut!(m5)),
-        Machine::new("192.168.0.244:8188", id_lut!(m6)),*/
+        Machine::new("DESKTOP-8:8188", id_lut!(m6))
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
@@ -931,7 +904,7 @@ impl LiveHook for App {
 
 impl App {
     fn send_prompt(&mut self, cx: &mut Cx, prompt_state: PromptState) {
-        // lets find a machine with the minimum queue size and
+
         for machine in &mut self.machines {
             if machine.running.is_some() {
                 continue
@@ -966,8 +939,6 @@ impl App {
             let ws = ws.replace("\"start_at_step\": 29", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.upscale_start_step));
             let ws = ws.replace("\"end_at_step\": 999", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.upscale_end_step));
             
-            
-            // lets store that we queued this image
             request.set_metadata_id(machine.id);
             request.set_body(ws.as_bytes().to_vec());
             Self::update_progress(cx, &self.ui, machine.id, true, 0, 1);
@@ -1028,10 +999,9 @@ impl App {
             live_id!(m6) => id!(progress6),
             _ => panic!()
         };
-        ui.view(progress_id).apply_over(cx, live!{
+        ui.view(progress_id).apply_over_and_redraw(cx, live!{
             draw_bg: {active: (if active {1.0}else {0.0}), progress: (steps as f64 / total as f64)}
         });
-        ui.redraw(cx);
     }
     
     
@@ -1054,8 +1024,7 @@ impl App {
     }
     
     fn update_seed_display(&mut self, cx: &mut Cx) {
-        self.ui.text_input(id!(seed_input)).set_text(&format!("{}", self.last_seed));
-        self.ui.redraw(cx);
+        self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}", self.last_seed));
     }
     
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
@@ -1115,13 +1084,12 @@ impl App {
             }
         }
         todo += self.todo.len();
-        self.ui.label(id!(todo_label)).set_text(&format!("Todo {}", todo));
-        self.ui.redraw(cx);
+        self.ui.label(id!(todo_label)).set_text_and_redraw(cx, &format!("Todo {}", todo));
     }
     
     fn save_preset(&self) -> PromptPreset {
         PromptPreset {
-            workflow: self.ui.drop_down(id!(workflow_dropdown)).get_selected_label(),
+            workflow: self.ui.drop_down(id!(workflow_dropdown)).selected_label(),
             width: self.ui.text_input(id!(settings_width.input)).text().parse::<u32>().unwrap_or(1344),
             height: self.ui.text_input(id!(settings_height.input)).text().parse::<u32>().unwrap_or(768),
             steps: self.ui.text_input(id!(settings_steps.input)).text().parse::<u32>().unwrap_or(20),
@@ -1201,7 +1169,7 @@ impl App {
     fn handle_slide_show(&mut self, cx: &mut Cx) {
         // lets get the slideshow values
         if self.ui.check_box(id!(slide_show_check_box)).selected(cx) {
-            let time = self.ui.drop_down(id!(slide_show_dropdown)).get_selected_label().parse::<f64>().unwrap_or(0.0);
+            let time = self.ui.drop_down(id!(slide_show_dropdown)).selected_label().parse::<f64>().unwrap_or(0.0);
             // ok lets check our last-change instant
             if Instant::now() - self.last_flip > Duration::from_millis((time * 1000.0)as u64) {
                 self.select_prev_image(cx);
@@ -1221,7 +1189,6 @@ impl App {
         self.set_current_image_by_item_id_and_row(cx, 0, 0);
         self.ui.list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
         self.set_slide_show(cx, true);
-        
     }
     
     fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
@@ -1305,7 +1272,7 @@ impl App {
                                     
                                     self.filtered.filter_db(&self.db, "", false);
                                     
-                                    if self.db.get_image_texture(&image_id).is_some() {
+                                    if self.db.image_texture(&image_id).is_some() {
                                         self.ui.redraw(cx);
                                     }
                                     
@@ -1338,15 +1305,9 @@ impl AppMain for App {
         }
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            /*
-        if let Some(change) = self.ui.get_text_input(id!(positive)).changed(&actions) {
-            self.ui.get_label(id!(second_image.prompt)).set_label(&change);
-            self.ui.redraw(cx);
-        }*/
-            
-            
+
             if let Some(current_image) = &self.current_image {
-                let tex = self.db.get_image_texture(current_image);
+                let tex = self.db.image_texture(current_image);
                 if tex.is_some() {
                     self.ui.image(id!(image_view.image)).set_texture(tex.clone());
                     self.ui.image(id!(big_image.image1)).set_texture(tex.clone());
@@ -1364,17 +1325,17 @@ impl AppMain for App {
                             match item {
                                 ImageListItem::Prompt {prompt_hash} => {
                                     let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
-                                    let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
+                                    let item = image_list.item(cx, item_id, live_id!(PromptGroup)).unwrap();
                                     item.label(id!(prompt)).set_text(&group.prompt.positive);
                                     item.draw_widget_all(cx);
                                 }
                                 ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
-                                    let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
+                                    let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
                                     let rows = item.view_set(ids!(row1, row2, row3));
                                     for (index, row) in rows.iter().enumerate() {
                                         if index >= *image_count {break}
                                         // alright we need to query our png cache for an image.
-                                        let tex = self.db.get_image_texture(&image_files[index]);
+                                        let tex = self.db.image_texture(&image_files[index]);
                                         row.image(id!(img)).set_texture(tex);
                                     }
                                     item.draw_widget_all(cx);
@@ -1399,7 +1360,7 @@ impl AppMain for App {
                 self.render(cx, 1);
             }
             else {
-                let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+                let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
                 self.render(cx, batch_size);
             }
         }
@@ -1411,8 +1372,6 @@ impl AppMain for App {
                 self.load_seed_from_current_image(cx);
             }
         }
-        
-        
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
@@ -1429,13 +1388,12 @@ impl AppMain for App {
             if modifiers.control || modifiers.logo {
                 let prompt_frame = self.ui.view(id!(second_image.prompt_frame));
                 if prompt_frame.visible() {
-                    prompt_frame.set_visible(false);
+                    prompt_frame.set_visible_and_redraw(cx, false);
                 }
                 else {
                     //cx.set_cursor(MouseCursor::Hidden);
-                    prompt_frame.set_visible(true);
+                    prompt_frame.set_visible_and_redraw(cx, true);
                 }
-                self.ui.redraw(cx);
             }
         }
         
@@ -1443,13 +1401,12 @@ impl AppMain for App {
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) = event {
             let big_image = self.ui.view(id!(big_image));
             if big_image.visible() {
-                big_image.set_visible(false);
+                big_image.set_visible_and_redraw(cx, false);
             }
             else {
                 //cx.set_cursor(MouseCursor::Hidden);
-                big_image.set_visible(true);
+                big_image.set_visible_and_redraw(cx, true);
             }
-            self.ui.redraw(cx);
         }
         
         if self.ui.button(id!(play_button)).clicked(&actions) {
@@ -1487,7 +1444,6 @@ impl AppMain for App {
             }
         }
         
-        
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) = event {
             if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, false);
@@ -1500,19 +1456,16 @@ impl AppMain for App {
         }
         
         if self.ui.button(id!(render_batch)).clicked(&actions) {
-            let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+            let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
             self.render(cx, batch_size);
-            self.ui.redraw(cx);
         }
         
         if self.ui.button(id!(render_single)).clicked(&actions) {
             self.render(cx, 1);
-            self.ui.redraw(cx);
         }
         
         if self.ui.button(id!(cancel_todo)).clicked(&actions) {
             self.clear_todo(cx);
-            self.ui.redraw(cx);
         }
         
         if let Some(change) = self.ui.text_input(id!(search)).changed(&actions) {
@@ -1521,19 +1474,15 @@ impl AppMain for App {
             image_list.set_first_id_and_scroll(0, 0.0);
         }
         
-        
-        
         if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.view(id!(big_image)).set_visible(true);
-                self.ui.redraw(cx);
+                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
             }
         }
         
         if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.view(id!(big_image)).set_visible(false);
-                self.ui.redraw(cx);
+                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, false);
             }
         }
         

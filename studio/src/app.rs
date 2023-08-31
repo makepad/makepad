@@ -46,7 +46,7 @@ live_design!{
             }
         }
          margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0 }
-        layout: { padding: 0.0 }
+         padding: 0.0 
         text: ""
     }
     
@@ -116,18 +116,16 @@ live_design!{
                     draw_bg: {color: #052329}
                     <View> {
                          width: Fill, height: Fill
-                        layout: {
-                            align: {
-                                x: 0.5,
-                                y: 0.5
-                            }
-                            flow: Down
+                        align: {
+                            x: 0.5,
+                            y: 0.5
                         }
+                        flow: Down
 
                         <Logo> {}
 
                         <Label>{
-                            label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                            text:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
                             width: Fit, margin:{left:200}
                             draw_text: {
                                 text_style: {
@@ -177,10 +175,10 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let dock = self.ui.get_dock(id!(dock));
-        let file_tree = self.ui.get_file_tree(id!(file_tree));
-        let run_view = self.ui.get_run_view(id!(run_view));
-        let log_list = self.ui.get_list_view(id!(log_list));
+        let dock = self.ui.dock(id!(dock));
+        let file_tree = self.ui.file_tree(id!(file_tree));
+        let run_view = self.ui.run_view(id!(run_view));
+        let log_list = self.ui.list_view(id!(log_list));
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);

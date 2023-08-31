@@ -73,10 +73,8 @@ live_design!{
     
     FileTreeNode = {{FileTreeNode}} {
         
-        
-            align: {y: 0.5
-            padding: {left: 5.0, bottom: 0,},
-        }
+        align: {y: 0.5}
+        padding: {left: 5.0, bottom: 0,},
         
         icon_walk: {
             width: Fixed((DIM_DATA_ICON_WIDTH)),
