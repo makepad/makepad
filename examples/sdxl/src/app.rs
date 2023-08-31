@@ -7,7 +7,7 @@ use crate::database::*;
 use crate::comfyui::*;
 
 live_design!{
-    import makepad_widgets::button::Button;
+    //import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::multi_window::MultiWindow;
     import makepad_widgets::label::Label;
@@ -149,7 +149,7 @@ live_design!{
     
     
     
-    BarButton = <Button> {
+    BarButton = <Button2> {
         padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
         margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
         text: "Cancel"
