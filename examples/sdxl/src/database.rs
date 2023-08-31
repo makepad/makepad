@@ -207,7 +207,7 @@ impl Database {
         updates
     }
     
-    pub fn get_image_texture(&mut self, image_id: &ImageId) -> Option<Texture> {
+    pub fn image_texture(&mut self, image_id: &ImageId) -> Option<Texture> {
         
         if let Some(texture) = self.textures.get_mut(&image_id) {
             texture.last_seen = Instant::now();

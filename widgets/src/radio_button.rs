@@ -95,17 +95,14 @@ live_design!{
             }
         }
         
-        
-            width: Fit,
-            height: Fit
-        
+        width: Fit,
+        height: Fit
 
         label_walk: {
             margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}
             width: Fit,
             height: Fit,
         }
-        
         
         label_align: {
             y: 0.0

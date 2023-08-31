@@ -51,19 +51,16 @@ live_design!{
             }
         }
         
-            width: Fit,
-            height: Fill, //Fixed((DIM_TAB_HEIGHT)),
+        width: Fit,
+        height: Fill, //Fixed((DIM_TAB_HEIGHT)),
         
-        
-        
-            align: {x: 0.0, y: 0.5
-            padding: {
-                left: 10.0,
-                top: 2.0,
-                right: 15.0,
-                bottom: 0.0,
-            },
-        }
+        align: {x: 0.0, y: 0.5}
+        padding: {
+            left: 10.0,
+            top: 2.0,
+            right: 15.0,
+            bottom: 0.0,
+        },
         
         animator: {
             hover = {
@@ -169,7 +166,7 @@ impl Tab {
         //}
     }
     
-    pub fn area(&self)->Area{
+    pub fn area(&self) -> Area {
         self.draw_bg.area()
     }
     
