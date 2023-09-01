@@ -4,21 +4,21 @@ live_design!{
     import makepad_draw::shader::std::*;
     import crate::base::*;
     
-    FONT_LABEL = {
+    THEME_FONT_LABEL = {
         font_size: 9.4,
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
     
-    FONT_DATA = {
+    THEME_FONT_DATA = {
         font_size: 9.4,
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
     
-    FONT_META = {
+    THEME_FONT_META = {
         font_size: 9.4,
         top_drop: 1.2,
         font: {
@@ -26,7 +26,7 @@ live_design!{
         }
     }
     
-    FONT_CODE = {
+    THEME_FONT_CODE = {
         font: {
             path: dep("crate://self/resources/LiberationMono-Regular.ttf")
         }
@@ -36,110 +36,110 @@ live_design!{
         top_drop: 1.3
     }
     
-    const DIM_DATA_ITEM_HEIGHT = 23.0
-    const DIM_DATA_ICON_WIDTH = 16.0
-    const DIM_DATA_ICON_HEIGHT = 24.0
+    const THEME_DATA_ITEM_HEIGHT = 23.0
+    const THEME_DATA_ICON_WIDTH = 16.0
+    const THEME_DATA_ICON_HEIGHT = 24.0
     // ABSOLUTE DEFS
     
-    const BRIGHTNESS = #x40
-    const COLOR_HIGHLIGHT = #42
-    const COLOR_HIGH = #C00
-    const COLOR_MID = #FA0
-    const COLOR_LOW = #8A0
+    const THEME_BRIGHTNESS = #x40
+    const THEME_COLOR_HIGHLIGHT = #42
+    const THEME_COLOR_HIGH = #C00
+    const THEME_COLOR_MID = #FA0
+    const THEME_COLOR_LOW = #8A0
     
     // RELATIVE =DEFS
     //    42, =78, 117
-    const COLOR_WHITE = #FFF
-    const COLOR_UP_80 = #FFFFFFCC
-    const COLOR_UP_50 = #FFFFFF80
-    const COLOR_UP_25 = #FFFFFF40
-    const COLOR_UP_15 = #FFFFFF26
-    const COLOR_UP_10 = #FFFFFF1A
-    const COLOR_UP_4 = #FFFFFF0A
-    const COLOR_DOWN_7 = #00000013
-    const COLOR_DOWN_10 = #00000030
-    const COLOR_DOWN_20 = #00000040
-    const COLOR_DOWN_50 = #00000080
-    const COLOR_BLACK = #000
+    const THEME_COLOR_WHITE = #FFF
+    const THEME_COLOR_UP_80 = #FFFFFFCC
+    const THEME_COLOR_UP_50 = #FFFFFF80
+    const THEME_COLOR_UP_25 = #FFFFFF40
+    const THEME_COLOR_UP_15 = #FFFFFF26
+    const THEME_COLOR_UP_10 = #FFFFFF1A
+    const THEME_COLOR_UP_4 = #FFFFFF0A
+    const THEME_COLOR_DOWN_7 = #00000013
+    const THEME_COLOR_DOWN_10 = #00000030
+    const THEME_COLOR_DOWN_20 = #00000040
+    const THEME_COLOR_DOWN_50 = #00000080
+    const THEME_COLOR_BLACK = #000
     
     // CORE BACKGROUND COLORS
     
-    const COLOR_BG_APP = (BRIGHTNESS)
+    const THEME_COLOR_BG_APP = (THEME_BRIGHTNESS)
     
-    const COLOR_BG_HEADER = (blend(
-        COLOR_BG_APP,
-        COLOR_DOWN_10
+    const THEME_COLOR_BG_HEADER = (blend(
+        THEME_COLOR_BG_APP,
+        THEME_COLOR_DOWN_10
     ))
     
-    const COLOR_CLEAR = (COLOR_BG_APP)
+    const THEME_COLOR_CLEAR = (THEME_COLOR_BG_APP)
     
-    const COLOR_BG_EDITOR = (blend(
-        COLOR_BG_HEADER,
-        COLOR_DOWN_10
+    const THEME_COLOR_BG_EDITOR = (blend(
+        THEME_COLOR_BG_HEADER,
+        THEME_COLOR_DOWN_10
     ))
     
-    const COLOR_BG_ODD = (blend(
-        COLOR_BG_EDITOR,
-        COLOR_DOWN_7
+    const THEME_COLOR_BG_ODD = (blend(
+        THEME_COLOR_BG_EDITOR,
+        THEME_COLOR_DOWN_7
     ))
     
-    const COLOR_BG_SELECTED = (COLOR_HIGHLIGHT)
+    const THEME_COLOR_BG_SELECTED = (THEME_COLOR_HIGHLIGHT)
     
-    const COLOR_BG_UNFOCUSSED = (blend(
-        COLOR_BG_EDITOR,
-        COLOR_UP_10
+    const THEME_COLOR_BG_UNFOCUSSED = (blend(
+        THEME_COLOR_BG_EDITOR,
+        THEME_COLOR_UP_10
     ))
     
-    const COLOR_EDITOR_SELECTED = (COLOR_BG_SELECTED)
-    const COLOR_EDITOR_SELECTED_UNFOCUSSED = (COLOR_BG_SELECTED_UNFOCUSSED)
+    const THEME_COLOR_EDITOR_SELECTED = (THEME_COLOR_BG_SELECTED)
+    const THEME_COLOR_EDITOR_SELECTED_UNFOCUSSED = (THEME_COLOR_BG_SELECTED_UNFOCUSSED)
     
-    const COLOR_BG_CURSOR = (blend(
-        COLOR_BG_EDITOR,
-        COLOR_UP_4
+    const THEME_COLOR_BG_CURSOR = (blend(
+        THEME_COLOR_BG_EDITOR,
+        THEME_COLOR_UP_4
     ))
     
-    const COLOR_FG_CURSOR = (blend(
-        COLOR_BG_EDITOR,
-        COLOR_UP_50
+    const THEME_COLOR_FG_CURSOR = (blend(
+        THEME_COLOR_BG_EDITOR,
+        THEME_COLOR_UP_50
     ))
     
     // TEXT / ICON COLORS
     
-    const COLOR_TEXT_DEFAULT = (COLOR_UP_50)
-    const COLOR_TEXT_HOVER = (COLOR_UP_80)
-    const COLOR_TEXT_META = (COLOR_UP_25)
-    const COLOR_TEXT_SELECTED = (COLOR_UP_80)
+    const THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_UP_50)
+    const THEME_COLOR_TEXT_HOVER = (THEME_COLOR_UP_80)
+    const THEME_COLOR_TEXT_META = (THEME_COLOR_UP_25)
+    const THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_UP_80)
     
     // SPLITTER AND SCROLLBAR
     
-    const COLOR_SCROLL_BAR_DEFAULT = (COLOR_UP_10)
+    const THEME_COLOR_SCROLL_BAR_DEFAULT = (THEME_COLOR_UP_10)
     
-    const COLOR_CONTROL_HOVER = (blend(
-        COLOR_BG_HEADER,
-        COLOR_UP_50
+    const THEME_COLOR_CONTROL_HOVER = (blend(
+        THEME_COLOR_BG_HEADER,
+        THEME_COLOR_UP_50
     ))
     
-    const COLOR_CONTROL_PRESSED = (blend(
-        COLOR_BG_HEADER,
-        COLOR_UP_25
+    const THEME_COLOR_CONTROL_PRESSED = (blend(
+        THEME_COLOR_BG_HEADER,
+        THEME_COLOR_UP_25
     ))
     
     // ICON COLORS
     
-    const COLOR_ICON_WAIT = (COLOR_LOW),
-    const COLOR_ERROR = (COLOR_HIGH),
-    const COLOR_WARNING = (COLOR_MID),
-    const COLOR_ICON_PANIC = (COLOR_HIGH)
-    const COLOR_DRAG_QUAD = (COLOR_UP_50)
-    const COLOR_PANIC = #f0f
+    const THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
+    const THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
+    const THEME_COLOR_WARNING = (THEME_COLOR_MID),
+    const THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
+    const THEME_COLOR_DRAG_QUAD = (THEME_COLOR_UP_50)
+    const THEME_COLOR_PANIC = #f0f
     
-    const DIM_TAB_HEIGHT = 26.0,
-    const DIM_SPLITTER_HORIZONTAL = 16.0,
-    const DIM_SPLITTER_MIN_HORIZONTAL = (DIM_TAB_HEIGHT),
-    const DIM_SPLITTER_MAX_HORIZONTAL = (DIM_TAB_HEIGHT + DIM_SPLITTER_SIZE),
-    const DIM_SPLITTER_MIN_VERTICAL = (DIM_SPLITTER_HORIZONTAL),
-    const DIM_SPLITTER_MAX_VERTICAL = (DIM_SPLITTER_HORIZONTAL + DIM_SPLITTER_SIZE),
-    const DIM_SPLITTER_SIZE = 5.0
+    const THEME_TAB_HEIGHT = 26.0,
+    const THEME_SPLITTER_HORIZONTAL = 16.0,
+    const THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
+    const THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
+    const THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
+    const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
+    const THEME_SPLITTER_SIZE = 5.0
     
 
 
@@ -589,7 +589,7 @@ live_design!{
     }
     
     DesktopWindow = <DesktopWindowBase> {
-        pass: {clear_color: (COLOR_CLEAR)}
+        pass: {clear_color: (THEME_COLOR_CLEAR)}
         flow: Down
         nav_control: <NavControl> {}
         caption_bar = <SolidView> {
@@ -597,7 +597,7 @@ live_design!{
             
             flow: Right
             
-            draw_bg: {color: (COLOR_BG_APP)}
+            draw_bg: {color: (THEME_COLOR_BG_APP)}
             height: 29
             caption_label = <View> {
                 width: Fill,
@@ -674,7 +674,7 @@ live_design!{
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(COLOR_BG_APP);
+                sdf.clear(THEME_COLOR_BG_APP);
                 
                 if self.is_vertical > 0.5 {
                     sdf.box(
@@ -695,21 +695,21 @@ live_design!{
                     );
                 }
                 return sdf.fill_keep(mix(
-                    COLOR_BG_APP,
+                    THEME_COLOR_BG_APP,
                     mix(
-                        COLOR_CONTROL_HOVER,
-                        COLOR_CONTROL_PRESSED,
+                        THEME_COLOR_CONTROL_HOVER,
+                        THEME_COLOR_CONTROL_PRESSED,
                         self.pressed
                     ),
                     self.hover
                 ));
             }
         }
-        split_bar_size: (DIM_SPLITTER_SIZE)
-        min_horizontal: (DIM_SPLITTER_MIN_HORIZONTAL)
-        max_horizontal: (DIM_SPLITTER_MAX_HORIZONTAL)
-        min_vertical: (DIM_SPLITTER_MIN_VERTICAL)
-        max_vertical: (DIM_SPLITTER_MAX_VERTICAL)
+        split_bar_size: (THEME_SPLITTER_SIZE)
+        min_horizontal: (THEME_SPLITTER_MIN_HORIZONTAL)
+        max_horizontal: (THEME_SPLITTER_MAX_HORIZONTAL)
+        min_vertical: (THEME_SPLITTER_MIN_VERTICAL)
+        max_vertical: (THEME_SPLITTER_MAX_VERTICAL)
         
         animator: {
             hover = {
@@ -750,7 +750,7 @@ live_design!{
     
     Tab = <TabBase> {
         width: Fit,
-        height: Fill, //Fixed((DIM_TAB_HEIGHT)),
+        height: Fill, //Fixed((THEME_TAB_HEIGHT)),
         
         align: {x: 0.0, y: 0.5}
         padding: {
@@ -762,17 +762,17 @@ live_design!{
         
         
         draw_name: {
-            text_style: <FONT_LABEL> {}
+            text_style: <THEME_FONT_LABEL> {}
             instance hover: 0.0
             instance selected: 0.0
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        COLOR_TEXT_DEFAULT,
-                        COLOR_TEXT_SELECTED,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
-                    COLOR_TEXT_HOVER,
+                    THEME_COLOR_TEXT_HOVER,
                     self.hover
                 )
             }
@@ -786,8 +786,8 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 return mix(
                     mix(
-                        COLOR_BG_HEADER,
-                        COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_HEADER,
+                        THEME_COLOR_BG_EDITOR,
                         self.selected
                     ),
                     #f,
@@ -853,11 +853,11 @@ live_design!{
             color: #c
         }
         draw_fill: {
-            color: (COLOR_BG_HEADER)
+            color: (THEME_COLOR_BG_HEADER)
         }
         
             width: Fill
-            height: Fixed((DIM_TAB_HEIGHT))
+            height: Fixed((THEME_TAB_HEIGHT))
         
         scroll_bars: {
             show_scroll_x: true
@@ -890,8 +890,8 @@ live_design!{
                 sdf.move_to(min.x, max.y);
                 sdf.line_to(max.x, min.y);
                 return sdf.stroke(mix(
-                    COLOR_TEXT_DEFAULT,
-                    COLOR_TEXT_HOVER,
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_HOVER,
                     self.hover
                 ), 1.0);
             }
@@ -942,17 +942,17 @@ live_design!{
                 );
                 
                 sdf.subtract()
-                return sdf.fill(COLOR_BG_APP);
+                return sdf.fill(THEME_COLOR_BG_APP);
             }
         }
         border_size: (BORDER_SIZE)
         
         flow: Down
         padding: {left: (BORDER_SIZE), top: (BORDER_SIZE), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
-        padding_fill: {color: (COLOR_BG_APP)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)}
         drag_quad: {
             draw_depth: 10.0
-            color: (COLOR_DRAG_QUAD)
+            color: (THEME_COLOR_DRAG_QUAD)
         }
         tab_bar: <TabBar> {}
         splitter: <Splitter> {}
@@ -974,11 +974,11 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        COLOR_TEXT_DEFAULT,
-                        COLOR_TEXT_SELECTED,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
-                    COLOR_TEXT_HOVER,
+                    THEME_COLOR_TEXT_HOVER,
                     self.hover
                 )
             }
@@ -996,8 +996,8 @@ live_design!{
                 sdf.clear(mix(
                     self.color,
                     self.color_selected,
-                    // COLOR_BG_EDITOR,
-                    // COLOR_BG_SELECTED,
+                    // THEME_COLOR_BG_EDITOR,
+                    // THEME_COLOR_BG_SELECTED,
                     self.hover
                 ))
                 
@@ -1220,13 +1220,13 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        COLOR_BG_EDITOR,
-                        COLOR_BG_ODD,
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
-                        COLOR_BG_UNFOCUSSED,
-                        COLOR_BG_SELECTED,
+                        THEME_COLOR_BG_UNFOCUSSED,
+                        THEME_COLOR_BG_SELECTED,
                         self.focussed
                     ),
                     self.selected
@@ -1244,11 +1244,11 @@ live_design!{
                 sdf.union();
                 return sdf.fill(mix(
                     mix(
-                        COLOR_TEXT_DEFAULT * self.scale,
-                        COLOR_TEXT_SELECTED,
+                        THEME_COLOR_TEXT_DEFAULT * self.scale,
+                        THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
-                    COLOR_TEXT_HOVER,
+                    THEME_COLOR_TEXT_HOVER,
                     self.hover
                 ));
             }
@@ -1258,16 +1258,16 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        COLOR_TEXT_DEFAULT * self.scale,
-                        COLOR_TEXT_SELECTED,
+                        THEME_COLOR_TEXT_DEFAULT * self.scale,
+                        THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
-                    COLOR_TEXT_HOVER,
+                    THEME_COLOR_TEXT_HOVER,
                     self.hover
                 )
             }
             
-            text_style: <FONT_DATA> {
+            text_style: <THEME_FONT_DATA> {
                 top_drop: 1.2,
             }
         }
@@ -1276,8 +1276,8 @@ live_design!{
         padding: {left: 5.0, bottom: 0,},
         
         icon_walk: {
-            width: Fixed((DIM_DATA_ICON_WIDTH)),
-            height: Fixed((DIM_DATA_ICON_HEIGHT)),
+            width: Fixed((THEME_DATA_ICON_WIDTH)),
+            height: Fixed((THEME_DATA_ICON_HEIGHT)),
             margin: {
                 left: 1
                 top: 0
@@ -1389,7 +1389,7 @@ live_design!{
     }
     
     FileTree = <FileTreeBase> {
-        node_height: (DIM_DATA_ITEM_HEIGHT),
+        node_height: (THEME_DATA_ITEM_HEIGHT),
         file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
@@ -1521,22 +1521,22 @@ live_design!{
                 sdf.move_to(0., self.rect_size.y - offset_y);
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
-                    COLOR_TEXT_DEFAULT,
-                    COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_META,
                     self.pressed
                 ), mix(0.0, 0.8, self.hover));
             }
         }
         draw_text: {
-            text_style: <FONT_META> {}
+            text_style: <THEME_FONT_META> {}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        COLOR_TEXT_META,
-                        COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_META,
+                        THEME_COLOR_TEXT_DEFAULT,
                         self.hover
                     ),
-                    COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_META,
                     self.pressed
                 )
             }
@@ -1737,10 +1737,10 @@ live_design!{
                     );
                 }
                 return sdf.fill(mix(
-                    COLOR_SCROLL_BAR_DEFAULT,
+                    THEME_COLOR_SCROLL_BAR_DEFAULT,
                     mix(
-                        COLOR_CONTROL_HOVER,
-                        COLOR_CONTROL_PRESSED,
+                        THEME_COLOR_CONTROL_HOVER,
+                        THEME_COLOR_CONTROL_PRESSED,
                         self.pressed
                     ),
                     self.hover
@@ -1812,7 +1812,7 @@ live_design!{
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,
-            text_style: <FONT_LABEL> {}
+            text_style: <THEME_FONT_LABEL> {}
             fn get_color(self) -> vec4 {
                 return
                 mix(
@@ -2155,7 +2155,7 @@ live_design!{
         fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
             let is_viz = clamp(self.scroll * 0.1, 0., 1.);
             let pos = self.pos;
-            let base = COLOR_BG_EDITOR.xyz;
+            let base = THEME_COLOR_BG_EDITOR.xyz;
             let alpha = 0.0;
             if self.shadow_is_top > 0.5 {
                 alpha = pow(pos.y, 0.5);

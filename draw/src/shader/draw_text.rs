@@ -592,7 +592,10 @@ impl DrawText {
     
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) {
-        let font_id = self.text_style.font.font_id.unwrap();
+        let font_id = if let Some(font_id) = self.text_style.font.font_id{font_id}else{
+            //log!("Draw text without font");
+            return
+        };
         let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
