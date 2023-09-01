@@ -580,9 +580,9 @@ impl HitOptions {
             ..self
         }
     }
-    pub fn with_capture_overload(self) -> Self {
+    pub fn with_capture_overload(self, capture_overload:bool) -> Self {
         Self {
-            capture_overload: true,
+            capture_overload,
             ..self
         }
     }
@@ -600,8 +600,8 @@ impl Event {
     }
     
     
-    pub fn hits_with_capture_overload(&self, cx: &mut Cx, area: Area) -> Hit {
-        self.hits_with_options(cx, area, HitOptions::new().with_capture_overload())
+    pub fn hits_with_capture_overload(&self, cx: &mut Cx, area: Area, capture_overload: bool) -> Hit {
+        self.hits_with_options(cx, area, HitOptions::new().with_capture_overload(capture_overload))
     }
     
     pub fn hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
