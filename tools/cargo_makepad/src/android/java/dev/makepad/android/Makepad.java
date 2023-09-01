@@ -2,6 +2,7 @@ package dev.makepad.android;
 
 import android.view.MotionEvent;
 import android.view.KeyEvent;
+import java.nio.ByteBuffer;
 
 public class Makepad {
     interface Callback {
@@ -50,6 +51,6 @@ public class Makepad {
     static native void onHttpRequestError(long cx, long requestId, long metadataId, String error, Callback callback);
     static native void onVideoDecodingInitialized(long cx, long videoId, int frameRate, int videoWidth, int videoHeight, 
     String colorFormat, long duration, Callback callback);
-    static native void onVideoStream(long cx, long videoId, byte[] video, int yStride, int uvStride, long timestamp, boolean isEoC, Callback callback);
+    static native void onVideoStream(long cx, long videoId, ByteBuffer frameGroup, Callback callback);
     static native void onVideoChunkDecoded(long cx, long videoId, Callback callback);
 }

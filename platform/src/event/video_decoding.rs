@@ -3,10 +3,7 @@ use makepad_shader_compiler::makepad_live_tokenizer::LiveId;
 #[derive(Clone, Debug)]
 pub struct VideoStreamEvent {
     pub video_id: LiveId,
-    pub pixel_data: Vec<u8>,
-    pub yuv_strides: (usize, usize),
-    pub timestamp: u128,
-    pub is_eoc: bool,
+    pub frame_group: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]

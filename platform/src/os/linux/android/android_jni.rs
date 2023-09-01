@@ -475,6 +475,48 @@ unsafe fn java_byte_array_to_vec(env: *mut JNIEnv, byte_array: jobject) -> Vec<u
     out_bytes
 }
 
+unsafe fn java_byte_buffer_to_vec(env: *mut JNIEnv, byte_buffer: jobject) -> Vec<u8> {
+    let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
+
+    // Call 'remaining' method to find out how many elements are remaining between the current position and the limit
+    let method_name = CString::new("remaining").unwrap();
+    let method_sig = CString::new("()I").unwrap();
+    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
+    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id);
+
+    // Call 'array()' to get the backing byte array (works only for non-direct byte buffers)
+    let method_name = CString::new("array").unwrap();
+    let method_sig = CString::new("()[B").unwrap();
+    let array_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
+    let byte_array = (**env).CallObjectMethod.unwrap()(env, byte_buffer, array_method_id);
+
+    // Extract elements from byte array
+    let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
+    let mut out_bytes = Vec::new();
+    let slice = std::slice::from_raw_parts(bytes as *const u8, remaining as usize);
+    out_bytes.extend_from_slice(slice);
+
+    (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, 0);
+
+    out_bytes
+}
+
+unsafe fn java_direct_byte_buffer_to_vec(env: *mut JNIEnv, byte_buffer: jobject) -> Vec<u8> {
+    let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
+
+    let method_name = CString::new("remaining").unwrap();
+    let method_sig = CString::new("()I").unwrap();
+    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
+    let buffer_size = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id);
+
+    let buffer_address = (**env).GetDirectBufferAddress.unwrap()(env, byte_buffer) as *const u8;
+    let slice = std::slice::from_raw_parts(buffer_address, buffer_size as usize);
+    
+    let mut out_bytes = Vec::new();
+    out_bytes.extend_from_slice(slice);
+    out_bytes
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onInit(
     env: *mut JNIEnv,
@@ -897,19 +939,12 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
     _: jclass,
     cx: jlong,
     video_id: jlong,
-    pixel_data: jobject,
-    y_stride: jint,
-    uv_stride: jint,
-    timestamp: jlong,
-    is_eoc: jboolean,
+    frames_group: jobject,
     callback: jobject,
 ) {
     (*(cx as *mut Cx)).from_java_on_video_stream(
         video_id as u64,
-        java_byte_array_to_vec(env, pixel_data),
-        (y_stride as usize, uv_stride as usize),
-        timestamp as u128,
-        is_eoc != 0,
+        java_byte_buffer_to_vec(env, frames_group),
         AndroidToJava {
             env,
             callback,
