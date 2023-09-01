@@ -50,7 +50,7 @@ impl CxFontsAtlas {
             texture_id,
             clear_buffer: false,
             alloc: CxFontsAtlasAlloc {
-                texture_size: DVec2 {x: 2048.0, y: 2048.0},
+                texture_size: DVec2 {x: 4096.0, y: 4096.0},
                 xpos: 0.0,
                 ypos: 0.0,
                 hmax: 0.0,

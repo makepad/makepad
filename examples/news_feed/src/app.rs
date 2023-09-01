@@ -335,7 +335,7 @@ impl AppMain for App {
                         };
                         let item = list.item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
-                            1 => format!("TOPLEVEL {} Requires recompile", item_id),
+                            1 => format!("Recompile {} Requires recompile", item_id),
                             2 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
                             3 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
