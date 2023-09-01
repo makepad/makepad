@@ -413,6 +413,12 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
+    pub fn from_java_on_video_chunk_decoded(&mut self, video_id: u64, to_java: AndroidToJava) {
+        let e = Event::VideoChunkDecoded(LiveId(video_id));
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
@@ -561,6 +567,9 @@ impl Cx {
                 },
                 CxOsOp::DecodeVideoChunk(video_id, start_timestamp, end_timestamp) => {
                     to_java.decode_video_chunk(video_id, start_timestamp, end_timestamp);
+                },
+                CxOsOp::FetchNextVideoFrames(video_id, number_frames) => {
+                    to_java.fetch_next_video_frames(video_id, number_frames);
                 },
                 _ => ()
             }

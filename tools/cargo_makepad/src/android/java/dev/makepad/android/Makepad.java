@@ -19,6 +19,7 @@ public class Makepad {
         void pasteFromClipboard();
         void initializeVideoDecoding(long video_id, byte[] video, int chunkSize);
         void decodeVideoChunk(long video_id, long startTimestampUs, long endTimestampUs);
+        void fetchNextVideoFrames(long video_id, int numberFrames);
         void requestHttp(long requestId, long metadataId, String url, String method, String headers, byte[] body);
     }
 
@@ -49,5 +50,6 @@ public class Makepad {
     static native void onHttpRequestError(long cx, long requestId, long metadataId, String error, Callback callback);
     static native void onVideoDecodingInitialized(long cx, long videoId, int frameRate, int videoWidth, int videoHeight, 
     String colorFormat, long duration, Callback callback);
-    static native void onVideoStream(long cx, long videoId, byte[] video, int yStride, int uvStride, long timestamp, boolean isEoC, Callback callback); 
+    static native void onVideoStream(long cx, long videoId, byte[] video, int yStride, int uvStride, long timestamp, boolean isEoC, Callback callback);
+    static native void onVideoChunkDecoded(long cx, long videoId, Callback callback);
 }

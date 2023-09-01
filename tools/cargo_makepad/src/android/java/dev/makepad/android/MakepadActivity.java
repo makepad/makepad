@@ -24,12 +24,15 @@ import android.os.Looper;
 
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Set;
 import java.util.UUID;
 import java.io.File;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import android.os.Bundle;
 import android.os.ParcelUuid;
@@ -398,8 +401,12 @@ Makepad.Callback{
     }
 
     public void initializeVideoDecoding(long videoId, byte[] videoData, int chunkSize) {
-        VideoDecoder videoDecoder = new VideoDecoder(mCx, mView, videoId, this);
+        BlockingQueue<VideoFrame> videoFrameQueue = new LinkedBlockingQueue<>();
+        mVideoFrameQueues.put(videoId, videoFrameQueue);
+
+        VideoDecoder videoDecoder = new VideoDecoder(mCx, mView, videoId, this, videoFrameQueue);
         VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, chunkSize, videoDecoder);
+
         mDecoderRunnables.put(videoId, runnable);
         mDecoderHandler.post(runnable);
     }
@@ -412,6 +419,21 @@ Makepad.Callback{
         runnable.setTimestamps(startTimestampUs, endTimestampUs);
 
         mDecoderHandler.post(runnable);
+    } 
+
+    public void fetchNextVideoFrames(long videoId, int numberFrames) {
+        BlockingQueue<VideoFrame> videoFrameQueue = mVideoFrameQueues.get(videoId);
+        VideoFrame[] frames = new VideoFrame[numberFrames];
+        Log.e("Makepad", "Length of frames: " + frames.length);
+        for (int i = 0; i < numberFrames; i++) {
+            frames[i] = videoFrameQueue.poll();
+            Log.e("Makepad", "VideoFrame timestamp: " + frames[i].getTimestamp());
+        }
+        for(VideoFrame frame : frames) {
+            if (frame != null) {
+                Makepad.onVideoStream(mCx, videoId, frame.getPixelData(), frame.getYStride(), frame.getUVStride(), frame.getTimestamp(), false, (Makepad.Callback) mView.getContext());
+            }
+        }
     }
 
     public void cleanupDecoder(long videoId) {
@@ -425,6 +447,7 @@ Makepad.Callback{
     HashMap<Long, Runnable> mRunnables;
     Handler mDecoderHandler;
     HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
+    private HashMap<Long, BlockingQueue<VideoFrame>> mVideoFrameQueues = new HashMap<>();
     
     MakepadSurfaceView mView;
     long mCx;
