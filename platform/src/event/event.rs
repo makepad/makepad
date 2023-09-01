@@ -87,6 +87,7 @@ pub enum Event {
     */
     VideoStream(VideoStreamEvent),
     VideoDecodingInitialized(VideoDecodingInitializedEvent),
+    VideoChunkDecoded(LiveId),
  
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),

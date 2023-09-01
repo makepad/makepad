@@ -11,6 +11,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.LinkedList;
 import java.util.Arrays;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import android.app.Activity;
 import java.lang.ref.WeakReference;
@@ -18,11 +20,12 @@ import java.lang.ref.WeakReference;
 import android.util.Log;
 
 public class VideoDecoder {
-    public VideoDecoder(long cx, MakepadSurfaceView view, long videoId, Activity activity) {
+    public VideoDecoder(long cx, MakepadSurfaceView view, long videoId, Activity activity, BlockingQueue<VideoFrame> videoFrameQueue) {
         mCx = cx;
         mVideoId = videoId;
         mView = view;
         mActivityReference = new WeakReference<>(activity);
+        mVideoFrameQueue = videoFrameQueue;
     }
 
     public void initializeVideoDecoding(byte[] video, int chunkSize) {
@@ -142,57 +145,85 @@ public class VideoDecoder {
     }
 
     public void decodeVideoChunk(long startTimestampUs, long endTimestampUs) {
-        if (mExtractor == null || mCodec == null) {
-            throw new IllegalStateException("Decoding hasn't been initialized");
-        }
+        synchronized (this) {
+            Log.e("Makepad", "decoding requested with startTimestampUs: " + startTimestampUs + " and endTimestampUs: " + endTimestampUs);
 
-        boolean isEndOfChunk = false;
-        long framesDecodedThisChunk = 0;
-        
-        mExtractor.seekTo(startTimestampUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-
-        while (!isEndOfChunk && framesDecodedThisChunk < mChunkSize) {
-            if (!mInputEos) {
-                int inputBufferIndex = mCodec.dequeueInputBuffer(2000);
-                if (inputBufferIndex >= 0) {
-                    ByteBuffer inputBuffer = mCodec.getInputBuffer(inputBufferIndex);
-                    int sampleSize = mExtractor.readSampleData(inputBuffer, 0);
-
-                    long presentationTimeUs = mExtractor.getSampleTime();
-
-                    if (sampleSize < 0 || presentationTimeUs > endTimestampUs) {
-                        isEndOfChunk = true;
-                    } else {
-                        mCodec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
-                        mExtractor.advance();
-                    }
-                }
+            if (mIsDecoding) {
+                Log.e("Makepad", "Already decoding");
+                return;
             }
 
-            int outputBufferIndex = mCodec.dequeueOutputBuffer(mInfo, 2000);
-            if (outputBufferIndex >= 0) {
-                ByteBuffer outputBuffer = mCodec.getOutputBuffer(outputBufferIndex);
-                byte[] pixelData = acquireBuffer(mInfo.size);
-                outputBuffer.get(pixelData);
+            mIsDecoding = true;
 
-                Image outputImage = mCodec.getOutputImage(outputBufferIndex);
-                Image.Plane yPlane = outputImage.getPlanes()[0];
-                int yStride = yPlane.getRowStride();
-                Image.Plane uvPlane = outputImage.getPlanes()[1];
-                int uvStride = uvPlane.getRowStride();
+            if (mExtractor == null || mCodec == null) {
+                throw new IllegalStateException("Decoding hasn't been initialized");
+            }
 
-                mCodec.releaseOutputBuffer(outputBufferIndex, false);
+            mCodec.flush();  // Flush the codec to remove lingering frames
 
-                Activity activity = mActivityReference.get();
-                boolean finalIsEoC = isEndOfChunk;
-                if (activity != null) {
-                    activity.runOnUiThread(() -> {
-                        Makepad.onVideoStream(mCx, mVideoId, pixelData, yStride, uvStride, mInfo.presentationTimeUs, finalIsEoC, (Makepad.Callback)mView.getContext());
-                    });
+            boolean isEndOfChunk = false;
+            long framesDecodedThisChunk = 0;
+
+            mExtractor.seekTo(startTimestampUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+            long actualTimeAfterSeek = mExtractor.getSampleTime();
+            Log.e("Makepad", "After seek, sample time is: " + actualTimeAfterSeek);
+
+            while (!isEndOfChunk) {
+                if (!mInputEos) {
+                    int inputBufferIndex = mCodec.dequeueInputBuffer(2000);
+                    if (inputBufferIndex >= 0) {
+                        ByteBuffer inputBuffer = mCodec.getInputBuffer(inputBufferIndex);
+                        int sampleSize = mExtractor.readSampleData(inputBuffer, 0);
+
+                        long presentationTimeUs = mExtractor.getSampleTime();
+                        int flags = mExtractor.getSampleFlags();
+
+                        if (sampleSize < 0 || presentationTimeUs > endTimestampUs) {
+                            mCodec.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            Log.e("Makepad", "End of chunk, timestamp is: " + presentationTimeUs);
+                            isEndOfChunk = true;
+                        } else {
+                            mCodec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
+                            mExtractor.advance();
+                        }
+
+                        // Log.e("Makepad", "JUST READ SAMPLE DATA FOR: " + mExtractor.getSampleTime());
+                    }
                 }
 
-                releaseBuffer(pixelData);
-                framesDecodedThisChunk++;
+                int outputBufferIndex = mCodec.dequeueOutputBuffer(mInfo, 2000);
+                if (outputBufferIndex >= 0) {
+                    ByteBuffer outputBuffer = mCodec.getOutputBuffer(outputBufferIndex);
+                    byte[] pixelData = acquireBuffer(mInfo.size);
+                    outputBuffer.get(pixelData);
+
+                    Image outputImage = mCodec.getOutputImage(outputBufferIndex);
+                    Image.Plane yPlane = outputImage.getPlanes()[0];
+                    int yStride = yPlane.getRowStride();
+                    Image.Plane uvPlane = outputImage.getPlanes()[1];
+                    int uvStride = uvPlane.getRowStride();
+
+                    mCodec.releaseOutputBuffer(outputBufferIndex, false);
+                    outputImage.close();                    
+
+                    VideoFrame frame = new VideoFrame();
+                    frame.pixelData = pixelData;
+                    frame.timestamp = mInfo.presentationTimeUs;
+                    frame.yStride = yStride;
+                    frame.uvStride = uvStride;
+                    mVideoFrameQueue.add(frame);
+                    // Log.e("Makepad", "Decoded frame with timestamp " + frame.timestamp);
+
+                    releaseBuffer(pixelData);
+                    framesDecodedThisChunk++;
+                }
+            }
+            mIsDecoding = false;
+            Activity activity = mActivityReference.get();
+            if (activity != null) {
+                activity.runOnUiThread(() -> {
+                    Makepad.onVideoChunkDecoded(mCx, mVideoId, (Makepad.Callback)mView.getContext());
+                });
             }
         }
     }
@@ -239,6 +270,9 @@ public class VideoDecoder {
         mInfo = null;
     }
 
+    // data
+    private BlockingQueue<VideoFrame> mVideoFrameQueue;
+
     // buffer management
     private static final int MAX_POOL_SIZE = 10; 
     private LinkedList<byte[]> mBufferPool = new LinkedList<>();
@@ -248,6 +282,7 @@ public class VideoDecoder {
     private MediaExtractor mExtractor;
     private MediaCodec mCodec;
     private MediaCodec.BufferInfo mInfo;
+    private boolean mIsDecoding = false;
 
     // metadata
     private int mFrameRate;
