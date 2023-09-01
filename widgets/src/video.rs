@@ -255,7 +255,45 @@ impl Video {
             makepad_error_log::log!("VideoChunkDecoded Event");
             self.decoding_state = DecodingState::Finished;
 
-            cx.fetch_next_video_frames(self.id, 20);       
+            cx.fetch_next_video_frames(self.id, 35);       
+        }
+
+
+        if let Event::VideoStream(event) = event {
+            let mut cursor = 0;
+            let frame_group = &event.frame_group;
+        
+            // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
+            let metadata_size = 20;
+        
+            while cursor < frame_group.len() { 
+                // might have to update for different endinaess on other platforms
+                let timestamp = u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
+                let y_stride = u32::from_be_bytes(frame_group[cursor + 8..cursor + 12].try_into().unwrap());
+                let uv_stride = u32::from_be_bytes(frame_group[cursor + 12..cursor + 16].try_into().unwrap());
+                let frame_length = u32::from_be_bytes(frame_group[cursor + 16..cursor + 20].try_into().unwrap()) as usize;
+
+                let frame_data_start = cursor + metadata_size;
+                let frame_data_end = frame_data_start + frame_length;
+
+                let pixel_data = &frame_group[frame_data_start..frame_data_end];
+                
+                let (y_data, uv_data) = split_nv12_data(
+                    pixel_data,
+                    self.width,
+                    self.height,
+                    y_stride as usize,
+                    uv_stride as usize,
+                );
+                
+                self.frames_buffer.push(VideoFrame {
+                    y_data,
+                    uv_data,
+                    timestamp_us: timestamp,
+                });
+                
+                cursor = frame_data_end;
+            }
 
             // decode next chunk
             let new_start = self.latest_chunk.unwrap().1;
@@ -266,25 +304,7 @@ impl Video {
             cx.decode_video_chunk(self.id, new_start, new_end);
             self.decoding_state = DecodingState::Decoding(new_start, new_end);     
             self.latest_chunk = Some((new_start, new_end));
-        }
-
-        if let Event::VideoStream(event) = event {
-            // if event.pixel_data.len() != 0 {
-            // TODO: check color format before splitting, might want to support NV12 and other formats
-            let (y_data, uv_data) = split_nv12_data(
-                &event.pixel_data,
-                self.width,
-                self.height,
-                event.yuv_strides.0,
-                event.yuv_strides.1,
-            );
-
-            self.frames_buffer.push(VideoFrame {
-                y_data,
-                uv_data,
-                timestamp_us: event.timestamp,
-            });
-        }
+        }        
     }
 
     fn should_request_decoding(&self) -> bool {
@@ -418,7 +438,7 @@ impl Video {
 }
 
 // TODO: dynamically calculate this based on frame rate and size
-const CHUNK_DURATION_US: u128 = 1_000_000;
+const CHUNK_DURATION_US: u128 = 1_000_000 / 2;
 
 struct RingBuffer {
     data: VecDeque<VideoFrame>,

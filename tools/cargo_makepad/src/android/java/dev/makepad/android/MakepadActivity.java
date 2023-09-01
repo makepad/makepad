@@ -401,7 +401,7 @@ Makepad.Callback{
     }
 
     public void initializeVideoDecoding(long videoId, byte[] videoData, int chunkSize) {
-        BlockingQueue<VideoFrame> videoFrameQueue = new LinkedBlockingQueue<>();
+        BlockingQueue<ByteBuffer> videoFrameQueue = new LinkedBlockingQueue<>();
         mVideoFrameQueues.put(videoId, videoFrameQueue);
 
         VideoDecoder videoDecoder = new VideoDecoder(mCx, mView, videoId, this, videoFrameQueue);
@@ -422,18 +422,52 @@ Makepad.Callback{
     } 
 
     public void fetchNextVideoFrames(long videoId, int numberFrames) {
-        BlockingQueue<VideoFrame> videoFrameQueue = mVideoFrameQueues.get(videoId);
-        VideoFrame[] frames = new VideoFrame[numberFrames];
-        Log.e("Makepad", "Length of frames: " + frames.length);
+        // TODO: 
+        // - Currently the queue grows unexpectedly
+        // - Queue size > 50 causes allocation failures
+        
+        BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
+        Log.e("Makepad", "queue length: " + videoFrameQueue.size());
+
+        int totalBytes = 0;
+        ArrayList<ByteBuffer> individualFrames = new ArrayList<>();
+
         for (int i = 0; i < numberFrames; i++) {
-            frames[i] = videoFrameQueue.poll();
-            Log.e("Makepad", "VideoFrame timestamp: " + frames[i].getTimestamp());
-        }
-        for(VideoFrame frame : frames) {
+            ByteBuffer frame = videoFrameQueue.poll();
             if (frame != null) {
-                Makepad.onVideoStream(mCx, videoId, frame.getPixelData(), frame.getYStride(), frame.getUVStride(), frame.getTimestamp(), false, (Makepad.Callback) mView.getContext());
+                individualFrames.add(frame);
+                totalBytes += frame.remaining();
+            } else {
+                Log.e("Makepad", "polled frame is null");
             }
         }
+
+        ByteBuffer frameGroup;
+        try {
+            frameGroup = ByteBuffer.allocate(totalBytes);
+        } catch (Error e) {
+            Log.e("Makepad", "error: " + e.getMessage());
+            return;
+        }
+        
+        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+
+        for (ByteBuffer frame : individualFrames) {
+            if (frame != null) {
+                frameGroup.put(frame);
+                if (runnable != null) {
+                    runnable.releaseBuffer(frame);
+                }
+            } else {
+                Log.e("Makepad", "frame is null");
+            }
+        }
+
+        frameGroup.flip();
+        Makepad.onVideoStream(mCx, videoId, frameGroup, (Makepad.Callback) mView.getContext());
+        Log.e("Makepad", "Queue size after polling: " + videoFrameQueue.size());
+        frameGroup = null;
+        individualFrames = null;
     }
 
     public void cleanupDecoder(long videoId) {
@@ -447,7 +481,7 @@ Makepad.Callback{
     HashMap<Long, Runnable> mRunnables;
     Handler mDecoderHandler;
     HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
-    private HashMap<Long, BlockingQueue<VideoFrame>> mVideoFrameQueues = new HashMap<>();
+    private HashMap<Long, BlockingQueue<ByteBuffer>> mVideoFrameQueues = new HashMap<>();
     
     MakepadSurfaceView mView;
     long mCx;
