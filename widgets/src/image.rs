@@ -6,34 +6,7 @@ use crate::{
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    
-    Image = {{Image}} {
-        
-            width: 100
-            height: 100
-        
-        draw_bg: {
-            texture image: texture2d
-            instance opacity: 1.0
-            instance image_scale: vec2(1.0, 1.0)
-            instance image_pan: vec2(0.0, 0.0)
-            
-            fn get_color_scale_pan(self, scale:vec2, pan:vec2) -> vec4 {
-                return sample2d(self.image, self.pos*scale+pan).xyzw;
-            }
-            
-            fn get_color(self) -> vec4 {
-                return self.get_color_scale_pan(self.image_scale, self.image_pan)
-            }
-            
-            fn pixel(self) -> vec4 {
-                let color = self.get_color();
-                return Pal::premul(vec4(color.xyz, color.w * self.opacity))
-            }
-        }
-    }
+    ImageBase = {{Image}} {}
 }
 
 #[derive(Live)]
@@ -87,51 +60,50 @@ impl Widget for Image {
 }
 
 impl Image {
-
+    
     pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
-        // alright we get a walk. depending on our aspect ratio 
-        // we change either nothing, or width or height 
+        // alright we get a walk. depending on our aspect ratio
+        // we change either nothing, or width or height
         let rect = cx.peek_walk_turtle(walk);
         let dpi = cx.current_dpi_factor();
-        let (width,height) = if let Some(image_texture) = &self.texture {
+        let (width, height) = if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
             let desc = image_texture.get_desc(cx);
-            (desc.width.unwrap_or(self.min_width as usize) as f64 / dpi,
-            desc.height.unwrap_or(self.min_height as usize) as f64 / dpi)
+            (desc.width.unwrap_or(self.min_width as usize) as f64 / dpi, desc.height.unwrap_or(self.min_height as usize) as f64 / dpi)
         }
-        else{
+        else {
             self.draw_bg.draw_vars.empty_texture(0);
             (self.min_width as f64 / dpi, self.min_height as f64 / dpi)
         };
-        let aspect = width/height;
-        match self.fit{
-            ImageFit::Stretch=>{},
-            ImageFit::Horizontal=>{
-                walk.height = Size::Fixed(rect.size.x/aspect);
+        let aspect = width / height;
+        match self.fit {
+            ImageFit::Stretch => {},
+            ImageFit::Horizontal => {
+                walk.height = Size::Fixed(rect.size.x / aspect);
             },
-            ImageFit::Vertical=>{
-                walk.width = Size::Fixed(rect.size.y*aspect);
+            ImageFit::Vertical => {
+                walk.width = Size::Fixed(rect.size.y * aspect);
             },
-            ImageFit::Smallest=>{
-                let walk_height = rect.size.x/aspect;
-                if walk_height > rect.size.y{
-                    walk.width = Size::Fixed(rect.size.y*aspect);
+            ImageFit::Smallest => {
+                let walk_height = rect.size.x / aspect;
+                if walk_height > rect.size.y {
+                    walk.width = Size::Fixed(rect.size.y * aspect);
                 }
-                else{
+                else {
                     walk.height = Size::Fixed(walk_height);
                 }
             }
-            ImageFit::Biggest=>{
-                let walk_height = rect.size.x/aspect;
-                if walk_height < rect.size.y{
-                    walk.width = Size::Fixed(rect.size.y*aspect);
+            ImageFit::Biggest => {
+                let walk_height = rect.size.x / aspect;
+                if walk_height < rect.size.y {
+                    walk.width = Size::Fixed(rect.size.y * aspect);
                 }
-                else{
+                else {
                     walk.height = Size::Fixed(walk_height);
                 }
             }
         }
-
+        
         // lets start a turtle and center horizontally
         
         self.draw_bg.draw_walk(cx, walk);
@@ -144,26 +116,26 @@ impl Image {
 pub struct ImageRef(WidgetRef);
 
 impl ImageRef {
-    pub fn load_image_dep_by_path(&self,cx: &mut Cx,image_path: &str) {
-        if let Some(mut inner) = self.borrow_mut(){
+    pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.load_image_dep_by_path(cx, image_path)
         }
     }
     
-    pub fn load_jpg_from_data(&self, cx:&mut Cx, data:&[u8]){
-        if let Some(mut inner) = self.borrow_mut(){
+    pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.load_jpg_from_data(cx, data)
         }
     }
     
-    pub fn load_png_from_data(&self, cx:&mut Cx, data:&[u8]){
-        if let Some(mut inner) = self.borrow_mut(){
+    pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.load_png_from_data(cx, data)
         }
     }
     
-    pub fn set_texture(&self, texture:Option<Texture>){
-        if let Some(mut inner) = self.borrow_mut(){
+    pub fn set_texture(&self, texture: Option<Texture>) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.texture = texture
         }
     }

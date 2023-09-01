@@ -8,44 +8,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import crate::theme::*;
-    
-    const THICKNESS = 0.8
-    LinkLabel = {{LinkLabel}} {
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let offset_y = 1.0
-                sdf.move_to(0., self.rect_size.y - offset_y);
-                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                return sdf.stroke(mix(
-                    COLOR_TEXT_DEFAULT,
-                    COLOR_TEXT_META,
-                    self.pressed
-                ), mix(0.0, THICKNESS, self.hover));
-            }
-        }
-        draw_text: {
-            text_style: <FONT_META> {}
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        COLOR_TEXT_META,
-                        COLOR_TEXT_DEFAULT,
-                        self.hover
-                    ),
-                    COLOR_TEXT_META,
-                    self.pressed
-                )
-            }
-        }
-        
-        width: Fit,
-        height: Fit,
-        margin: {left: 5.0, top: 0.0, right: 0.0}
-        padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
-    }
+    LinkLabelBase = {{LinkLabel}} {}
 }
 
 #[derive(Live)]

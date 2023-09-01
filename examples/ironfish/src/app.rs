@@ -12,22 +12,16 @@ use crate::{
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design!{  
-    import makepad_widgets::view::*
-    import makepad_widgets::button::Button;
+    import makepad_widgets::base::*
+    import makepad_widgets::theme_desktop_dark::*
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
-    import makepad_widgets::desktop_window::DesktopWindow
-    import makepad_widgets::multi_window::MultiWindow
-    
+
     import makepad_audio_graph::mixer::Mixer;
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
     import makepad_widgets::designer::Designer;
-    import makepad_widgets::slides_view::Slide;
-    import makepad_widgets::slides_view::SlideChapter;
-    import makepad_widgets::slides_view::SlideBody;
-    import makepad_widgets::slides_view::SlidesView;
-    
+
     //import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
     //import makepad_example_numbers::number_grid::NumberGrid;
     // APP
@@ -362,7 +356,7 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        
+        /*
         let preset_lists = self.ui.swipe_list_set(ids!(preset_list));
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
@@ -377,13 +371,13 @@ impl AppMain for App {
                 }
             }
             return
-        }
+        }*/
         let ui = self.ui.clone();
         let mut synth_db = DataBindingStore::new();
         let mut actions = ui.handle_widget_event(cx, event);
         
         // handle preset lists events
-        for list in preset_lists.iter() {
+        /*for list in preset_lists.iter() {
             for item in list.items_with_actions(&actions).iter() {
                 // check for actions inside the list item
                 if item.button(id!(delete)).clicked(&actions) {
@@ -391,7 +385,7 @@ impl AppMain for App {
                     list.redraw(cx); 
                 }
             }
-        }
+        }*/
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
