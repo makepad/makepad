@@ -199,15 +199,12 @@ impl DesktopWindow {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
-                log!("BEGIN");
 
         if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
-                log!("NO REDARW {:?}", self.main_draw_list);
             return Redrawing::no()
         }
         
         cx.begin_pass(&self.pass, None);
-                log!("BEGIN PASS {:?}", self.pass);
 
         self.main_draw_list.begin_always(cx);
         
@@ -271,7 +268,6 @@ impl Widget for DesktopWindow {
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
-        log!("DARW WALK ");
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();
