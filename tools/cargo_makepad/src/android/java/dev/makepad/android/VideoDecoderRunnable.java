@@ -1,5 +1,7 @@
 package dev.makepad.android;
 
+import java.nio.ByteBuffer;
+
 public class VideoDecoderRunnable implements Runnable {
     private final VideoDecoder mVideoDecoder;
     private final byte[] mVideoData;
@@ -31,6 +33,10 @@ public class VideoDecoderRunnable implements Runnable {
 
     public void cleanup() {
         mVideoDecoder.cleanup();
+    }
+
+    public void releaseBuffer(ByteBuffer buffer) {
+        mVideoDecoder.releaseBuffer(buffer);
     }
 }
 
