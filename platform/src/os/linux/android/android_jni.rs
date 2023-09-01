@@ -353,6 +353,27 @@ impl<'a> AndroidToJava<'a> {
         }
     }
 
+    pub fn fetch_next_video_frames(&self, video_id: LiveId, number_frames: usize) {
+        unsafe {
+            let name = CString::new("fetchNextVideoFrames").unwrap();
+            let signature = CString::new("(JI)V").unwrap();
+            let method_id = (**self.env).GetMethodID.unwrap()(
+                self.env,
+                (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+
+            (**self.env).CallVoidMethod.unwrap()(
+                self.env,
+                self.callback,
+                method_id,
+                video_id.get_value() as jlong,
+                number_frames as jint,
+            );
+        }
+    }
+
     pub fn cleanup_decoder(&self, video_id: i64) {
         unsafe {
             let name = CString::new("cleanupDecoder").unwrap();
@@ -889,6 +910,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
         (y_stride as usize, uv_stride as usize),
         timestamp as u128,
         is_eoc != 0,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoChunkDecoded(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    video_id: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_video_chunk_decoded(
+        video_id as u64,
         AndroidToJava {
             env,
             callback,

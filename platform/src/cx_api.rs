@@ -81,6 +81,7 @@ pub enum CxOsOp {
 
     InitializeVideoDecoding(LiveId, Rc<Vec<u8>>, usize),
     DecodeVideoChunk(LiveId, u128, u128),
+    FetchNextVideoFrames(LiveId, usize),
 }
 
 impl Cx { 
@@ -421,6 +422,10 @@ impl Cx {
     pub fn decode_video_chunk(&mut self, video_id: LiveId, start_timestamp: u128, end_timestamp: u128) {
         makepad_error_log::log!("Decoding next chunk from {:?} to {:?}", start_timestamp, end_timestamp);
         self.platform_ops.push(CxOsOp::DecodeVideoChunk(video_id, start_timestamp, end_timestamp));
+    }
+
+    pub fn fetch_next_video_frames(&mut self, video_id: LiveId, number_frames: usize) {
+        self.platform_ops.push(CxOsOp::FetchNextVideoFrames(video_id, number_frames));
     }
     
     pub fn println_resources(&self){
