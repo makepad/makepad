@@ -5,35 +5,32 @@ use makepad_widgets::*;
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 live_design!{
-    import makepad_widgets::button::Button;
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::text_input::TextInput;
+    import makepad_widgets::theme_desktop_dark::*;
     
     App = {{App}} {
-        ui: <DesktopWindow>{
+        ui: <DesktopWindow> {
             
             show_bg: true
             
-                flow: Down,
-                spacing: 20,
-                align: {
-                    x: 0.5,
-                    y: 0.5
-                
+            flow: Down,
+            spacing: 20,
+            align: {
+                x: 0.5,
+                y: 0.5
             },
             
-                width: Fill,
-                height: Fill
+            width: Fill,
+            height: Fill
             
             draw_bg: {
-                
                 fn pixel(self) -> vec4 {
                     return mix(#3, #1, self.geom_pos.y);
                 }
             }
+            
             message_label = <Label> {
-                width: 300, height: Fit
+                width: 300,
+                height: Fit
                 draw_text: {
                     color: #f
                 },
@@ -41,14 +38,15 @@ live_design!{
             }
             message_input = <TextInput> {
                 text: "Hi!"
-                width: 300, height: Fit
+                width: 300,
+                height: Fit
                 draw_bg: {
                     color: #1
                 }
             }
             send_button = <Button> {
-               icon_walk:{margin:{left:10}, width:16,height:Fit}
-               text: "send"
+                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                text: "send"
             }
         }
     }
@@ -68,8 +66,8 @@ impl LiveHook for App {
     }
 }
 
-impl App{
-    // This performs and event-based http request: it has no relationship with the response. 
+impl App {
+    // This performs and event-based http request: it has no relationship with the response.
     // The response will be received and processed by AppMain's handle_event.
     fn send_message(cx: &mut Cx, message: String) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
@@ -80,27 +78,27 @@ impl App{
         request.set_header("Authorization".to_string(), "Bearer <your-token>".to_string());
         
         request.set_json_body(ChatPrompt {
-            messages: vec![ Message { content: message, role: "user".to_string() } ],
+            messages: vec![Message {content: message, role: "user".to_string()}],
             model: "gpt-3.5-turbo".to_string(),
             max_tokens: 100
         });
-
+        
         cx.http_request(request_id, request);
     }
 }
 
-impl AppMain for App{
+impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
             return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
         }
         
-        for event in event.network_responses(){
-            match &event.response{
-                NetworkResponse::HttpResponse(response)=>{
+        for event in event.network_responses() {
+            match &event.response {
+                NetworkResponse::HttpResponse(response) => {
                     let label = self.ui.label(id!(message_label));
                     match event.request_id {
-                         live_id!(SendChatMessage) => {
+                        live_id!(SendChatMessage) => {
                             if response.status_code == 200 {
                                 let chat_response = response.get_json_body::<ChatResponse>().unwrap();
                                 label.set_text_and_redraw(cx, &chat_response.choices[0].message.content);
@@ -112,14 +110,14 @@ impl AppMain for App{
                         _ => (),
                     }
                 }
-                NetworkResponse::HttpRequestError(error)=>{
+                NetworkResponse::HttpRequestError(error) => {
                     let label = self.ui.label(id!(message_label));
                     label.set_text_and_redraw(cx, &format!("Failed to connect with OpenAI {:?}", error));
                 }
                 _ => ()
             }
         }
-
+        
         let actions = self.ui.handle_widget_event(cx, event);
         
         if self.ui.button(id!(send_button)).clicked(&actions) {
