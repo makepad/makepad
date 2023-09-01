@@ -54,8 +54,14 @@ impl<'a> LiveExpander<'a> {
         });
         let mut current_parent = vec![(LiveId(0), 0usize)];
         let mut in_index = 1;
-        
+        let mut lazy_define_value = None;
         loop {
+            if let Some((node_id, ptr)) = lazy_define_value.take(){
+                if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
+                    id_resolve.insert(node_id, ptr);
+                }
+            }
+            
             if in_index >= in_doc.nodes.len() - 1 {
                 break;
             }
@@ -107,9 +113,7 @@ impl<'a> LiveExpander<'a> {
             let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.prop()) {
                 Ok(overwrite) => {
                     if current_parent.len() == 1{
-                        if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
-                            id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(overwrite));
-                        }
+                        lazy_define_value = Some((in_node.id, LiveScopeTarget::LocalPtr(overwrite)));
                     } 
                     let out_value = &out_doc.nodes[overwrite].value;
                     let out_origin = out_doc.nodes[overwrite].origin;
@@ -170,9 +174,7 @@ impl<'a> LiveExpander<'a> {
                 }
                 Err(insert_point) => {
                     if current_parent.len() == 1{
-                        if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
-                            id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(insert_point));
-                        }
+                        lazy_define_value = Some((in_node.id, LiveScopeTarget::LocalPtr(insert_point)));
                     }
 
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
@@ -306,7 +308,18 @@ impl<'a> LiveExpander<'a> {
                         if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
                             
                             if *file_id == self.in_file_id { // clone on self
-                                if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name.as_instance()) {
+                                 let mut index = 1;
+                                 let mut found = None;
+                                 while index < out_doc.nodes.len() - 1{
+                                    if let LiveValue::Class{live_type, ..} = &out_doc.nodes[index].value{
+                                        if *live_type == lti.live_type{
+                                            found = Some(index);
+                                            break
+                                        }
+                                    }
+                                    index = out_doc.nodes.skip_node(index);
+                                }
+                                if let Some(index) = found {
                                     let node_insert_point = insert_point;
                                     
                                     let old_len = out_doc.nodes.len();
@@ -335,7 +348,18 @@ impl<'a> LiveExpander<'a> {
                                         self.live_registry.file_id_to_file_name(self.in_file_id),
                                     );
                                 }
-                                if let Some(index) = other_nodes.child_by_name(0, lti.type_name.as_instance()) {
+                                let mut index = 1;
+                                let mut found = None;
+                                while index < other_nodes.len() - 1{
+                                    if let LiveValue::Class{live_type, ..} = &other_nodes[index].value{
+                                        if *live_type == lti.live_type{
+                                            found = Some(index);
+                                            break
+                                        }
+                                    }
+                                    index = other_nodes.skip_node(index);
+                                }
+                                if let Some(index) = found {
                                     let node_insert_point = insert_point;
                                     
                                     let old_len = out_doc.nodes.len();

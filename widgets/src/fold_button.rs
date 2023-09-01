@@ -5,78 +5,7 @@ use crate::{
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    
-    FoldButton= {{FoldButton}} {
-        draw_bg: {
-            instance opened: 0.0
-            instance hover: 0.0
-            
-            uniform fade: 1.0
-            
-            fn pixel(self) -> vec4 {
-                
-                let sz = 3.;
-                let c = vec2(5.0, 0.5 * self.rect_size.y);
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(vec4(0.));
-                // we have 3 points, and need to rotate around its center
-                sdf.rotate(self.opened * 0.5 * PI + 0.5 * PI, c.x, c.y);
-                sdf.move_to(c.x - sz, c.y + sz);
-                sdf.line_to(c.x, c.y - sz);
-                sdf.line_to(c.x + sz, c.y + sz);
-                sdf.close_path();
-                sdf.fill(mix(#a, #f, self.hover));
-                return sdf.result * self.fade;
-            }
-        }
-        
-        abs_size: vec2(32, 12)
-        abs_offset: vec2(4., 0.)
-        
-        
-            width: 12,
-            height: 12,
-        
-        
-        animator: {
-            
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_bg: {hover: 0.0}}
-                }
-                
-                on = {
-                    from: {all: Snap}
-                    apply: {draw_bg: {hover: 1.0}}
-                }
-            }
-            
-            open = {
-                default: yes
-                no = {
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.96, d2: 0.97}
-                    redraw: true
-                    apply: {
-                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        draw_bg: {opened: (opened)}
-                    }
-                }
-                yes = {
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.98, d2: 0.95}
-                    redraw: true
-                    apply: {
-                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
-                        draw_bg: {opened: (opened)}
-                    }
-                }
-            }
-        }
-    }
+    FoldButtonBase = {{FoldButton}} {}
 }
 
 #[derive(Live)]
