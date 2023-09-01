@@ -14,12 +14,6 @@ live_design!{
     
     DrawText = {{DrawText}} {
         //debug: true;
-        text_style: {
-            font: { 
-                path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")
-            }
-        }
-        
         color: #fff
         
         uniform brightness: float
