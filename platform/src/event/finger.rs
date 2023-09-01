@@ -552,7 +552,8 @@ pub enum HitTouch {
 #[derive(Clone, Debug, Default)]
 pub struct HitOptions {
     pub margin: Option<Margin>,
-    pub sweep_area: Area
+    pub sweep_area: Area,
+    pub multi_area: Area,
 }
 
 impl HitOptions {
@@ -572,6 +573,12 @@ impl HitOptions {
             ..self
         }
     }
+    pub fn with_multi_area(self, area: Area) -> Self {
+        Self {
+            multi_area: area,
+            ..self
+        }
+    }
 }
 
 
@@ -583,6 +590,11 @@ impl Event {
 
     pub fn hits_with_sweep_area(&self, cx: &mut Cx, area: Area, sweep_area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::new().with_sweep_area(sweep_area))
+    }
+
+
+    pub fn hits_with_multi_area(&self, cx: &mut Cx, area: Area, sweep_area: Area) -> Hit {
+        self.hits_with_options(cx, area, HitOptions::new().with_multi_area(sweep_area))
     }
     
     pub fn hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
@@ -920,7 +932,7 @@ impl Event {
                 
                 let digit_id = live_id!(mouse).into();
                 
-                if !e.handled.get().is_empty() {
+                if options.multi_area.is_empty() && !e.handled.get().is_empty() {
                     return Hit::Nothing
                 }
                 
