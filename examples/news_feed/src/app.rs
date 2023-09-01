@@ -1,18 +1,10 @@
 use makepad_widgets::*; 
  
 live_design!{
-    import makepad_widgets::theme::*;
     import makepad_draw::shader::std::*;
-    
-    import makepad_widgets::button::Button;
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::view::*;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::slider::Slider;
-    import makepad_widgets::text_input::TextInput;
-    import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::list_view::ListView;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
+
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_B = dep("crate://self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
@@ -266,15 +258,15 @@ live_design!{
         ui: <DesktopWindow> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
-            
-                flow: Overlay,
-                padding: 0.0
-                spacing: 0,
-                align: {
-                    x: 0.0,
-                    y: 0.0
-                
+        
+            flow: Overlay,
+            padding: 0.0
+            spacing: 0,
+            align: {
+                x: 0.0,
+                y: 0.0
             },
+            
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return (COLOR_BG);

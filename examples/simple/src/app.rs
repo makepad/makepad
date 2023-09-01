@@ -9,12 +9,8 @@ use makepad_widgets::*;
 // as a code editor) can notify the Makepad runtime that a DSL code block has been changed, allowing
 // the runtime to automatically update the affected widgets.
 live_design!{
-    import makepad_widgets::button::Button;
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::view::View;
-    import makepad_widgets::text_input::TextInput;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     
     // The `{{App}}` syntax is used to inherit a DSL object from a Rust struct. This tells the
     // Makepad runtime that our DSL object corresponds to a Rust struct named `App`. Whenever an

@@ -3,8 +3,9 @@ use crate::makepad_widgets::*;
 //#[cfg(feature = "nightly")]
 
 live_design!{
-    import makepad_widgets::view::*;
-    import makepad_widgets::desktop_window::DesktopWindow;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
+    
     import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
     App = {{App}} {
         ui: <DesktopWindow> {
