@@ -13,8 +13,7 @@ use {
 
 live_design! {
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-
+    import makepad_widgets::theme_desktop_dark::*;
     TokenColors = {{TokenColors}} {
         unknown: #808080,
         branch_keyword: #C485BE,
@@ -90,7 +89,7 @@ live_design! {
         }
         draw_text: {
             draw_depth: 0.5,
-            text_style: <FONT_CODE> {}
+            text_style: <THEME_FONT_CODE> {}
         }
         draw_selection: {
             draw_depth: 1.0,

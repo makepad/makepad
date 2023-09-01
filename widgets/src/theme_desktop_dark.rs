@@ -141,8 +141,96 @@ live_design!{
     const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
     const THEME_SPLITTER_SIZE = 5.0
     
-
-
+    
+    
+    ScrollBar = <ScrollBarBase> {
+        bar_size: 10.0,
+        bar_side_margin: 3.0
+        min_handle_size: 30.0
+        draw_bar: {
+            //draw_depth: 5.0
+            uniform border_radius: 1.5
+            instance bar_width: 6.0
+            instance pressed: 0.0
+            instance hover: 0.0
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                if self.is_vertical > 0.5 {
+                    sdf.box(
+                        1.,
+                        self.rect_size.y * self.norm_scroll,
+                        self.bar_width,
+                        self.rect_size.y * self.norm_handle,
+                        self.border_radius
+                    );
+                }
+                else {
+                    sdf.box(
+                        self.rect_size.x * self.norm_scroll,
+                        1.,
+                        self.rect_size.x * self.norm_handle,
+                        self.bar_width,
+                        self.border_radius
+                    );
+                }
+                return sdf.fill(mix(
+                    THEME_COLOR_SCROLL_BAR_DEFAULT,
+                    mix(
+                        THEME_COLOR_CONTROL_HOVER,
+                        THEME_COLOR_CONTROL_PRESSED,
+                        self.pressed
+                    ),
+                    self.hover
+                ));
+            }
+        }
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bar: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    cursor: Default,
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bar: {
+                            pressed: 0.0,
+                            hover: [{time: 0.0, value: 1.0}],
+                        }
+                    }
+                }
+                
+                pressed = {
+                    cursor: Default,
+                    from: {all: Snap}
+                    apply: {
+                        draw_bar: {
+                            pressed: 1.0,
+                            hover: 1.0,
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    ScrollBars = <ScrollBarsBase> {
+        show_scroll_x: true,
+        show_scroll_y: true,
+        scroll_bar_x: <ScrollBar> {}
+        scroll_bar_y: <ScrollBar> {}
+    }
+    
+    
     Label = <LabelBase> {
         width: Fit
         height: Fit
@@ -748,6 +836,54 @@ live_design!{
     }
     
     
+    TabCloseButton = <TabCloseButtonBase> {
+        height: 10.0,
+        width: 10.0,
+        margin: {right: 5},
+        draw_button: {
+            
+            instance hover: float;
+            instance selected: float;
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let mid = self.rect_size / 2.0;
+                let size = (self.hover * 0.25 + 0.5) * 0.25 * length(self.rect_size);
+                let min = mid - vec2(size);
+                let max = mid + vec2(size);
+                sdf.move_to(min.x, min.y);
+                sdf.line_to(max.x, max.y);
+                sdf.move_to(min.x, max.y);
+                sdf.line_to(max.x, min.y);
+                return sdf.stroke(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                ), 1.0);
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_button: {hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    cursor: Hand,
+                    from: {all: Snap}
+                    apply: {
+                        draw_button: {hover: 1.0}
+                    }
+                }
+            }
+        }
+    }
+    
     Tab = <TabBase> {
         width: Fit,
         height: Fill, //Fixed((THEME_TAB_HEIGHT)),
@@ -760,7 +896,7 @@ live_design!{
             bottom: 0.0,
         },
         
-        
+        close_button: <TabCloseButton>{}
         draw_name: {
             text_style: <THEME_FONT_LABEL> {}
             instance hover: 0.0
@@ -846,7 +982,7 @@ live_design!{
         }
     }
     
-    TabBar = <TabBarBase>{
+    TabBar = <TabBarBase> {
         tab: <Tab> {}
         draw_drag: {
             draw_depth: 10
@@ -856,64 +992,16 @@ live_design!{
             color: (THEME_COLOR_BG_HEADER)
         }
         
-            width: Fill
-            height: Fixed((THEME_TAB_HEIGHT))
+        width: Fill
+        height: Fixed((THEME_TAB_HEIGHT))
         
-        scroll_bars: {
+        scroll_bars: <ScrollBars>{
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
-                draw_bar:{bar_width:3.0}
+                draw_bar: {bar_width: 3.0}
                 bar_size: 4
                 use_vertical_finger_scroll: true
-            }
-        }
-    }
-    
-    TabCloseButton = <TabCloseButtonBase> {
-        height: 10.0,
-        width: 10.0,
-        margin: {right: 5},
-        draw_button: {
-            
-            instance hover: float;
-            instance selected: float;
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let mid = self.rect_size / 2.0;
-                let size = (self.hover * 0.25 + 0.5) * 0.25 * length(self.rect_size);
-                let min = mid - vec2(size);
-                let max = mid + vec2(size);
-                sdf.move_to(min.x, min.y);
-                sdf.line_to(max.x, max.y);
-                sdf.move_to(min.x, max.y);
-                sdf.line_to(max.x, min.y);
-                return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_HOVER,
-                    self.hover
-                ), 1.0);
-            }
-        }
-        
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_button: {hover: 0.0}
-                    }
-                }
-                
-                on = {
-                    cursor: Hand,
-                    from: {all: Snap}
-                    apply: {
-                        draw_button: {hover: 1.0}
-                    }
-                }
             }
         }
     }
@@ -969,7 +1057,7 @@ live_design!{
         height: Fit
         
         draw_name: {
-            text_style:<THEME_FONT_LABEL>{}
+            text_style: <THEME_FONT_LABEL> {}
             instance selected: 0.0
             instance hover: 0.0
             fn get_color(self) -> vec4 {
@@ -1514,8 +1602,10 @@ live_design!{
         height: Fit,
         margin: {left: 5.0, top: 0.0, right: 0.0}
         padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
-        
+        button:<Button>{}
         draw_bg: {
+            instance pressed: 0.0
+            instance hover: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let offset_y = 1.0
@@ -1529,6 +1619,8 @@ live_design!{
             }
         }
         draw_text: {
+            instance pressed: 0.0
+            instance hover: 0.0
             text_style: <THEME_FONT_META> {}
             fn get_color(self) -> vec4 {
                 return mix(
@@ -1706,92 +1798,15 @@ live_design!{
         }
     }
     
-    ScrollBar = <ScrollBarBase> {
-        bar_size: 10.0,
-        bar_side_margin: 3.0
-        min_handle_size: 30.0
-        draw_bar: {
-            //draw_depth: 5.0
-            uniform border_radius: 1.5
-            instance bar_width: 6.0
-            instance pressed: 0.0
-            instance hover: 0.0
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                if self.is_vertical > 0.5 {
-                    sdf.box(
-                        1.,
-                        self.rect_size.y * self.norm_scroll,
-                        self.bar_width,
-                        self.rect_size.y * self.norm_handle,
-                        self.border_radius
-                    );
-                }
-                else {
-                    sdf.box(
-                        self.rect_size.x * self.norm_scroll,
-                        1.,
-                        self.rect_size.x * self.norm_handle,
-                        self.bar_width,
-                        self.border_radius
-                    );
-                }
-                return sdf.fill(mix(
-                    THEME_COLOR_SCROLL_BAR_DEFAULT,
-                    mix(
-                        THEME_COLOR_CONTROL_HOVER,
-                        THEME_COLOR_CONTROL_PRESSED,
-                        self.pressed
-                    ),
-                    self.hover
-                ));
-            }
-        }
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bar: {pressed: 0.0, hover: 0.0}
-                    }
-                }
-                
-                on = {
-                    cursor: Default,
-                    from: {
-                        all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
-                    }
-                    apply: {
-                        draw_bar: {
-                            pressed: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
-                        }
-                    }
-                }
-                
-                pressed = {
-                    cursor: Default,
-                    from: {all: Snap}
-                    apply: {
-                        draw_bar: {
-                            pressed: 1.0,
-                            hover: 1.0,
-                        }
-                    }
-                }
-            }
-        }
+    
+    ListView = <ListViewBase> {
+        width: Fill
+        height: Fill
+        capture_overload: true
+        scroll_bar: <ScrollBar> {}
+        flow: Down
     }
     
-    ScrollBars = <ScrollBarsBase> {
-        show_scroll_x: true,
-        show_scroll_y: true,
-        scroll_bar_x: <ScrollBar> {}
-        scroll_bar_y: <ScrollBar> {}
-    }
     
     CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
@@ -1805,10 +1820,10 @@ live_design!{
     ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
     ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
-
-
     
-    TextInput = <TextInputBase>{
+    
+    
+    TextInput = <TextInputBase> {
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
@@ -2026,7 +2041,7 @@ live_design!{
         
         precision: 2,
         
-        text_input: <TextInput>{
+        text_input: <TextInput> {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
             select_pad_edges: 3.0
@@ -2149,7 +2164,7 @@ live_design!{
     
     
     
-    DrawScrollShadow = <DrawScrollShadowBase>{
+    DrawScrollShadow = <DrawScrollShadowBase> {
         
         shadow_size: 4.0,
         
