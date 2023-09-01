@@ -116,14 +116,14 @@ impl DesktopWindow {
                 if ev.window_id == self.window.window_id() {
                     match cx.os_type() {
                         OsType::Macos => {
-                            if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
+                            /*if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
                                 self.view.view(id!(caption_bar)).set_visible(false);
                                 self.view.redraw(cx);
                             }
                             else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
                                 self.view.view(id!(caption_bar)).set_visible(true);
                                 self.view.redraw(cx);
-                            };
+                            };*/
                         }
                         _ => ()
                     }
