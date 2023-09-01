@@ -202,14 +202,7 @@ live_design!{
     
     MultiWindow = <MultiWindowBase> {}
     View = <ViewBase> {}
-    
-    ListView = <ListViewBase> {
-        width: Fill
-        height: Fill
-        capture_overload: true
-        flow: Down
-    }
-    
+
     HookWidget = <HookWidgetBase> {
         width: Fit,
         height: Fit,

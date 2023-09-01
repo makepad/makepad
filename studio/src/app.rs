@@ -19,13 +19,8 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    import makepad_widgets::view::*;
-    import makepad_widgets::file_tree::FileTree;
-    import makepad_widgets::button::Button;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::dock::*;
-    import makepad_widgets::desktop_window::DesktopWindow;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
     
     import makepad_studio::run_view::RunView;

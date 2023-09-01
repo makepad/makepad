@@ -37,11 +37,8 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    import makepad_widgets::view::*;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::link_label::LinkLabel;
-    import makepad_widgets::list_view::ListView;
+    import makepad_widgets::theme_desktop_dark::*;
+    import makepad_widgets::base::*;
     
     WaitIcon = <View> {
         width: 10, height: 10
@@ -49,7 +46,7 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.circle(5., 5., 4.)
-                sdf.fill(COLOR_TEXT_META)
+                sdf.fill(THEME_COLOR_TEXT_META)
                 sdf.move_to(3., 5.)
                 sdf.line_to(3., 5.)
                 sdf.move_to(5., 5.)
@@ -73,11 +70,11 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        COLOR_BG_EDITOR,
-                        COLOR_BG_ODD,
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    COLOR_BG_SELECTED,
+                    THEME_COLOR_BG_SELECTED,
                     self.selected
                 );
             }
@@ -138,8 +135,8 @@ live_design!{
             instance is_even: 0.0
             fn pixel(self) -> vec4 {
                 return mix(
-                    COLOR_BG_EDITOR,
-                    COLOR_BG_ODD,
+                    THEME_COLOR_BG_EDITOR,
+                    THEME_COLOR_BG_ODD,
                     self.is_even
                 )
             }
