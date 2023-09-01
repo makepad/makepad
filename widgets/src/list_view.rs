@@ -9,16 +9,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    import makepad_widgets::view::View;
-    ListView = {{ListView}} {
-        width: Fill
-        height: Fill
-        capture_overload: true
-        flow: Down
-        Entry = <View> {}
-    }
+    ListViewBase = {{ListView}} {}
 }
 
 enum DragState {

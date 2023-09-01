@@ -9,7 +9,6 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
     
     DrawWave = {{DrawWave}} {
         texture wave_texture: texture2d

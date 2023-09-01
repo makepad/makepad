@@ -8,32 +8,7 @@ use {
 };
 
 live_design!{
-    import crate::tab::Tab;
-    import makepad_widgets::theme::*;
-    
-    TabBar= {{TabBar}} {
-        tab: <Tab> {}
-        draw_drag: {
-            draw_depth: 10
-            color: #c
-        }
-        draw_fill: {
-            color: (COLOR_BG_HEADER)
-        }
-        
-            width: Fill
-            height: Fixed((DIM_TAB_HEIGHT))
-        
-        scroll_bars: {
-            show_scroll_x: true
-            show_scroll_y: false
-            scroll_bar_x: {
-                draw_bar:{bar_width:3.0}
-                bar_size: 4
-                use_vertical_finger_scroll: true
-            }
-        }
-    }
+    TabBarBase = {{TabBar}} {}
 }
 
 #[derive(Live)]

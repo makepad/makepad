@@ -1,22 +1,9 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::theme::*;
-    import makepad_widgets::view::*;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    
-    import makepad_widgets::image::Image;
-    import makepad_widgets::scroll_bars::ScrollBars;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::link_label::LinkLabel;
-    import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::button::Button;
-    import makepad_widgets::slider::Slider;
-    import makepad_widgets::check_box::CheckBox;
-    import makepad_widgets::text_input::TextInput;
-    import makepad_widgets::radio_button::RadioButton;
-    import makepad_widgets::swipe_list::SwipeList;
-    import makepad_widgets::swipe_list::SwipeListEntry;
     
     import makepad_example_ironfish::sequencer::Sequencer;
     import makepad_audio_widgets::display_audio::DisplayAudio;
@@ -2124,7 +2111,7 @@ live_design!{
         <FishInput> {}
         
     }
-    
+    /*
     PresetListEntry = <SwipeListEntry> {
         flow: Down,
         padding: 0.0
@@ -2316,7 +2303,7 @@ live_design!{
         <PresetSaver> {}
         <PresetHeader> {}
         preset_list = <PresetList> {}
-    }
+    }*/
     
     AppDesktop = <View> {
         flow: Right
