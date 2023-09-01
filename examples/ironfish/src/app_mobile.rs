@@ -1,21 +1,10 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::theme::*;
-    import makepad_widgets::view::*;
+    import makepad_widgets::theme_desktop_dark::*;
+    import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
-    
-    import makepad_widgets::image::Image;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::button::Button;
-    import makepad_widgets::slider::Slider;
-    import makepad_widgets::check_box::CheckBox;
-    import makepad_widgets::text_input::TextInput;
-    import makepad_widgets::radio_button::RadioButton;
-    import makepad_widgets::swipe_list::SwipeList;
-    import makepad_widgets::swipe_list::SwipeListEntry;
-    
+
     import makepad_example_ironfish::sequencer::Sequencer;
     import makepad_audio_widgets::display_audio::DisplayAudio;
     import makepad_audio_widgets::piano::Piano;
@@ -999,7 +988,7 @@ live_design!{
             color: (COLOR_UP_6)
         }
     }
-    
+    /*
     PresetListEntry = <SwipeListEntry> {
         flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5 align: {x: 0.5, y: 0.5}}
          width: Fill, height: Fit, margin: 0 
@@ -1078,7 +1067,7 @@ live_design!{
             }
             <DividerY> { margin: 0.0 padding: 0.0}
         }
-    }
+    }*/
     
     PaginationButton = <FishButton> {
         text: "1"
@@ -1117,12 +1106,12 @@ live_design!{
         <PaginationButton> {text: "7"}
         <PaginationButton> {text: "…"}
     }
-    
+    /*
     PresetList = <SwipeList> {
         height: Fill
         Entry = <PresetListEntry> {}
     }
-    
+    */
     PresetListFavs = <ScrollYView> {
         
         width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}
@@ -1170,7 +1159,7 @@ live_design!{
             
         }
         preset_pages = <View> {
-            preset_list = <PresetList> {}
+            /*preset_list = <PresetList> {}*/
             tab2_frame = <PresetListFavs> {visible: false}
         }
         

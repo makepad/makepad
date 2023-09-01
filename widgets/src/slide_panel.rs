@@ -6,39 +6,7 @@ use crate::{
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::view::*;
-    import makepad_widgets::label::Label;
-    //registry Widget::*;
-    
-    SlidePanel = {{SlidePanel}} {
-        animator: {
-            closed = {
-                default: off,
-                on = {
-                    redraw: true,
-                    from: {
-                        all: Forward {duration: 0.5}
-                    }
-                    ease: InQuad
-                    apply: {
-                        closed: 1.0
-                    }
-                }
-                
-                off = {
-                    redraw: true,
-                    from: {
-                        all: Forward {duration: 0.5}
-                    }
-                    ease: OutQuad
-                    apply: {
-                        closed: 0.0
-                    }
-                }
-            }
-        }
-    }
+    SlidePanelBase = {{SlidePanel}} {}
 }
 
 

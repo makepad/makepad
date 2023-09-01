@@ -7,165 +7,16 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    
-    DrawBg = {{DrawBg}} {
-        instance color: #0
-        instance color_selected: #4
-
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            
-            sdf.clear(mix(
-                self.color,
-                self.color_selected,
-                // COLOR_BG_EDITOR,
-                // COLOR_BG_SELECTED,
-                self.hover
-            ))
-
-            // 
-            // we have 3 points, and need to rotate around its center
-            let sz = 3.;
-            let dx = 2.0;
-            let c = vec2(8.0, 0.5 * self.rect_size.y);
-            sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
-            sdf.line_to(c.x, c.y + sz);
-            sdf.line_to(c.x + sz, c.y - sz);
-            sdf.stroke(mix(#fff0, #f, self.selected), 1.0);
-            
-            return sdf.result;
-        }
-    }
-    
-    DrawName = {{DrawName}} {
-        fn get_color(self) -> vec4 {
-            return mix(
-                mix(
-                    COLOR_TEXT_DEFAULT,
-                    COLOR_TEXT_SELECTED,
-                    self.selected
-                ),
-                COLOR_TEXT_HOVER,
-                self.hover
-            )
-        }
-        //text_style: FONT_DATA {top_drop: 1.15},
-    }
-    
-    PopupMenuItem = {{PopupMenuItem}} {
-        
-        align: {y: 0.5}
-        padding: {left: 15, top: 5, bottom: 5},
-        width: Fill,
-        height: Fit
-        
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
-                    }
-                }
-                on = {
-                    cursor: Hand
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {hover: 1.0}
-                        draw_name: {hover: 1.0}
-                    }
-                }
-            }
-            
-            select = {
-                default: off
-                off = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {selected: 0.0,}
-                        draw_name: {selected: 0.0,}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {selected: 1.0,}
-                        draw_name: {selected: 1.0,}
-                    }
-                }
-            }
-        }
-        indent_width: 10.0
-    }
-    
-    PopupMenu = {{PopupMenu}} {
-        menu_item: <PopupMenuItem> {}
-        
-            flow: Down,
-            padding: 5
-        
-        
-            width:100,
-            height:Fit
-        
-        draw_bg: {
-            
-            instance color: #0
-            instance border_width: 0.0,
-            instance border_color: #0000,
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0),
-            instance radius: 4.0
-            
-            fn get_color(self) -> vec4 {
-                return self.color
-            }
-            
-            fn get_border_color(self) -> vec4 {
-                return self.border_color
-            }
-            
-            fn pixel(self) -> vec4 {
-                
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.blur = 20.0;
-                sdf.box(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    max(1.0, self.radius)
-                )
-                sdf.fill_keep(self.get_color())
-                return sdf.result;
-            }
-        }
-    }
+    PopupMenuItemBase = {{PopupMenuItem}} {}
+    PopupMenuBase = {{PopupMenu}} {}
 }
 
-// TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
-struct DrawBg {
-    #[deref] draw_super: DrawQuad,
-    #[live] selected: f32,
-    #[live] hover: f32,
-}
-
-#[derive(Live, LiveHook)]#[repr(C)]
-struct DrawName {
-    #[deref] draw_super: DrawText,
-    #[live] selected: f32,
-    #[live] hover: f32,
-}
 
 #[derive(Live, LiveHook)]
 pub struct PopupMenuItem {
     
-    #[live] draw_bg: DrawBg,
-    #[live] draw_name: DrawName,
+    #[live] draw_bg: DrawQuad,
+    #[live] draw_name: DrawText,
     
     #[layout] layout: Layout,
     #[animator] animator: Animator,
@@ -267,9 +118,9 @@ impl PopupMenuItem {
                     //if se.was_tap() { // ok this only goes for the first time
                     //    dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
                     //    println!("MIGHTBESELECTED");
-                   // }
+                    // }
                     //else {
-                        dispatch_action(cx, PopupMenuItemAction::WasSelected);
+                    dispatch_action(cx, PopupMenuItemAction::WasSelected);
                     //}
                 }
                 else {
@@ -308,8 +159,8 @@ impl PopupMenu {
         //cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
         //let menu_rect1 = cx.turtle().padded_rect_used();
         self.draw_bg.end(cx);
-
-        cx.end_pass_sized_turtle_with_shift(shift_area,shift);
+        
+        cx.end_pass_sized_turtle_with_shift(shift_area, shift);
         //cx.debug.rect_r(self.draw_bg.area().get_rect(cx));
         self.draw_list.end(cx);
         self.menu_items.retain_visible();

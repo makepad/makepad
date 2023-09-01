@@ -497,8 +497,6 @@ pub struct FingerUpEvent {
 }
 
 impl FingerUpEvent {
-    pub fn mod_shift(&self) -> bool {self.modifiers.shift}
-    
     pub fn was_tap(&self) -> bool {
         self.time - self.capture_time < TAP_COUNT_TIME &&
         (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE

@@ -1,28 +1,7 @@
 use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import crate::theme::*;
-    
-    DrawScrollShadow= {{DrawScrollShadow}} {
-        
-        shadow_size: 4.0,
-        
-        fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
-            let is_viz = clamp(self.scroll * 0.1, 0., 1.);
-            let pos = self.pos;
-            let base = COLOR_BG_EDITOR.xyz;
-            let alpha = 0.0;
-            if self.shadow_is_top > 0.5 {
-                alpha = pow(pos.y, 0.5);
-            }
-            else {
-                alpha = pow(pos.x, 0.5);
-            }
-            //turn vec4(base,is_viz);
-            return Pal::premul(mix(vec4(#000.xyz, is_viz), vec4(base, 0.), alpha));
-        }
-    }
+    DrawScrollShadowBase = {{DrawScrollShadow}} {}
 }
 
 #[derive(Live, LiveHook)]

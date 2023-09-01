@@ -7,23 +7,9 @@ use crate::database::*;
 use crate::comfyui::*;
 
 live_design!{
-    //import makepad_widgets::button::Button;
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::multi_window::MultiWindow;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::button::Button;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::text_input::TextInput;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::list_view::ListView;
-    import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::slide_panel::SlidePanel;
-    import makepad_widgets::check_box::CheckBox;
-    import makepad_widgets::view::*;
-    import makepad_widgets::theme::*;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    import makepad_widgets::dock::*;
-    
     
     TEXT_BIG = 12.0
     

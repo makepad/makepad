@@ -9,11 +9,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    
-    MultiWindow = {{MultiWindow}} {
-    }
+    MultiWindowBase = {{MultiWindow}} {}
 }
 
 #[derive(Live)]

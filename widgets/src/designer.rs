@@ -6,12 +6,8 @@ use crate::{
 };
 
 live_design!{
-    import makepad_widgets::theme::*
-    import makepad_widgets::view::*
-    import makepad_widgets::splitter::Splitter
-    import makepad_widgets::file_tree::FileTree
-    import makepad_widgets::hook_widget::HookWidget
-    import makepad_widgets::label::Label
+    import makepad_widgets::base::*
+    import makepad_widgets::theme_desktop_dark::*
     import makepad_draw::shader::std::*
     
     Designer = {{Designer}} {

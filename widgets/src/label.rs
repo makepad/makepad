@@ -7,18 +7,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    Label= {{Label}} {
-        
-            width:Fit
-            height:Fit
-        
-        draw_text:{
-            color:#8,
-            wrap: Word
-        }
-    }
+    LabelBase = {{Label}} {}
 }
 
 #[derive(Live)]

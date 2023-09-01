@@ -177,7 +177,7 @@ impl Database {
             textures: HashMap::new(),
             in_flight: Vec::new(),
             thread_pool: TagThreadPool::new(cx, use_cores),
-            image_path: "./sdxl_images".to_string(),
+            image_path: "./local/sdxl_images".to_string(),
             image_files: Vec::new(),
             prompt_files: Vec::new(),
             //image_index: HashMap::new(),
