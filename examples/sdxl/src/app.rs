@@ -80,11 +80,11 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                width: Fill, height: Fit
+                width: Fill,
+                height: Fit
                 
                 
-                    padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)
-                }
+                padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)}
                 
                 draw_bg: {
                     color: #x48,
@@ -190,55 +190,78 @@ live_design!{
     }
     
     SettingsInput = <View> {
-        width: 150, height: Fit, margin: {top: 10},
+        width: 150,
+        height: Fit,
+        margin: {top: 10},
         label = <BarLabel> {
-            width: Fit, margin: {left: 5},
+            width: Fit,
+            margin: {left: 5},
             align: {x: 1.0}
         }
         input = <TextInput> {
             padding: 0
-            height: Fit, width: 50, margin: {top: 1, left: 2}
+            height: Fit,
+            width: 50,
+            margin: {top: 1, left: 2}
             text: "1344"
         }
     }
     
     FillerH = <View> {
-        width: Fill, height: Fit
+        width: Fill,
+        height: Fit
     }
     
     FillerV = <View> {
-        width: Fit, height: Fill
+        width: Fit,
+        height: Fill
     }
     
     
     DividerV = <View> {
-        flow: Down, spacing: 0.0
+        flow: Down,
+        spacing: 0.0
         margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
-        width: Fill, height: Fit
-        <RectView> {
-            height: 2, width: Fill, margin: 0.0
-            flow: Down, padding: 0.0
+        width: Fill,
+        height: Fit
+            <RectView> {
+            height: 2,
+            width: Fill,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #x00000033}
         }
         <RectView> {
-            height: 2, width: Fill, margin: 0.0
-            flow: Down, padding: 0.0
+            height: 2,
+            width: Fill,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #xFFFFFF18}
         }
     }
     
     DividerH = <View> {
-        flow: Right, spacing: 0.0
+        flow: Right,
+        spacing: 0.0
         margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}
-        width: Fit, height: Fill
-        <RectView> {
-            height: Fill, width: 2, margin: 0.0
-            flow: Down, padding: 0.0
+        width: Fit,
+        height: Fill
+            <RectView> {
+            height: Fill,
+            width: 2,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #x00000033}
         }
         <RectView> {
-            height: Fill, width: 2, margin: 0.0
-            flow: Down, padding: 0.0
+            height: Fill,
+            width: 2,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #xFFFFFF18}
         }
     }
@@ -296,7 +319,8 @@ live_design!{
     
     ProgressCircle = <View> {
         show_bg: true,
-        width: 24, height: 24
+        width: 24,
+        height: 24
         draw_bg: {
             instance progress: 0.0
             instance active: 0.0
@@ -336,8 +360,12 @@ live_design!{
     
     PromptGroup = <RectView> {
         <DividerV> {}
-        height: Fit, width: Fill, margin: {bottom: 10, top: 0}
-        flow: Down, spacing: 0, padding: 0
+        height: Fit,
+        width: Fill,
+        margin: {bottom: 10, top: 0}
+        flow: Down,
+        spacing: 0,
+        padding: 0
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
@@ -408,7 +436,8 @@ live_design!{
     }
     
     ImageTile = <View> {
-        width: Fill, height: Fit
+        width: Fill,
+        height: Fit
         cursor: Hand
         animator: {
             hover = {
@@ -452,7 +481,8 @@ live_design!{
         }
         
         img = <Image> {
-            width: Fill, height: Fill
+            width: Fill,
+            height: Fill
             min_width: 1920,
             min_height: 1080,
             fit: Horizontal,
@@ -486,15 +516,16 @@ live_design!{
                 hide_caption_on_fullscreen: true,
                 <View> {
                     
-                        flow: Overlay,
+                    flow: Overlay,
                     
                     
-                        width: Fill,
-                        height: Fill
+                    width: Fill,
+                    height: Fill
                     
                     
                     dock = <Dock> {
-                        height: Fill, width: Fill
+                        height: Fill,
+                        width: Fill
                         
                         root = Splitter {
                             axis: Horizontal,
@@ -527,25 +558,31 @@ live_design!{
                         
                         ImageView = <RectView> {
                             draw_bg: {color: #2}
-                            height: Fill, width: Fill
-                            flow: Down, align: {x: 0.5, y: 0.5}
+                            height: Fill,
+                            width: Fill
+                            flow: Down,
+                            align: {x: 0.5, y: 0.5}
                             cursor: Hand,
                             image = <Image> {
                                 fit: Smallest,
-                                width: Fill, height: Fill
+                                width: Fill,
+                                height: Fill
                             }
                         }
                         
                         InputPanel = <RectView> {
-                            height: Fill, width: Fill
-                            flow: Down, padding: 0.0
+                            height: Fill,
+                            width: Fill
+                            flow: Down,
+                            padding: 0.0
                             draw_bg: {color: (COLOR_PANEL_BG)}
                             <View> {
-                                height: Fit, width: Fill
+                                height: Fit,
+                                width: Fill
                                 align: {x: 0.0, y: 0.5}
                                 padding: 5
                                 
-                                <BarLabel> {
+                                    <BarLabel> {
                                     text: "Workflow"
                                 }
                                 
@@ -564,7 +601,9 @@ live_design!{
                                 }
                                 seed_input = <TextInput> {
                                     draw_text: {text_style: <TEXT_BOLD> {}}
-                                    height: Fit, width: Fit, margin: {bottom: 0, left: 0}
+                                    height: Fit,
+                                    width: Fit,
+                                    margin: {bottom: 0, left: 0}
                                 }
                                 
                                 render_batch = <BarButton> {
@@ -617,7 +656,9 @@ live_design!{
                             <View> {
                                 positive = <TextInput> {
                                     ascii_only: true,
-                                    width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
+                                    width: Fill,
+                                    height: Fill,
+                                    margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
                                     text: "Positive"
                                     draw_text: {
                                         text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
@@ -630,7 +671,9 @@ live_design!{
                                 }
                                 negative = <TextInput> {
                                     ascii_only: true,
-                                    width: 200, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
+                                    width: 200,
+                                    height: Fill,
+                                    margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
                                     draw_text: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
                                     text: "text, watermark, cartoon"
                                     draw_bg: {
@@ -640,10 +683,13 @@ live_design!{
                                     }
                                 }
                                 <View> {
-                                    width: Fill, height: Fill
+                                    width: Fill,
+                                    height: Fill
                                     flow: Right
-                                    <View> {
-                                        width: 100, height: Fit, margin: {top: 10},
+                                        <View> {
+                                        width: 100,
+                                        height: Fit,
+                                        margin: {top: 10},
                                         flow: Down
                                         settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
                                         settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
@@ -652,7 +698,9 @@ live_design!{
                                         settings_total_steps = <SettingsInput> {label = {text: "total(0):"}, input = {text: "32"}}
                                     }
                                     <View> {
-                                        width: Fit, height: Fit, margin: {top: 10},
+                                        width: Fit,
+                                        height: Fit,
+                                        margin: {top: 10},
                                         flow: Down
                                         settings_base_cfg = <SettingsInput> {label = {text: "base_cfg:"}, input = {text: "8.5"}}
                                         settings_refiner_cfg = <SettingsInput> {label = {text: "refiner_cfg:"}, input = {text: "9.5"}}
@@ -660,7 +708,9 @@ live_design!{
                                         settings_neg_score = <SettingsInput> {label = {text: "neg_score:"}, input = {text: "2"}}
                                     }
                                     <View> {
-                                        width: Fit, height: Fit, margin: {top: 10},
+                                        width: Fit,
+                                        height: Fit,
+                                        margin: {top: 10},
                                         flow: Down
                                         settings_base_start_step = <SettingsInput> {label = {text: "base_start_step:"}, input = {text: "0"}}
                                         settings_base_end_step = <SettingsInput> {label = {text: "base_end_step:"}, input = {text: "20"}}
@@ -668,7 +718,9 @@ live_design!{
                                         settings_refiner_end_step = <SettingsInput> {label = {text: "refiner_end_step:"}, input = {text: "1000"}}
                                     }
                                     <View> {
-                                        width: Fit, height: Fit, margin: {top: 10},
+                                        width: Fit,
+                                        height: Fit,
+                                        margin: {top: 10},
                                         flow: Down
                                         settings_upscale_steps = <SettingsInput> {label = {text: "upscale_steps:"}, input = {text: "31"}}
                                         settings_upscale_start_step = <SettingsInput> {label = {text: "upscale_start_step:"}, input = {text: "29"}}
@@ -703,13 +755,18 @@ live_design!{
                         
                         ImageLibrary = <RectView> {
                             draw_bg: {color: (COLOR_PANEL_BG)}
-                            height: Fill, width: Fill
+                            height: Fill,
+                            width: Fill
                             flow: Down
-                            <View> {
-                                height: Fit, width: Fill
-                                flow: Right, padding: {left: 10, right: 10, top: 10, bottom: 10},
+                                <View> {
+                                height: Fit,
+                                width: Fill
+                                flow: Right,
+                                padding: {left: 10, right: 10, top: 10, bottom: 10},
                                 search = <TextInput> {
-                                    height: Fit, width: Fill, margin: {bottom: 0}
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 0}
                                     empty_message: "Search"
                                     draw_bg: {
                                         color: (COLOR_TEXT_INPUT)
@@ -738,27 +795,39 @@ live_design!{
                                 }
                             }
                             image_list = <ListView> {
-                                height: Fill, width: Fill, margin: {top: 0}
-                                flow: Down, padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}
+                                height: Fill,
+                                width: Fill,
+                                margin: {top: 0}
+                                flow: Down,
+                                padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}
                                 
                                 PromptGroup = <PromptGroup> {}
                                 
                                 Empty = <View> {}
                                 
                                 ImageRow1 = <View> {
-                                    height: Fit, width: Fill, margin: {bottom: 10}
-                                    spacing: 20, flow: Right
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 10}
+                                    spacing: 20,
+                                    flow: Right
                                     row1 = <ImageTile> {}
                                 }
                                 ImageRow2 = <View> {
-                                    height: Fit, width: Fill, margin: {bottom: 10}
-                                    spacing: 20, flow: Right
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 10}
+                                    spacing: 20,
+                                    flow: Right
                                     row1 = <ImageTile> {}
                                     row2 = <ImageTile> {}
                                 }
                                 ImageRow3 = <View> {
-                                    height: Fit, width: Fill, margin: {bottom: 10}
-                                    spacing: 20, flow: Right
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 10}
+                                    spacing: 20,
+                                    flow: Right
                                     row1 = <ImageTile> {}
                                     row2 = <ImageTile> {}
                                     row3 = <ImageTile> {}
@@ -771,12 +840,16 @@ live_design!{
                         visible: false,
                         draw_bg: {draw_depth: 10.0}
                         draw_bg: {color: #0}
-                        height: All, width: All, abs_pos: vec2(0.0, 0.0)
-                        flow: Overlay, align: {x: 0.5, y: 0.5}
+                        height: All,
+                        width: All,
+                        abs_pos: vec2(0.0, 0.0)
+                        flow: Overlay,
+                        align: {x: 0.5, y: 0.5}
                         image1 = <Image> {
                             draw_bg: {draw_depth: 11.0}
                             fit: Smallest,
-                            width: Fill, height: Fill
+                            width: Fill,
+                            height: Fill
                         }
                     }
                 }
@@ -785,18 +858,23 @@ live_design!{
                 window: {inner_size: vec2(960, 540)},
                 second_image = <RectView> {
                     draw_bg: {color: #0}
-                    height: Fill, width: Fill
-                    flow: Overlay, align: {x: 0.5, y: 0.5}
+                    height: Fill,
+                    width: Fill
+                    flow: Overlay,
+                    align: {x: 0.5, y: 0.5}
                     image1 = <Image> {
                         fit: Smallest,
-                        width: Fill, height: Fill
+                        width: Fill,
+                        height: Fill
                     }
                     prompt_frame = <View> {
-                        width: Fill, height: Fill
+                        width: Fill,
+                        height: Fill
                         align: {y: 1.0}
-                        padding: {left: 120, bottom: 40,right:120}
+                        padding: {left: 120, bottom: 40, right: 120}
                         prompt = <Label> {
-                            width: Fill, height: Fit
+                            width: Fill,
+                            height: Fit
                             draw_text: {
                                 wrap: Word
                                 text_style: <TEXT_BOLD> {font_size: 20}
@@ -869,7 +947,7 @@ pub struct App {
     #[rust] current_image: Option<ImageId>,
     
     #[rust(Instant::now())] last_flip: Instant
-} 
+}
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
@@ -890,7 +968,7 @@ impl LiveHook for App {
 
 impl App {
     fn send_prompt(&mut self, cx: &mut Cx, prompt_state: PromptState) {
-
+        
         for machine in &mut self.machines {
             if machine.running.is_some() {
                 continue
@@ -1291,7 +1369,7 @@ impl AppMain for App {
         }
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-
+            
             if let Some(current_image) = &self.current_image {
                 let tex = self.db.image_texture(current_image);
                 if tex.is_some() {
@@ -1338,7 +1416,7 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey|KeyCode::NumpadEnter, modifiers, ..}) = event {
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..}) = event {
             if modifiers.logo || modifiers.control {
                 self.clear_todo(cx);
             }
