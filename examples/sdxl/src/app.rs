@@ -483,7 +483,7 @@ live_design!{
             <DesktopWindow> {
                 window: {inner_size: vec2(2000, 1024)},
                 caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
-                
+                hide_caption_on_fullscreen: true,
                 <View> {
                     
                         flow: Overlay,
