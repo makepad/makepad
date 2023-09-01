@@ -356,22 +356,23 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        /*
-        let preset_lists = self.ui.swipe_list_set(ids!(preset_list));
+        
+        //let preset_lists = self.ui.swipe_list_set(ids!(preset_list));
+        
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                if let Some(mut list) = preset_lists.has_widget(&next).borrow_mut() {
+            while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
+                /*if let Some(mut list) = preset_lists.has_widget(&next).borrow_mut() {
                     for i in 0..10 {
                         if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {
                             item.button(id!(label)).set_text(&format!("Button id {i}"));
                             item.draw_widget_all(cx);
                         }
                     }
-                }
+                }*/
             }
             return
-        }*/
+        }
         let ui = self.ui.clone();
         let mut synth_db = DataBindingStore::new();
         let mut actions = ui.handle_widget_event(cx, event);
