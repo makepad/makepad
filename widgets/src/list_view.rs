@@ -13,10 +13,9 @@ live_design!{
     import makepad_widgets::theme::*;
     import makepad_widgets::view::View;
     ListView = {{ListView}} {
-        
-            width: Fill
-            height: Fill
-        
+        width: Fill
+        height: Fill
+        capture_overload: true
         flow: Down
         Entry = <View> {}
     }
@@ -51,6 +50,7 @@ pub struct ListView {
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
+    #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
@@ -321,7 +321,7 @@ impl Widget for ListView {
             }
         }
         let vi = self.vec_index;
-        match event.hits_with_capture_overload(cx, self.area) {
+        match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
             Hit::FingerScroll(e) => {
                 self.scroll_state = ScrollState::Stopped;
                 self.delta_top_scroll(cx, -e.scroll.index(vi));
