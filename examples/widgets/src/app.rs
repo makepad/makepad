@@ -86,7 +86,7 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        if self.ui.get_button(id!(button1)).clicked(&actions) {
+        if self.ui.button(id!(button1)).clicked(&actions) {
         }
     }
 }
