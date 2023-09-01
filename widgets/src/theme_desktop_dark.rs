@@ -969,6 +969,7 @@ live_design!{
         height: Fit
         
         draw_name: {
+            text_style:<THEME_FONT_LABEL>{}
             instance selected: 0.0
             instance hover: 0.0
             fn get_color(self) -> vec4 {
