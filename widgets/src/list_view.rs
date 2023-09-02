@@ -9,17 +9,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    import makepad_widgets::frame::Frame;
-    ListView = {{ListView}} {
-        walk: {
-            width: Fill
-            height: Fill
-        }
-        layout: {flow: Down}
-        Entry = <Frame> {}
-    }
+    ListViewBase = {{ListView}} {}
 }
 
 enum DragState {
@@ -38,8 +28,8 @@ enum ScrollState {
 #[derive(Live)]
 pub struct ListView {
     #[rust] area: Area,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     
     #[rust] range_start: u64,
     #[rust(u64::MAX)] range_end: u64,
@@ -51,6 +41,7 @@ pub struct ListView {
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
+    #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
@@ -113,7 +104,7 @@ impl ListView {
         let rect = cx.turtle().rect();
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
-        
+        self.items.retain_visible();
         cx.end_turtle_with_area(&mut self.area);
     }
     
@@ -121,7 +112,7 @@ impl ListView {
         let vi = self.vec_index;
         match self.draw_state.get() {
             Some(ListDrawState::Begin) => {
-                let viewport = cx.turtle().rect();
+                let viewport = cx.turtle().padded_rect();
                 self.draw_state.set(ListDrawState::Down {
                     index: self.first_id,
                     scroll: self.first_scroll,
@@ -231,7 +222,7 @@ impl ListView {
         }
     }
     
-    pub fn get_item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
@@ -321,7 +312,7 @@ impl Widget for ListView {
             }
         }
         let vi = self.vec_index;
-        match event.hits(cx, self.area) {
+        match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
             Hit::FingerScroll(e) => {
                 self.scroll_state = ScrollState::Stopped;
                 self.delta_top_scroll(cx, -e.scroll.index(vi));
@@ -413,7 +404,7 @@ impl Widget for ListView {
         }
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
@@ -433,16 +424,31 @@ impl Widget for ListView {
 pub struct ListViewRef(WidgetRef);
 
 impl ListViewRef {
+    pub fn set_first_id_and_scroll(&self, id:u64, s:f64){
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.first_id = id;
+            inner.first_scroll =s;
+        }
+    }
+
     pub fn set_first_id(&self, id:u64){
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
-            inner.first_scroll = 0.0;
         }
     }
     
-    pub fn get_item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn first_id(&self)->u64{
+         if let Some(inner) = self.borrow() {
+             inner.first_id 
+        }
+        else{
+            0
+        }
+    }
+    
+    pub fn item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.get_item(cx, entry_id, template)
+            inner.item(cx, entry_id, template)
         }
         else {
             None
@@ -480,6 +486,7 @@ impl ListViewSet {
             list.set_first_id(id)
         }
     }
+    
     
     pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
         let mut set = Vec::new();

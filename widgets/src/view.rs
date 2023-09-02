@@ -9,349 +9,14 @@ use {
 };
 
 live_design!{
-    import crate::scroll_bars::ScrollBars;
-    import makepad_draw::shader::std::*;
-    import makepad_draw::shader::draw_color::DrawColor;
-    Frame = {{Frame}} {}
-    
-    Solid = <Frame> {show_bg: true, draw_bg: {
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn pixel(self) -> vec4 {
-            return Pal::premul(self.get_color())
-        }
-    }}
-    
-    Debug = <Frame> {show_bg: true, draw_bg: {
-        color: #f00
-        fn pixel(self) -> vec4 {
-            return self.color
-        }
-    }}
-    
-    Rect = <Frame> {show_bg: true, draw_bg: {
-        instance border_width: 0.0
-        instance border_color: #0000
-        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-        
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn get_border_color(self) -> vec4 {
-            return self.border_color
-        }
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.rect(
-                self.inset.x + self.border_width,
-                self.inset.y + self.border_width,
-                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0)
-            )
-            sdf.fill_keep(self.get_color())
-            if self.border_width > 0.0 {
-                sdf.stroke(self.get_border_color(), self.border_width)
-            }
-            return sdf.result
-        }
-    }}
-    
-    Box = <Frame> {show_bg: true, draw_bg: {
-        instance border_width: 0.0
-        instance border_color: #0000
-        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-        instance radius: 2.5
-        
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn get_border_color(self) -> vec4 {
-            return self.border_color
-        }
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            sdf.box(
-                self.inset.x + self.border_width,
-                self.inset.y + self.border_width,
-                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                max(1.0, self.radius)
-            )
-            sdf.fill_keep(self.get_color())
-            if self.border_width > 0.0 {
-                sdf.stroke(self.get_border_color(), self.border_width)
-            }
-            return sdf.result;
-        }
-    }}
-    
-    BoxX = <Frame> {show_bg: true, draw_bg: {
-        instance border_width: 0.0
-        instance border_color: #0000
-        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-        instance radius: vec2(2.5, 2.5)
-        
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn get_border_color(self) -> vec4 {
-            return self.border_color
-        }
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            sdf.box_x(
-                self.inset.x + self.border_width,
-                self.inset.y + self.border_width,
-                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                self.radius.x,
-                self.radius.y
-            )
-            sdf.fill_keep(self.get_color())
-            if self.border_width > 0.0 {
-                sdf.stroke(self.get_border_color(), self.border_width)
-            }
-            return sdf.result;
-        }
-    }}
-    
-    BoxY = <Frame> {show_bg: true, draw_bg: {
-        instance border_width: 0.0
-        instance border_color: #0000
-        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-        instance radius: vec2(2.5, 2.5)
-        
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn get_border_color(self) -> vec4 {
-            return self.border_color
-        }
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            sdf.box_y(
-                self.inset.x + self.border_width,
-                self.inset.y + self.border_width,
-                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                self.radius.x,
-                self.radius.y
-            )
-            sdf.fill_keep(self.get_color())
-            if self.border_width > 0.0 {
-                sdf.stroke(self.get_border_color(), self.border_width)
-            }
-            return sdf.result;
-        }
-    }}
-    
-    BoxAll = <Frame> {show_bg: true, draw_bg: {
-        instance border_width: 0.0
-        instance border_color: #0000
-        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-        instance radius: vec4(2.5, 2.5, 2.5, 2.5)
-        
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn get_border_color(self) -> vec4 {
-            return self.border_color
-        }
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            sdf.box_all(
-                self.inset.x + self.border_width,
-                self.inset.y + self.border_width,
-                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                self.radius.x,
-                self.radius.y,
-                self.radius.z,
-                self.radius.w
-            )
-            sdf.fill_keep(self.get_color())
-            if self.border_width > 0.0 {
-                sdf.stroke(self.get_border_color(), self.border_width)
-            }
-            return sdf.result;
-        }
-    }}
-    
-    Circle = <Frame> {show_bg: true, draw_bg: {
-        instance border_width: 0.0
-        instance border_color: #0000
-        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-        instance radius: 5.0
-        
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn get_border_color(self) -> vec4 {
-            return self.border_color
-        }
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            if self.radius.x > 0.0 {
-                sdf.circle(
-                    self.rect_size.x * 0.5,
-                    self.rect_size.y * 0.5,
-                    self.radius.x
-                )
-            }
-            else {
-                sdf.circle(
-                    self.rect_size.x * 0.5,
-                    self.rect_size.y * 0.5,
-                    min(
-                        (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
-                        (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
-                    )
-                )
-            }
-            sdf.fill_keep(self.get_color())
-            if self.border_width > 0.0 {
-                sdf.stroke(self.get_border_color(), self.border_width)
-            }
-            return sdf.result
-        }
-    }}
-    
-    Hexagon = <Frame> {show_bg: true, draw_bg: {
-        instance border_width: 0.0
-        instance border_color: #0000
-        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-        instance radius: 5
-        
-        fn get_color(self) -> vec4 {
-            return self.color
-        }
-        
-        fn get_border_color(self) -> vec4 {
-            return self.border_color
-        }
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            if self.radius.x > 0.0 {
-                sdf.hexagon(
-                    self.rect_size.x * 0.5,
-                    self.rect_size.y * 0.5,
-                    self.radius
-                )
-            }
-            else {
-                sdf.hexagon(
-                    self.rect_size.x * 0.5,
-                    self.rect_size.y * 0.5,
-                    min(
-                        (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
-                        (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
-                    )
-                )
-            }
-            sdf.fill_keep(color)
-            if self.border_width > 0.0 {
-                sdf.stroke(self.border_color, self.border_width)
-            }
-            return sdf.result
-        }
-    }}
-    
-    GradientX = <Frame> {show_bg: true, draw_bg: {
-        instance color2: #f00
-        instance dither: 1.0
-        fn get_color(self) -> vec4 {
-            let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
-            return mix(self.color, self.color2, self.pos.x + dither)
-        }
-        
-        fn pixel(self) -> vec4 {
-            return Pal::premul(self.get_color())
-        }
-    }}
-    
-    GradientY = <Frame> {show_bg: true, draw_bg: {
-        instance color2: #f00
-        instance dither: 1.0
-        fn get_color(self) -> vec4 {
-            let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
-            return mix(self.color, self.color2, self.pos.y + dither)
-        }
-        
-        fn pixel(self) -> vec4 {
-            return Pal::premul(self.get_color())
-        }
-    }}
-/*
-    // Legacy Image widget that is being replaced with the new Image widget
-    ImageFrame = <Frame> {show_bg: true, draw_bg: {
-        texture image: texture2d
-        instance image_scale: vec2(1.0, 1.0)
-        instance image_pan: vec2(0.0, 0.0)
-        uniform image_alpha: 1.0
-        fn get_color(self) -> vec4 {
-            return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
-        }
-        
-        fn pixel(self) -> vec4 {
-            let color = self.get_color();
-            return Pal::premul(vec4(color.xyz, color.w * self.image_alpha))
-        }
-    }}*/
-    
-    CachedFrame = <Frame> {
-        optimize: Texture,
-        draw_bg: {
-            texture image: texture2d
-            uniform marked: float,
-            varying scale: vec2
-            varying shift: vec2
-            fn vertex(self) -> vec4 {
-                let dpi = self.dpi_factor;
-                let ceil_size = ceil(self.rect_size * dpi) / dpi
-                let floor_pos = floor(self.rect_pos * dpi) / dpi
-                self.scale = self.rect_size / ceil_size;
-                self.shift = (self.rect_pos - floor_pos) / ceil_size;
-                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
-            }
-            fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
-            }
-        }
-    }
-    CachedScrollXY = <CachedFrame> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
-    }
-    CachedScrollX = <CachedFrame> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
-    }
-    CachedScrollY = <CachedFrame> {
-        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
-    }
-    ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
-    ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
-    ScrollY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
+    ViewBase = {{View}} {}
 }
 
 // maybe we should put an enum on the bools like
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
-pub enum FrameOptimize{
+pub enum ViewOptimize{
     #[pick] None,
     DrawList,
     Texture    
@@ -367,7 +32,7 @@ pub enum EventOrder{
 }
 
 
-impl FrameOptimize{
+impl ViewOptimize{
     fn is_texture(&self)->bool{
         if let Self::Texture = self{true} else{false}
     }
@@ -380,19 +45,19 @@ impl FrameOptimize{
 }
 
 #[derive(Live)]
-pub struct Frame { // draw info per UI element
+pub struct View { // draw info per UI element
     #[live] draw_bg: DrawColor,
     
     #[live(false)] show_bg: bool,
     
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
     //#[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
     
-    #[live] optimize: FrameOptimize,
+    #[live] optimize: ViewOptimize,
     #[live] event_order: EventOrder,
     
     #[live(true)] visible: bool,
@@ -410,24 +75,24 @@ pub struct Frame { // draw info per UI element
     #[rust] area: Area,
     #[rust] draw_list: Option<DrawList2d>,
     
-    #[rust] texture_cache: Option<FrameTextureCache>,
+    #[rust] texture_cache: Option<ViewTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
 }
 
-struct FrameTextureCache {
+struct ViewTextureCache {
     pass: Pass,
     _depth_texture: Texture,
     color_texture: Texture,
 }
 
-impl LiveHook for Frame {
+impl LiveHook for View {
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Frame)
+        register_widget!(cx, View)
     }
     
     fn before_apply(&mut self,  _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
@@ -496,14 +161,14 @@ impl LiveHook for Frame {
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
-pub struct FrameRef(WidgetRef);
+pub struct ViewRef(WidgetRef);
 
 
 #[derive(Clone, WidgetSet)]
-pub struct FrameSet(WidgetSet);
+pub struct ViewSet(WidgetSet);
 
 #[derive(Clone, WidgetAction)]
-pub enum FrameAction {
+pub enum ViewAction {
     None,
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
@@ -512,10 +177,10 @@ pub enum FrameAction {
     KeyUp(KeyEvent),
 }
 
-impl FrameRef {
+impl ViewRef {
     pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::FingerDown(fd) = item.action() {
+            if let ViewAction::FingerDown(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -524,7 +189,7 @@ impl FrameRef {
 
     pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::FingerUp(fd) = item.action() {
+            if let ViewAction::FingerUp(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -533,7 +198,7 @@ impl FrameRef {
 
     pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::FingerMove(fd) = item.action() {
+            if let ViewAction::FingerMove(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -542,7 +207,7 @@ impl FrameRef {
 
     pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::KeyDown(fd) = item.action() {
+            if let ViewAction::KeyDown(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -551,7 +216,7 @@ impl FrameRef {
 
     pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FrameAction::KeyUp(fd) = item.action() {
+            if let ViewAction::KeyUp(fd) = item.action() {
                 return Some(fd)
             }
         }
@@ -560,25 +225,42 @@ impl FrameRef {
 
     pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.cut_state(cx, state);
+            inner.animator_cut(cx, state);
         }
     }
     
-    pub fn animate_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_play(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animate_state(cx, state);
+            inner.animator_play(cx, state);
         }
     }
     
     pub fn toggle_state(&self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.toggle_state(cx, is_state_1, animate, state1, state2);
+            inner.animator_toggle(cx, is_state_1, animate, state1, state2);
         }
     }
     
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible
+        }
+    }
+    
+    
+    pub fn set_visible_and_redraw(&self, cx:&mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.visible = visible;
+            inner.redraw(cx);
+        }
+    }
+    
+    pub fn visible(&self)->bool {
+        if let Some(inner) = self.borrow() {
+            inner.visible 
+        }
+        else{
+            false
         }
     }
     
@@ -619,7 +301,7 @@ impl FrameRef {
     }
 }
 
-impl FrameSet {
+impl ViewSet {
     
     pub fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
@@ -627,9 +309,9 @@ impl FrameSet {
         }
     }
     
-    pub fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
-            item.animate_state(cx, state);
+            item.animator_play(cx, state);
         }
     }
     
@@ -662,9 +344,55 @@ impl FrameSet {
             item.redraw(cx);
         }
     }
+    
+    pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_down(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_up(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+
+    pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.finger_move(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.key_down(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
+
+    pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+        for item in self.iter() {
+            if let Some(e) = item.key_up(actions){
+                return Some(e)
+            }
+        }
+        None
+    }
 }
 
-impl Widget for Frame {
+impl Widget for View {
     fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
@@ -672,7 +400,9 @@ impl Widget for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.state_handle_event(cx, event);
+        if self.animator_handle_event(cx, event).must_redraw(){
+            self.redraw(cx);
+        }
         
         if self.block_signal_event {
             if let Event::Signal = event {
@@ -721,36 +451,42 @@ impl Widget for Frame {
         }
         
         
-        if self.cursor.is_some() || self.state.live_ptr.is_some(){
+        if self.visible && (self.cursor.is_some() || self.animator.live_ptr.is_some()){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area());
-                    dispatch_action(cx, FrameAction::FingerDown(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::FingerDown(e).into_action(uid));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(down.on));
+                    }
                 }
                 Hit::FingerMove(e) => {
-                    dispatch_action(cx, FrameAction::FingerMove(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::FingerMove(e).into_action(uid))
                 }
                 Hit::FingerUp(e) => {
-                    dispatch_action(cx, FrameAction::FingerUp(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::FingerUp(e).into_action(uid));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(down.off));
+                    }
                 }
                 Hit::FingerHoverIn(_) => {
                     if let Some(cursor) = &self.cursor{
                         cx.set_cursor(*cursor);
                     }
-                    if self.state.live_ptr.is_some(){
-                        self.animate_state(cx, id!(hover.on));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(hover.on));
                     }
                 }
                 Hit::FingerHoverOut(_)=>{
-                    if self.state.live_ptr.is_some(){
-                        self.animate_state(cx, id!(hover.off));
+                    if self.animator.live_ptr.is_some(){
+                        self.animator_play(cx, id!(hover.off));
                     }
                 }
                 Hit::KeyDown(e)=>{
-                    dispatch_action(cx, FrameAction::KeyDown(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::KeyDown(e).into_action(uid))
                 }
                 Hit::KeyUp(e)=>{
-                    dispatch_action(cx, FrameAction::KeyUp(e).into_action(uid))
+                    dispatch_action(cx, ViewAction::KeyUp(e).into_action(uid))
                 }
                 _ => ()
             }
@@ -765,7 +501,7 @@ impl Widget for Frame {
         self.visible
     }
     
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
     
@@ -834,7 +570,7 @@ enum DrawState {
     DeferWalk(usize)
 }
 
-impl Frame {
+impl View {
     
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: DVec2) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
@@ -870,7 +606,7 @@ impl Frame {
             self.defer_walks.clear();
             
             match self.optimize{
-                FrameOptimize::Texture=>{
+                ViewOptimize::Texture=>{
                     let walk = self.walk_from_previous_size(walk);
                     if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
@@ -885,7 +621,7 @@ impl Frame {
                     }
                     // lets start a pass
                     if self.texture_cache.is_none() {
-                        self.texture_cache = Some(FrameTextureCache {
+                        self.texture_cache = Some(ViewTextureCache {
                             pass: Pass::new(cx),
                             _depth_texture: Texture::new(cx),
                             color_texture: Texture::new(cx)
@@ -899,7 +635,7 @@ impl Frame {
                     cx.begin_pass(&texture_cache.pass, self.dpi_factor);
                     self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
-                FrameOptimize::DrawList=>{
+                ViewOptimize::DrawList=>{
                     let walk = self.walk_from_previous_size(walk);
                     if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
                         cx.walk_turtle_with_area(&mut self.area, walk);
@@ -923,10 +659,10 @@ impl Frame {
                 /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }*/
-                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));//.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll));//.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
         }
         
@@ -935,7 +671,7 @@ impl Frame {
                 let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id) {
                     if child.is_visible() {
-                        let walk = child.get_walk();
+                        let walk = child.walk();
                         if resume {
                             child.draw_walk_widget(cx, walk) ?;
                         }

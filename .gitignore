@@ -10,14 +10,6 @@ Cargo.lock
 **/*.rs.bk
 
 .DS_Store
-/shui/target/
-/webgl/target/
-
-/shui/fontencoder/fontencoder
-/shui/fontencoder/ttf/
-
-/webgl/target/wasm32-unknown-unknown/release/makepad_webgl.wasm
-
 /platform/bind/windows/generate
 
 /edit_repo
@@ -29,4 +21,6 @@ makepad_state.ron
 key.ron
 .vscode
 
-/tools/cargo_makepad/android_33_macos_x64
+/local
+
+/tools/cargo_makepad/android_*

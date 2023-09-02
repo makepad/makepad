@@ -12,22 +12,16 @@ use crate::{
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design!{  
-    import makepad_widgets::frame::*
-    import makepad_widgets::button::Button;
+    import makepad_widgets::base::*
+    import makepad_widgets::theme_desktop_dark::*
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
-    import makepad_widgets::desktop_window::DesktopWindow
-    import makepad_widgets::multi_window::MultiWindow
-    
+
     import makepad_audio_graph::mixer::Mixer;
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
     import makepad_widgets::designer::Designer;
-    import makepad_widgets::slides_view::Slide;
-    import makepad_widgets::slides_view::SlideChapter;
-    import makepad_widgets::slides_view::SlideBody;
-    import makepad_widgets::slides_view::SlidesView;
-    
+
     //import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
     //import makepad_example_numbers::number_grid::NumberGrid;
     // APP
@@ -60,7 +54,7 @@ live_design!{
                 window: {position: vec2(0, 400), inner_size: vec2(800, 800)},
                 pass: {clear_color: #2A}
                 block_signal_event: true;
-                layout: {padding: {top: 30}},
+                padding: {top: 30},
                 <Designer> {}
             }
             <DesktopWindow> {
@@ -80,135 +74,135 @@ live_design!{
                 goal_pos: 0.0
                 
                 <SlideChapter> {
-                    title = {label: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
-                    <SlideBody> {label: "Rik Arends\n"}
+                    title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
+                    <SlideBody> {text: "Rik Arends\n"}
                 }
                 <Slide> {
-                    title = {label: "A long long time ago …"},
-                    <SlideBody> {label: "… in a galaxy nearby\n   Cloud9 IDE & ACE"}
+                    title = {text: "A long long time ago …"},
+                    <SlideBody> {text: "… in a galaxy nearby\n   Cloud9 IDE & ACE"}
                 }
                 <Slide> {
-                    title = {label: "HTML as an IDE UI?\nMadness!"},
-                    <SlideBody> {label: "- Integrating design and code was hard\n- Could not innovate editing\n- Too slow, too hard to control"}
+                    title = {text: "HTML as an IDE UI?\nMadness!"},
+                    <SlideBody> {text: "- Integrating design and code was hard\n- Could not innovate editing\n- Too slow, too hard to control"}
                 }
                 <Slide> {
-                    title = {label: "Let's start over!"},
-                    <SlideBody> {label: "- JavaScript and WebGL for UI\n- Write shaders to style UI\n- A quick demo"}
+                    title = {text: "Let's start over!"},
+                    <SlideBody> {text: "- JavaScript and WebGL for UI\n- Write shaders to style UI\n- A quick demo"}
                 }
                 <Slide> {
-                    title = {label: "Maybe JavaScript\nwas the problem?"},
-                    <SlideBody> {label: "- Great livecoding, but …\n- Chrome crashing tabs after 30 minutes\n- Too slow"}
+                    title = {text: "Maybe JavaScript\nwas the problem?"},
+                    <SlideBody> {text: "- Great livecoding, but …\n- Chrome crashing tabs after 30 minutes\n- Too slow"}
                 }
                 <Slide> {
-                    title = {label: "Rust appears"},
-                    <SlideBody> {label: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
+                    title = {text: "Rust appears"},
+                    <SlideBody> {text: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
                 }
-                <Slide> {title = {label: "Rust is fast: SIMD Mandelbrot"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                <Slide> {title = {text: "Rust is fast: SIMD Mandelbrot"}, 
+                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
-                    <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
-                        <Box>{
+                    <View>{
+                        padding: 0, align:{x:0.5 spacing: 20}
+                        <RoundedView>{
                             draw_bg: { color: #x2A } 
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <Mandelbrot> {walk:{width:Fill, height:Fill}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <Mandelbrot> {width:Fill, height:Fill}
                         }
                     }
                 }
 
-                <Slide> {title = {label: "Instanced rendering"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                <Slide> {title = {text: "Instanced rendering"}, 
+                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
-                    <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
-                        <Box>{
+                    <View>{
+                        padding: 0, align:{x:0.5 spacing: 20}
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <NumberGrid> {walk:{width:Fill, height:Fill}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <NumberGrid> {width:Fill, height:Fill}
                         }
                     }
                 }
                 
                 <Slide> {
-                    title = {label: "Our goal:\nUnify coding and UI design again."},
-                    <SlideBody> {label: "As it was in Visual Basic.\nNow with modern design."}
+                    title = {text: "Our goal:\nUnify coding and UI design again."},
+                    <SlideBody> {text: "As it was in Visual Basic.\nNow with modern design."}
                 }
 
-                <Slide> {title = {label: "Ironfish Desktop"}, 
-                    <Box>{
+                <Slide> {title = {text: "Ironfish Desktop"}, 
+                    <RoundedView>{
                         draw_bg: { color: #x2A }
-                        walk: { margin: 10.0, width: 1600 }
-                        layout:{ padding: 0.0 }
+                         margin: 10.0, width: 1600 
+                         padding: 0.0 
                         <AppDesktop> {}
                     }
                 }
                 
-                <Slide> {title = {label: "Ironfish Mobile"}, 
-                    <Frame>{
-                        layout:{padding: 0, align:{x:0.5}}
-                        walk: { margin: { top: 0 }}
-                        <AppMobile> {walk:{width:400, height: Fill}}
+                <Slide> {title = {text: "Ironfish Mobile"}, 
+                    <View>{
+                        padding: 0, align:{x:0.5}
+                         margin: { top: 0 }
+                        <AppMobile> {width:400, height: Fill}
                     }
                 }
                 
-                <Slide> {title = {label: "Multi modal"}, 
-                    <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                <Slide> {title = {text: "Multi modal"}, 
+                    <View>{
+                        padding: 0, align:{x:0.5 spacing: 20}
 
-                        <AppMobile> {walk:{width:400, height: Fill}}
+                        <AppMobile> {width:400, height: Fill}
 
-                        <Box>{
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
+                             margin: 0.0
+                             padding: 0.0 
                             <AppDesktop> {
-                                walk:{width: Fill, height: Fill}
+                                width: Fill, height: Fill
                             }
                         }
                     }
                 }
                 
-                <Slide> {title = {label: "Visual design"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
-                    <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
-                        <Box>{
+                <Slide> {title = {text: "Visual design"}, 
+                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
+                    <View>{
+                        padding: 0, align:{x:0.5 spacing: 20}
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <AppDesktop> {walk:{width:900}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <AppDesktop> {width:900}
                         }
 
-                        <Box>{
+                        <RoundedView>{
                             draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <Designer> {walk:{width:900}}
+                             margin: 0.0
+                             padding: 0.0 
+                            <Designer> {width:900}
                         } 
                     }
                 }
                 
                 <Slide> {
-                    title = {label: "Our UI language: Live."},
-                    <SlideBody> {label: "- Live editable\n- Design tool manipulates text\n- Inheritance structure\n- Rust-like module system"}
+                    title = {text: "Our UI language: Live."},
+                    <SlideBody> {text: "- Live editable\n- Design tool manipulates text\n- Inheritance structure\n- Rust-like module system"}
                 }
                 
                 <Slide> {
-                    title = {label: "These slides are a Makepad app"},
-                    <SlideBody> {label: "- Show source\n"}
-                    <SlideBody> {label: "- Show Rust API\n"}
+                    title = {text: "These slides are a Makepad app"},
+                    <SlideBody> {text: "- Show source\n"}
+                    <SlideBody> {text: "- Show Rust API\n"}
                 }                
                 
                 <Slide> {
-                    title = {label: "Future"},
-                    <SlideBody> {label: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
+                    title = {text: "Future"},
+                    <SlideBody> {text: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
                 }                
                 
                 <Slide> {
-                    title = {label: "Build for Android"},
-                    <SlideBody> {label: "- SDK installer\n- Cargo makepad android\n"}
+                    title = {text: "Build for Android"},
+                    <SlideBody> {text: "- SDK installer\n- Cargo makepad android\n"}
                 }                
             }
         }*/
@@ -363,18 +357,19 @@ impl App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
-        let preset_lists = self.ui.get_swipe_list_set(ids!(preset_list));
+        //let preset_lists = self.ui.swipe_list_set(ids!(preset_list));
+        
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                if let Some(mut list) = preset_lists.has_widget(&next).borrow_mut() {
+            while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
+                /*if let Some(mut list) = preset_lists.has_widget(&next).borrow_mut() {
                     for i in 0..10 {
                         if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {
-                            item.get_button(id!(label)).set_label(&format!("Button id {i}"));
+                            item.button(id!(label)).set_text(&format!("Button id {i}"));
                             item.draw_widget_all(cx);
                         }
                     }
-                }
+                }*/
             }
             return
         }
@@ -383,20 +378,20 @@ impl AppMain for App {
         let mut actions = ui.handle_widget_event(cx, event);
         
         // handle preset lists events
-        for list in preset_lists.iter() {
+        /*for list in preset_lists.iter() {
             for item in list.items_with_actions(&actions).iter() {
                 // check for actions inside the list item
-                if item.get_button(id!(delete)).clicked(&actions) {
+                if item.button(id!(delete)).clicked(&actions) {
                     // delete the item in the data
                     list.redraw(cx); 
                 }
             }
-        }
+        }*/
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             synth_db.nodes = ironfish.settings.live_read();
-            ui.get_piano(id!(piano)).set_key_focus(cx);
+            ui.piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
         }
         
@@ -408,7 +403,7 @@ impl AppMain for App {
             cx.use_audio_outputs(&devices.default_output());
         }
         
-        ui.get_radio_button_set(ids!(
+        ui.radio_button_set(ids!(
             oscillators.tab1,
             oscillators.tab2,
         )).selected_to_visible(cx, &ui, &actions, ids!(
@@ -416,7 +411,7 @@ impl AppMain for App {
             oscillators.osc2,
         ));
         
-        ui.get_radio_button_set(ids!(
+        ui.radio_button_set(ids!(
             filter_modes.tab1,
             filter_modes.tab2,
         )).selected_to_visible(cx, &ui, &actions, ids!(
@@ -424,7 +419,7 @@ impl AppMain for App {
             preset_pages.tab2_frame,
         ));
         
-        ui.get_radio_button_set(ids!(
+        ui.radio_button_set(ids!(
             mobile_modes.tab1,
             mobile_modes.tab2,
             mobile_modes.tab3,
@@ -434,7 +429,7 @@ impl AppMain for App {
             application_pages.tab3_frame,
         ));
         
-        let display_audio = ui.get_display_audio_set(ids!(display_audio));
+        let display_audio = ui.display_audio_set(ids!(display_audio));
         
         let mut buffers = 0;
         self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
@@ -449,7 +444,7 @@ impl AppMain for App {
             };
         });
         
-        let piano = ui.get_piano_set(ids!(piano));
+        let piano = ui.piano_set(ids!(piano));
         
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
@@ -467,23 +462,23 @@ impl AppMain for App {
             }.into());
         }
         
-        if ui.get_button_set(ids!(panic)).clicked(&actions) {
+        if ui.button_set(ids!(panic)).clicked(&actions) {
             cx.midi_reset();
             self.audio_graph.all_notes_off();
         }
         
-        let sequencer = ui.get_sequencer(id!(sequencer));
+        let sequencer = ui.sequencer(id!(sequencer));
         // lets fetch and update the tick.
         
-        if ui.get_button_set(ids!(clear_grid)).clicked(&actions) {
+        if ui.button_set(ids!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx, &mut actions);
         }
         
-        if ui.get_button_set(ids!(grid_down)).clicked(&actions) {
+        if ui.button_set(ids!(grid_down)).clicked(&actions) {
             sequencer.grid_down(cx, &mut actions);
         }
         
-        if ui.get_button_set(ids!(grid_up)).clicked(&actions) {
+        if ui.button_set(ids!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx, &mut actions);
         }
         

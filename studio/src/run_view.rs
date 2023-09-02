@@ -37,10 +37,10 @@ pub struct DrawApp {
 
 #[derive(Live)]
 pub struct RunView {
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[live] draw_bg: DrawApp,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     #[live] frame_delta: f64,
     #[rust] last_size: (usize, usize),
     #[rust] tick: Timer,
@@ -63,7 +63,7 @@ impl LiveHook for RunView {
 impl RunView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, manager: &mut BuildManager) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
             self.frame += 1;
@@ -172,7 +172,7 @@ impl RunView {
 }
 
 impl Widget for RunView{
-    fn get_walk(&self)->Walk{
+    fn walk(&self)->Walk{
         self.walk
     }
     
