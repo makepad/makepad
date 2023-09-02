@@ -18,7 +18,6 @@ use {
             FileNotification,
             FileRequest,
             FileResponse,
-            unix_path::{UnixPath},
         },
         makepad_widgets::*,
         makepad_widgets::list_view::ListView,
