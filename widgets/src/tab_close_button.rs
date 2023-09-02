@@ -1,67 +1,15 @@
 use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    
-    TabCloseButton= {{TabCloseButton}} {
-        draw_button: {
-            
-            instance hover: float;
-            instance selected: float;
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let mid = self.rect_size / 2.0;
-                let size = (self.hover * 0.25 + 0.5) * 0.25 * length(self.rect_size);
-                let min = mid - vec2(size);
-                let max = mid + vec2(size);
-                sdf.move_to(min.x, min.y);
-                sdf.line_to(max.x, max.y);
-                sdf.move_to(min.x, max.y);
-                sdf.line_to(max.x, min.y);
-                return sdf.stroke(mix(
-                    COLOR_TEXT_DEFAULT,
-                    COLOR_TEXT_HOVER,
-                    self.hover
-                ), 1.0);
-            }
-        }
-        
-        state:{
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_button: {hover: 0.0}
-                    }
-                }
-                
-                on =  {
-                    cursor: Hand,
-                    from: {all: Snap}
-                    apply: {
-                        draw_button: {hover:1.0}
-                    }
-                }
-            }
-        }
-        
-        walk: {
-            height: 10.0,
-            width: 10.0,
-            margin: {right: 5},
-        },
-    }
+    TabCloseButtonBase = {{TabCloseButton}} {}
 }
 
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
     #[live] draw_button: DrawQuad,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
 
-    #[live] walk: Walk
+    #[walk] walk: Walk
 }
 
 impl TabCloseButton {
@@ -78,14 +26,14 @@ impl TabCloseButton {
         cx: &mut Cx,
         event: &Event,
     ) -> TabCloseButtonAction {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_button.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
                 return TabCloseButtonAction::HoverIn;
             }
             Hit::FingerHoverOut(_)=>{
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
                 return TabCloseButtonAction::HoverOut;
             }
             Hit::FingerDown(_) => return TabCloseButtonAction::WasPressed,

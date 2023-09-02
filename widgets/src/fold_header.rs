@@ -6,40 +6,7 @@ use crate::{
 };
 
 live_design!{
-    FoldHeader= {{FoldHeader}} {
-        walk: {
-            width: Fill,
-            height: Fit
-        }
-        body_walk: {
-            width: Fill,
-            height: Fit
-        }
-        layout: {
-            flow: Down,
-        }
-        state: {
-            open = {
-                default: on
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.96, d2: 0.97}
-                    redraw: true
-                    apply: {
-                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                    }
-                }
-                on = {
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.98, d2: 0.95}
-                    redraw: true
-                    apply: {
-                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
-                    }
-                }
-            }
-        }
-    }
+    FoldHeaderBase = {{FoldHeader}} {}
 }
 
 #[derive(Live)]
@@ -49,10 +16,11 @@ pub struct FoldHeader {
     #[rust] area: Area,
     #[live] header: WidgetRef,
     #[live] body: WidgetRef,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
+
     #[live] opened: f64,
-    #[live] layout: Layout,
-    #[live] walk: Walk,
+    #[layout] layout: Layout,
+    #[walk] walk: Walk,
     #[live] body_walk: Walk,
 }
 
@@ -75,20 +43,20 @@ impl Widget for FoldHeader {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
-            if self.state.is_track_animating(cx, id!(open)) {
+        if self.animator_handle_event(cx, event).must_redraw() {
+            if self.animator.is_track_animating(cx, id!(open)) {
                 self.area.redraw(cx);
             }
         };
         
         for item in self.header.handle_widget_event(cx, event) {
-            if item.widget_uid == self.header.get_widget(id!(fold_button)).widget_uid(){
+            if item.widget_uid == self.header.widget(id!(fold_button)).widget_uid(){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
-                        self.animate_state(cx, id!(open.on))
+                        self.animator_play(cx, id!(open.on))
                     }
                     FoldButtonAction::Closing => {
-                        self.animate_state(cx, id!(open.off))
+                        self.animator_play(cx, id!(open.off))
                     }
                     _ => ()
                 }
@@ -104,7 +72,7 @@ impl Widget for FoldHeader {
         self.body.redraw(cx);
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
 
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.header.find_widgets(path, cached, results);

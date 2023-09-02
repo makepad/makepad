@@ -7,28 +7,17 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    Label= {{Label}} {
-        walk:{
-            width:Fit
-            height:Fit
-        }
-        draw_label:{
-            color:#8,
-            wrap: Word
-        }
-    }
+    LabelBase = {{Label}} {}
 }
 
 #[derive(Live)]
 pub struct Label {
-    #[live] draw_label: DrawText,
-    #[live] walk: Walk,
+    #[live] draw_text: DrawText,
+    #[walk] walk: Walk,
     #[live] align: Align,
 
     //margin: Margin,
-    #[live] label: String,
+    #[live] text: RcStringMut,
 } 
 
 impl LiveHook for Label{
@@ -39,16 +28,24 @@ impl LiveHook for Label{
 
 impl Widget for Label {
     fn redraw(&mut self, cx:&mut Cx){
-        self.draw_label.redraw(cx)
+        self.draw_text.redraw(cx)
     }
     
-    fn get_walk(&self)->Walk{
+    fn walk(&self)->Walk{
         self.walk
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
-        self.draw_label.draw_walk(cx, walk, self.align, &self.label);
+        self.draw_text.draw_walk(cx, walk, self.align, self.text.as_ref());
         WidgetDraw::done()
+    }
+    
+    fn text(&self)->String{
+        self.text.as_ref().to_string()
+    }
+    
+    fn set_text(&mut self, v:&str){
+        self.text.as_mut_empty().push_str(v);
     }
 }
 
@@ -57,10 +54,5 @@ impl Widget for Label {
 pub struct LabelRef(WidgetRef); 
 
 impl LabelRef{
-    pub fn set_label(&self, text:&str){
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.label.clear();
-            inner.label.push_str(text);
-        }
-    }
+  
 }

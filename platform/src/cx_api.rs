@@ -72,10 +72,10 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
-    HttpRequest{id:LiveId, request:HttpRequest},
-    WebSocketOpen{id: LiveId, request:HttpRequest},
-    WebSocketSendString{id: LiveId, data:String},
-    WebSocketSendBinary{id: LiveId, data:Vec<u8>},
+    HttpRequest{request_id: LiveId, request:HttpRequest},
+    WebSocketOpen{request_id: LiveId, request:HttpRequest},
+    WebSocketSendString{request_id: LiveId, data:String},
+    WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
 }
 
 impl Cx { 
@@ -391,22 +391,26 @@ impl Cx {
         &self.spawner
     }
 
-    pub fn http_request(&mut self, id:LiveId, request: HttpRequest) {
-        self.platform_ops.push(CxOsOp::HttpRequest{id, request});
+    pub fn http_request(&mut self, request_id: LiveId, request: HttpRequest) {
+        self.platform_ops.push(CxOsOp::HttpRequest{request_id, request});
     }
            
-    pub fn web_socket_open(&mut self, id:LiveId, request: HttpRequest) {
+    pub fn web_socket_open(&mut self, request_id: LiveId, request: HttpRequest) {
         self.platform_ops.push(CxOsOp::WebSocketOpen{
             request,
-            id,
+            request_id,
         });
     }
     
-    pub fn web_socket_send_binary(&mut self, id: LiveId, data: Vec<u8>) {
+    pub fn web_socket_send_binary(&mut self, request_id: LiveId, data: Vec<u8>) {
         self.platform_ops.push(CxOsOp::WebSocketSendBinary{
-            id,
+            request_id,
             data,
         });
+    }
+    
+    pub fn println_resources(&self){
+        println!("Num textures: {}",self.textures.0.pool.len());
     }
 }
 

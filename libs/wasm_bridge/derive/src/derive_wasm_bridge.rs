@@ -74,7 +74,7 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("{");
             
             tb.add("    fn type_name()->&'static str{").string(&name).add("}");
-            tb.add("    fn live_id()->LiveId{LiveId::from_str_with_lut(").string(&name).add(").unwrap()}");
+            tb.add("    fn live_id()->LiveId{LiveId::from_str_with_lut(").string(&name).add(")}");
              
             tb.add("    fn from_wasm_inner(self ,out:&mut FromWasmMsg){");
             tb.add("        match self {");

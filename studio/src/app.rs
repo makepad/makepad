@@ -19,13 +19,8 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
-    import makepad_widgets::file_tree::FileTree;
-    import makepad_widgets::button::Button;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::dock::*;
-    import makepad_widgets::desktop_window::DesktopWindow;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
     
     import makepad_studio::run_view::RunView;
@@ -45,16 +40,16 @@ live_design!{
                 return sdf.result
             }
         }
-        walk: { margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0} }
-        layout: { padding: 0.0 }
-        label: ""
+         margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0 }
+         padding: 0.0 
+        text: ""
     }
     
     App = {{App}} {
         ui: <DesktopWindow> { 
-            caption_bar = {visible: true, caption_label = {label = {label: "Makepad Studio"}}},
+            caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
             dock = <Dock> {
-                walk: {height: Fill, width: Fill}
+                height: Fill, width: Fill
                 
                 root = Splitter {
                     axis: Horizontal,
@@ -112,24 +107,22 @@ live_design!{
                     kind: RunView
                 }
                 CodeEditor = <CodeEditor> {}
-                Welcome = <Rect> {
+                Welcome = <RectView> {
                     draw_bg: {color: #052329}
-                    <Frame> {
-                        walk: { width: Fill, height: Fill}
-                        layout: {
-                            align: {
-                                x: 0.5,
-                                y: 0.5
-                            }
-                            flow: Down
+                    <View> {
+                         width: Fill, height: Fill
+                        align: {
+                            x: 0.5,
+                            y: 0.5
                         }
+                        flow: Down
 
                         <Logo> {}
 
                         <Label>{
-                            label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
-                            walk: {width: Fit, margin:{left:200}}
-                            draw_label: {
+                            text:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                            width: Fit, margin:{left:200}
+                            draw_text: {
                                 text_style: {
                                     font_size: 20.0,
                                     height_factor: 1.0,
@@ -177,10 +170,10 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let dock = self.ui.get_dock(id!(dock));
-        let file_tree = self.ui.get_file_tree(id!(file_tree));
-        let run_view = self.ui.get_run_view(id!(run_view));
-        let log_list = self.ui.get_list_view(id!(log_list));
+        let dock = self.ui.dock(id!(dock));
+        let file_tree = self.ui.file_tree(id!(file_tree));
+        let run_view = self.ui.run_view(id!(run_view));
+        let log_list = self.ui.list_view(id!(log_list));
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);

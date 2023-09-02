@@ -37,8 +37,8 @@ pub type Result<T> = result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Error;
 
-pub fn from_ttf_parser_face(face: &Face<'_>) -> Result<TTFFont> {
-    Ok(TTFFont {
+pub fn from_ttf_parser_face(face: &Face<'_>) -> TTFFont {
+    TTFFont {
         units_per_em: face.units_per_em() as f64,
         ascender: face.ascender() as f64,
         descender: face.descender() as f64,
@@ -50,7 +50,18 @@ pub fn from_ttf_parser_face(face: &Face<'_>) -> Result<TTFFont> {
                 Point::new(x_max as f64, y_max as f64),
             )
         },
-        glyphs: (0..face.number_of_glyphs()).map(ttf_parser::GlyphId).map(|id| {
+        cached_decoded_glyphs: vec![],
+    }
+}
+
+impl TTFFont {
+    pub fn get_glyph_by_id(&mut self, face: &Face<'_>, id: usize) -> Result<&Glyph> {
+        if self.cached_decoded_glyphs.len() <= id {
+            self.cached_decoded_glyphs.resize(id + 1, None);
+        }
+        let glyph_slot = &mut self.cached_decoded_glyphs[id];
+        if glyph_slot.is_none() {
+            let id = ttf_parser::GlyphId(u16::try_from(id).unwrap());
             let horizontal_metrics = HorizontalMetrics {
                 advance_width: face.glyph_hor_advance(id).ok_or(Error)? as f64,
                 left_side_bearing: face.glyph_hor_side_bearing(id).ok_or(Error)? as f64,
@@ -64,11 +75,12 @@ pub fn from_ttf_parser_face(face: &Face<'_>) -> Result<TTFFont> {
                     )
                 })
                 .unwrap_or_default();
-            Ok(Glyph {
+            *glyph_slot = Some(Box::new(Glyph {
                 horizontal_metrics,
                 bounds,
                 outline: outline_builder.0,
-            })
-        }).collect::<Result<_>>()?,
-    })
+            }));
+        }
+        Ok(glyph_slot.as_ref().unwrap())
+    }
 }

@@ -1,21 +1,10 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
+    import makepad_widgets::theme_desktop_dark::*;
+    import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
-    
-    import makepad_widgets::image::Image;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::button::Button;
-    import makepad_widgets::slider::Slider;
-    import makepad_widgets::check_box::CheckBox;
-    import makepad_widgets::text_input::TextInput;
-    import makepad_widgets::radio_button::RadioButton;
-    import makepad_widgets::swipe_list::SwipeList;
-    import makepad_widgets::swipe_list::SwipeListEntry;
-    
+
     import makepad_example_ironfish::sequencer::Sequencer;
     import makepad_audio_widgets::display_audio::DisplayAudio;
     import makepad_audio_widgets::piano::Piano;
@@ -112,51 +101,51 @@ live_design!{
     
     // WIDGETS
     
-    DividerX = <Frame> {
-        walk: {width: Fit, height: Fill, margin: {top: 2.5, right: 1.0, bottom: 2.5, left: 1.0}}
-        layout: {flow: Right}
-        <Box> {
-            walk: {width: 4.0, height: Fill}
+    DividerX = <View> {
+        width: Fit, height: Fill, margin: {top: 2.5, right: 1.0, bottom: 2.5, left: 1.0}
+        flow: Right
+        <RoundedView> {
+            width: 4.0, height: Fill
             draw_bg: {color: (COLOR_UP_2)}
         }
     }
     
-    DividerY = <Frame> {
-        walk: {width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-        layout: {flow: Down}
-        <Box> {
-            walk: {width: Fill, height: 1.0}
+    DividerY = <View> {
+        width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
+        flow: Down
+        <RoundedView> {
+            width: Fill, height: 1.0
             draw_bg: {color: (COLOR_DOWN_5)}
         }
     }
     
-    FillerX = <Frame> {
-        walk: {width: Fill, height: Fit}
+    FillerX = <View> {
+        width: Fill, height: Fit
     }
     
-    FillerY = <Box> {
-        walk: {width: Fit, height: 10}
+    FillerY = <RoundedView> {
+        width: Fit, height: 10
         draw_bg: {color: #f00}
     }
     
-    ElementBox = <Frame> {
-        walk: {width: Fill, height: Fit}
-        layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
+    ElementBox = <View> {
+        width: Fill, height: Fit
+        flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS) spacing: (SPACING_CONTROLS)}
     }
     
-    FishPanelContainer = <Frame> {
-        layout: {flow: Down},
-        walk: {width: Fill, height: Fit}
+    FishPanelContainer = <View> {
+        flow: Down
+        width: Fill, height: Fit
     }
     
     FishTab = <RadioButton> {
-        walk: {height: Fill, width: Fit}
-        layout: {align: {x: 0.0, y: 0.5}}
+        height: Fill, width: Fit
+        align: {x: 0.0, y: 0.5}
         draw_radio: {
             radio_type: Tab,
             color_inactive: (COLOR_UP_OFF),
         }
-        draw_label: {
+        draw_text: {
             color_selected: (COLOR_UP_FULL),
             color_unselected: (COLOR_UP_6),
             color_unselected_hover: (COLOR_UP_6),
@@ -165,10 +154,10 @@ live_design!{
     }
     
     FishDropDown = <DropDown> {
-        walk: {width: Fit}
-        layout: {padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
+        width: Fit
+        padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return mix(
@@ -186,9 +175,9 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                walk: {width: Fit, height: Fit}
-                layout: {
-                    padding: {left: 15, top: 5, bottom: 5, right: 15},
+                width: Fit, height: Fit
+                
+                    padding: {left: 15, top: 5, bottom: 5, right: 15
                 }
             }
         }
@@ -211,12 +200,12 @@ live_design!{
     }
     
     FishButton = <Button> {
-        layout: {
-            align: {x: 0.5, y: 0.5},
+        
+            align: {x: 0.5, y: 0.5
             padding: 10
         }
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
@@ -265,7 +254,7 @@ live_design!{
                 )
             }
         }
-        layout: { align: {x: 0.5, y: 0.5 }}
+         align: {x: 0.5, y: 0.5 }
         icon_walk:{margin:{left:10}, width:16,height:Fit}
         text: "Click"
         draw_bg: {
@@ -315,7 +304,7 @@ live_design!{
             }
         }
         icon_walk: {margin: {left: 0.0}, width: 16, height: Fit}
-        label: ""
+        text: ""
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -336,10 +325,10 @@ live_design!{
     
     
     FishSlider = <Slider> {
-        walk: {
+        
             height: 36,
-        }
-        label: "Change Me"
+        
+        text: "Change Me"
         label_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_6)}
         text_input: {
             cursor_margin_bottom: 3.0,
@@ -416,8 +405,8 @@ live_design!{
     
     InstrumentCheckbox = <ElementBox> {
         checkbox = <CheckBox> {
-            layout: {padding: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
-            label: "CutOff1"
+            padding: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}
+            text: "CutOff1"
             draw_check: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -437,7 +426,7 @@ live_design!{
                     return sdf.result
                 }
             }
-            draw_label: {
+            draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_6)
             }
@@ -445,26 +434,26 @@ live_design!{
     }
     
     InstrumentDropdown = <ElementBox> {
-        layout: {align: {y: 0.5}, padding: 0, flow: Right}
+        align: {y: 0.5 padding: 0, flow: Right}
         label = <Label> {
-            walk: {width: Fit}
-            draw_label: {
+            width: Fit
+            draw_text: {
                 color: (COLOR_UP_6)
                 text_style: <H2_TEXT_BOLD> {},
             }
         }
         dropdown = <FishDropDown> {
-            walk: {margin: {left: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}}
+            margin: {left: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}
         }
     }
     
     PlayPause = <InstrumentCheckbox> {
-        walk: {width: Fit, height: Fit, margin: {top: 10, right: 0, bottom: 0, left: 0}}
-        layout: {align: {x: 0.0, y: 0.5}}
+        width: Fit, height: Fit, margin: {top: 10, right: 0, bottom: 0, left: 0}
+        align: {x: 0.0, y: 0.5}
         draw_bg: {color: (COLOR_UP_OFF)}
         checkbox = {
-            walk: {width: 20, height: 20}
-            label: ""
+            width: 20, height: 20
+            text: ""
             draw_check: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -493,12 +482,12 @@ live_design!{
     }
     
     FishToggle = <ElementBox> {
-        layout: {padding: <SPACING_0> {}}
+        padding: <SPACING_0> {}
         checkbox = <CheckBox> {
-            layout: {padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}}
-            label: "CutOff1"
+            padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}
+            text: "CutOff1"
             label_walk: {margin: {left: 45.0, top: 8, bottom: 8, right: 10}}
-            state: {
+            animator: {
                 selected = {
                     default: off
                     off = {
@@ -537,7 +526,7 @@ live_design!{
                     return sdf.result
                 }
             }
-            draw_label: {
+            draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
             }
@@ -572,30 +561,30 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             color: (COLOR_UP_6)
         }
     }
     
     
-    SequencerControls = <Frame> {
-        layout: {flow: Down, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}}
-        walk: {width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}}
+    SequencerControls = <View> {
+        flow: Down, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}
+        width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}
         
-        <Frame> {
-            walk: {width: Fill, height: Fit, margin: 0.0}
-            layout: {align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS), padding: 0.0}
+        <View> {
+            width: Fill, height: Fit, margin: 0.0
+            align: {x: 0.0, y: 0.5 spacing: (SPACING_CONTROLS), padding: 0.0}
 
             playpause = <PlayPause> {}
             
             speed = <TextSlider> {
-                walk: {width: 110, height: 35, margin: 0.0}
+                width: 110, height: 35, margin: 0.0
                 draw_bg: {color: (COLOR_UP_OFF)}
                 slider = {
                     min: 0.0
                     max: 240.0
-                    label: "BPM"
+                    text: "BPM"
                 }
             }
             
@@ -603,8 +592,8 @@ live_design!{
 
             <Image> {
                 source: dep("crate://self/resources/tinrs_mobile.png"),
-                walk: {width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 } }
-                layout: {padding: 0}
+                width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0  }
+                padding: 0
             }
             
             share = <IconButton> {
@@ -612,49 +601,49 @@ live_design!{
                     svg_file: (ICO_SHARE),
                 }
                 icon_walk: { height: 14.0, width: Fit }
-                walk: {margin: {top: 5.0, right: -7.5, bottom: 5.0, left: 0.0 }}
-                layout: {padding: 10.0}
+                margin: {top: 5.0, right: -7.5, bottom: 5.0, left: 0.0 }
+                padding: 10.0
             }
             platformtoggle = <IconButton> {
                 draw_icon: { svg_file: (ICO_PLAT_DESKTOP) }
-                walk: {margin: { top: 0.0, right: -5, bottom: 0, left: 0 }}
-                layout: {padding: 10.0}
+                margin: { top: 0.0, right: -5, bottom: 0, left: 0 }
+                padding: 10.0
             }
             
         }
         
-        <Frame> {
-            walk: {width: Fill, height: Fit, margin: 0.0}
-            layout: {align: {x: 0.0, y: 0.5}, spacing: 0.0, padding: 0.0}
+        <View> {
+            width: Fill, height: Fit, margin: 0.0
+            align: {x: 0.0, y: 0.5 spacing: 0.0, padding: 0.0}
             
             arp = <FishToggle> {
-                walk: {margin: 0.0}
-                layout: {padding: <SPACING_0> {}}
+                margin: 0.0
+                padding: <SPACING_0> {}
                 checkbox = {
-                    label: "Arp"
-                    layout: {padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}}
-                    walk: {margin: <SPACING_0> {}}
+                    text: "Arp"
+                    padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}
+                    margin: <SPACING_0> {}
                 }
-                walk: {width: Fit, height: Fit, margin: <SPACING_0> {}}
+                width: Fit, height: Fit, margin: <SPACING_0> {}
             }
             
             rootnote = <InstrumentDropdown> {
-                walk: {height: Fit, width: Fit, margin: 0}
-                layout: {align: {x: 0.0, y: 0.5}, padding: 0}
+                height: Fit, width: Fit, margin: 0
+                align: {x: 0.0, y: 0.5 padding: 0}
                 draw_bg: {color: (COLOR_UP_OFF)}
                 dropdown = {
-                    walk: {margin: 5}
+                    margin: 5
                     labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
                     values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
                 }
             }
             
             scaletype = <InstrumentDropdown> {
-                walk: {height: Fit, width: 90.0}
-                layout: {align: {x: 0.0, y: 0.5}}
+                height: Fit, width: 90.0
+                align: {x: 0.0, y: 0.5}
                 draw_bg: {color: (COLOR_UP_OFF)}
                 dropdown = {
-                    walk: {margin: 5}
+                    margin: 5
                     labels: ["Minor", "Major", "Dorian", "Pentatonic"]
                     values: [Minor, Major, Dorian, Pentatonic]
                 }
@@ -662,21 +651,21 @@ live_design!{
             
             <FillerX> {}
             
-            grid_up = <IconButton> { draw_icon: { svg_file: (ICO_UP) }, icon_walk: {height: 7.5, width: Fit}, walk: { margin: 0.0 }, layout: {padding: 10.0} }
-            grid_down = <IconButton> { draw_icon: { svg_file: (ICO_DOWN) }, icon_walk: {height: 7.5, width: Fit}, walk: { margin: 0.0 }, layout: {padding: 10.0} }
-            clear_grid = <IconButton> { draw_icon: { svg_file: (ICO_SEQ_SWEEP) }, walk: { margin: { top: 0.0, right: -5, bottom: 0.0, left: 0.0 } }, layout: {padding: 10.0 } }
+            grid_up = <IconButton> { draw_icon: { svg_file: (ICO_UP) }, icon_walk: {height: 7.5, width: Fit},  margin: 0.0  padding: 10.0 }
+            grid_down = <IconButton> { draw_icon: { svg_file: (ICO_DOWN) }, icon_walk: {height: 7.5, width: Fit},  margin: 0.0  padding: 10.0 }
+            clear_grid = <IconButton> { draw_icon: { svg_file: (ICO_SEQ_SWEEP) },  margin: { top: 0.0, right: -5, bottom: 0.0, left: 0.0  }, padding: 10.0  }
             
         }
         
     }
     
-    SequencerPanel = <Frame> {
-        walk: {width: Fill, height: Fill, margin: 0.0}
-        layout: {flow: Down, spacing: 0.0}
+    SequencerPanel = <View> {
+        width: Fill, height: Fill, margin: 0.0
+        flow: Down, spacing: 0.0
         
         sequencer = <Sequencer> {
-            walk: {width: Fill, height: Fill, margin: {top: 0, right: 0, bottom: 10, left: 0}}
-            //layout: {padding: 0.0}
+            width: Fill, height: Fill, margin: {top: 0, right: 0, bottom: 10, left: 0}
+            //padding: 0.0
             
             button: {
                 draw_button: {
@@ -722,37 +711,37 @@ live_design!{
         }
     }
     
-    ModeSequencer = <Frame> {
-        walk: {width: Fill, height: Fill, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}}
-        layout: {flow: Down}
+    ModeSequencer = <View> {
+        width: Fill, height: Fill, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}
+        flow: Down
         
-        <SequencerPanel> {walk: {height: Fill, width: Fill}}
+        <SequencerPanel> {height: Fill, width: Fill}
         
-        PresetNavigation = <Frame> {
-            walk: {width: Fill, height: Fit}
-            layout: {flow: Right, align: {x: 0.0, y: 0.5}}
+        PresetNavigation = <View> {
+            width: Fill, height: Fit
+            flow: Right, align: {x: 0.0, y: 0.5}
             
             <IconButton> {
                 draw_icon: {svg_file: (ICO_PREV)}
                 icon_walk: {width: 10, height: Fit}
             }
             
-            <Frame> {}
+            <View> {}
             
-            <Frame> {
-                walk: {width: Fit, height: Fit}
-                layout: {flow: Right, align: {x: 0.0, y: 0.5}}
+            <View> {
+                width: Fit, height: Fit
+                flow: Right, align: {x: 0.0, y: 0.5}
                 
                 label = <Label> {
-                    draw_label: {
+                    draw_text: {
                         text_style: {font_size: (FONT_SIZE_H1)},
                         color: (COLOR_UP_6)
                     }
-                    label: "Preset Name"
+                    text: "Preset Name"
                 }
             }
             
-            <Frame> {}
+            <View> {}
             
             <IconButton> {
                 draw_icon: {svg_file: (ICO_NEXT)}
@@ -762,10 +751,10 @@ live_design!{
     }
     
     ChordButtonA = <Button> {
-        walk: {width: Fill, height: Fill, margin: 2.5}
-        layout: {align: {x: 0.5, y: 0.5}, padding: 0.0}
+        width: Fill, height: Fill, margin: 2.5
+        align: {x: 0.5, y: 0.5 padding: 0.0}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
@@ -805,10 +794,10 @@ live_design!{
     }
     
     ChordButtonB = <Button> {
-        walk: {width: Fill, height: Fill, margin: {top: 2.5, right: 0.0, bottom: 2.5, left: 0}}
-        layout: {align: {x: 0.5, y: 0.5}, padding: 0.0}
+        width: Fill, height: Fill, margin: {top: 2.5, right: 0.0, bottom: 2.5, left: 0}
+        align: {x: 0.5, y: 0.5 padding: 0.0}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
                 return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
@@ -847,9 +836,9 @@ live_design!{
         
     }
     
-    ChordStrip = <Box> {
-        walk: {width: Fill, height: Fill}
-        layout: {flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5}, align: {x: 0.5, y: 0.5}}
+    ChordStrip = <RoundedView> {
+        width: Fill, height: Fill
+        flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5 align: {x: 0.5, y: 0.5}}
         draw_bg: {
             color: (COLOR_UP_2),
             radius: 2.5
@@ -857,18 +846,18 @@ live_design!{
         
         
         label = <Label> {
-            walk: {width: 40, height: Fill, margin: 5.0}
-            draw_label: {
+            width: 40, height: Fill, margin: 5.0
+            draw_text: {
                 text_style: <H3_TEXT_REGULAR> {},
                 color: (COLOR_UP_6)
             }
-            label: "change me"
+            text: "change me"
         }
         
         <ChordButtonA> {}
         <ChordButtonA> {}
         <ChordButtonA> {}
-        <ChordButtonA> {walk: {margin: {top: 2.5, right: 5, bottom: 2.5, left: 2.5}}}
+        <ChordButtonA> {margin: {top: 2.5, right: 5, bottom: 2.5, left: 2.5}}
         <ChordButtonB> {}
         <DividerX> {}
         <ChordButtonB> {}
@@ -879,32 +868,32 @@ live_design!{
         
     }
     
-    ChordPiano = <Frame> {
-        layout: {flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}}
+    ChordPiano = <View> {
+        flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}
         
-        <ChordStrip> {label = {label: "Em"}}
-        <ChordStrip> {label = {label: "Am"}}
-        <ChordStrip> {label = {label: "Dm"}}
-        <ChordStrip> {label = {label: "G"}}
-        <ChordStrip> {label = {label: "C"}}
-        <ChordStrip> {label = {label: "F"}}
-        <ChordStrip> {label = {label: "Bb"}}
-        <ChordStrip> {label = {label: "Bdim"}}
+        <ChordStrip> {label = {text: "Em"}}
+        <ChordStrip> {label = {text: "Am"}}
+        <ChordStrip> {label = {text: "Dm"}}
+        <ChordStrip> {label = {text: "G"}}
+        <ChordStrip> {label = {text: "C"}}
+        <ChordStrip> {label = {text: "F"}}
+        <ChordStrip> {label = {text: "Bb"}}
+        <ChordStrip> {label = {text: "Bdim"}}
     }
     
-    ModePlay = <Frame> {
-        layout: {flow: Down, spacing: (SPACING_CONTROLS)}
-        walk: {width: Fill, height: Fill, margin: {top: 20}}
+    ModePlay = <View> {
+        flow: Down, spacing: (SPACING_CONTROLS)
+        width: Fill, height: Fill, margin: {top: 20}
         
         <ChordPiano> {}
         
-        <Frame> {
-            layout: {flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}, spacing: 10}
-            walk: {width: Fill, height: Fit}
+        <View> {
+            flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS) spacing: 10}
+            width: Fill, height: Fit
             
-            <Box> {
-                layout: {flow: Down}
-                walk: {width: Fill, height: 200}
+            <RoundedView> {
+                flow: Down
+                width: Fill, height: 200
                 draw_bg: {
                     color: (COLOR_UP_2),
                     radius: 5.0
@@ -912,17 +901,17 @@ live_design!{
                 
             }
             
-            <Frame> {
-                layout: {flow: Down}
-                walk: {width: Fill, height: Fill}
+            <View> {
+                flow: Down
+                width: Fill, height: Fill
                 draw_bg: {color: #f00}
                 
                 crushamount = <FishSlider> {
-                    label: "Crush"
+                    text: "Crush"
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Amount"
+                        text: "Amount"
                         
                     }
                 }
@@ -930,33 +919,33 @@ live_design!{
                 <FillerY> {}
                 
                 chorusmix = <FishSlider> {
-                    label: "Chorus"
+                    text: "Chorus"
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Mix"
+                        text: "Mix"
                     }
                 }
                 
                 <FillerY> {}
                 
                 delaysend = <FishSlider> {
-                    label: "Delay",
+                    text: "Delay",
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Delay Send"
+                        text: "Delay Send"
                     }
                 }
                 
                 <FillerY> {}
                 
                 porta = <FishSlider> {
-                    label: "Portamento",
+                    text: "Portamento",
                     slider = {
                         min: 0.0
                         max: 1.0
-                        label: "Portamento"
+                        text: "Portamento"
                     }
                 }
                 
@@ -994,33 +983,33 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_BOLD> {},
             color: (COLOR_UP_6)
         }
     }
-    
+    /*
     PresetListEntry = <SwipeListEntry> {
-        layout: {flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5}, align: {x: 0.5, y: 0.5}}
-        walk: { width: Fill, height: Fit, margin: 0 }
+        flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5 align: {x: 0.5, y: 0.5}}
+         width: Fill, height: Fit, margin: 0 
         
-        center: <Frame> {
-            layout: {flow: Down, align: {x: 0.5, y: 0.0}, padding: {top: 0, right: 0, bottom: 0, left: 0}}
-            walk: {width: Fill, height: Fit, margin: 0.0}
-            <Frame> {
-                layout: {flow: Right, align: {x: 0.5, y: 0.0}, padding: 0.0}
-                walk: { width: Fill, height: Fit, margin: {top: 2.5, right: 0, bottom: 7.5, left: 0}}
+        center: <View> {
+            flow: Down, align: {x: 0.5, y: 0.0 padding: {top: 0, right: 0, bottom: 0, left: 0}}
+            width: Fill, height: Fit, margin: 0.0
+            <View> {
+                flow: Right, align: {x: 0.5, y: 0.0 padding: 0.0}
+                 width: Fill, height: Fit, margin: {top: 2.5, right: 0, bottom: 7.5, left: 0}
                 
                 label = <Button> {
-                    walk: { width: Fill, height: Fill, margin: {top: 5} }
-                    layout: {align: {x: 0.0, y: 0.5}, padding: { left: 5 }}
-                    draw_label: {
+                     width: Fill, height: Fill, margin: {top: 5 }
+                    align: {x: 0.0, y: 0.5 padding: { left: 5 }}
+                    draw_text: {
                         fn get_color(self) -> vec4 {
                             return mix( (COLOR_UP_5), (COLOR_UP_3), self.pressed )
                         }
                         text_style: <H2_TEXT_REGULAR>{},
                     }
-                    label: "Preset Name"
+                    text: "Preset Name"
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1029,13 +1018,13 @@ live_design!{
                     }
                 }
                 
-                <Box> {
-                    walk: {width: Fit, height: Fit}
+                <RoundedView> {
+                    width: Fit, height: Fit
                     
-                    layout: {align: {x: 0.0, y: 0.5}}
+                    align: {x: 0.0, y: 0.5}
                     // presetfavorite = <PresetFavorite> {
-                    //     walk: {width: 30, height: 30, margin: {top: 15} }
-                    //     label: " "
+                    //     width: 30, height: 30, margin: {top: 15 }
+                    //     text: " "
                     // }
                     
                 <IconButton> {
@@ -1076,14 +1065,14 @@ live_design!{
                     
                 }
             }
-            <DividerY> {walk: { margin: 0.0}, layout: {padding: 0.0}}
+            <DividerY> { margin: 0.0 padding: 0.0}
         }
-    }
+    }*/
     
     PaginationButton = <FishButton> {
-        label: "1"
-        walk: {width: 40, height: 40, margin: {top: 20}}
-        draw_label: {text_style: {font_size: (FONT_SIZE_H2)}}
+        text: "1"
+        width: 40, height: 40, margin: {top: 20}
+        draw_text: {text_style: {font_size: (FONT_SIZE_H2)}}
         
         draw_bg: {
             // instance pressed: 0.0
@@ -1105,113 +1094,113 @@ live_design!{
         }
     }
     
-    Pagination = <Frame> {
-        walk: {width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}}
-        layout: {flow: Right, align: {x: 0.5, y: 0.0}, spacing: 10}
+    Pagination = <View> {
+        width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}
+        flow: Right, align: {x: 0.5, y: 0.0 spacing: 10}
         
-        <PaginationButton> {label: "…"}
-        <PaginationButton> {label: "3"}
-        <PaginationButton> {label: "4"}
-        <PaginationButton> {label: "5"}
-        <PaginationButton> {label: "6"}
-        <PaginationButton> {label: "7"}
-        <PaginationButton> {label: "…"}
+        <PaginationButton> {text: "…"}
+        <PaginationButton> {text: "3"}
+        <PaginationButton> {text: "4"}
+        <PaginationButton> {text: "5"}
+        <PaginationButton> {text: "6"}
+        <PaginationButton> {text: "7"}
+        <PaginationButton> {text: "…"}
     }
-    
+    /*
     PresetList = <SwipeList> {
-        walk: {height: Fill}
+        height: Fill
         Entry = <PresetListEntry> {}
     }
-    
-    PresetListFavs = <ScrollY> {
+    */
+    PresetListFavs = <ScrollYView> {
         
-        walk: {width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}}
-        layout: {flow: Down, align: {x: 0.5, y: 0.0},}
+        width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}
+        flow: Down, align: {x: 0.5, y: 0.0}
     }
     
-    ModePresetmanager = <Box> {
-        walk: {width: Fill, height: Fill}
-        layout: {flow: Down}
+    ModePresetmanager = <RoundedView> {
+        width: Fill, height: Fill
+        flow: Down
         
-        <GradientY> {
+        <GradientYView> {
             draw_bg: {color: (COLOR_DOWN_OFF), color2: (COLOR_DOWN_2)}
-            walk: {width: Fill, height: 50}
-            layout: {flow: Right}
+            width: Fill, height: 50
+            flow: Right
             
-            <Frame> {
-                walk: {width: Fill, margin: {top: 0, right: (SPACING_OS), bottom: 0, left: (SPACING_OS)}}
-                layout: {align: {x: 0.0, y: 1.0}}
+            <View> {
+                width: Fill, margin: {top: 0, right: (SPACING_OS), bottom: 0, left: (SPACING_OS)}
+                align: {x: 0.0, y: 1.0}
                 
                 <TextInput> {
-                    walk: {width: Fill, height: 50}
-                    layout: {align: {x: 0.0, y: 0.5}}
+                    width: Fill, height: 50
+                    align: {x: 0.0, y: 0.5}
                     text: "Search"
-                    draw_label: {
+                    draw_text: {
                         text_style: <H2_TEXT_BOLD> {font_size: (FONT_SIZE_H1)}
                     }
                 }
-                filter_modes = <Frame> {
-                    walk: {width: Fit}
-                    layout: {spacing: 10, align: {x: 0.0, y: 1.0}}
+                filter_modes = <View> {
+                    width: Fit
+                    spacing: 10, align: {x: 0.0, y: 1.0}
                     
                     tab1 = <FishTab> {
-                        label: "All",
-                        walk: {height: Fit, margin: 10}
-                        state: {selected = {default: on}},
-                        draw_label: {color_selected: (COLOR_UP_8)}
+                        text: "All",
+                        height: Fit, margin: 10
+                        animator: {selected = {default: on}},
+                        draw_text: {color_selected: (COLOR_UP_8)}
                     }
                     tab2 = <FishTab> {
-                        label: "Favorites",
-                        walk: {height: Fit, margin: 10}
-                        draw_label: {color_selected: (COLOR_UP_8)}
+                        text: "Favorites",
+                        height: Fit, margin: 10
+                        draw_text: {color_selected: (COLOR_UP_8)}
                     }
                 }
             }
             
         }
-        preset_pages = <Frame> {
-            preset_list = <PresetList> {}
+        preset_pages = <View> {
+            /*preset_list = <PresetList> {}*/
             tab2_frame = <PresetListFavs> {visible: false}
         }
         
         // <Pagination> {}
     }
     
-    AppMobile = <Frame> {
+    AppMobile = <View> {
         design_mode: false,
-        walk: {width: Fill, height: Fill}
-        layout: {padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down}
+        width: Fill, height: Fill
+        padding: 0, align: {x: 0.0, y: 0.0 spacing: 0., flow: Down}
         
-        <GradientY> {
+        <GradientYView> {
             draw_bg: {color: (GRADIENT_A), color2: (GRADIENT_B)}
-            layout: {flow: Down, spacing: (SPACING_BASE_PADDING)}
+            flow: Down, spacing: (SPACING_BASE_PADDING)
             
-            os_header_placeholder = <Box> {
-                walk: {width: Fill, height: 50, margin: 0}
-                layout: {flow: Right, spacing: (SPACING_BASE_PADDING), padding: 0}
+            os_header_placeholder = <RoundedView> {
+                width: Fill, height: 50, margin: 0
+                flow: Right, spacing: (SPACING_BASE_PADDING), padding: 0
                 draw_bg: {color: (COLOR_DOWN_1)}
             }
             
             <SequencerControls> {}
             
-            application_pages = <Frame> {
-                walk: {margin: 0.0}
-                layout: {padding: 0.0}
+            application_pages = <View> {
+                margin: 0.0
+                padding: 0.0
                 
                 tab1_frame = <ModeSequencer> {}
                 tab2_frame = <ModePlay> {visible: false} // TODO: enable again
                 tab3_frame = <ModePresetmanager> {visible: false} // TODO: enable again
             }
             
-            mobile_menu = <Box> {
-                walk: {width: Fill, height: 120}
-                layout: {flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20}
+            mobile_menu = <RoundedView> {
+                width: Fill, height: 120
+                flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20
                 draw_bg: {color: (COLOR_DOWN_2)}
                 
-                mobile_modes = <Frame> {
+                mobile_modes = <View> {
                     tab1 = <FishTab> {
-                        state: {selected = {default: on}},
-                        label: "Sequencer"
+                        animator: {selected = {default: on}},
+                        text: "Sequencer"
                         draw_icon: {
                             svg_file: (ICO_SEQ),
                             fn get_color(self) -> vec4 {
@@ -1222,12 +1211,12 @@ live_design!{
                                 )
                             }
                         }
-                        walk: {width: Fill}
+                        width: Fill
                         icon_walk: {width: 27.5, height: Fit}
-                        layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
+                        flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}
                     }
                     tab2 = <FishTab> {
-                        label: "Play",
+                        text: "Play",
                         draw_icon: {
                             svg_file: (ICO_LIVEPLAY),
                             fn get_color(self) -> vec4 {
@@ -1238,12 +1227,12 @@ live_design!{
                                 )
                             }
                         }
-                        walk: {width: Fill}
+                        width: Fill
                         icon_walk: {width: 34, height: Fit, margin: {top: 0.0, right: 0.0, bottom: 5.0, left: 0.0}}
-                        layout: {flow: Down, spacing: 3.0, align: {x: 0.5, y: 0.5}}
+                        flow: Down, spacing: 3.0, align: {x: 0.5, y: 0.5}
                     }
                     tab3 = <FishTab> {
-                        label: "Presets",
+                        text: "Presets",
                         draw_icon: {
                             svg_file: (ICO_PRESET),
                             fn get_color(self) -> vec4 {
@@ -1254,9 +1243,9 @@ live_design!{
                                 )
                             }
                         }
-                        walk: {width: Fill}
+                        width: Fill
                         icon_walk: {width: 30, height: Fit}
-                        layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
+                        flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}
                     }
                 }
             }

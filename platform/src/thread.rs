@@ -86,13 +86,13 @@ impl<T> ToUIReceiver<T> {
     
     pub fn try_recv_flush(&self) -> Result<T, TryRecvError> {
         let mut store_last = None;
-        loop{
+        loop {
             match self.receiver.try_recv() {
                 Ok(last) => {
                     store_last = Some(last);
                 },
                 Err(TryRecvError::Empty) => {
-                    if let Some(last) = store_last{
+                    if let Some(last) = store_last {
                         return Ok(last)
                     }
                     else {
@@ -100,7 +100,7 @@ impl<T> ToUIReceiver<T> {
                     }
                 },
                 Err(TryRecvError::Disconnected) => {
-                    return  Err(TryRecvError::Disconnected)
+                    return Err(TryRecvError::Disconnected)
                 }
             }
         }
@@ -171,12 +171,95 @@ impl<T> FromUIReceiver<T> {
     }
 }
 
-pub struct ThreadPool<T: Clone + Send + 'static> {
+pub struct RevThreadPool {
+    tasks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static >> >>,
+}
+
+impl RevThreadPool {
+    pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
+        let tasks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static >> >> = Default::default();
+        
+        for _ in 0..num_threads {
+            let tasks = tasks.clone();
+            cx.spawn_thread(move || loop {
+                let task = if let Ok(mut tasks) = tasks.lock() {
+                    tasks.pop()
+                }
+                else {
+                    panic!();
+                };
+                if let Some(task) = task {
+                    task();
+                }
+            })
+        }
+        Self {
+            tasks
+        }
+    }
+    
+    pub fn execute<F>(&self, task: F) where F: FnOnce() + Send + 'static {
+        self.tasks.lock().unwrap().insert(0, Box::new(task));
+    }
+    
+    pub fn execute_rev<F>(&self, task: F) where F: FnOnce() + Send + 'static {
+        self.tasks.lock().unwrap().push(Box::new(task));
+    }
+}
+
+pub struct TagThreadPool<T: Clone + Send + 'static + PartialEq> {
+    tasks: Arc<Mutex<Vec<(T, Box<dyn FnOnce(T) + Send + 'static >) >> >,
+}
+
+impl<T> TagThreadPool<T>where T: Clone + Send + 'static + PartialEq {
+    pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
+        let tasks: Arc<Mutex<Vec<(T, Box<dyn FnOnce(T) + Send + 'static >) >> > = Default::default();
+        
+        for _ in 0..num_threads {
+            let tasks = tasks.clone();
+            cx.spawn_thread(move || loop {
+                let task = if let Ok(mut tasks) = tasks.lock() {
+                    tasks.pop()
+                }
+                else {
+                    panic!()
+                };
+                if let Some((tag, task)) = task {
+                    task(tag);
+                }
+                else{
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+        }
+        Self {
+            tasks
+        }
+    }
+    
+    pub fn execute<F>(&self, tag: T, task: F) where F: FnOnce(T) + Send + 'static {
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain( | v | v.0 != tag);
+            tasks.insert(0, (tag, Box::new(task)));
+        }
+    }
+    
+    pub fn execute_rev<F>(&self, tag: T, task: F) where F: FnOnce(T) + Send + 'static {
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain( | v | v.0 != tag);
+            tasks.push((tag, Box::new(task)));
+        }
+    }
+}
+
+
+
+pub struct MessageThreadPool<T: Clone + Send + 'static> {
     sender: Sender<Box<dyn FnOnce(Option<T>) + Send + 'static >>,
     msg_senders: Vec<Sender<T >>
 }
 
-impl<T> ThreadPool<T> where T: Clone + Send + 'static {
+impl<T> MessageThreadPool<T> where T: Clone + Send + 'static {
     pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
         let (sender, receiver) = channel::<Box<dyn FnOnce(Option<T>) + Send + 'static >> ();
         let receiver = Arc::new(Mutex::new(receiver));
