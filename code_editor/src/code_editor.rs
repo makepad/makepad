@@ -82,7 +82,7 @@ live_design! {
         width: Fill,
         height: Fill,
         margin: 0,
-    
+        scroll_bars: <ScrollBars>{}
         draw_bg:{
             draw_depth: 0.0,
             color:#3

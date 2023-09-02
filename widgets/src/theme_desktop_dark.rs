@@ -896,7 +896,7 @@ live_design!{
             bottom: 0.0,
         },
         
-        close_button: <TabCloseButton>{}
+        close_button: <TabCloseButton> {}
         draw_name: {
             text_style: <THEME_FONT_LABEL> {}
             instance hover: 0.0
@@ -995,7 +995,7 @@ live_design!{
         width: Fill
         height: Fixed((THEME_TAB_HEIGHT))
         
-        scroll_bars: <ScrollBars>{
+        scroll_bars: <ScrollBars> {
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
@@ -1489,6 +1489,23 @@ live_design!{
             draw_bg: {is_folder: 1.0}
             draw_name: {is_folder: 1.0}
         }
+        filler: {
+            fn pixel(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    mix(
+                        THEME_COLOR_BG_UNFOCUSSED,
+                        THEME_COLOR_BG_SELECTED,
+                        self.focussed
+                    ),
+                    self.selected
+                );
+            }
+        }
         flow: Down,
         clip_x: true,
         clip_y: true
@@ -1602,7 +1619,6 @@ live_design!{
         height: Fit,
         margin: {left: 5.0, top: 0.0, right: 0.0}
         padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
-        button:<Button>{}
         draw_bg: {
             instance pressed: 0.0
             instance hover: 0.0
