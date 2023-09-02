@@ -18,8 +18,6 @@ use {
             FileClientAction,
             FileNodeData,
             FileTreeData,
-            unix_str::UnixString,
-            unix_path::UnixPathBuf,
         },
     },
 };
@@ -27,11 +25,11 @@ use {
 #[derive(Default)]
 pub struct FileSystem {
     pub file_client: FileClient,
-    pub root_path: UnixPathBuf,
+    pub root_path: String,
     pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
-    pub tab_id_to_path: HashMap<LiveId, UnixPathBuf>,
+    pub tab_id_to_path: HashMap<LiveId, String>,
     pub tab_id_to_session: HashMap<LiveId, Session>,
-    pub open_documents: HashMap<UnixPathBuf, Option<Rc<RefCell<Document>>>>
+    pub open_documents: HashMap<String, Option<Rc<RefCell<Document>>>>
 }
 
 #[derive(Debug)]
@@ -49,7 +47,7 @@ impl FileNode {
 
 #[derive(Debug)]
 pub struct FileEdge {
-    pub name: UnixString,
+    pub name: String,
     pub file_node_id: FileNodeId,
 }
 
@@ -123,7 +121,7 @@ impl FileSystem {
         }
     }
     
-    pub fn request_open_file(&mut self, tab_id:LiveId, path:UnixPathBuf){
+    pub fn request_open_file(&mut self, tab_id:LiveId, path:String){
         // ok lets see if we have a document
         // ifnot, we create a new one
         self.tab_id_to_path.insert(tab_id, path.clone());
@@ -167,18 +165,15 @@ impl FileSystem {
         self.file_nodes.get(&file_node_id).unwrap().name.clone()
     }
     
-    pub fn file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
-        let mut components = Vec::new();
+    pub fn file_node_path(&self, file_node_id: FileNodeId) -> String {
+        let mut path = self.root_path.clone();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
-            components.push(&edge.name);
+            path.push_str("/");
+            path.push_str(&edge.name);
             file_node = &self.file_nodes[edge.file_node_id];
         }
-        self.root_path.join(components.into_iter().rev().collect::<UnixPathBuf>())
-    }
-    
-    pub fn _file_path_join(&self, components: &[&str]) -> UnixPathBuf {
-        self.root_path.join(components.into_iter().rev().collect::<UnixPathBuf>())
+        path
     }
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
@@ -191,7 +186,7 @@ impl FileSystem {
             let file_node_id = file_node_id.unwrap_or(LiveId::unique().into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
-                | edge | edge.name.to_string_lossy().to_string(),
+                | edge | edge.name.clone(),
             );
             let node = FileNode {
                 parent_edge,
