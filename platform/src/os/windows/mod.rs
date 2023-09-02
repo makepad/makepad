@@ -11,7 +11,7 @@ pub mod media_foundation;
 //pub mod com_sys;
 pub mod d3d11;
 pub mod windows;
-
+pub mod windows_stdin;
 pub(crate) use crate::os::windows::d3d11::*; 
 pub(crate) use crate::os::windows::windows::*;
 pub(crate) use crate::os::windows::winrt_midi::{OsMidiInput, OsMidiOutput};
