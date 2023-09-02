@@ -10,6 +10,7 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
+    import makepad_widgets::theme_desktop_dark::Button as MyButton;
     
     TEXT_BIG = 12.0
     
@@ -136,7 +137,7 @@ live_design!{
     
     
     
-    BarButton = <Button> {
+    BarButton = <MyButton> {
         padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
         margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
         text: "Cancel"
