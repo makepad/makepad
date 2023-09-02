@@ -76,18 +76,26 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Import(module_id) => {
+                LiveValue::Import(live_import) => {
                     // lets verify it points anywhere
                     let mut found = false;
                     let is_glob = in_node.id == LiveId::empty();
-                    if let Some(nodes) = self.live_registry.module_id_to_expanded_nodes(*module_id) {
-                        let file_id = self.live_registry.module_id_to_file_id(*module_id).unwrap();
+                    if let Some(nodes) = self.live_registry.module_id_to_expanded_nodes(live_import.module_id) {
+                        let file_id = self.live_registry.module_id_to_file_id(live_import.module_id).unwrap();
                         let mut node_iter = Some(1);
                         while let Some(index) = node_iter {
-                            if is_glob || nodes[index].id == in_node.id { // its *
-                                // ok so what do we store...
+                            if is_glob{
                                 if let LiveValue::Root {id_resolve} = &mut out_doc.nodes[0].value {
                                     id_resolve.insert(nodes[index].id, LiveScopeTarget::LivePtr(
+                                        self.live_registry.file_id_index_to_live_ptr(file_id, index)
+                                    ));
+                                }
+                                found = true;
+                            }
+                            else if nodes[index].id == live_import.import_id { // its *
+                                // ok so what do we store...
+                                if let LiveValue::Root {id_resolve} = &mut out_doc.nodes[0].value {
+                                    id_resolve.insert(in_node.id , LiveScopeTarget::LivePtr(
                                         self.live_registry.file_id_index_to_live_ptr(file_id, index)
                                     ));
                                 }
@@ -100,7 +108,7 @@ impl<'a> LiveExpander<'a> {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_node.origin.token_id().unwrap().into(),
-                            message: format!("Import statement nothing found {}::{}", module_id, in_node.id)
+                            message: format!("Import statement nothing found {}::{} as {}", live_import.module_id, live_import.import_id, in_node.id)
                         });
                     }
                     in_index += 1;

@@ -68,7 +68,13 @@ pub enum LiveValue {
         token_count: u32,
         expand_index: Option<u32>
     },
-    Import (LiveModuleId),
+    Import (Box<LiveImport>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveImport{
+    pub module_id: LiveModuleId,
+    pub import_id: LiveId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
