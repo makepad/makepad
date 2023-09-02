@@ -22,14 +22,9 @@ live_design!{
         // `ui` field on the Rust struct `App`, the latter will be initialized from the DSL object
         // here below.
         ui: <DesktopWindow>{
-            
             show_bg: true
-            
-            // The `walk` property determines how the frame widget itself is laid out. In this
-            // case, the frame widget takes up the entire window.
-            
-                width: Fill,
-                height: Fill
+            width: Fill,
+            height: Fill
             
             draw_bg: {
                 
