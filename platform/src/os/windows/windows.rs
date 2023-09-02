@@ -31,6 +31,14 @@ impl Cx {
         
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
         
+        for arg in std::env::args() {
+            if arg == "--stdin-loop" {
+                let mut cx = cx.borrow_mut();
+                let mut d3d11_cx = d3d11_cx.borrow_mut();
+                return cx.stdin_event_loop(&mut d3d11_cx);
+            }
+        }
+        
         let d3d11_windows = Rc::new(RefCell::new(Vec::new()));
         
         init_win32_app_global(Box::new({
@@ -220,6 +228,9 @@ impl Cx {
                 }
             }
         }
+    }
+    
+    pub(crate) fn handle_networking_events(&mut self) {
     }
     
     fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App)->EventFlow {
