@@ -259,10 +259,7 @@ live_design!{
         draw_text: {
             instance hover: 0.0
             instance pressed: 0.0
-            text_style: {
-                font: {
-                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
-                }
+            text_style: <THEME_FONT_LABEL>{
                 font_size: 11.0
             }
             fn get_color(self) -> vec4 {
