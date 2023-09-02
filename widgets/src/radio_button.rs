@@ -7,173 +7,8 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-
-
-    DrawRadioButton = {{DrawRadioButton}} {
-
-        uniform size: 7.0;
-
-        uniform color_active: #00000000
-        uniform color_inactive: #x99EEFF
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            match self.radio_type {
-                RadioType::Round => {
-                    let sz = self.size;
-                    let left = sz + 1.;
-                    let c = vec2(left + sz, self.rect_size.y * 0.5);
-                    sdf.circle(left, c.y, sz);
-                    sdf.fill(#2);
-                    let isz = sz * 0.5;
-                    sdf.circle(left, c.y, isz);
-                    sdf.fill(mix(#fff0, #f, self.selected));
-                }
-                RadioType::Tab => {
-                    let sz = self.size;
-                    let left = 0.;
-                    let c = vec2(left, self.rect_size.y);
-                    sdf.rect(
-                        -1., 0.,
-                        self.rect_size.x + 2.0,
-                        self.rect_size.y 
-                    );
-                    sdf.fill(mix(self.color_inactive, self.color_active, self.selected));
-                }
-            }
-            return sdf.result
-        }
-
-
-    }
-    
-    RadioButton = {{RadioButton}} {
-        draw_label: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance selected: 0.0
-            
-            uniform color_unselected: #x00000088
-            uniform color_unselected_hover: #x000000CC
-            uniform color_selected: #xFFFFFF66
-            
-            color: #9
-            text_style: {
-                font: {
-                    //path: d"resources/ibmplexsans-semibold.ttf"
-                }
-                font_size: 9.5
-            }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        self.color_unselected,
-                        self.color_unselected_hover,
-                        self.hover
-                    ),
-                    self.color_selected,
-                    self.selected
-                )
-            }
-        }
-        
-        draw_icon:{
-            instance focus: 0.0
-            instance hover: 0.0
-            instance selected: 0.0
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        #9,
-                        #c,
-                        self.hover
-                    ),
-                    #9,
-                    self.selected
-                )
-            }
-        }
-        
-        walk: {
-            width: Fit,
-            height: Fit
-        }
-
-        label_walk: {
-            margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}
-            width: Fit,
-            height: Fit,
-        }
-        
-        
-        label_align: {
-            y: 0.0
-        }
-        
-        state: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.15}}
-                    apply: {
-                        draw_radio: {hover: 0.0}
-                        draw_label: {hover: 0.0}
-                        draw_icon: {hover: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_radio: {hover: 1.0}
-                        draw_label: {hover: 1.0}
-                        draw_icon: {hover: 1.0}
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_radio: {focus: 0.0}
-                        draw_label: {focus: 0.0}
-                        draw_icon: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_radio: {focus: 1.0}
-                        draw_label: {focus: 1.0}
-                        draw_icon: {focus: 1.0}
-                    }
-                }
-            }
-            selected = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_radio: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
-                        draw_label: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
-                    }
-                }
-                on = {
-                    cursor: Arrow,
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_radio: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
-                        draw_label: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
-                    }
-                }
-            }
-        }
-    }
+    DrawRadioButton = {{DrawRadioButton}} {}
+    RadioButtonBase = {{RadioButton}} {}
 }
 
 #[derive(Live, LiveHook)]
@@ -199,15 +34,15 @@ pub enum RadioType {
 pub struct RadioButton {
     #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
-    #[live] draw_label: DrawText,
+    #[live] draw_text: DrawText,
     
     #[live] icon_walk: Walk,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
     #[live] value: LiveValue,
     
-    #[live] layout: Layout,
-    #[state] state: LiveState,
+    #[layout] layout: Layout,
+    #[animator] animator: Animator,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
@@ -232,20 +67,20 @@ pub enum RadioButtonAction {
 impl RadioButton {
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, RadioButtonAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_radio.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                if self.is_in_state(cx, id!(selected.off)) {
-                    self.animate_state(cx, id!(selected.on));
+                if self.animator_in_state(cx, id!(selected.off)) {
+                    self.animator_play(cx, id!(selected.on));
                     dispatch_action(cx, RadioButtonAction::Clicked);
                 }
             },
@@ -262,7 +97,7 @@ impl RadioButton {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
         self.draw_radio.end(cx);
     }
 }
@@ -280,7 +115,7 @@ impl Widget for RadioButton {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
@@ -294,7 +129,7 @@ pub struct RadioButtonRef(WidgetRef);
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.animate_state(cx, id!(selected.off));
+            inner.animator_play(cx, id!(selected.off));
         }
     }
 }
@@ -326,7 +161,7 @@ impl RadioButtonSet{
         if let Some(index) = self.selected(cx, actions){
             // ok now we set visible
             for (i,path) in paths.iter().enumerate(){
-                let mut widget = ui.get_widget(path);
+                let mut widget = ui.widget(path);
                 widget.apply_over(cx, live!{visible:(i == index)});
                 widget.redraw(cx);
             }

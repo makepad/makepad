@@ -776,11 +776,11 @@ impl LiveRegistry {
         
         for node in &mut original.nodes {
             match &mut node.value {
-                LiveValue::Import(module_id) => {
-                    if module_id.0 == live_id!(crate) { // patch up crate refs
-                        module_id.0 = own_module_id.0
+                LiveValue::Import(live_import) => {
+                    if live_import.module_id.0 == live_id!(crate) { // patch up crate refs
+                       live_import.module_id.0 = own_module_id.0
                     };
-                    deps.insert(*module_id);
+                    deps.insert(live_import.module_id);
                 }, // import
                 /*LiveValue::Registry(component_id) => {
                     let reg = self.components.0.borrow();

@@ -78,12 +78,12 @@ impl FileSystem {
                 FileClientAction::Response(response) => match response {
                     FileResponse::LoadFileTree(response) => {
                         self.load_file_tree(response.unwrap());
-                        ui.get_file_tree(id!(file_tree)).redraw(cx);
+                        ui.file_tree(id!(file_tree)).redraw(cx);
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     FileResponse::OpenFile(result)=>match result{
                         Ok((unix_path, data))=>{
-                            let dock = ui.get_dock(id!(dock));
+                            let dock = ui.dock(id!(dock));
                             for (tab_id, path) in &self.tab_id_to_path{
                                 if unix_path == *path{
                                     dock.redraw_tab(cx, *tab_id);

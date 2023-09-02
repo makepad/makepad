@@ -1,66 +1,12 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    frame::*,
+    view::*,
     widget::*,
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::frame::*;
-    import makepad_widgets::label::Label;
-    //registry Widget::*;
-    
-    const SLIDE_WIDTH = 1920
-    
-    SlideBody = <Label> {
-        draw_label: {
-            color: #D
-            text_style: {
-                font_size: 35
-            }
-        }
-        label: ""
-    }
-    
-    Slide = <Box> {
-        draw_bg: { color: #x1A, radius: 5.0 }
-        walk: {width: (SLIDE_WIDTH), height: Fill}
-        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
-        title = <Label> {
-            draw_label: {
-                color: #f
-                text_style: {
-                    font_size: 84
-                }
-            }
-            label: "SlideTitle"
-        }
-    }
-
-    SlideChapter = <Slide> {
-        draw_bg: { color: #xFF5C39, radius: 5.0 }
-        walk: {width: (SLIDE_WIDTH), height: Fill}
-        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
-        title = <Label> {
-            draw_label: {
-                color: #x181818
-                text_style: {
-                    font_size: 120
-                }
-            }
-            label: "SlideTitle"
-        }
-    }
-    
-    SlidesView = {{SlidesView}} {
-        slide_width: (SLIDE_WIDTH)
-        goal_pos: 0.0
-        anim_speed: 0.9
-        <ScrollX> {
-            walk: {width: Fill, height: Fill}
-        }
-    }
+    SlidesViewBase = {{SlidesView}} {}
 }
 
 
@@ -70,7 +16,7 @@ pub struct SlidesView {
     #[live] goal_pos: f64,
     #[live] current_pos: f64,
     #[live] anim_speed: f64,
-    #[deref] frame: Frame,
+    #[deref] frame: View,
     #[rust] next_frame: NextFrame
 }
 
@@ -99,8 +45,8 @@ impl Widget for SlidesView {
         });
     }
     
-    fn get_walk(&self) -> Walk {
-        self.frame.get_walk()
+    fn walk(&self) -> Walk {
+        self.frame.walk()
     }
     
     fn redraw(&mut self, cx: &mut Cx) {

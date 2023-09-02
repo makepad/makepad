@@ -251,6 +251,20 @@ live_design!{
             self.old_shape = self.shape;
             self.shape = min(self.shape, self.dist);
         }
+         
+        fn arc2(inout self, x: float, y: float, r: float, s:float, e:float)->vec4{
+            let c = self.pos - vec2(x, y);
+            let pi = 3.141592653589793; // FIX THIS BUG
+            
+            //let circle = (sqrt(c.x * c.x + c.y * c.y) - r)*ang;
+            
+            // ok lets do atan2
+            let ang = (atan(c.y,c.x)+pi)/(2.0*pi);
+            let ces = (e-s)*0.5;
+            let ang2 = 1.0 - abs(ang - ces)+ces
+            return mix(vec4(0.,0.,0.,1.0),vec4(1.0),ang2);
+        }
+        
         
         fn hline(inout self, y: float, h:float) {
             let c = self.pos.y - y;

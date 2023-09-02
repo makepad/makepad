@@ -101,7 +101,7 @@ impl Cx {
     }
     
     pub fn apply_error_animation_missing_state(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], track: LiveId, state_id: LiveId, ids: &[LiveProp]) {
-        self.apply_error(origin, index, nodes, format!("animation missing state: {} {} {:?}", track, state_id, ids))
+        self.apply_error(origin, index, nodes, format!("animation missing animator: {} {} {:?}", track, state_id, ids))
     }
     
     pub fn apply_error_wrong_animation_track_used(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], id: LiveId, expect: LiveId, got: LiveId) {
@@ -227,7 +227,7 @@ impl Cx {
     pub fn live_expand(&mut self) {
         let mut errs = Vec::new();
         let mut live_registry = self.live_registry.borrow_mut();
-        /*
+        /* 
         for file in &live_registry.live_files {
             log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
         }*/

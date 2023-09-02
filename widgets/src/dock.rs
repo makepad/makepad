@@ -9,52 +9,8 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import crate::tab_bar::TabBar
-    import makepad_widgets::splitter::Splitter
-    import makepad_widgets::theme::*;
-    
-    DrawRoundCorner = {{DrawRoundCorner}} {
-        draw_depth: 6.0
-        border_radius: 10.0
-        fn pixel(self) -> vec4 {
-            
-            let pos = vec2(
-                mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
-                mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
-            )
-            
-            let sdf = Sdf2d::viewport(pos * self.rect_size);
-            sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
-            sdf.box(
-                0.25,
-                0.25,
-                self.rect_size.x * 2.0,
-                self.rect_size.y * 2.0,
-                4.0
-            );
-            
-            sdf.subtract()
-            return sdf.fill(COLOR_BG_APP);
-        }
-    }
-    
-    const BORDER_SIZE: 6.0
-    
-    Dock = {{Dock}} {
-        border_size: (BORDER_SIZE)
-        layout: {
-            flow: Down
-            padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
-        }
-        padding_fill: {color: (COLOR_BG_APP)}
-        drag_quad: {
-            draw_depth: 10.0
-            color: (COLOR_DRAG_QUAD)
-        }
-        tab_bar: <TabBar> {}
-        splitter: <Splitter> {}
-    }
+    DrawRoundCorner = {{DrawRoundCorner}} {}
+    DockBase = {{Dock}} {}
 }
 
 #[derive(Live, LiveHook)]
@@ -84,8 +40,8 @@ impl DrawRoundCorner {
 #[derive(Live)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[live] drop_target_draw_list: DrawList2d,
     #[live] round_corner: DrawRoundCorner,
     #[live] padding_fill: DrawColor,
@@ -811,7 +767,7 @@ impl Widget for Dock {
         }
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {

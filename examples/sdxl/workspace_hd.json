@@ -9,8 +9,8 @@
         },
         "5": {
             "inputs": {
-                "width": 1024,
-                "height": 1024,
+                "width": 1344,
+                "height": 768,
                 "batch_size": 1
             },
             "class_type": "EmptyLatentImage"
@@ -38,12 +38,12 @@
             "inputs": {
                 "add_noise": "enable",
                 "noise_seed": 11223344,
-                "steps": 25,
+                "steps": 23,
                 "cfg": 8.5,
                 "sampler_name": "ddim",
                 "scheduler": "normal",
                 "start_at_step": 0,
-                "end_at_step": 20,
+                "end_at_step": 27,
                 "return_with_leftover_noise": "enable",
                 "model": [
                     "10",
@@ -68,11 +68,11 @@
             "inputs": {
                 "add_noise": "disable",
                 "noise_seed": 11223344,
-                "steps": 25,
-                "cfg": 8.5,
+                "steps": 23,
+                "cfg": 9.5,
                 "sampler_name": "ddim",
                 "scheduler": "normal",
-                "start_at_step": 20,
+                "start_at_step": 27,
                 "end_at_step": 1000,
                 "return_with_leftover_noise": "disable",
                 "model": [
@@ -185,8 +185,8 @@
         },
         "215": {
             "inputs": {
-                "upscale_method": "area",
-                "scale_by": 0.5,
+                "upscale_method": "nearest-exact",
+                "scale_by": 0.7117466517857182,
                 "image": [
                     "213",
                     0
@@ -202,8 +202,8 @@
                 "cfg": 8.5,
                 "sampler_name": "ddim",
                 "scheduler": "ddim_uniform",
-                "start_at_step": 25,
-                "end_at_step": 1000,
+                "start_at_step": 29,
+                "end_at_step": 999,
                 "return_with_leftover_noise": "disable",
                 "model": [
                     "10",
@@ -461,49 +461,6 @@
                         "bgcolor": "#335"
                     },
                     {
-                        "id": 215,
-                        "type": "ImageScaleBy",
-                        "pos": [
-                            1252.60940919966,
-                            -392.1920078464396
-                        ],
-                        "size": {
-                            "0": 230,
-                            "1": 82
-                        },
-                        "flags": {},
-                        "order": 35,
-                        "mode": 0,
-                        "inputs": [
-                            {
-                                "name": "image",
-                                "type": "IMAGE",
-                                "link": 927
-                            }
-                        ],
-                        "outputs": [
-                            {
-                                "name": "IMAGE",
-                                "type": "IMAGE",
-                                "links": [
-                                    943
-                                ],
-                                "shape": 3,
-                                "slot_index": 0
-                            }
-                        ],
-                        "title": "Downscale",
-                        "properties": {
-                            "Node name for S&R": "ImageScaleBy"
-                        },
-                        "widgets_values": [
-                            "area",
-                            0.5
-                        ],
-                        "color": "#223",
-                        "bgcolor": "#335"
-                    },
-                    {
                         "id": 234,
                         "type": "Note",
                         "pos": [
@@ -528,100 +485,6 @@
                         "bgcolor": "#355"
                     },
                     {
-                        "id": 115,
-                        "type": "PrimitiveNode",
-                        "pos": [
-                            320,
-                            -1080
-                        ],
-                        "size": {
-                            "0": 210,
-                            "1": 82
-                        },
-                        "flags": {
-                            "collapsed": false
-                        },
-                        "order": 3,
-                        "mode": 0,
-                        "outputs": [
-                            {
-                                "name": "INT",
-                                "type": "INT",
-                                "links": [
-                                    475,
-                                    721
-                                ],
-                                "slot_index": 0,
-                                "widget": {
-                                    "name": "steps",
-                                    "config": [
-                                        "INT",
-                                        {
-                                            "default": 20,
-                                            "min": 1,
-                                            "max": 10000
-                                        }
-                                    ]
-                                }
-                            }
-                        ],
-                        "title": "Steps",
-                        "properties": {},
-                        "widgets_values": [
-                            25,
-                            "fixed"
-                        ],
-                        "color": "#233",
-                        "bgcolor": "#355"
-                    },
-                    {
-                        "id": 218,
-                        "type": "VAEDecode",
-                        "pos": [
-                            1252.60940919966,
-                            -182.19200784644025
-                        ],
-                        "size": {
-                            "0": 140,
-                            "1": 46
-                        },
-                        "flags": {
-                            "collapsed": false
-                        },
-                        "order": 38,
-                        "mode": 0,
-                        "inputs": [
-                            {
-                                "name": "samples",
-                                "type": "LATENT",
-                                "link": 903,
-                                "slot_index": 0
-                            },
-                            {
-                                "name": "vae",
-                                "type": "VAE",
-                                "link": 940,
-                                "slot_index": 1
-                            }
-                        ],
-                        "outputs": [
-                            {
-                                "name": "IMAGE",
-                                "type": "IMAGE",
-                                "links": [
-                                    900,
-                                    901
-                                ],
-                                "slot_index": 0
-                            }
-                        ],
-                        "properties": {
-                            "Node name for S&R": "VAEDecode"
-                        },
-                        "color": "#222",
-                        "bgcolor": "#000"
-                    },
-                    {
                         "id": 209,
                         "type": "PrimitiveNode",
                         "pos": [
@@ -633,7 +496,7 @@
                             "1": 82
                         },
                         "flags": {},
-                        "order": 4,
+                        "order": 3,
                         "mode": 0,
                         "outputs": [
                             {
@@ -734,7 +597,7 @@
                         "flags": {
                             "collapsed": false
                         },
-                        "order": 5,
+                        "order": 4,
                         "mode": 0,
                         "outputs": [
                             {
@@ -776,7 +639,7 @@
                             "1": 300
                         },
                         "flags": {},
-                        "order": 6,
+                        "order": 5,
                         "mode": 0,
                         "outputs": [
                             {
@@ -915,7 +778,7 @@
                             6,
                             2048,
                             2048,
-                            "stylized"
+                            "beautiful south american android woman beautiful lips front full body wide angle shot cinematic  standing with eletric wires  open skull sunlit from the front cyberpunk metallic robot transparent veins red horns and scales with snakes and skull tattoos covered in feathers with intricate detail blue eyes bright colors colourful orange and blue bright neon lights "
                         ],
                         "color": "#232",
                         "bgcolor": "#353"
@@ -1025,7 +888,7 @@
                             2,
                             2048,
                             2048,
-                            ""
+                            "text, watermark, cartoon"
                         ],
                         "color": "#322",
                         "bgcolor": "#533"
@@ -1173,8 +1036,8 @@
                             0,
                             2048,
                             2048,
-                            "",
-                            ""
+                            "text, watermark, cartoon",
+                            "text, watermark, cartoon"
                         ],
                         "color": "#322",
                         "bgcolor": "#533"
@@ -1323,8 +1186,8 @@
                             0,
                             2048,
                             2048,
-                            "cyberpunk banana fruit with neon sunglasses futuristic shiny plastic glassy in front of futuristic city over cliff",
-                            "stylized"
+                            "beautiful south american android woman beautiful lips front full body wide angle shot cinematic  standing with eletric wires  open skull sunlit from the front cyberpunk metallic robot transparent veins red horns and scales with snakes and skull tattoos covered in feathers with intricate detail blue eyes bright colors colourful orange and blue bright neon lights ",
+                            "beautiful south american android woman beautiful lips front full body wide angle shot cinematic  standing with eletric wires  open skull sunlit from the front cyberpunk metallic robot transparent veins red horns and scales with snakes and skull tattoos covered in feathers with intricate detail blue eyes bright colors colourful orange and blue bright neon lights "
                         ],
                         "color": "#232",
                         "bgcolor": "#353"
@@ -1634,45 +1497,6 @@
                         }
                     },
                     {
-                        "id": 5,
-                        "type": "EmptyLatentImage",
-                        "pos": [
-                            320,
-                            -1230
-                        ],
-                        "size": {
-                            "0": 210,
-                            "1": 110
-                        },
-                        "flags": {
-                            "collapsed": false
-                        },
-                        "order": 7,
-                        "mode": 0,
-                        "inputs": [],
-                        "outputs": [
-                            {
-                                "name": "LATENT",
-                                "type": "LATENT",
-                                "links": [
-                                    794
-                                ],
-                                "slot_index": 0
-                            }
-                        ],
-                        "title": "Image Resolution",
-                        "properties": {
-                            "Node name for S&R": "EmptyLatentImage"
-                        },
-                        "widgets_values": [
-                            1024,
-                            1024,
-                            1
-                        ],
-                        "color": "#432",
-                        "bgcolor": "#653"
-                    },
-                    {
                         "id": 138,
                         "type": "PrimitiveNode",
                         "pos": [
@@ -1686,7 +1510,7 @@
                         "flags": {
                             "collapsed": false
                         },
-                        "order": 8,
+                        "order": 6,
                         "mode": 0,
                         "outputs": [
                             {
@@ -1731,7 +1555,7 @@
                             "1": 82
                         },
                         "flags": {},
-                        "order": 9,
+                        "order": 7,
                         "mode": 0,
                         "outputs": [
                             {
@@ -1851,7 +1675,7 @@
                             "1": 350
                         },
                         "flags": {},
-                        "order": 12,
+                        "order": 8,
                         "mode": 0,
                         "title": "UMD Notes",
                         "properties": {
@@ -1961,7 +1785,7 @@
                             8.5,
                             "ddim",
                             "ddim_uniform",
-                            25,
+                            29,
                             1000,
                             "disable"
                         ],
@@ -2006,11 +1830,438 @@
                         }
                     },
                     {
+                        "id": 8,
+                        "type": "VAEDecode",
+                        "pos": [
+                            932,
+                            -1147
+                        ],
+                        "size": {
+                            "0": 140,
+                            "1": 46
+                        },
+                        "flags": {
+                            "collapsed": true
+                        },
+                        "order": 33,
+                        "mode": 0,
+                        "inputs": [
+                            {
+                                "name": "samples",
+                                "type": "LATENT",
+                                "link": 663
+                            },
+                            {
+                                "name": "vae",
+                                "type": "VAE",
+                                "link": 665
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "IMAGE",
+                                "type": "IMAGE",
+                                "links": [
+                                    925
+                                ],
+                                "slot_index": 0
+                            }
+                        ],
+                        "properties": {
+                            "Node name for S&R": "VAEDecode"
+                        },
+                        "color": "#222",
+                        "bgcolor": "#000"
+                    },
+                    {
+                        "id": 10,
+                        "type": "CheckpointLoaderSimple",
+                        "pos": [
+                            -278.28666137695313,
+                            -447.0705126953124
+                        ],
+                        "size": {
+                            "0": 320,
+                            "1": 100
+                        },
+                        "flags": {},
+                        "order": 9,
+                        "mode": 0,
+                        "outputs": [
+                            {
+                                "name": "MODEL",
+                                "type": "MODEL",
+                                "links": [
+                                    947
+                                ],
+                                "slot_index": 0
+                            },
+                            {
+                                "name": "CLIP",
+                                "type": "CLIP",
+                                "links": [
+                                    945
+                                ],
+                                "slot_index": 1
+                            },
+                            {
+                                "name": "VAE",
+                                "type": "VAE",
+                                "links": [],
+                                "slot_index": 2
+                            }
+                        ],
+                        "title": "Base Model",
+                        "properties": {
+                            "Node name for S&R": "CheckpointLoaderSimple"
+                        },
+                        "widgets_values": [
+                            "dreamshaperXL10_alpha2Xl10.safetensors"
+                        ],
+                        "color": "#432",
+                        "bgcolor": "#653"
+                    },
+                    {
+                        "id": 4,
+                        "type": "CheckpointLoaderSimple",
+                        "pos": [
+                            -278.7306029975788,
+                            -589.4474027883095
+                        ],
+                        "size": {
+                            "0": 320,
+                            "1": 100
+                        },
+                        "flags": {},
+                        "order": 10,
+                        "mode": 0,
+                        "outputs": [
+                            {
+                                "name": "MODEL",
+                                "type": "MODEL",
+                                "links": [
+                                    950
+                                ],
+                                "slot_index": 0
+                            },
+                            {
+                                "name": "CLIP",
+                                "type": "CLIP",
+                                "links": [
+                                    956
+                                ],
+                                "slot_index": 1
+                            },
+                            {
+                                "name": "VAE",
+                                "type": "VAE",
+                                "links": [
+                                    955
+                                ],
+                                "slot_index": 2
+                            }
+                        ],
+                        "title": "Refiner Model",
+                        "properties": {
+                            "Node name for S&R": "CheckpointLoaderSimple"
+                        },
+                        "widgets_values": [
+                            "sd_xl_refiner_1.0.safetensors"
+                        ],
+                        "color": "#432",
+                        "bgcolor": "#653"
+                    },
+                    {
+                        "id": 187,
+                        "type": "UpscaleModelLoader",
+                        "pos": [
+                            817,
+                            -817
+                        ],
+                        "size": {
+                            "0": 230,
+                            "1": 60
+                        },
+                        "flags": {},
+                        "order": 11,
+                        "mode": 0,
+                        "outputs": [
+                            {
+                                "name": "UPSCALE_MODEL",
+                                "type": "UPSCALE_MODEL",
+                                "links": [
+                                    926
+                                ],
+                                "shape": 3,
+                                "slot_index": 0
+                            }
+                        ],
+                        "title": "Upscale Model",
+                        "properties": {
+                            "Node name for S&R": "UpscaleModelLoader"
+                        },
+                        "widgets_values": [
+                            "4x-UltraSharp.pth"
+                        ],
+                        "color": "#432",
+                        "bgcolor": "#653"
+                    },
+                    {
+                        "id": 5,
+                        "type": "EmptyLatentImage",
+                        "pos": [
+                            320,
+                            -1230
+                        ],
+                        "size": {
+                            "0": 210,
+                            "1": 110
+                        },
+                        "flags": {
+                            "collapsed": false
+                        },
+                        "order": 12,
+                        "mode": 0,
+                        "inputs": [],
+                        "outputs": [
+                            {
+                                "name": "LATENT",
+                                "type": "LATENT",
+                                "links": [
+                                    794
+                                ],
+                                "slot_index": 0
+                            }
+                        ],
+                        "title": "Image Resolution",
+                        "properties": {
+                            "Node name for S&R": "EmptyLatentImage"
+                        },
+                        "widgets_values": [
+                            1344,
+                            768,
+                            1
+                        ],
+                        "color": "#432",
+                        "bgcolor": "#653"
+                    },
+                    {
+                        "id": 201,
+                        "type": "SaveImage",
+                        "pos": [
+                            1188,
+                            -1108
+                        ],
+                        "size": {
+                            "0": 447.005615234375,
+                            "1": 473.4501953125
+                        },
+                        "flags": {},
+                        "order": 42,
+                        "mode": 0,
+                        "inputs": [
+                            {
+                                "name": "images",
+                                "type": "IMAGE",
+                                "link": 931
+                            }
+                        ],
+                        "title": "2048x Upscale",
+                        "properties": {},
+                        "widgets_values": [
+                            "ComfyUI"
+                        ],
+                        "color": "#223",
+                        "bgcolor": "#335"
+                    },
+                    {
+                        "id": 101,
+                        "type": "PrimitiveNode",
+                        "pos": [
+                            540,
+                            -1080
+                        ],
+                        "size": {
+                            "0": 210,
+                            "1": 82
+                        },
+                        "flags": {},
+                        "order": 15,
+                        "mode": 0,
+                        "outputs": [
+                            {
+                                "name": "FLOAT",
+                                "type": "FLOAT",
+                                "links": [
+                                    380,
+                                    813
+                                ],
+                                "slot_index": 0,
+                                "widget": {
+                                    "name": "cfg",
+                                    "config": [
+                                        "FLOAT",
+                                        {
+                                            "default": 8,
+                                            "min": 0,
+                                            "max": 100
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                        "title": "Base CFG",
+                        "properties": {},
+                        "widgets_values": [
+                            8.5,
+                            "fixed"
+                        ],
+                        "color": "#233",
+                        "bgcolor": "#355"
+                    },
+                    {
+                        "id": 215,
+                        "type": "ImageScaleBy",
+                        "pos": [
+                            1252.60940919966,
+                            -392.1920078464396
+                        ],
+                        "size": {
+                            "0": 230,
+                            "1": 82
+                        },
+                        "flags": {},
+                        "order": 35,
+                        "mode": 0,
+                        "inputs": [
+                            {
+                                "name": "image",
+                                "type": "IMAGE",
+                                "link": 927
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "IMAGE",
+                                "type": "IMAGE",
+                                "links": [
+                                    943
+                                ],
+                                "shape": 3,
+                                "slot_index": 0
+                            }
+                        ],
+                        "title": "Downscale",
+                        "properties": {
+                            "Node name for S&R": "ImageScaleBy"
+                        },
+                        "widgets_values": [
+                            "nearest-exact",
+                            0.7117466517857182
+                        ],
+                        "color": "#223",
+                        "bgcolor": "#335"
+                    },
+                    {
+                        "id": 218,
+                        "type": "VAEDecode",
+                        "pos": [
+                            1301,
+                            -171
+                        ],
+                        "size": {
+                            "0": 140,
+                            "1": 46
+                        },
+                        "flags": {
+                            "collapsed": false
+                        },
+                        "order": 38,
+                        "mode": 0,
+                        "inputs": [
+                            {
+                                "name": "samples",
+                                "type": "LATENT",
+                                "link": 903,
+                                "slot_index": 0
+                            },
+                            {
+                                "name": "vae",
+                                "type": "VAE",
+                                "link": 940,
+                                "slot_index": 1
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "IMAGE",
+                                "type": "IMAGE",
+                                "links": [
+                                    900,
+                                    901
+                                ],
+                                "slot_index": 0
+                            }
+                        ],
+                        "properties": {
+                            "Node name for S&R": "VAEDecode"
+                        },
+                        "color": "#222",
+                        "bgcolor": "#000"
+                    },
+                    {
+                        "id": 115,
+                        "type": "PrimitiveNode",
+                        "pos": [
+                            321,
+                            -1071
+                        ],
+                        "size": {
+                            "0": 210,
+                            "1": 82
+                        },
+                        "flags": {
+                            "collapsed": false
+                        },
+                        "order": 16,
+                        "mode": 0,
+                        "outputs": [
+                            {
+                                "name": "INT",
+                                "type": "INT",
+                                "links": [
+                                    475,
+                                    721
+                                ],
+                                "slot_index": 0,
+                                "widget": {
+                                    "name": "steps",
+                                    "config": [
+                                        "INT",
+                                        {
+                                            "default": 20,
+                                            "min": 1,
+                                            "max": 10000
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                        "title": "Steps",
+                        "properties": {},
+                        "widgets_values": [
+                            23,
+                            "fixed"
+                        ],
+                        "color": "#233",
+                        "bgcolor": "#355"
+                    },
+                    {
                         "id": 22,
                         "type": "KSamplerAdvanced",
                         "pos": [
-                            601.7133386230468,
-                            -536.070512695313
+                            634,
+                            -552
                         ],
                         "size": {
                             "0": 270,
@@ -2111,12 +2362,12 @@
                             "enable",
                             11223344,
                             "fixed",
-                            25,
+                            23,
                             8.5,
                             "ddim",
                             "normal",
                             0,
-                            20,
+                            27,
                             "enable"
                         ],
                         "color": "#323",
@@ -2126,8 +2377,8 @@
                         "id": 23,
                         "type": "KSamplerAdvanced",
                         "pos": [
-                            919.55234279341,
-                            -557.5831523776902
+                            920,
+                            -558
                         ],
                         "size": {
                             "0": 270,
@@ -2227,61 +2478,16 @@
                             "disable",
                             11223344,
                             "fixed",
-                            25,
-                            8.5,
+                            23,
+                            9.5,
                             "ddim",
                             "normal",
-                            20,
+                            27,
                             1000,
                             "disable"
                         ],
                         "color": "#323",
                         "bgcolor": "#535"
-                    },
-                    {
-                        "id": 101,
-                        "type": "PrimitiveNode",
-                        "pos": [
-                            540,
-                            -1080
-                        ],
-                        "size": {
-                            "0": 210,
-                            "1": 82
-                        },
-                        "flags": {},
-                        "order": 13,
-                        "mode": 0,
-                        "outputs": [
-                            {
-                                "name": "FLOAT",
-                                "type": "FLOAT",
-                                "links": [
-                                    380,
-                                    813
-                                ],
-                                "slot_index": 0,
-                                "widget": {
-                                    "name": "cfg",
-                                    "config": [
-                                        "FLOAT",
-                                        {
-                                            "default": 8,
-                                            "min": 0,
-                                            "max": 100
-                                        }
-                                    ]
-                                }
-                            }
-                        ],
-                        "title": "Base CFG",
-                        "properties": {},
-                        "widgets_values": [
-                            8.5,
-                            "fixed"
-                        ],
-                        "color": "#233",
-                        "bgcolor": "#355"
                     },
                     {
                         "id": 102,
@@ -2295,7 +2501,7 @@
                             "1": 82
                         },
                         "flags": {},
-                        "order": 14,
+                        "order": 13,
                         "mode": 0,
                         "outputs": [
                             {
@@ -2321,217 +2527,11 @@
                         "title": "Refiner CFG",
                         "properties": {},
                         "widgets_values": [
-                            8.5,
+                            9.5,
                             "fixed"
                         ],
                         "color": "#233",
                         "bgcolor": "#355"
-                    },
-                    {
-                        "id": 8,
-                        "type": "VAEDecode",
-                        "pos": [
-                            932,
-                            -1147
-                        ],
-                        "size": {
-                            "0": 140,
-                            "1": 46
-                        },
-                        "flags": {
-                            "collapsed": true
-                        },
-                        "order": 33,
-                        "mode": 0,
-                        "inputs": [
-                            {
-                                "name": "samples",
-                                "type": "LATENT",
-                                "link": 663
-                            },
-                            {
-                                "name": "vae",
-                                "type": "VAE",
-                                "link": 665
-                            }
-                        ],
-                        "outputs": [
-                            {
-                                "name": "IMAGE",
-                                "type": "IMAGE",
-                                "links": [
-                                    925
-                                ],
-                                "slot_index": 0
-                            }
-                        ],
-                        "properties": {
-                            "Node name for S&R": "VAEDecode"
-                        },
-                        "color": "#222",
-                        "bgcolor": "#000"
-                    },
-                    {
-                        "id": 201,
-                        "type": "SaveImage",
-                        "pos": [
-                            1262,
-                            -1156
-                        ],
-                        "size": {
-                            "0": 447.005615234375,
-                            "1": 473.4501953125
-                        },
-                        "flags": {},
-                        "order": 42,
-                        "mode": 0,
-                        "inputs": [
-                            {
-                                "name": "images",
-                                "type": "IMAGE",
-                                "link": 931
-                            }
-                        ],
-                        "title": "2048x Upscale",
-                        "properties": {},
-                        "widgets_values": [
-                            "ComfyUI"
-                        ],
-                        "color": "#223",
-                        "bgcolor": "#335"
-                    },
-                    {
-                        "id": 10,
-                        "type": "CheckpointLoaderSimple",
-                        "pos": [
-                            -278.28666137695313,
-                            -447.0705126953124
-                        ],
-                        "size": {
-                            "0": 320,
-                            "1": 100
-                        },
-                        "flags": {},
-                        "order": 15,
-                        "mode": 0,
-                        "outputs": [
-                            {
-                                "name": "MODEL",
-                                "type": "MODEL",
-                                "links": [
-                                    947
-                                ],
-                                "slot_index": 0
-                            },
-                            {
-                                "name": "CLIP",
-                                "type": "CLIP",
-                                "links": [
-                                    945
-                                ],
-                                "slot_index": 1
-                            },
-                            {
-                                "name": "VAE",
-                                "type": "VAE",
-                                "links": [],
-                                "slot_index": 2
-                            }
-                        ],
-                        "title": "Base Model",
-                        "properties": {
-                            "Node name for S&R": "CheckpointLoaderSimple"
-                        },
-                        "widgets_values": [
-                            "dreamshaperXL10_alpha2Xl10.safetensors"
-                        ],
-                        "color": "#432",
-                        "bgcolor": "#653"
-                    },
-                    {
-                        "id": 4,
-                        "type": "CheckpointLoaderSimple",
-                        "pos": [
-                            -278.7306029975788,
-                            -589.4474027883095
-                        ],
-                        "size": {
-                            "0": 320,
-                            "1": 100
-                        },
-                        "flags": {},
-                        "order": 16,
-                        "mode": 0,
-                        "outputs": [
-                            {
-                                "name": "MODEL",
-                                "type": "MODEL",
-                                "links": [
-                                    950
-                                ],
-                                "slot_index": 0
-                            },
-                            {
-                                "name": "CLIP",
-                                "type": "CLIP",
-                                "links": [
-                                    956
-                                ],
-                                "slot_index": 1
-                            },
-                            {
-                                "name": "VAE",
-                                "type": "VAE",
-                                "links": [
-                                    955
-                                ],
-                                "slot_index": 2
-                            }
-                        ],
-                        "title": "Refiner Model",
-                        "properties": {
-                            "Node name for S&R": "CheckpointLoaderSimple"
-                        },
-                        "widgets_values": [
-                            "sd_xl_refiner_1.0.safetensors"
-                        ],
-                        "color": "#432",
-                        "bgcolor": "#653"
-                    },
-                    {
-                        "id": 187,
-                        "type": "UpscaleModelLoader",
-                        "pos": [
-                            817,
-                            -817
-                        ],
-                        "size": {
-                            "0": 230,
-                            "1": 60
-                        },
-                        "flags": {},
-                        "order": 11,
-                        "mode": 0,
-                        "outputs": [
-                            {
-                                "name": "UPSCALE_MODEL",
-                                "type": "UPSCALE_MODEL",
-                                "links": [
-                                    926
-                                ],
-                                "shape": 3,
-                                "slot_index": 0
-                            }
-                        ],
-                        "title": "Upscale Model",
-                        "properties": {
-                            "Node name for S&R": "UpscaleModelLoader"
-                        },
-                        "widgets_values": [
-                            "4x-UltraSharp.pth"
-                        ],
-                        "color": "#432",
-                        "bgcolor": "#653"
                     },
                     {
                         "id": 66,
@@ -2545,7 +2545,7 @@
                             "1": 82
                         },
                         "flags": {},
-                        "order": 10,
+                        "order": 14,
                         "mode": 0,
                         "outputs": [
                             {

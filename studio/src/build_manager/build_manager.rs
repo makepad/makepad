@@ -37,19 +37,16 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::link_label::LinkLabel;
-    import makepad_widgets::list_view::ListView;
+    import makepad_widgets::theme_desktop_dark::*;
+    import makepad_widgets::base::*;
     
-    WaitIcon = <Frame> {
-        walk: {width: 10, height: 10}
+    WaitIcon = <View> {
+        width: 10, height: 10
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.circle(5., 5., 4.)
-                sdf.fill(COLOR_TEXT_META)
+                sdf.fill(THEME_COLOR_TEXT_META)
                 sdf.move_to(3., 5.)
                 sdf.line_to(3., 5.)
                 sdf.move_to(5., 5.)
@@ -62,25 +59,27 @@ live_design!{
         }
     }
     
-    LogItem = <Rect> {
-        walk: {height: Fit, width: Fill}
-        layout: {padding: {top: 5, bottom: 5}}
+    LogItem = <RectView> {
+        height: Fit, width: Fill
+        padding: {top: 5, bottom: 5}
+        
         draw_bg: {
             instance is_even: 0.0
             instance selected: 0.0
+            instance hover: 0.0
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        COLOR_BG_EDITOR,
-                        COLOR_BG_ODD,
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    COLOR_BG_SELECTED,
+                    THEME_COLOR_BG_SELECTED,
                     self.selected
                 );
             }
         }
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -126,18 +125,18 @@ live_design!{
     
     LogItemWait = <LogItem> {
         icon = <WaitIcon> {},
-        label = <Label> {walk: {width: Fill}, draw_label: {wrap: Word}}
+        label = <Label> {width: Fill draw_text: {wrap: Word}}
         link_label = <LinkLabel> {}
     }
     
-    LogItemEmpty = <Rect> {
-        walk: {height: 20, width: Fill}
+    LogItemEmpty = <RectView> {
+        height: 20, width: Fill
         draw_bg: {
             instance is_even: 0.0
             fn pixel(self) -> vec4 {
                 return mix(
-                    COLOR_BG_EDITOR,
-                    COLOR_BG_ODD,
+                    THEME_COLOR_BG_EDITOR,
+                    THEME_COLOR_BG_ODD,
                     self.is_even
                 )
             }
@@ -145,8 +144,8 @@ live_design!{
     }
     
     LogList = <ListView> {
-        walk: {height: Fill, width: Fill}
-        layout: {flow: Down}
+        height: Fill, width: Fill
+        flow: Down
         WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
         WaitOdd = <LogItemWait> {draw_bg: {is_even: 0.0}}
         EmptyEven = <LogItemEmpty> {draw_bg: {is_even: 1.0}}
@@ -199,15 +198,15 @@ impl BuildManager {
                 match msg {
                     BuildMsg::Bare(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
-                        let item = list.get_item(cx, item_id, template).unwrap().as_frame();
-                        item.get_label(id!(label)).set_label(&msg.line);
+                        let item = list.item(cx, item_id, template).unwrap().as_view();
+                        item.label(id!(label)).set_text(&msg.line);
                         item.draw_widget_all(cx);
                     }
                     BuildMsg::Location(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
-                        let item = list.get_item(cx, item_id, template).unwrap().as_frame();
-                        item.get_label(id!(link_label)).set_label(&msg.file_name);
-                        item.get_label(id!(label)).set_label(&msg.msg);
+                        let item = list.item(cx, item_id, template).unwrap().as_view();
+                        item.label(id!(link_label)).set_text(&msg.file_name);
+                        item.label(id!(label)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
                     _=>()
@@ -215,7 +214,7 @@ impl BuildManager {
             }
             else{ // draw empty items
                 let template = if is_even{live_id!(EmptyEven)}else{live_id!(EmptyOdd)};
-                let item = list.get_item(cx, item_id, template).unwrap().as_frame();
+                let item = list.item(cx, item_id, template).unwrap().as_view();
                 item.draw_widget_all(cx);
             }
         }

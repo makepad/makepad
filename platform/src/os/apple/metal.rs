@@ -261,7 +261,13 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let draw_list_id = if let Some(draw_list_id) = self.passes[pass_id].main_draw_list_id{
+            draw_list_id
+        }
+        else{
+            error!("Draw pass has no draw list!");
+            return
+        };
         
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
