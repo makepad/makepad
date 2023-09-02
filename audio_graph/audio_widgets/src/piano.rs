@@ -8,7 +8,6 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
     
     DrawKey= {{DrawKey}} {
         
@@ -64,7 +63,7 @@ live_design!{
     
     PianoKey= {{PianoKey}} {
         
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -110,10 +109,8 @@ live_design!{
         piano_key: <PianoKey> {}
         white_size: vec2(20.0, 75.0),
         black_size: vec2(15.0, 50.0),
-        walk: {
-            width: Fit,
-            height: Fit
-        }
+        width: Fit,
+        height: Fit
     }
 }
 
@@ -130,13 +127,13 @@ struct DrawKey {
 #[derive(Live, LiveHook)]
 pub struct PianoKey {
     #[live] draw_key: DrawKey,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
 }
 
 #[derive(Live)]
 pub struct Piano {
     #[rust] area: Area,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] piano_key: Option<LivePtr>,
     
     #[rust([0; 20])]
@@ -196,11 +193,11 @@ impl PianoKey {
     }
     
     fn set_is_pressed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(pressed.on), id!(pressed.off))
+        self.animator_toggle(cx, is, animate, id!(pressed.on), id!(pressed.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(focus.on), id!(focus.off))
+        self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
     pub fn handle_event_with(
@@ -210,30 +207,30 @@ impl PianoKey {
         sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_key.area().redraw(cx);
         }
         match event.hits_with_sweep_area(cx, self.draw_key.area(), sweep_area) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, id!(hover.on));
-                self.animate_state(cx, id!(pressed.on));
+                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, id!(pressed.on));
                 dispatch_action(cx, PianoKeyAction::Pressed(127));
             }
             Hit::FingerUp(e) => {
                 if !e.is_sweep && e.device.has_hovers(){
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else{
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
-                self.animate_state(cx, id!(pressed.off));
+                self.animator_play(cx, id!(pressed.off));
                 dispatch_action(cx, PianoKeyAction::Up);
             }
             _ => {}
@@ -454,7 +451,7 @@ impl Widget for Piano{
         });
     }
 
-    fn get_walk(&self)->Walk{self.walk}
+    fn walk(&self)->Walk{self.walk}
     
     fn redraw(&mut self, cx:&mut Cx){
         self.area.redraw(cx)

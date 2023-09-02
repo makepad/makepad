@@ -27,9 +27,9 @@ live_design!{
     import makepad_widgets::multi_window::MultiWindow
     import makepad_audio_widgets::display_audio::DisplayAudio
     
-    VideoFrame = <Frame> {
+    VideoFrame = <View> {
         show_bg: true,
-        walk: {width: Fill, height: Fill},
+        width: Fill, height: Fill
         draw_bg: {
             texture image: texture2d
             uniform image_size: vec2
@@ -84,19 +84,19 @@ live_design!{
     
     DisplayChannel = <Box> {
         draw_bg: {color: #3337, radius: 10.0}
-        walk: {width: Fill, height: 300}
+        width: Fill, height: 300
         disp = <DisplayAudio> {
         }
     }
     AudioMixer = {{AudioMixer}} {}
     
-    MainSlides = <Frame> {
-        layout: {flow: Overlay, align: {x: 1.0, y: 1.0}, padding: 0}
+    MainSlides = <View> {
+        flow: Overlay, align: {x: 1.0, y: 1.0 padding: 0}
         slides_view = <SlidesView> {
             slide_width: 1920.0
             goal_pos: 0.0
             video_input0 = <VideoFrame> {
-                walk: {width: 1920, height: Fill}
+                width: 1920, height: Fill
             }
             
             <Slide> {
@@ -108,7 +108,7 @@ live_design!{
     
     MeetupOverlay = <Image> {
         source: dep("crate://self/rust-meetup-breda.png"),
-        walk: {width: 1920, height: 1080}
+        width: 1920, height: 1080
     }
     
     App = {{App}} {
@@ -118,18 +118,18 @@ live_design!{
         ui: <MultiWindow> {
             window1 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), dpi_override: 1.0},
-                <Frame> {
-                    layout: {flow: Overlay}
+                <View> {
+                    flow: Overlay
                     <MainSlides> {}
                     meetup_overlay = <MeetupOverlay> {}
-                    <Frame> {
-                        layout: {align: {y: 1.0}, spacing: 5, padding: 40}
+                    <View> {
+                        align: {y: 1.0 spacing: 5, padding: 40}
                         chan1 = <DisplayChannel> {}
                         chan2 = <DisplayChannel> {}
                         chan3 = <DisplayChannel> {}
                         chan4 = <DisplayChannel> {}
                         video_input1 = <VideoFrameRound> {
-                            walk: {width: 480, height: 270}
+                            width: 480, height: 270
                         }
                     }
                 }
@@ -137,19 +137,19 @@ live_design!{
             
             window2 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
-                layout: {flow: Overlay}
+                flow: Overlay
                 <MainSlides> {}
                 meetup_overlay = <MeetupOverlay> {}
             }
             window3 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
-                <Frame> {
-                    layout: {flow: Overlay}
+                <View> {
+                    flow: Overlay
                     <MainSlides> {
                     }
-                    <Frame> {
+                    <View> {
                         video_input1 = <VideoFrameRound> {
-                            walk: {width: 480, height: 270}
+                            width: 480, height: 270
                         }
                         layout: {align: {x: 1.0, y: 1.0}, spacing: 5, padding: 40}
                     }

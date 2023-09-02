@@ -220,9 +220,9 @@ impl Cx {
                 live_id!(ToWasmHTTPResponse) => {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpResponse(HttpResponse::new(
-                            LiveId(0),
+                            LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
                             tw.status as u16,
                             tw.headers,
                             Some(tw.body.into_vec_u8())
@@ -233,7 +233,7 @@ impl Cx {
                 live_id!(ToWasmHttpRequestError) => {
                     let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpRequestError(tw.error)
                     });
                 }
@@ -241,7 +241,7 @@ impl Cx {
                 live_id!(ToWasmHttpResponseProgress) => {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
                     });
                 }
@@ -249,7 +249,7 @@ impl Cx {
                 live_id!(ToWasmHttpUploadProgress) => {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
                     });
                 }
@@ -257,7 +257,7 @@ impl Cx {
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketClose
                     });
                 }
@@ -265,7 +265,7 @@ impl Cx {
                 live_id!(ToWasmWebSocketOpen) => {
                     let tw = ToWasmWebSocketOpen::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketOpen
                     });
                 }
@@ -273,21 +273,21 @@ impl Cx {
                 live_id!(ToWasmWebSocketError) => {
                     let tw = ToWasmWebSocketError::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketError(tw.error)
                     });
                 }
                 live_id!(ToWasmWebSocketString) => {
                     let tw = ToWasmWebSocketString::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketString(tw.data)
                     });
                 }
                 live_id!(ToWasmWebSocketBinary) => {
                     let tw = ToWasmWebSocketBinary::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
-                        id: LiveId::from_lo_hi(tw.id_lo, tw.id_hi),
+                        request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
                 }
@@ -324,6 +324,10 @@ impl Cx {
                 self.webgl_compile_shaders();
             }
             self.handle_repaint();
+        }
+
+        if network_responses.len() != 0 {
+            self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
         
         self.handle_platform_ops();
@@ -428,39 +432,41 @@ impl Cx {
                 }
                 CxOsOp::UpdateMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{id, request} => {
+                CxOsOp::HttpRequest{request_id, request} => {
                     let headers = request.get_headers_string();
                     self.os.from_wasm(FromWasmHTTPRequest {
-                        id_lo: id.lo(),
-                        id_hi: id.hi(),
+                        request_id_lo: request_id.lo(),
+                        request_id_hi: request_id.hi(),
+                        metadata_id_lo: request.metadata_id.lo(),
+                        metadata_id_hi: request.metadata_id.hi(),
                         url: request.url,
                         method: request.method.to_string().into(),
                         headers: headers,
                         body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
                     });
                 },
-                CxOsOp::WebSocketOpen{id, request}=>{
+                CxOsOp::WebSocketOpen{request_id, request}=>{
                     let headers = request.get_headers_string();
                     self.os.from_wasm(FromWasmWebSocketOpen {
                         url: request.url,
                         method: request.method.to_string().into(),
                         headers: headers,
                         body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
-                        id_lo: id.lo(),
-                        id_hi: id.hi(),
+                        request_id_lo: request_id.lo(),
+                        request_id_hi: request_id.hi(),
                     });
                 }
-                CxOsOp::WebSocketSendBinary{id, data}=>{
+                CxOsOp::WebSocketSendBinary{request_id, data}=>{
                     self.os.from_wasm(FromWasmWebSocketSendBinary {
-                        id_lo: id.lo(),
-                        id_hi: id.hi(),
+                        request_id_lo: request_id.lo(),
+                        request_id_hi: request_id.hi(),
                         data: WasmDataU8::from_vec_u8(data)
                     });
                 }
-                CxOsOp::WebSocketSendString{id, data}=>{
+                CxOsOp::WebSocketSendString{request_id, data}=>{
                     self.os.from_wasm(FromWasmWebSocketSendString {
-                        id_lo: id.lo(),
-                        id_hi: id.hi(),
+                        request_id_lo: request_id.lo(),
+                        request_id_hi: request_id.hi(),
                         data
                     });
                 }

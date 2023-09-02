@@ -12,200 +12,11 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    
-    DrawBgQuad = {{DrawBgQuad}} {
-        fn pixel(self) -> vec4 {
-            return mix(
-                mix(
-                    COLOR_BG_EDITOR,
-                    COLOR_BG_ODD,
-                    self.is_even
-                ),
-                mix(
-                    COLOR_BG_UNFOCUSSED,
-                    COLOR_BG_SELECTED,
-                    self.focussed
-                ),
-                self.selected
-            );
-        }
-    }
-    
-    DrawNameText = {{DrawNameText}} {
-        fn get_color(self) -> vec4 {
-            return mix(
-                mix(
-                    COLOR_TEXT_DEFAULT * self.scale,
-                    COLOR_TEXT_SELECTED,
-                    self.selected
-                ),
-                COLOR_TEXT_HOVER,
-                self.hover
-            )
-        }
-        
-        text_style: <FONT_DATA> {
-            top_drop: 1.2,
-        }
-    }
-    
-    DrawIconQuad = {{DrawIconQuad}} {
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            let w = self.rect_size.x;
-            let h = self.rect_size.y;
-            sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
-            sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
-            sdf.union();
-            return sdf.fill(mix(
-                mix(
-                    COLOR_TEXT_DEFAULT * self.scale,
-                    COLOR_TEXT_SELECTED,
-                    self.selected
-                ),
-                COLOR_TEXT_HOVER,
-                self.hover
-            ));
-        }
-    }
-    
-    FileTreeNode = {{FileTreeNode}} {
-        
-        layout: {
-            align: {y: 0.5},
-            padding: {left: 5.0, bottom: 0,},
-        }
-        
-        icon_walk: {
-            width: Fixed((DIM_DATA_ICON_WIDTH)),
-            height: Fixed((DIM_DATA_ICON_HEIGHT)),
-            margin: {
-                left: 1
-                top: 0
-                right: 2
-                bottom: 0
-            },
-        }
-        
-        state: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        hover: 0.0
-                        draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
-                        draw_icon: {hover: 0.0}
-                    }
-                }
-                
-                on = {
-                    cursor: Hand
-                    from: {all: Snap}
-                    apply: {
-                        hover: 1.0
-                        draw_bg: {hover: 1.0}
-                        draw_name: {hover: 1.0}
-                        draw_icon: {hover: 1.0}
-                    },
-                }
-            }
-            
-            focus = {
-                default: on
-                on = {
-                    from: {all: Snap}
-                    apply: {focussed: 1.0}
-                }
-                
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {focussed: 0.0}
-                }
-            }
-            
-            select = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        selected: 0.0
-                        draw_bg: {selected: 0.0}
-                        draw_name: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        selected: 1.0
-                        draw_bg: {selected: 1.0}
-                        draw_name: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
-                    }
-                }
-                
-            }
-            
-            open = {
-                default: off
-                off = {
-                    //from: {all: Exp {speed1: 0.80, speed2: 0.97}}
-                    //duration: 0.2
-                    redraw: true
-                    
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.80, d2: 0.97}
-                    
-                    //ease: Ease::OutExp
-                    apply: {
-                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_name: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                    }
-                }
-                
-                on = {
-                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
-                    
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.82, d2: 0.95}
-                    
-                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
-                    redraw: true
-                    apply: {
-                        opened: 1.0
-                        draw_bg: {opened: 1.0}
-                        draw_name: {opened: 1.0}
-                        draw_icon: {opened: 1.0}
-                    }
-                }
-            }
-        }
-        is_folder: false,
-        indent_width: 10.0
-        min_drag_distance: 10.0
-    }
-    
-    FileTree = {{FileTree}} {
-        node_height: (DIM_DATA_ITEM_HEIGHT),
-        file_node: <FileTreeNode> {
-            is_folder: false,
-            draw_bg: {is_folder: 0.0}
-            draw_name: {is_folder: 0.0}
-        }
-        folder_node: <FileTreeNode> {
-            is_folder: true,
-            draw_bg: {is_folder: 1.0}
-            draw_name: {is_folder: 1.0}
-        }
-        layout: {flow: Down, clip_x: true, clip_y: true},
-        scroll_bars: {}
-    }
+    DrawBgQuad = {{DrawBgQuad}} {}
+    DrawNameText = {{DrawNameText}} {}
+    DrawIconQuad = {{DrawIconQuad}} {}
+    FileTreeNodeBase = {{FileTreeNode}} {}
+    FileTreeBase = {{FileTree}} {}
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
@@ -250,9 +61,9 @@ pub struct FileTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
     #[live] draw_name: DrawNameText,
-    #[live] layout: Layout,
+    #[layout] layout: Layout,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] indent_width: f64,
     
@@ -272,8 +83,8 @@ pub struct FileTree {
     #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
     #[live] folder_node: Option<LivePtr>,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[live] filler: DrawBgQuad,
     
     #[live] node_height: f64,
@@ -373,15 +184,15 @@ impl FileTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(select.on), id!(select.off))
+        self.animator_toggle(cx, is, animate, id!(select.on), id!(select.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(focus.on), id!(focus.off))
+        self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(open.on), id!(open.off));
+        self.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
     }
     
     pub fn handle_event_with(
@@ -390,15 +201,15 @@ impl FileTreeNode {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -406,14 +217,14 @@ impl FileTreeNode {
                 }
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, id!(select.on));
+                self.animator_play(cx, id!(select.on));
                 if self.is_folder {
-                    if self.is_in_state(cx, id!(open.on)) {
-                        self.animate_state(cx, id!(open.off));
+                    if self.animator_in_state(cx, id!(open.on)) {
+                        self.animator_play(cx, id!(open.off));
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
-                        self.animate_state(cx, id!(open.on));
+                        self.animator_play(cx, id!(open.on));
                         dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
                     
@@ -661,7 +472,7 @@ impl Widget for FileTree {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ()) {

@@ -29,12 +29,11 @@ mod pass;
 mod texture;
 mod cursor;
 mod menu;
-mod live_state;
+mod animator;
 mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
-pub mod network;
 
 pub mod audio_stream;
 
@@ -213,6 +212,7 @@ pub use {
         },
         live_prims::{
             LiveDependency,
+            RcStringMut,
         },
         live_traits::{
             LiveHookDeref,
@@ -225,13 +225,13 @@ pub use {
             ToLiveValue,
             ApplyFrom,
         },
-        live_state::{
+        animator::{
             Ease,
             Play,
             Animate,
-            LiveState,
-            LiveStateImpl,
-            StateAction,
+            Animator,
+            AnimatorImpl,
+            AnimatorAction,
         },
         draw_vars::{
             shader_enum,

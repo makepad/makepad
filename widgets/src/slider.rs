@@ -8,141 +8,8 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    DrawSlider = {{DrawSlider}} {
-        instance hover: float
-        instance focus: float
-        instance drag: float
-        
-        fn pixel(self) -> vec4 {
-            let slider_height = 3;
-            let nub_size = mix(3, 4, self.hover);
-            let nubbg_size = 18
-            
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-
-            let slider_bg_color = mix(#38, #30, self.focus);
-            let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
-            let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
-            let nubbg_color = mix(#eee0, #8, self.drag);
-
-            match self.slider_type{
-                SliderType::Horizontal=>{
-                    sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
-                    sdf.fill(slider_bg_color);
-                    
-                    sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
-                    sdf.fill(slider_color);
-                    
-                    let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
-                    sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
-                    sdf.fill(nubbg_color);
-                    
-                    // the nub
-                    let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
-                    sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
-                    sdf.fill(nub_color);
-                }
-                SliderType::Vertical=>{
-                    
-                }
-                SliderType::Rotary=>{
-                    
-                }
-            }
-            return sdf.result
-        }
-    }
-    
-    Slider = {{Slider}} {
-        min: 0.0,
-        max: 1.0,
-        step: 0.0,
-        
-        label_text: {
-            color: #9
-        }
-        
-        label_walk: {
-            margin: {left: 4.0, top: 3.0}
-            width: Fill,
-            height: Fill
-        }
-        
-        label_align: {
-            y: 0.0
-        }
-        
-        precision: 2,
-        
-        text_input: {
-            cursor_margin_bottom: 3.0,
-            cursor_margin_top: 4.0,
-            select_pad_edges: 3.0
-            cursor_size: 2.0,
-            empty_message: "0",
-            numeric_only: true,
-            draw_bg: {
-                shape: None
-                color: #5
-                radius: 2.0
-            },
-            layout: {
-                padding:0,
-                align: {y: 0.}
-            },
-            walk: {
-                margin: {top: 3, right: 5}
-            }
-        }
-        state: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_slider: {hover: 0.0}
-                        //text_input: {state: {hover = off}}
-                    }
-                }
-                on = {
-                    //cursor: Arrow,
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: {hover: 1.0}
-                        //text_input: {state: {hover = on}}
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_slider: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: {focus: 1.0}
-                    }
-                }
-            }
-            drag = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_slider: {drag: 0.0}}
-                }
-                on = {
-                    cursor: Arrow,
-                    from: {all: Snap}
-                    apply: {draw_slider: {drag: 1.0}}
-                }
-            }
-        }
-    }
+    DrawSlider = {{DrawSlider}} {}
+    SliderBase = {{Slider}} {}
 }
 
 #[derive(Live, LiveHook)]
@@ -167,15 +34,15 @@ pub struct DrawSlider {
 pub struct Slider {
     #[live] draw_slider: DrawSlider,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     
-    #[live] layout: Layout,
-    #[state] state: LiveState,
+    #[layout] layout: Layout,
+    #[animator] animator: Animator,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] label_text: DrawText,
-    #[live] label: String,
+    #[live] draw_text: DrawText,
+    #[live] text: String,
     
     #[live] text_input: TextInput,
     
@@ -226,14 +93,14 @@ impl Slider {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         for action in self.text_input.handle_event(cx, event) {
             match action {
                 TextInputAction::KeyFocus => {
-                    self.animate_state(cx, id!(focus.on));
+                    self.animator_play(cx, id!(focus.on));
                 }
                 TextInputAction::KeyFocusLost => {
-                    self.animate_state(cx, id!(focus.off));
+                    self.animator_play(cx, id!(focus.off));
                 }
                 TextInputAction::Return(value) => {
                     if let Ok(v) = value.parse::<f64>() {
@@ -251,10 +118,10 @@ impl Slider {
         match event.hits(cx, self.draw_slider.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
                 // cx.set_key_focus(self.slider.area());
@@ -263,7 +130,7 @@ impl Slider {
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
                 
-                self.animate_state(cx, id!(drag.on));
+                self.animator_play(cx, id!(drag.on));
                 self.dragging = Some(self.value);
                 dispatch_action(cx, SliderAction::StartSlide);
             },
@@ -271,12 +138,12 @@ impl Slider {
                 self.text_input.read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.create_external_undo();
-                self.animate_state(cx, id!(drag.off));
+                self.animator_play(cx, id!(drag.off));
                 if fe.is_over && fe.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
                 self.dragging = None;
                 dispatch_action(cx, SliderAction::EndSlide);
@@ -318,8 +185,8 @@ impl Slider {
         
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
-            self.text_input.draw_walk(cx, self.text_input.get_walk());
-            self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
+            self.text_input.draw_walk(cx, self.text_input.walk());
+            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
         }
         
         self.draw_slider.end(cx);
@@ -339,7 +206,7 @@ impl Widget for Slider {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
