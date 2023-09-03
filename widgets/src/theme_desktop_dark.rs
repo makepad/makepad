@@ -236,6 +236,7 @@ live_design!{
         height: Fit
         draw_text: {
             color: #8,
+            text_style: <THEME_FONT_LABEL>{}
             wrap: Word
         }
     }
