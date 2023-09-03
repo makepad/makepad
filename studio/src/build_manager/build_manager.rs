@@ -60,7 +60,7 @@ live_design!{
     
     LogItem = <RectView> {
         height: Fit, width: Fill
-        padding: {top: 5, bottom: 5}
+        padding: {top: 7, bottom: 7}
         
         draw_bg: {
             instance is_even: 0.0

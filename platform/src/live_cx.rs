@@ -198,7 +198,7 @@ impl Cx {
         });
     }
     
-    pub fn check_live_file_watcher(&mut self)->bool{
+    pub fn was_live_edit(&mut self)->bool{
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
@@ -216,6 +216,8 @@ impl Cx {
             for err in errs {
                 error!("check_live_file_watcher: Error expanding live file {}", err);
             }
+            self.draw_shaders.ptr_to_item.clear();
+            self.draw_shaders.fingerprints.clear();
             true
         }
         else{
