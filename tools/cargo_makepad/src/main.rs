@@ -1,8 +1,10 @@
 mod android;
 mod wasm;
 mod shell;
+mod ios;
 use android::*;
 use wasm::*;
+use ios::*;
 
 fn show_help(err: &str){
     if !err.is_empty(){
@@ -23,6 +25,12 @@ fn show_help(err: &str){
     println!();
     println!("       --port=8080                               The port to run the wasm webserver");
     println!();
+    println!("iOS Commands:");
+    println!();
+    println!("    ios toolchain-install                       Install the toolchain needed for wasm32 with rustup");
+    println!("    ios build <cargo args>                      Build an ios project");
+    println!("    ios [options] run <cargo args>              runs the ios project on the simulator");
+    println!();    
     println!("Android commands:");
     println!();
     println!("    android [options] toolchain-install          Download and install the android sdk and rust toolchains");
@@ -71,6 +79,9 @@ fn main() {
             println!("Got error: {}", e);
         }
         "wasm" => if let Err(e) = handle_wasm(&args[1..]){
+            println!("Got error: {}", e);
+        }
+        "ios" => if let Err(e) = handle_ios(&args[1..]){
             println!("Got error: {}", e);
         }
         _=> show_help("not implemented yet")
