@@ -216,8 +216,7 @@ impl Cx {
             for err in errs {
                 error!("check_live_file_watcher: Error expanding live file {}", err);
             }
-            self.draw_shaders.ptr_to_item.clear();
-            self.draw_shaders.fingerprints.clear();
+            self.draw_shaders.reset_for_live_reload();
             true
         }
         else{
