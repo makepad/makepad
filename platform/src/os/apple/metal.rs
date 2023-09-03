@@ -21,6 +21,7 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
+            
             cocoa_app::CocoaApp,
             cocoa_window::CocoaWindow,
         },
@@ -42,6 +43,9 @@ use {
         }
     }
 };
+
+#[cfg(target_os = "macos")]
+use crate::metal_xpc::store_xpc_service_texture;
 
 impl Cx {
     
