@@ -21,7 +21,6 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
-            metal_xpc::store_xpc_service_texture,
             cocoa_app::CocoaApp,
             cocoa_window::CocoaWindow,
         },
@@ -205,6 +204,7 @@ impl Cx {
                     let cxtexture = &mut self.textures[texture_id];
                     
                     if cxtexture.desc.format.is_shared() {
+                        #[cfg(target_os = "macos")]
                         cxtexture.os.update_shared_texture(
                             metal_cx,
                             &cxtexture.desc,
@@ -935,7 +935,7 @@ impl CxOsTexture {
         ]};
     }
     
-    
+    #[cfg(target_os = "macos")]
     fn update_shared_texture(
         &mut self,
         metal_cx: &MetalCx,
@@ -1171,8 +1171,8 @@ pub fn get_default_metal_device() -> Option<ObjcId> {
 
 pub fn get_all_metal_devices() -> Vec<ObjcId> {
     #[cfg(target_os = "ios")]
-    {
-        MTLCreateSystemDefaultDevice().into_iter().collect()
+    unsafe {
+        vec![MTLCreateSystemDefaultDevice()]
     }
     #[cfg(not(target_os = "ios"))]
     unsafe {
