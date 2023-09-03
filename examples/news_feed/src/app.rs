@@ -54,7 +54,8 @@ live_design!{
         draw_icon: {
             svg_file: (LOGO),
             fn get_color(self) -> vec4 {
-                return (COLOR_BRAND)
+                return vec4(Pal::iq1(0.4),1.0);
+                return (COLOR_BRAND);
             }
         }
         icon_walk: {width: 7.5, height: Fit}

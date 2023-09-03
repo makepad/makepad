@@ -75,6 +75,15 @@ pub struct CxDrawShaders {
     pub error_fingerprints: Vec<Vec<LiveNode >>,
 }
 
+impl CxDrawShaders{
+    pub fn reset_for_live_reload(&mut self){
+        self.ptr_to_item.clear();
+        self.fingerprints.clear();
+        self.error_set.clear();
+        self.error_fingerprints.clear();
+    }
+}
+
 impl Cx {
     pub fn flush_draw_shaders(&mut self) {
         self.draw_shaders.generation += 1;
