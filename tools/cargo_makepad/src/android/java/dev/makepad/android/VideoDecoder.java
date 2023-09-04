@@ -144,7 +144,7 @@ public class VideoDecoder {
         return -1;
     }
 
-    public void decodeVideoChunk(long startTimestampUs, long endTimestampUs) {
+    public void decodeVideoChunk(int maxFramesToDecode) {
         synchronized (this) {
             if (mIsDecoding) {
                 Log.e("Makepad", "Already decoding");
@@ -156,13 +156,12 @@ public class VideoDecoder {
                 throw new IllegalStateException("Decoding hasn't been initialized");
             }
 
-            mCodec.flush();  // removes lingering frames
+            mCodec.flush();
 
             boolean isEndOfChunk = false;
             long framesDecodedThisChunk = 0;
-            mExtractor.seekTo(startTimestampUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
 
-            while (!isEndOfChunk) {
+            while (framesDecodedThisChunk < maxFramesToDecode) {
                 if (!mInputEos) {
                     int inputBufferIndex = mCodec.dequeueInputBuffer(2000);
                     if (inputBufferIndex >= 0) {
@@ -172,10 +171,12 @@ public class VideoDecoder {
                         long presentationTimeUs = mExtractor.getSampleTime();
                         int flags = mExtractor.getSampleFlags();
 
-                        if (sampleSize < 0 || presentationTimeUs > endTimestampUs) {
+                        // if (sampleSize < 0 || presentationTimeUs > endTimestampUs) {
+                        if (sampleSize < 0) {
                             mCodec.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                             Log.e("Makepad", "End of chunk, timestamp is: " + presentationTimeUs);
                             isEndOfChunk = true;
+                            mExtractor.advance();
                         } else {
                             mCodec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
                             mExtractor.advance();
@@ -215,11 +216,14 @@ public class VideoDecoder {
                     // Ideally I'd use add if the queue has a limit but because this is synchronized, if this waits, it locks other things.
                     mVideoFrameQueue.add(frameBuffer);
 
-
                     mCodec.releaseOutputBuffer(outputBufferIndex, false);
                     outputImage.close();
 
-                    framesDecodedThisChunk++;
+                    if (isEndOfChunk) {
+                        mExtractor.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    } else {
+                        framesDecodedThisChunk++;
+                    }
                 }
             }
 
