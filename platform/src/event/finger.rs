@@ -312,6 +312,9 @@ impl CxFingers {
         self.captures.iter_mut().find( | v | v.area == area)
     }
     
+    pub fn is_area_captured(&self, area: Area) -> bool {
+        self.captures.iter().find( | v | v.area == area).is_some()
+    }
     
     pub (crate) fn release_digit(&mut self, digit_id: DigitId) {
         while let Some(index) = self.captures.iter_mut().position( | v | v.digit_id == digit_id) {
