@@ -312,95 +312,97 @@ impl Widget for ListView {
             }
         }
         let vi = self.vec_index;
-        match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
-            Hit::FingerScroll(e) => {
-                self.scroll_state = ScrollState::Stopped;
-                self.delta_top_scroll(cx, -e.scroll.index(vi));
-                dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
-                self.area.redraw(cx);
-            },
-            Hit::FingerDown(e) => {
-                cx.set_key_focus(self.area);
-                // ok so fingerdown eh.
-                self.drag_state = DragState::SwipeDrag {
-                    last_abs: e.abs.index(vi),
-                    delta: 0.0,
-                    initial_time: e.time
-                };
-            }
-            Hit::KeyDown(ke) => match ke.key_code {
-                KeyCode::ArrowDown => {
-                    self.first_id += 1;
-                    if self.first_id >= self.range_end.max(1) {
-                        self.first_id = self.range_end - 1;
-                    }
-                    self.first_scroll = 0.0;
+        if !self.scroll_bar.is_area_captured(cx){
+            match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
+                Hit::FingerScroll(e) => {
+                    self.scroll_state = ScrollState::Stopped;
+                    self.delta_top_scroll(cx, -e.scroll.index(vi));
+                    dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 },
-                KeyCode::ArrowUp => {
-                    if self.first_id > 0 {
-                        self.first_id -= 1;
-                        if self.first_id < self.range_start {
-                            self.first_id = self.range_start;
+                Hit::FingerDown(e) => {
+                    cx.set_key_focus(self.area);
+                    // ok so fingerdown eh.
+                    self.drag_state = DragState::SwipeDrag {
+                        last_abs: e.abs.index(vi),
+                        delta: 0.0,
+                        initial_time: e.time
+                    };
+                }
+                Hit::KeyDown(ke) => match ke.key_code {
+                    KeyCode::ArrowDown => {
+                        self.first_id += 1;
+                        if self.first_id >= self.range_end.max(1) {
+                            self.first_id = self.range_end - 1;
                         }
                         self.first_scroll = 0.0;
                         self.area.redraw(cx);
-                    }
-                },
-                _ => ()
-            }
-            Hit::FingerMove(e) => {
-                cx.set_cursor(MouseCursor::Default);
-                
-                // ok we kinda have to set the scroll pos to our abs position
-                match &mut self.drag_state {
-                    DragState::SwipeDrag {last_abs, delta, initial_time} => {
-                        let new_delta = e.abs.index(vi) - *last_abs;
-                        if e.time - *initial_time < self.swipe_drag_duration {
+                    },
+                    KeyCode::ArrowUp => {
+                        if self.first_id > 0 {
+                            self.first_id -= 1;
+                            if self.first_id < self.range_start {
+                                self.first_id = self.range_start;
+                            }
+                            self.first_scroll = 0.0;
+                            self.area.redraw(cx);
+                        }
+                    },
+                    _ => ()
+                }
+                Hit::FingerMove(e) => {
+                    cx.set_cursor(MouseCursor::Default);
+                    
+                    // ok we kinda have to set the scroll pos to our abs position
+                    match &mut self.drag_state {
+                        DragState::SwipeDrag {last_abs, delta, initial_time} => {
+                            let new_delta = e.abs.index(vi) - *last_abs;
+                            if e.time - *initial_time < self.swipe_drag_duration {
+                                *delta = new_delta;
+                                *last_abs = e.abs.index(vi);
+                            }
+                            else {
+                                // After a short span of time, the flick motion is considered a normal drag
+                                self.scroll_state = ScrollState::Stopped;
+                                self.drag_state = DragState::NormalDrag {
+                                    last_abs: e.abs.index(vi),
+                                    delta: new_delta
+                                };
+                            }
+                            self.delta_top_scroll(cx, new_delta);
+                            dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                            self.area.redraw(cx);
+                        },
+                        DragState::NormalDrag {last_abs, delta} => {
+                            let new_delta = e.abs.index(vi) - *last_abs;
                             *delta = new_delta;
                             *last_abs = e.abs.index(vi);
-                        }
-                        else {
-                            // After a short span of time, the flick motion is considered a normal drag
-                            self.scroll_state = ScrollState::Stopped;
-                            self.drag_state = DragState::NormalDrag {
-                                last_abs: e.abs.index(vi),
-                                delta: new_delta
-                            };
-                        }
-                        self.delta_top_scroll(cx, new_delta);
-                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
-                        self.area.redraw(cx);
-                    },
-                    DragState::NormalDrag {last_abs, delta} => {
-                        let new_delta = e.abs.index(vi) - *last_abs;
-                        *delta = new_delta;
-                        *last_abs = e.abs.index(vi);
-                        self.delta_top_scroll(cx, new_delta);
-                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
-                        self.area.redraw(cx);
-                    },
-                    DragState::None => {}
-                }
-            }
-            Hit::FingerUp(_) => {
-                if let DragState::SwipeDrag {delta, ..} = &mut self.drag_state {
-                    if delta.abs()>self.flick_scroll_minimum {
-                        self.scroll_state = ScrollState::Flick {
-                            delta: *delta,
-                            next_frame: cx.new_next_frame()
-                        };
+                            self.delta_top_scroll(cx, new_delta);
+                            dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                            self.area.redraw(cx);
+                        },
+                        DragState::None => {}
                     }
                 }
-                self.drag_state = DragState::None;
-                // ok so. lets check our gap from 'drag'
-                // here we kinda have to take our last delta and animate it
+                Hit::FingerUp(_) => {
+                    if let DragState::SwipeDrag {delta, ..} = &mut self.drag_state {
+                        if delta.abs()>self.flick_scroll_minimum {
+                            self.scroll_state = ScrollState::Flick {
+                                delta: *delta,
+                                next_frame: cx.new_next_frame()
+                            };
+                        }
+                    }
+                    self.drag_state = DragState::None;
+                    // ok so. lets check our gap from 'drag'
+                    // here we kinda have to take our last delta and animate it
+                }
+                Hit::KeyFocus(_) => {
+                }
+                Hit::KeyFocusLost(_) => {
+                }
+                _ => ()
             }
-            Hit::KeyFocus(_) => {
-            }
-            Hit::KeyFocusLost(_) => {
-            }
-            _ => ()
         }
     }
     

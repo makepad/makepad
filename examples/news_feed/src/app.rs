@@ -54,8 +54,7 @@ live_design!{
         draw_icon: {
             svg_file: (LOGO),
             fn get_color(self) -> vec4 {
-                return vec4(Pal::iq1(0.4),1.0);
-                return (COLOR_BRAND);
+                return (COLOR_BRAND)
             }
         }
         icon_walk: {width: 7.5, height: Fit}
@@ -311,7 +310,6 @@ impl LiveHook for App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let news_feeds = self.ui.list_view_set(ids!(news_feed));
-        
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
