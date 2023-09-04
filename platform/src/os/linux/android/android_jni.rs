@@ -331,10 +331,10 @@ impl<'a> AndroidToJava<'a> {
         }
     }
 
-    pub fn decode_video_chunk(&self, video_id: LiveId, start_timestamp: u128, end_timestamp: u128) {
+    pub fn decode_next_video_chunk(&self, video_id: LiveId, max_frames_to_decode: usize) {
         unsafe {
-            let name = CString::new("decodeVideoChunk").unwrap();
-            let signature = CString::new("(JJJ)V").unwrap();
+            let name = CString::new("decodeNextVideoChunk").unwrap();
+            let signature = CString::new("(JI)V").unwrap();
             let method_id = (**self.env).GetMethodID.unwrap()(
                 self.env,
                 (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
@@ -347,11 +347,32 @@ impl<'a> AndroidToJava<'a> {
                 self.callback,
                 method_id,
                 video_id.get_value() as jlong,
-                start_timestamp as jlong,
-                end_timestamp as jlong,
+                max_frames_to_decode as jint,
             );
         }
     }
+
+    // pub fn decode_video_chunk(&self, video_id: LiveId, start_timestamp: u128, end_timestamp: u128) {
+    //     unsafe {
+    //         let name = CString::new("decodeVideoChunk").unwrap();
+    //         let signature = CString::new("(JJJ)V").unwrap();
+    //         let method_id = (**self.env).GetMethodID.unwrap()(
+    //             self.env,
+    //             (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
+    //             name.as_ptr(),
+    //             signature.as_ptr(),
+    //         );
+
+    //         (**self.env).CallVoidMethod.unwrap()(
+    //             self.env,
+    //             self.callback,
+    //             method_id,
+    //             video_id.get_value() as jlong,
+    //             start_timestamp as jlong,
+    //             end_timestamp as jlong,
+    //         );
+    //     }
+    // }
 
     pub fn fetch_next_video_frames(&self, video_id: LiveId, number_frames: usize) {
         unsafe {

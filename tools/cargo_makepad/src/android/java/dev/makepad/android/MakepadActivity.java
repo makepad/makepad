@@ -33,6 +33,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.LinkedList;
 
 import android.os.Bundle;
 import android.os.ParcelUuid;
@@ -411,21 +412,16 @@ Makepad.Callback{
         mDecoderHandler.post(runnable);
     }
 
-    public void decodeVideoChunk(long videoId, long startTimestampUs, long endTimestampUs) {
+    public void decodeNextVideoChunk(long videoId, int maxFramesToDecode) {
         VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
         if(runnable == null) {
             throw new IllegalStateException("No runnable initialized with ID: " + videoId);
         }
-        runnable.setTimestamps(startTimestampUs, endTimestampUs);
-
+        runnable.setMaxFramesToDecode(maxFramesToDecode);
         mDecoderHandler.post(runnable);
     } 
 
     public void fetchNextVideoFrames(long videoId, int numberFrames) {
-        // TODO: 
-        // - Currently the queue grows unexpectedly
-        // - Queue size > 50 causes allocation failures
-        
         BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
         Log.e("Makepad", "queue length: " + videoFrameQueue.size());
 
@@ -444,7 +440,7 @@ Makepad.Callback{
 
         ByteBuffer frameGroup;
         try {
-            frameGroup = ByteBuffer.allocate(totalBytes);
+            frameGroup = acquireBuffer(totalBytes);
         } catch (Error e) {
             Log.e("Makepad", "error: " + e.getMessage());
             return;
@@ -466,8 +462,7 @@ Makepad.Callback{
         frameGroup.flip();
         Makepad.onVideoStream(mCx, videoId, frameGroup, (Makepad.Callback) mView.getContext());
         Log.e("Makepad", "Queue size after polling: " + videoFrameQueue.size());
-        frameGroup = null;
-        individualFrames = null;
+        releaseBuffer(frameGroup);
     }
 
     public void cleanupDecoder(long videoId) {
@@ -477,12 +472,37 @@ Makepad.Callback{
         }
     }
 
+    private ByteBuffer acquireBuffer(int size) {
+        synchronized(mVideoChunkBufferPool) {
+            if (!mVideoChunkBufferPool.isEmpty()) {
+                ByteBuffer buffer = mVideoChunkBufferPool.poll();
+                if (buffer.capacity() == size) {
+                    return buffer;
+                } else {
+                    return ByteBuffer.allocate(size);
+                }
+            } else {
+                return ByteBuffer.allocate(size);
+            }
+        }
+    }
+
+    private void releaseBuffer(ByteBuffer buffer) {
+        synchronized(mVideoChunkBufferPool) {
+            buffer.clear();
+            mVideoChunkBufferPool.offer(buffer);
+        }
+    }
+
     Handler mHandler;
     HashMap<Long, Runnable> mRunnables;
     Handler mDecoderHandler;
+    
     HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
     private HashMap<Long, BlockingQueue<ByteBuffer>> mVideoFrameQueues = new HashMap<>();
-    
+    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 10; 
+    private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
+
     MakepadSurfaceView mView;
     long mCx;
     String mSelectedText;

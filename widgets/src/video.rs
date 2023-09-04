@@ -167,10 +167,10 @@ pub enum VideoAction {
 }
 
 // TODO:
-// - implement buffering
-//  - play on a loop, use total duration and frame timestamp to determine next decodes and loop
-//  - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
+// - handle looping gracefully
+// - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
 // - implement a pause/play
+// - cleanup resources after playback is finished
 
 impl Widget for Video {
     fn redraw(&mut self, cx: &mut Cx) {
@@ -216,9 +216,7 @@ impl Video {
         // TODO: Check for video id
         if self.tick.is_event(event) {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
-
             self.process_tick(cx);
-
         }
 
         if let Event::VideoDecodingInitialized(event) = event {
@@ -244,9 +242,11 @@ impl Video {
             let start_ts = 0;
             let end_ts = CHUNK_DURATION_US;
 
-            cx.decode_video_chunk(self.id, start_ts, end_ts);
-            self.latest_chunk = Some((start_ts, end_ts));
-            self.decoding_state = DecodingState::Decoding(start_ts, end_ts);
+            // cx.decode_video_chunk(self.id, start_ts, end_ts);
+            // self.latest_chunk = Some((start_ts, end_ts));
+            // self.decoding_state = DecodingState::Decoding(start_ts, end_ts);
+
+            cx.decode_next_video_chunk(self.id, 30);
 
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
         }
@@ -255,7 +255,7 @@ impl Video {
             makepad_error_log::log!("VideoChunkDecoded Event");
             self.decoding_state = DecodingState::Finished;
 
-            cx.fetch_next_video_frames(self.id, 35);       
+            cx.fetch_next_video_frames(self.id, 30);       
         }
 
 
@@ -266,6 +266,8 @@ impl Video {
             // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
             let metadata_size = 20;
         
+            // TODO:
+            // AVOID DATA COPYING HERE.
             while cursor < frame_group.len() { 
                 // might have to update for different endinaess on other platforms
                 let timestamp = u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
@@ -296,14 +298,16 @@ impl Video {
             }
 
             // decode next chunk
-            let new_start = self.latest_chunk.unwrap().1;
-            let new_end = self.latest_chunk.unwrap().1 + CHUNK_DURATION_US;
+            // let new_start = self.latest_chunk.unwrap().1;
+            // let new_end = self.latest_chunk.unwrap().1 + CHUNK_DURATION_US;
 
-            makepad_error_log::log!("New chunk: {:?}", (new_start, new_end));
+            // makepad_error_log::log!("New chunk: {:?}", (new_start, new_end));
 
-            cx.decode_video_chunk(self.id, new_start, new_end);
-            self.decoding_state = DecodingState::Decoding(new_start, new_end);     
-            self.latest_chunk = Some((new_start, new_end));
+            // cx.decode_video_chunk(self.id, new_start, new_end);
+            // self.decoding_state = DecodingState::Decoding(new_start, new_end);     
+            // self.latest_chunk = Some((new_start, new_end));
+
+            cx.decode_next_video_chunk(self.id, 30);
         }        
     }
 
@@ -320,7 +324,7 @@ impl Video {
         let elapsed = now.duration_since(self.last_update.0).as_micros();
         self.accumulated_time += elapsed;
 
-        // makepad_error_log::log!("Tick");
+        makepad_error_log::log!("Tick");
 
         match self.frames_buffer.get() {
             Some(current_frame) => {
@@ -357,7 +361,7 @@ impl Video {
                 self.last_update = MyInstant(now);
             }
             None => {
-                // makepad_error_log::log!("Empty Buffer");
+                makepad_error_log::log!("Empty Buffer");
             }
         }
     }
@@ -415,7 +419,6 @@ impl Video {
         match cx.get_dependency(self.source.as_str()) {
             Ok(data) => {
                 cx.initialize_video_decoding(self.id, data, 100);
-                makepad_error_log::log!("Decoding initialization requested");
             }
             Err(_e) => {
                 todo!()
