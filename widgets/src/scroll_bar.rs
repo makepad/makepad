@@ -261,6 +261,9 @@ impl ScrollBar {
             }
         }
     }
+    pub fn is_area_captured(&self, cx:&Cx)->bool{
+        cx.fingers.is_area_captured(self.draw_bar.area())
+    }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if self.visible {
