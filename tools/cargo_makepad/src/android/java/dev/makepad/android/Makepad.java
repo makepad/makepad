@@ -19,7 +19,7 @@ public class Makepad {
         void copyToClipboard(String selected);
         void pasteFromClipboard();
         void initializeVideoDecoding(long video_id, byte[] video, int chunkSize);
-        void decodeVideoChunk(long video_id, long startTimestampUs, long endTimestampUs);
+        void decodeNextVideoChunk(long video_id, int maxFramesToDecode);
         void fetchNextVideoFrames(long video_id, int numberFrames);
         void requestHttp(long requestId, long metadataId, String url, String method, String headers, byte[] body);
     }
