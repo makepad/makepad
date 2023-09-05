@@ -420,6 +420,7 @@ impl Cx {
     }
 
     pub fn decode_next_video_chunk(&mut self, video_id: LiveId, max_frames_to_decode: usize) {
+        makepad_error_log::log!(">>>>>>>>>>>>>>>>> decoding next video chunk");
         self.platform_ops.push(CxOsOp::DecodeNextVideoChunk(video_id, max_frames_to_decode));
     }
 

@@ -423,7 +423,6 @@ Makepad.Callback{
 
     public void fetchNextVideoFrames(long videoId, int numberFrames) {
         BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
-        Log.e("Makepad", "queue length: " + videoFrameQueue.size());
 
         int totalBytes = 0;
         ArrayList<ByteBuffer> individualFrames = new ArrayList<>();
@@ -433,35 +432,23 @@ Makepad.Callback{
             if (frame != null) {
                 individualFrames.add(frame);
                 totalBytes += frame.remaining();
-            } else {
-                Log.e("Makepad", "polled frame is null");
             }
         }
 
-        ByteBuffer frameGroup;
-        try {
-            frameGroup = acquireBuffer(totalBytes);
-        } catch (Error e) {
-            Log.e("Makepad", "error: " + e.getMessage());
-            return;
-        }
-        
         VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
-
+        ByteBuffer frameGroup = acquireBuffer(totalBytes);
+    
         for (ByteBuffer frame : individualFrames) {
             if (frame != null) {
                 frameGroup.put(frame);
                 if (runnable != null) {
                     runnable.releaseBuffer(frame);
                 }
-            } else {
-                Log.e("Makepad", "frame is null");
             }
         }
 
         frameGroup.flip();
         Makepad.onVideoStream(mCx, videoId, frameGroup, (Makepad.Callback) mView.getContext());
-        Log.e("Makepad", "Queue size after polling: " + videoFrameQueue.size());
         releaseBuffer(frameGroup);
     }
 
@@ -500,7 +487,7 @@ Makepad.Callback{
     
     HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
     private HashMap<Long, BlockingQueue<ByteBuffer>> mVideoFrameQueues = new HashMap<>();
-    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 10; 
+    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 2; 
     private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
 
     MakepadSurfaceView mView;

@@ -31,6 +31,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
             android:allowBackup="true"
             android:supportsRtl="true"
             android:debuggable="true"
+            android:largeHeap="true"
             tools:targetApi="33">
             <meta-data android:name="android.max_aspect" android:value="2.1" />
             <activity

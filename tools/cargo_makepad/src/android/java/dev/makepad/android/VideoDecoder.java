@@ -145,24 +145,21 @@ public class VideoDecoder {
     }
 
     public void decodeVideoChunk(int maxFramesToDecode) {
-        synchronized (this) {
-            if (mIsDecoding) {
-                Log.e("Makepad", "Already decoding");
-                return;
-            }
-            mIsDecoding = true;
+        try {
+            synchronized (this) {
+                if (mIsDecoding) {
+                    Log.e("Makepad", "Already decoding");
+                    return;
+                }
+                mIsDecoding = true;
 
-            if (mExtractor == null || mCodec == null) {
-                throw new IllegalStateException("Decoding hasn't been initialized");
-            }
+                if (mExtractor == null || mCodec == null) {
+                    throw new IllegalStateException("Decoding hasn't been initialized");
+                }
 
-            mCodec.flush();
+                long framesDecodedThisChunk = 0;
 
-            boolean isEndOfChunk = false;
-            long framesDecodedThisChunk = 0;
-
-            while (framesDecodedThisChunk < maxFramesToDecode) {
-                if (!mInputEos) {
+                while (framesDecodedThisChunk < maxFramesToDecode  && !mInputEos) {
                     int inputBufferIndex = mCodec.dequeueInputBuffer(2000);
                     if (inputBufferIndex >= 0) {
                         ByteBuffer inputBuffer = mCodec.getInputBuffer(inputBufferIndex);
@@ -171,69 +168,72 @@ public class VideoDecoder {
                         long presentationTimeUs = mExtractor.getSampleTime();
                         int flags = mExtractor.getSampleFlags();
 
-                        // if (sampleSize < 0 || presentationTimeUs > endTimestampUs) {
                         if (sampleSize < 0) {
                             mCodec.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            Log.e("Makepad", "End of chunk, timestamp is: " + presentationTimeUs);
-                            isEndOfChunk = true;
+                            mInputEos = true;
                             mExtractor.advance();
                         } else {
                             mCodec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
                             mExtractor.advance();
                         }
                     }
-                }
 
-                int outputBufferIndex = mCodec.dequeueOutputBuffer(mInfo, 2000);
-                if (outputBufferIndex >= 0) {
-                    ByteBuffer outputBuffer = mCodec.getOutputBuffer(outputBufferIndex);
+                    int outputBufferIndex = mCodec.dequeueOutputBuffer(mInfo, 2000);
+                    if (outputBufferIndex >= 0) {
+                        ByteBuffer outputBuffer = mCodec.getOutputBuffer(outputBufferIndex);
 
-                    Image outputImage = mCodec.getOutputImage(outputBufferIndex);
-                    Image.Plane yPlane = outputImage.getPlanes()[0];
-                    int yStride = yPlane.getRowStride();
-                    Image.Plane uvPlane = outputImage.getPlanes()[1];
-                    int uvStride = uvPlane.getRowStride();
+                        Image outputImage = mCodec.getOutputImage(outputBufferIndex);
+                        Image.Plane yPlane = outputImage.getPlanes()[0];
+                        int yStride = yPlane.getRowStride();
+                        Image.Plane uvPlane = outputImage.getPlanes()[1];
+                        int uvStride = uvPlane.getRowStride();
 
-                    // Construct the ByteBuffer for the frame + metadata
-                    // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
-                    int metadataSize = 8 + 4 + 4 + 4;
-                    int totalSize = metadataSize + mInfo.size;
+                        // Construct the ByteBuffer for the frame + metadata
+                        // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
+                        int metadataSize = 8 + 4 + 4 + 4;
+                        int totalSize = metadataSize + mInfo.size;
 
-                    ByteBuffer frameBuffer = acquireBuffer(totalSize);
-                    frameBuffer.clear(); // Prepare for new data
-                    frameBuffer.putLong(mInfo.presentationTimeUs);
-                    frameBuffer.putInt(yStride);
-                    frameBuffer.putInt(uvStride);
-                    frameBuffer.putInt(mInfo.size);
+                        ByteBuffer frameBuffer = acquireBuffer(totalSize);
+                        frameBuffer.clear();
+                        frameBuffer.putLong(mInfo.presentationTimeUs);
+                        frameBuffer.putInt(yStride);
+                        frameBuffer.putInt(uvStride);
+                        frameBuffer.putInt(mInfo.size);
 
-                    int oldLimit = outputBuffer.limit();
-                    outputBuffer.limit(outputBuffer.position() + mInfo.size);
-                    frameBuffer.put(outputBuffer);
-                    outputBuffer.limit(oldLimit);
+                        int oldLimit = outputBuffer.limit();
+                        outputBuffer.limit(outputBuffer.position() + mInfo.size);
+                        frameBuffer.put(outputBuffer);
+                        outputBuffer.limit(oldLimit);
 
-                    frameBuffer.flip();
+                        frameBuffer.flip();
 
-                    // Ideally I'd use add if the queue has a limit but because this is synchronized, if this waits, it locks other things.
-                    mVideoFrameQueue.add(frameBuffer);
+                        // WIP: Ideally I'd use `put` instead of `add` (if the queue has a limit) because `put` waits for capacity to be available
+                        // howver because this is synchronized, if this waits, it locks other things.
+                        mVideoFrameQueue.add(frameBuffer);
 
-                    mCodec.releaseOutputBuffer(outputBufferIndex, false);
-                    outputImage.close();
+                        mCodec.releaseOutputBuffer(outputBufferIndex, false);
+                        outputImage.close();
 
-                    if (isEndOfChunk) {
-                        mExtractor.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
-                    } else {
                         framesDecodedThisChunk++;
                     }
                 }
-            }
 
-            mIsDecoding = false;
-            Activity activity = mActivityReference.get();
-            if (activity != null) {
-                activity.runOnUiThread(() -> {
-                    Makepad.onVideoChunkDecoded(mCx, mVideoId, (Makepad.Callback)mView.getContext());
-                });
+                if (mInputEos) {
+                    mExtractor.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    mCodec.flush();
+                    mInputEos = false;
+                };
+
+                mIsDecoding = false;
+                Activity activity = mActivityReference.get();
+                if (activity != null) {
+                    activity.runOnUiThread(() -> {
+                        Makepad.onVideoChunkDecoded(mCx, mVideoId, (Makepad.Callback)mView.getContext());
+                    });
+                }
             }
+        } catch(Exception e) {
+            Log.e("Makepad", "Exception in decodeVideoChunk: ", e);
         }
     }
 
