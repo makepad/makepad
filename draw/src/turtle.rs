@@ -649,10 +649,26 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn get_turtle_align_range(&self) -> TurtleAlignRange {
+        TurtleAlignRange{
+            start:  self.turtles.last().unwrap().align_start,
+            end: self.align_list.len()
+        }
+    }
+    
+    pub fn shift_align_range(&mut self, range: &TurtleAlignRange, shift: DVec2) {
+        self.move_align_list(shift.x, shift.y, range.start, range.end, true, dvec2(0.0,0.0));
+    }
+    
     pub fn add_rect_area(&mut self, area: &mut Area, rect: Rect) {
         //let turtle = self.turtle();
         self.add_aligned_rect_area(area, rect)
     }
+}
+
+pub struct TurtleAlignRange{
+    start: usize,
+    end: usize
 }
 
 impl Turtle {
@@ -688,6 +704,8 @@ impl Turtle {
         self.width_used = width_used;
         self.height_used = height_used;
     }
+    
+    
     /*
     pub fn move_pos(&mut self, dx: f64, dy: f64) {
         self.pos.x += dx;
