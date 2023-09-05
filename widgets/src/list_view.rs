@@ -26,6 +26,28 @@ enum ScrollState {
     Pulldown{next_frame: NextFrame},
 }
 
+#[derive(Clone)]
+enum ListDrawState {
+    Begin,
+    Down {index: u64, pos: f64, viewport: Rect},
+    Up {index: u64, pos: f64, viewport: Rect},
+    Tail {index: u64, pos: f64, viewport: Rect},
+    End{viewport:Rect}
+}
+
+#[derive(Clone, WidgetAction)]
+pub enum InfiniteListAction {
+    Scroll,
+    None
+}
+impl ListDrawState {
+    fn is_tail(&self) -> bool {
+        match self {
+            Self::Tail {..} => true,
+            _ => false
+        }
+    }
+}
 #[derive(Live)]
 pub struct ListView {
     #[rust] area: Area,
@@ -119,12 +141,13 @@ impl ListView {
                 list.sort_by( | a, b | a.index.cmp(&b.index));
                 // ok so we have to find out if our top is < 0.0
                 let first_index = list.iter().position( | v | v.index == self.first_id).unwrap();
-                // now we scan down and up to move items into place
+                
                 let mut first_pos = self.first_scroll;
                 for i in (0..first_index).rev() {
                     let item = &list[i];
                     first_pos -= item.size.index(vi);
                 }
+                
                 let mut last_pos = self.first_scroll;
                 let mut last_item_pos = None;
                 for i in first_index..list.len() {
@@ -139,16 +162,31 @@ impl ListView {
                 }
                 
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0{
-                    let mut pos = first_pos.min(self.max_pull_down); // lets do a maximum for first scroll
+                    //log!("SNAPPING TO TOP");
+                    let min = if let DragState::None = self.drag_state{
+                        if let ScrollState::Stopped = self.scroll_state{
+                            
+                            0.0
+                        }
+                        else{
+                            self.max_pull_down
+                        }
+                    }
+                    else{
+                        self.max_pull_down
+                    };
+                    
+                    let mut pos = first_pos.min(min); // lets do a maximum for first scroll
                     for item in list {
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(&item.align_range, shift);
                         pos += item.size.index(vi)
                     }
-                    self.first_scroll = first_pos.min(self.max_pull_down);
+                    self.first_scroll = first_pos.min(min);
                     self.first_id = self.range_start;
                 }
                 else {
+                    //log!("NORMAL {}", list.first().unwrap().index);
                     // ok so. now what. if our last ranged item is < end
                     // we shift back with the same
                     let shift = if let Some(last_item_pos) = last_item_pos{
@@ -188,7 +226,7 @@ impl ListView {
                     }
                     //self.first_scroll = new_first_scroll;
                     //self.first_id = list.first().unwrap().index;
-                    log!("SETTING FIRST ID {}", self.first_id);
+                    //log!("SETTING FIRST ID {}", self.first_id);
                 }
             }
         }
@@ -222,8 +260,8 @@ impl ListView {
                     }, Layout::flow_down());
                     return Some(self.first_id)
                 }
-                ListDrawState::Down {index, pos, viewport}=> {
-                    
+                ListDrawState::Down {index, pos, viewport} | ListDrawState::Tail {index, pos, viewport} => {
+                    let is_tail = draw_state.is_tail();
                     let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
@@ -235,7 +273,7 @@ impl ListView {
                     
                     if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) {
                         // lets scan upwards
-                        if self.first_id>0  {
+                        if self.first_id>0 && !is_tail {
                             self.draw_state.set(ListDrawState::Up {
                                 index: self.first_id - 1,
                                 pos: self.first_scroll,
@@ -254,12 +292,20 @@ impl ListView {
                             return None
                         }
                     }
-                    
-                    self.draw_state.set(ListDrawState::Down {
-                        index: index + 1,
-                        pos: pos + rect.size.index(vi),
-                        viewport
-                    });
+                    if is_tail{
+                        self.draw_state.set(ListDrawState::Tail {
+                            index: index + 1,
+                            pos: pos + rect.size.index(vi),
+                            viewport
+                        });
+                    }
+                    else{
+                        self.draw_state.set(ListDrawState::Down {
+                            index: index + 1,
+                            pos: pos + rect.size.index(vi),
+                            viewport
+                        });
+                    }
                     cx.begin_turtle(Walk {
                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                         margin: Default::default(),
@@ -277,19 +323,38 @@ impl ListView {
                         size: rect.size,
                         index
                     });
-                    
-                    if !did_draw || pos - rect.size.index(vi) < 0.0 {
+                    if index == self.range_start {
+                        // we are at range start, but if we snap to top, we might need to walk further down as well
+                        if pos - rect.size.index(vi) > 0.0 {
+                            // scan the tail
+                            if let Some(last_index) = self.draw_align_list.iter().map(|v| v.index).max() {
+                                // lets sum up all the items
+                                let total_height: f64 = self.draw_align_list.iter().map( | v | v.size.index(vi)).sum();
+                                self.draw_state.set(ListDrawState::Tail {
+                                    index: last_index + 1,
+                                    pos: total_height,
+                                    viewport
+                                });
+                                cx.begin_turtle(Walk {
+                                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                    margin: Default::default(),
+                                    width: Size::Fill,
+                                    height: Size::Fit
+                                }, Layout::flow_down());
+                                return Some(last_index + 1);
+                            }
+                        }
                         self.draw_state.set(ListDrawState::End{viewport});
                         return None
                     }
                     
-                    if index == self.range_start {
+                    if !did_draw || pos  < 0.0 {
                         self.draw_state.set(ListDrawState::End{viewport});
                         return None
                     }
                     
                     self.draw_state.set(ListDrawState::Up {
-                        index: self.first_id - 1,
+                        index: index - 1,
                         pos: pos - rect.size.index(vi),
                         viewport
                     });
@@ -336,19 +401,6 @@ impl ListView {
     }
 }
 
-#[derive(Clone)]
-enum ListDrawState {
-    Begin,
-    Down {index: u64, pos: f64, viewport: Rect},
-    Up {index: u64, pos: f64, viewport: Rect},
-    End{viewport:Rect}
-}
-
-#[derive(Clone, WidgetAction)]
-pub enum InfiniteListAction {
-    Scroll,
-    None
-}
 
 impl Widget for ListView {
     fn redraw(&mut self, cx: &mut Cx) {
