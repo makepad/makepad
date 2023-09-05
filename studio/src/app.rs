@@ -239,6 +239,7 @@ impl AppMain for App {
         for action in self.build_manager.handle_event(cx, event) {
             match action {
                 BuildManagerAction::RedrawLog => {
+                    // if the log_list is tailing, set the new len
                     log_list.redraw(cx);
                 }
                 BuildManagerAction::StdinToHost {cmd_id, msg} => if let Some(mut run_view) = run_view.borrow_mut() {
