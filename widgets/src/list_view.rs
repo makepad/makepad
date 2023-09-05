@@ -126,9 +126,6 @@ impl ListView {
             }
             
             if list.first().unwrap().index == self.range_start && first_pos > 0.0{
-                // trigger snap back animation with a certain animation speed
-                
-                // how do we do a pull down effect at the top
                 let mut pos = first_pos.min(self.max_pull_down); // lets do a maximum for first scroll
                 for item in list {
                     let shift = DVec2::from_index_pair(vi, pos, 0.0);
@@ -398,8 +395,13 @@ impl Widget for ListView {
                     // we have to bounce back
                     if self.first_id == self.range_start && self.first_scroll > 0.0{
                         self.first_scroll *= 0.9;
-                        *next_frame = cx.new_next_frame();
-                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                        if self.first_scroll < 1.0{
+                            self.first_scroll = 0.0;
+                        }
+                        else{
+                            *next_frame = cx.new_next_frame();
+                            dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                        }
                         self.area.redraw(cx);
                     }
                     else{
