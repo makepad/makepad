@@ -525,14 +525,14 @@ impl<'a> Cx2d<'a> {
     }
     
     fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
-        let current_dpi_factor = self.current_dpi_factor();
+        //let current_dpi_factor = self.current_dpi_factor();
         let dx = if dx.is_nan() {0.0}else {dx} + turtle_shift.x;
         let dy = if dy.is_nan() {0.0}else {dy} + turtle_shift.y;
         if dx == 0.0 && dy == 0.0 {
             return 
         }
-        let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
-        let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
+        //let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
+        //let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
         let d = dvec2(dx, dy);
         let mut c = align_start;
         while c < align_end {
