@@ -463,7 +463,7 @@ impl Widget for ListView {
         let mut scroll_to = None;
         self.scroll_bar.handle_event_with(cx, event, &mut | _cx, action | {
             // snap the scrollbar to a top-index with scroll_pos 0
-            if let ScrollBarAction::Scroll {scroll_pos, view_total, view_visible} = action {
+            if let ScrollBarAction::Scroll {scroll_pos, view_total:_, view_visible:_} = action {
                 //if scroll_pos+0.5 >= view_total - view_visible{
                 //    log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
                // }
