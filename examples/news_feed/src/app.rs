@@ -304,8 +304,8 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        for i in 0..1{
-            log!("LINE {}",i)
+        for i in 0..15{
+            log!("LINE {}",i) 
         }
         crate::makepad_widgets::live_design(cx);
     }
@@ -330,7 +330,7 @@ impl AppMain for App {
                         };
                         let item = list.item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
-                            1 => format!("Hello 444  {} Requires recompile", item_id),
+                            1 => format!("Hello 123  {} Requires recompile", item_id),
                             2 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
                             3 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
