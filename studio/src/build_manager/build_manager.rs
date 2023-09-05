@@ -181,8 +181,7 @@ impl BuildManager {
     
     pub fn draw_log_list(&self, cx: &mut Cx2d, list: &mut ListView) {
 
-
-        list.set_item_range(0, self.messages.len() as u64, 1);
+        list.set_item_range(cx, 0, self.messages.len() as u64, 1);
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id&1 == 0;
             //log!("GOT ITEM ID {}", item_id);
