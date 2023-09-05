@@ -30,7 +30,7 @@ enum ScrollState {
 enum ListDrawState {
     Begin,
     Down {index: u64, pos: f64, viewport: Rect},
-    Up {index: u64, pos: f64, viewport: Rect},
+    Up {index: u64, pos: f64, hit_bottom: bool, viewport: Rect},
     Tail {index: u64, pos: f64, viewport: Rect},
     End{viewport:Rect}
 }
@@ -165,7 +165,6 @@ impl ListView {
                     //log!("SNAPPING TO TOP");
                     let min = if let DragState::None = self.drag_state{
                         if let ScrollState::Stopped = self.scroll_state{
-                            
                             0.0
                         }
                         else{
@@ -277,6 +276,7 @@ impl ListView {
                             self.draw_state.set(ListDrawState::Up {
                                 index: self.first_id - 1,
                                 pos: self.first_scroll,
+                                hit_bottom: index >= self.range_end,
                                 viewport
                             });
                             cx.begin_turtle(Walk {
@@ -314,7 +314,7 @@ impl ListView {
                     }, Layout::flow_down());
                     return Some(index + 1)
                 }
-                ListDrawState::Up {index, pos, viewport} => {
+                ListDrawState::Up {index, pos, hit_bottom, viewport} => {
                     let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
@@ -348,13 +348,14 @@ impl ListView {
                         return None
                     }
                     
-                    if !did_draw || pos  < 0.0 {
+                    if !did_draw || pos  < if hit_bottom{-viewport.size.index(vi)} else{0.0} {
                         self.draw_state.set(ListDrawState::End{viewport});
                         return None
                     }
                     
                     self.draw_state.set(ListDrawState::Up {
                         index: index - 1,
+                        hit_bottom,
                         pos: pos - rect.size.index(vi),
                         viewport
                     });
@@ -366,7 +367,7 @@ impl ListView {
                         height: Size::Fit
                     }, Layout::flow_down());
                     
-                    return Some(self.first_id - 1);
+                    return Some(index - 1);
                 }
                 _ => ()
             }
@@ -392,6 +393,9 @@ impl ListView {
     
     fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top:bool) {
         self.first_scroll += delta;
+        if self.first_id == self.range_start{
+            self.first_scroll = self.first_scroll.min(self.max_pull_down);
+        }
         if self.first_id == self.range_start && self.first_scroll > 0.0 && clip_top{
             self.first_scroll = 0.0;
         }
