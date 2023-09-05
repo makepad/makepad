@@ -1,5 +1,6 @@
 use {
     crate::{
+        makepad_micro_serde::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
             LiveValue,
@@ -17,7 +18,7 @@ use {
     }
 };
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Live, LiveHook)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Live, LiveHook, SerBin, DeBin, SerJson, DeJson)]
 #[live_ignore]
 pub enum MouseCursor {
     // don't show the cursor
