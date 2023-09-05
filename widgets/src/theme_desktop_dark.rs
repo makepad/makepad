@@ -1476,6 +1476,7 @@ live_design!{
     }
     
     FileTree = <FileTreeBase> {
+        scroll_bars: <ScrollBars>{}
         node_height: (THEME_DATA_ITEM_HEIGHT),
         file_node: <FileTreeNode> {
             is_folder: false,

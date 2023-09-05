@@ -503,7 +503,8 @@ impl Widget for ListView {
             ScrollState::Stopped => ()
         }
         let vi = self.vec_index;
-        if !self.scroll_bar.is_area_captured(cx) {
+        let is_scroll = if let Event::Scroll(_) = event{true} else {false};
+        if !self.scroll_bar.is_area_captured(cx) || is_scroll{
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
                     if self.tail_range {
