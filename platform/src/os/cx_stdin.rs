@@ -124,7 +124,8 @@ pub enum HostToStdin{
     ReloadFile{
         file:String,
         contents:String
-    }
+    },
+    Dx11TextureGuid(String)
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

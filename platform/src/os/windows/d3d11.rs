@@ -9,6 +9,7 @@ use {
             windows::win32_app::{TRUE, FALSE},
             windows::win32_window::Win32Window,
         },
+        texture::Texture,
         draw_list::DrawListId,
         event::WindowGeom,
         cx::Cx,
@@ -291,7 +292,12 @@ impl Cx {
             }
         }
     }
-    
+
+    pub fn get_dx11_shared_texture_guid(&self, _texture:&Texture)->String{
+        // todo fetch the guid and plug it into a string
+        "".to_string()
+    }
+
     pub fn setup_pass_render_targets(&mut self, pass_id: PassId, first_target: &Option<ID3D11RenderTargetView >, d3d11_cx: &D3d11Cx) {
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
