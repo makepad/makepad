@@ -136,6 +136,9 @@ impl Cx {
                             // we need to make this shared texture handle into a true metal one
                             self.stdin_handle_repaint(d3d11_cx);
                         }
+                        HostToStdin::Dx11TextureGuid(_guid)=>{
+                            // we have a guid. we get this every 'tick' tho just in case.
+                        }
                     }
                     Err(err) => { // we should output a log string
                         error!("Cant parse stdin-JSON {} {:?}", line, err);

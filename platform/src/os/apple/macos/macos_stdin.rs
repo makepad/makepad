@@ -171,6 +171,7 @@ impl Cx {
                             // we need to make this shared texture handle into a true metal one
                             self.stdin_handle_repaint(metal_cx);
                         }
+                        _=>()
                     }
                     Err(err) => { // we should output a log string
                         error!("Cant parse stdin-JSON {} {:?}", line, err);
