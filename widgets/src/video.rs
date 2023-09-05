@@ -115,6 +115,8 @@ pub struct Video {
     decoding_state: DecodingState,
     #[rust]
     latest_chunk: Option<(u128, u128)>,
+    #[rust]
+    vec_pool: VecPool,
 
     #[rust]
     id: LiveId,
@@ -215,7 +217,8 @@ impl Video {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
 
             if self.decoding_state == DecodingState::Finished
-                || self.decoding_state == DecodingState::Decoding && self.frames_buffer.data.len() > 5
+                || self.decoding_state == DecodingState::Decoding
+                    && self.frames_buffer.data.len() > 5
             {
                 self.process_tick(cx);
             }
@@ -252,12 +255,13 @@ impl Video {
         }
 
         if let Event::VideoChunkDecoded(_id) = event {
-            makepad_error_log::log!("<<<<<<<<<<<<<<< VideoChunkDecoded Event");
+            // makepad_error_log::log!("<<<<<<<<<<<<<<< VideoChunkDecoded Event");
             self.decoding_state = DecodingState::Finished;
 
             cx.fetch_next_video_frames(self.id, 30);
         }
 
+        // let start = Instant::now();
         if let Event::VideoStream(event) = event {
             makepad_error_log::log!("<<<<<<<<<<<<<<< VideoStream Event");
             let mut cursor = 0;
@@ -283,12 +287,17 @@ impl Video {
 
                 let pixel_data = &frame_group[frame_data_start..frame_data_end];
 
-                let (y_data, uv_data) = split_nv12_data(
+                let mut y_data = self.vec_pool.acquire(self.width * self.height);
+                let mut uv_data = self.vec_pool.acquire((self.width / 2) * (self.height / 2));
+
+                split_nv12_data(
                     pixel_data,
                     self.width,
                     self.height,
                     y_stride as usize,
                     uv_stride as usize,
+                    y_data.as_mut_slice(),
+                    uv_data.as_mut_slice(),
                 );
 
                 self.frames_buffer.push(VideoFrame {
@@ -300,15 +309,10 @@ impl Video {
                 cursor = frame_data_end;
             }
 
-            // decode next chunk
-            // let new_start = self.latest_chunk.unwrap().1;
-            // let new_end = self.latest_chunk.unwrap().1 + CHUNK_DURATION_US;
+            // let elapsed = start.elapsed();
 
-            // makepad_error_log::log!("New chunk: {:?}", (new_start, new_end));
-
-            // cx.decode_video_chunk(self.id, new_start, new_end);
-            // self.decoding_state = DecodingState::Decoding(new_start, new_end);
-            // self.latest_chunk = Some((new_start, new_end));
+            // let elapsed_ms = elapsed.as_secs() * 1000 + elapsed.subsec_millis() as u64;
+            // makepad_error_log::log!("STREAM EVENT TOOK: {}", elapsed_ms);
         }
     }
 
@@ -328,11 +332,6 @@ impl Video {
         match self.frames_buffer.get() {
             Some(current_frame) => {
                 if self.accumulated_time >= current_frame.timestamp_us {
-                    // makepad_error_log::log!(
-                    //     "Updating textures with frame {}",
-                    //     current_frame.timestamp_us
-                    // );
-
                     self.update_textures(cx, current_frame.y_data, current_frame.uv_data);
 
                     self.redraw(cx);
@@ -395,7 +394,12 @@ impl Video {
         );
 
         y_texture.swap_image_u32(cx, &mut y_data.borrow_mut());
-        uv_texture.swap_image_u32(cx, &mut *uv_data.borrow_mut());
+        uv_texture.swap_image_u32(cx, &mut uv_data.borrow_mut());
+
+        // TODO: simplify and probably remove Rc
+
+        self.vec_pool.release(y_data.replace(Vec::new()));
+        self.vec_pool.release(uv_data.replace(Vec::new()));        
     }
 
     fn initialize_decoding(&self, cx: &mut Cx) {
@@ -415,7 +419,6 @@ impl Video {
             (self.original_frame_rate as f64 * chunk_duration_seconds).ceil() as usize;
 
         self.frames_buffer.capacity = (estimated_frames_per_chunk as f64 * 1.2).ceil() as usize;
-        makepad_error_log::log!("Frames buffer capacity: {}", self.frames_buffer.capacity);
     }
 
     fn cleanup_decoding(&mut self, cx: &mut Cx) {
@@ -462,22 +465,61 @@ impl Default for RingBuffer {
     }
 }
 
+#[derive(Default)]
+pub struct VecPool {
+    pool: RefCell<Vec<Vec<u32>>>,
+}
+
+impl VecPool {
+    pub fn new() -> Self {
+        Self {
+            pool: RefCell::new(Vec::new()),
+        }
+    }
+
+    // TODO: rework this to avoid zeroing out the vec
+    pub fn acquire(&self, capacity: usize) -> Vec<u32> {
+        let mut pool = self.pool.borrow_mut();
+        match pool.pop() {
+            Some(mut vec) => {
+                vec.clear();
+                vec.resize(capacity, 0);
+                vec
+            }
+            None => vec![0u32; capacity],
+        }
+    }
+
+    pub fn release(&self, vec: Vec<u32>) {
+        let mut pool = self.pool.borrow_mut();
+        pool.push(vec);
+    }
+}
+
 fn split_nv12_data(
     data: &[u8],
     width: usize,
     height: usize,
     y_stride: usize,
     uv_stride: usize,
-) -> (Vec<u32>, Vec<u32>) {
-    let mut y_data_u32 = Vec::with_capacity(width * height);
-    let mut uv_data_u32 = Vec::with_capacity((width / 2) * (height / 2));
+    y_data: &mut [u32],
+    uv_data: &mut [u32],
+) {
+    let mut y_idx = 0;
+    let mut uv_idx = 0;
+
+    if y_data.len() < width * height || uv_data.len() < (width / 2) * (height / 2) {
+        makepad_error_log::log!("y_data len: {}, uv_data len: {}, width: {}, height: {}", y_data.len(), uv_data.len(), width, height);
+        return; 
+    }
 
     // Extract and convert Y data
     for row in 0..height {
         let start = row * y_stride;
         let end = start + width;
         for &y in &data[start..end] {
-            y_data_u32.push(0xFFFFFF00u32 | (y as u32));
+            y_data[y_idx] = 0xFFFFFF00u32 | (y as u32);
+            y_idx += 1;
         }
     }
 
@@ -489,9 +531,8 @@ fn split_nv12_data(
         for chunk in data[start..end].chunks(2) {
             let u = chunk[0];
             let v = chunk[1];
-            uv_data_u32.push((u as u32) << 16 | (v as u32) << 8 | 0xFF000000u32);
+            uv_data[uv_idx] = (u as u32) << 16 | (v as u32) << 8 | 0xFF000000u32;
+            uv_idx += 1;
         }
     }
-
-    (y_data_u32, uv_data_u32)
 }
