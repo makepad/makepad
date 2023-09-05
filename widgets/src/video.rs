@@ -1,8 +1,5 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, VideoColorFormat};
-use std::{
-    collections::VecDeque,
-    time::Instant,
-};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
 
 const DEFAULT_FPS_INTERVAL: f64 = 33.0;
 
@@ -125,8 +122,8 @@ pub struct Video {
 
 #[derive(Clone)]
 struct VideoFrame {
-    y_data: Vec<u8>,
-    uv_data: Vec<u8>,
+    y_data: Rc<RefCell<Vec<u32>>>,
+    uv_data: Rc<RefCell<Vec<u32>>>,
     timestamp_us: u128,
 }
 
@@ -138,7 +135,7 @@ enum DecodingState {
     #[default]
     NotStarted,
     Idle,
-    Decoding(u128, u128),
+    Decoding,
     Finished,
 }
 
@@ -167,7 +164,7 @@ pub enum VideoAction {
 }
 
 // TODO:
-// - handle looping gracefully
+// - add audio playback
 // - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
 // - implement a pause/play
 // - cleanup resources after playback is finished
@@ -216,7 +213,17 @@ impl Video {
         // TODO: Check for video id
         if self.tick.is_event(event) {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
-            self.process_tick(cx);
+
+            if self.decoding_state == DecodingState::Finished
+                || self.decoding_state == DecodingState::Decoding && self.frames_buffer.data.len() > 5
+            {
+                self.process_tick(cx);
+            }
+
+            if self.should_request_decoding() {
+                cx.decode_next_video_chunk(self.id, 30);
+                self.decoding_state = DecodingState::Decoding;
+            }
         }
 
         if let Event::VideoDecodingInitialized(event) = event {
@@ -225,11 +232,10 @@ impl Video {
             self.original_frame_rate = event.frame_rate;
             self.total_duration = event.duration;
             self.color_format = event.color_format;
-            // round up:
             self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
 
             makepad_error_log::log!(
-                "Decoding initialized: {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
+                "<<<<<<<<<<<<<<< Decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
                 self.width,
                 self.height,
                 self.original_frame_rate,
@@ -239,47 +245,44 @@ impl Video {
 
             self.resize_frames_buffer();
 
-            let start_ts = 0;
-            let end_ts = CHUNK_DURATION_US;
-
-            // cx.decode_video_chunk(self.id, start_ts, end_ts);
-            // self.latest_chunk = Some((start_ts, end_ts));
-            // self.decoding_state = DecodingState::Decoding(start_ts, end_ts);
-
-            cx.decode_next_video_chunk(self.id, 30);
+            cx.decode_next_video_chunk(self.id, 45);
+            self.decoding_state = DecodingState::Decoding;
 
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
         }
 
         if let Event::VideoChunkDecoded(_id) = event {
-            makepad_error_log::log!("VideoChunkDecoded Event");
+            makepad_error_log::log!("<<<<<<<<<<<<<<< VideoChunkDecoded Event");
             self.decoding_state = DecodingState::Finished;
 
-            cx.fetch_next_video_frames(self.id, 30);       
+            cx.fetch_next_video_frames(self.id, 30);
         }
 
-
         if let Event::VideoStream(event) = event {
+            makepad_error_log::log!("<<<<<<<<<<<<<<< VideoStream Event");
             let mut cursor = 0;
             let frame_group = &event.frame_group;
-        
+
             // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
             let metadata_size = 20;
-        
-            // TODO:
-            // AVOID DATA COPYING HERE.
-            while cursor < frame_group.len() { 
+
+            while cursor < frame_group.len() {
                 // might have to update for different endinaess on other platforms
-                let timestamp = u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
-                let y_stride = u32::from_be_bytes(frame_group[cursor + 8..cursor + 12].try_into().unwrap());
-                let uv_stride = u32::from_be_bytes(frame_group[cursor + 12..cursor + 16].try_into().unwrap());
-                let frame_length = u32::from_be_bytes(frame_group[cursor + 16..cursor + 20].try_into().unwrap()) as usize;
+                let timestamp =
+                    u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
+                let y_stride =
+                    u32::from_be_bytes(frame_group[cursor + 8..cursor + 12].try_into().unwrap());
+                let uv_stride =
+                    u32::from_be_bytes(frame_group[cursor + 12..cursor + 16].try_into().unwrap());
+                let frame_length =
+                    u32::from_be_bytes(frame_group[cursor + 16..cursor + 20].try_into().unwrap())
+                        as usize;
 
                 let frame_data_start = cursor + metadata_size;
                 let frame_data_end = frame_data_start + frame_length;
 
                 let pixel_data = &frame_group[frame_data_start..frame_data_end];
-                
+
                 let (y_data, uv_data) = split_nv12_data(
                     pixel_data,
                     self.width,
@@ -287,13 +290,13 @@ impl Video {
                     y_stride as usize,
                     uv_stride as usize,
                 );
-                
+
                 self.frames_buffer.push(VideoFrame {
-                    y_data,
-                    uv_data,
+                    y_data: Rc::new(RefCell::new(y_data)),
+                    uv_data: Rc::new(RefCell::new(uv_data)),
                     timestamp_us: timestamp,
                 });
-                
+
                 cursor = frame_data_end;
             }
 
@@ -304,17 +307,15 @@ impl Video {
             // makepad_error_log::log!("New chunk: {:?}", (new_start, new_end));
 
             // cx.decode_video_chunk(self.id, new_start, new_end);
-            // self.decoding_state = DecodingState::Decoding(new_start, new_end);     
+            // self.decoding_state = DecodingState::Decoding(new_start, new_end);
             // self.latest_chunk = Some((new_start, new_end));
-
-            cx.decode_next_video_chunk(self.id, 30);
-        }        
+        }
     }
 
     fn should_request_decoding(&self) -> bool {
         match self.decoding_state {
-            DecodingState::Decoding(_start, _end) => false,
-            DecodingState::Finished => self.frames_buffer.data.len() < 2,
+            DecodingState::Decoding => false,
+            DecodingState::Finished => self.frames_buffer.data.len() < 10,
             _ => todo!(),
         }
     }
@@ -324,34 +325,27 @@ impl Video {
         let elapsed = now.duration_since(self.last_update.0).as_micros();
         self.accumulated_time += elapsed;
 
-        makepad_error_log::log!("Tick");
-
         match self.frames_buffer.get() {
             Some(current_frame) => {
                 if self.accumulated_time >= current_frame.timestamp_us {
-                    makepad_error_log::log!(
-                        "Updating textures with frame {}",
-                        current_frame.timestamp_us
-                    );
+                    // makepad_error_log::log!(
+                    //     "Updating textures with frame {}",
+                    //     current_frame.timestamp_us
+                    // );
 
-                    self.update_textures(
-                        cx,
-                        &mut current_frame.y_data.clone(),
-                        &mut current_frame.uv_data.clone(),
-                    );
+                    self.update_textures(cx, current_frame.y_data, current_frame.uv_data);
 
                     self.redraw(cx);
-
-                    // if at last frame:
-                    // self.accumulated_time -= frame_timestamp;
 
                     // if at latest frame, restart
                     if self.current_frame_ts >= self.total_duration {
                         if self.is_looping {
                             self.current_frame_ts = 0;
+                        } else {
+                            self.playback_finished = true;
+                            self.cleanup_decoding(cx);
                         }
-                        self.playback_finished = true;
-                        self.cleanup_decoding(cx);
+                        self.accumulated_time -= current_frame.timestamp_us;
                     } else {
                         self.current_frame_ts =
                             (self.current_frame_ts as f64 + self.frame_ts_interval).ceil() as u128;
@@ -366,7 +360,12 @@ impl Video {
         }
     }
 
-    fn update_textures(&mut self, cx: &mut Cx, y_data: &mut Vec<u8>, uv_data: &mut Vec<u8>) {
+    fn update_textures(
+        &mut self,
+        cx: &mut Cx,
+        y_data: Rc<RefCell<Vec<u32>>>,
+        uv_data: Rc<RefCell<Vec<u32>>>,
+    ) {
         if let None = self.y_texture {
             self.y_texture = Some(Texture::new(cx));
         }
@@ -395,24 +394,8 @@ impl Video {
             },
         );
 
-        // TODO:
-        // - optimize by adding support for 8-bit textures
-        // - optimize by already buffering the u32 data instead of converting at this stage.
-
-        // Convert 8-bit Y data to 32-bit
-        let mut y_data_u32: Vec<u32> = y_data.iter().map(|&y| 0xFFFFFF00u32 | (y as u32)).collect();
-        // Convert 8-bit UV data to 32-bit (only 2 channels are used)
-        let mut uv_data_u32: Vec<u32> = uv_data
-            .chunks(2)
-            .map(|chunk| {
-                let u = chunk[0];
-                let v = chunk[1];
-                (u as u32) << 16 | (v as u32) << 8 | 0xFF000000u32
-            })
-            .collect();
-
-        y_texture.swap_image_u32(cx, &mut y_data_u32);
-        uv_texture.swap_image_u32(cx, &mut uv_data_u32);
+        y_texture.swap_image_u32(cx, &mut y_data.borrow_mut());
+        uv_texture.swap_image_u32(cx, &mut *uv_data.borrow_mut());
     }
 
     fn initialize_decoding(&self, cx: &mut Cx) {
@@ -432,6 +415,7 @@ impl Video {
             (self.original_frame_rate as f64 * chunk_duration_seconds).ceil() as usize;
 
         self.frames_buffer.capacity = (estimated_frames_per_chunk as f64 * 1.2).ceil() as usize;
+        makepad_error_log::log!("Frames buffer capacity: {}", self.frames_buffer.capacity);
     }
 
     fn cleanup_decoding(&mut self, cx: &mut Cx) {
@@ -484,24 +468,30 @@ fn split_nv12_data(
     height: usize,
     y_stride: usize,
     uv_stride: usize,
-) -> (Vec<u8>, Vec<u8>) {
-    let mut y_data = Vec::with_capacity(width * height);
-    let mut uv_data = Vec::with_capacity(width * height / 2);
+) -> (Vec<u32>, Vec<u32>) {
+    let mut y_data_u32 = Vec::with_capacity(width * height);
+    let mut uv_data_u32 = Vec::with_capacity((width / 2) * (height / 2));
 
-    // Extract Y data
+    // Extract and convert Y data
     for row in 0..height {
         let start = row * y_stride;
         let end = start + width;
-        y_data.extend_from_slice(&data[start..end]);
+        for &y in &data[start..end] {
+            y_data_u32.push(0xFFFFFF00u32 | (y as u32));
+        }
     }
 
-    // Extract UV data
+    // Extract and convert UV data
     let uv_start = y_stride * height;
     for row in 0..(height / 2) {
         let start = uv_start + row * uv_stride;
-        let end = start + width; // since U and V are interleaved, and are half the width of Y
-        uv_data.extend_from_slice(&data[start..end]);
+        let end = start + width;
+        for chunk in data[start..end].chunks(2) {
+            let u = chunk[0];
+            let v = chunk[1];
+            uv_data_u32.push((u as u32) << 16 | (v as u32) << 8 | 0xFF000000u32);
+        }
     }
 
-    (y_data, uv_data)
+    (y_data_u32, uv_data_u32)
 }
