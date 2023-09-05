@@ -59,6 +59,7 @@ pub struct TextInput {
     #[live] numeric_only: bool,
     #[live] on_focus_select_all: bool,
     #[live] pub read_only: bool,
+    #[live] capture_overload: bool,
     
     //#[live] label_walk: Walk,
     
@@ -321,7 +322,7 @@ impl TextInput {
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
         self.animator_handle_event(cx, event);
-        match event.hits(cx, self.draw_bg.area()) {
+        match event.hits_with_capture_overload(cx, self.draw_bg.area(), self.capture_overload) {
             Hit::KeyFocusLost(_) => {
                 self.animator_play(cx, id!(focus.off));
                 cx.hide_text_ime();

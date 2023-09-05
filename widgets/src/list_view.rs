@@ -484,13 +484,6 @@ impl Widget for ListView {
             self.area.redraw(cx);
         }
         
-        for item in self.items.values_mut() {
-            let item_uid = item.widget_uid();
-            item.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
-            });
-        }
-        
         match &mut self.scroll_state {
             ScrollState::Flick {delta, next_frame} => {
                 if let Some(_) = next_frame.is_event(event) {
@@ -642,6 +635,13 @@ impl Widget for ListView {
                 }
                 _ => ()
             }
+        }
+
+        for item in self.items.values_mut() {
+            let item_uid = item.widget_uid();
+            item.handle_widget_event_with(cx, event, &mut | cx, action | {
+                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
+            });
         }
     }
     
