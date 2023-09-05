@@ -165,6 +165,9 @@ impl Cx {
                         texture_id: main_texture.texture_id()
                     }];
                 },
+                CxOsOp::SetCursor(cursor) => {
+                    let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
+                },
                 _ => ()
                 /*
                 CxOsOp::CloseWindow(_window_id) => {},

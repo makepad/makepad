@@ -120,6 +120,9 @@ impl RunView {
     
     pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, _manager: &mut BuildManager) {
         match msg {
+            StdinToHost::SetCursor(cursor)=>{
+                cx.set_cursor(cursor)
+            }
             StdinToHost::ReadyToStart => {
                 // cause a resize event to fire
                 self.last_size = Default::default();
