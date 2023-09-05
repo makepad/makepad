@@ -23,7 +23,7 @@ enum DragState {
 enum ScrollState {
     Stopped,
     Flick {delta: f64, next_frame: NextFrame},
-    Pulldown{next_frame: NextFrame},
+    Pulldown {next_frame: NextFrame},
 }
 
 #[derive(Clone)]
@@ -32,7 +32,7 @@ enum ListDrawState {
     Down {index: u64, pos: f64, viewport: Rect},
     Up {index: u64, pos: f64, hit_bottom: bool, viewport: Rect},
     Tail {index: u64, pos: f64, viewport: Rect},
-    End{viewport:Rect}
+    End {viewport: Rect}
 }
 
 #[derive(Clone, WidgetAction)]
@@ -135,7 +135,7 @@ impl ListView {
     
     fn end(&mut self, cx: &mut Cx2d) {
         let vi = self.vec_index;
-        if let Some(ListDrawState::End{viewport}) = self.draw_state.get() {
+        if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
             if list.len()>0 {
                 list.sort_by( | a, b | a.index.cmp(&b.index));
@@ -153,25 +153,37 @@ impl ListView {
                 for i in first_index..list.len() {
                     let item = &list[i];
                     last_pos += item.size.index(vi);
-                    if item.index < self.range_end{
+                    if item.index < self.range_end {
                         last_item_pos = Some(last_pos);
                     }
-                    else{
+                    else {
                         break;
                     }
                 }
                 
-                if list.first().unwrap().index == self.range_start && first_pos > 0.0{
+                let mut not_filling_viewport = false;
+                if list[0].index == self.range_start {
+                    let mut total = 0.0;
+                    for item in list.iter() {
+                        if item.index >= self.range_end {
+                            break;
+                        }
+                        total += item.size.index(vi);
+                    }
+                    not_filling_viewport = total < viewport.size.index(vi);
+                }
+                
+                if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
                     //log!("SNAPPING TO TOP");
-                    let min = if let DragState::None = self.drag_state{
-                        if let ScrollState::Stopped = self.scroll_state{
+                    let min = if let DragState::None = self.drag_state {
+                        if let ScrollState::Stopped = self.scroll_state {
                             0.0
                         }
-                        else{
+                        else {
                             self.max_pull_down
                         }
                     }
-                    else{
+                    else {
                         self.max_pull_down
                     };
                     
@@ -185,19 +197,20 @@ impl ListView {
                     self.first_id = self.range_start;
                 }
                 else {
-                    //log!("NORMAL {}", list.first().unwrap().index);
-                    // ok so. now what. if our last ranged item is < end
-                    // we shift back with the same
-                    let shift = if let Some(last_item_pos) = last_item_pos{
-                        // the bottom of last item needs to be aligned to the viewport
-                        
-                        (viewport.size.index(vi) - last_item_pos).max(0.0)
+                    
+                    let shift = if let Some(last_item_pos) = last_item_pos {
+                        if not_filling_viewport {
+                            -first_pos
+                        }
+                        else {
+                            (viewport.size.index(vi) - last_item_pos).max(0.0)
+                        }
                     }
-                    else{
+                    else {
                         0.0
                     };
                     
-                    let start_pos = self.first_scroll+ shift;
+                    let start_pos = self.first_scroll + shift;
                     let mut pos = start_pos;
                     for i in (0..first_index).rev() {
                         let item = &list[i];
@@ -205,7 +218,7 @@ impl ListView {
                         pos -= item.size.index(vi);
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(&item.align_range, shift);
-                        if visible{ // move up
+                        if visible { // move up
                             self.first_scroll = pos;
                             self.first_id = item.index;
                         }
@@ -218,7 +231,7 @@ impl ListView {
                         cx.shift_align_range(&item.align_range, shift);
                         pos += item.size.index(vi);
                         let invisible = pos < 0.0;
-                        if invisible{ // move down
+                        if invisible { // move down
                             self.first_scroll = pos - item.size.index(vi);
                             self.first_id = item.index;
                         }
@@ -229,9 +242,9 @@ impl ListView {
                 }
             }
         }
-        else{
+        else {
             log!("Draw state not at end in listview, please review your next_visible_item loop")
-        } 
+        }
         let rect = cx.turtle().rect();
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
@@ -288,18 +301,18 @@ impl ListView {
                             return Some(self.first_id - 1);
                         }
                         else {
-                            self.draw_state.set(ListDrawState::End{viewport});
+                            self.draw_state.set(ListDrawState::End {viewport});
                             return None
                         }
                     }
-                    if is_tail{
+                    if is_tail {
                         self.draw_state.set(ListDrawState::Tail {
                             index: index + 1,
                             pos: pos + rect.size.index(vi),
                             viewport
                         });
                     }
-                    else{
+                    else {
                         self.draw_state.set(ListDrawState::Down {
                             index: index + 1,
                             pos: pos + rect.size.index(vi),
@@ -327,7 +340,7 @@ impl ListView {
                         // we are at range start, but if we snap to top, we might need to walk further down as well
                         if pos - rect.size.index(vi) > 0.0 {
                             // scan the tail
-                            if let Some(last_index) = self.draw_align_list.iter().map(|v| v.index).max() {
+                            if let Some(last_index) = self.draw_align_list.iter().map( | v | v.index).max() {
                                 // lets sum up all the items
                                 let total_height: f64 = self.draw_align_list.iter().map( | v | v.size.index(vi)).sum();
                                 self.draw_state.set(ListDrawState::Tail {
@@ -344,12 +357,12 @@ impl ListView {
                                 return Some(last_index + 1);
                             }
                         }
-                        self.draw_state.set(ListDrawState::End{viewport});
+                        self.draw_state.set(ListDrawState::End {viewport});
                         return None
                     }
                     
-                    if !did_draw || pos  < if hit_bottom{-viewport.size.index(vi)} else{0.0} {
-                        self.draw_state.set(ListDrawState::End{viewport});
+                    if !did_draw || pos < if hit_bottom {-viewport.size.index(vi)} else {0.0} {
+                        self.draw_state.set(ListDrawState::End {viewport});
                         return None
                     }
                     
@@ -391,12 +404,12 @@ impl ListView {
         self.view_window = view_window;
     }
     
-    fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top:bool) {
+    fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top: bool) {
         self.first_scroll += delta;
-        if self.first_id == self.range_start{
+        if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
         }
-        if self.first_id == self.range_start && self.first_scroll > 0.0 && clip_top{
+        if self.first_id == self.range_start && self.first_scroll > 0.0 && clip_top {
             self.first_scroll = 0.0;
         }
         let scroll_pos = ((self.first_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
@@ -437,8 +450,8 @@ impl Widget for ListView {
             });
         }
         
-        match &mut self.scroll_state{
-            ScrollState::Flick {delta, next_frame} =>{
+        match &mut self.scroll_state {
+            ScrollState::Flick {delta, next_frame} => {
                 if let Some(_) = next_frame.is_event(event) {
                     *delta = *delta * self.flick_scroll_decay;
                     if delta.abs()>self.flick_scroll_minimum {
@@ -452,26 +465,26 @@ impl Widget for ListView {
                     }
                 }
             }
-            ScrollState::Pulldown{next_frame}=>{
+            ScrollState::Pulldown {next_frame} => {
                 if let Some(_) = next_frame.is_event(event) {
                     // we have to bounce back
-                    if self.first_id == self.range_start && self.first_scroll > 0.0{
+                    if self.first_id == self.range_start && self.first_scroll > 0.0 {
                         self.first_scroll *= 0.9;
-                        if self.first_scroll < 1.0{
+                        if self.first_scroll < 1.0 {
                             self.first_scroll = 0.0;
                         }
-                        else{
+                        else {
                             *next_frame = cx.new_next_frame();
                             dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                         }
                         self.area.redraw(cx);
                     }
-                    else{
+                    else {
                         self.scroll_state = ScrollState::Stopped
                     }
                 }
             }
-            ScrollState::Stopped=>()
+            ScrollState::Stopped => ()
         }
         let vi = self.vec_index;
         if !self.scroll_bar.is_area_captured(cx) {
@@ -485,7 +498,7 @@ impl Widget for ListView {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area);
                     // ok so fingerdown eh.
-                    if let ScrollState::Pulldown{..} = &self.scroll_state {
+                    if let ScrollState::Pulldown {..} = &self.scroll_state {
                         self.scroll_state = ScrollState::Stopped;
                     };
                     self.drag_state = DragState::SwipeDrag {
@@ -558,8 +571,8 @@ impl Widget for ListView {
                             };
                         }
                     }
-                    if self.first_id == self.range_start && self.first_scroll > 0.0{
-                        self.scroll_state = ScrollState::Pulldown{next_frame:cx.new_next_frame()};
+                    if self.first_id == self.range_start && self.first_scroll > 0.0 {
+                        self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
                     }
                     
                     self.drag_state = DragState::None;

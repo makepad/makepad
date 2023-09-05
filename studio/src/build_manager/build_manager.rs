@@ -185,7 +185,7 @@ impl BuildManager {
         list.set_item_range(0, self.messages.len() as u64, 1);
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id&1 == 0;
-            
+            //log!("GOT ITEM ID {}", item_id);
             if let Some(msg) = self.messages.get(item_id as usize){
                 match msg {
                     BuildMsg::Bare(msg) => {
