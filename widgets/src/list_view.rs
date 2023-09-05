@@ -138,6 +138,8 @@ impl ListView {
     
     fn end(&mut self, cx: &mut Cx2d) {
         let vi = self.vec_index;
+        let mut at_end = false;
+        let mut visible_items = 0;
         if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
             if list.len()>0 {
@@ -192,7 +194,7 @@ impl ListView {
                     for item in list {
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(&item.align_range, shift);
-                        pos += item.size.index(vi)
+                        pos += item.size.index(vi);
                     }
                     self.first_scroll = first_pos.min(min);
                     self.first_id = self.range_start;
@@ -204,13 +206,17 @@ impl ListView {
                             -first_pos
                         }
                         else {
-                            (viewport.size.index(vi) - last_item_pos).max(0.0)
+                            let ret = (viewport.size.index(vi) - last_item_pos).max(0.0);
+                            if ret > 0.0{
+                                at_end = true;
+                            }
+                            ret
                         }
                     }
                     else {
                         0.0
                     };
-                    
+                    let mut shifted = false;
                     let start_pos = self.first_scroll + shift;
                     let mut pos = start_pos;
                     for i in (0..first_index).rev() {
@@ -222,6 +228,10 @@ impl ListView {
                         if visible { // move up
                             self.first_scroll = pos;
                             self.first_id = item.index;
+                            shifted = true;
+                            if item.index < self.range_end{
+                                visible_items += 1;
+                            }
                         }
                     }
                     
@@ -235,7 +245,15 @@ impl ListView {
                         if invisible { // move down
                             self.first_scroll = pos - item.size.index(vi);
                             self.first_id = item.index;
+                            shifted = true;
                         }
+                        else if item.index < self.range_end{
+                            visible_items += 1;
+                        }
+                    }
+                    // overwrite first scroll to compensate for shift
+                    if !shifted{
+                        self.first_scroll = start_pos;
                     }
                 }
                 self.update_scroll_bar(cx);
@@ -245,6 +263,9 @@ impl ListView {
             log!("Draw state not at end in listview, please review your next_visible_item loop")
         }
         let rect = cx.turtle().rect();
+        if at_end{ 
+            self.view_window = visible_items.max(3)-2;
+        }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
         self.items.retain_visible();
@@ -397,10 +418,10 @@ impl ListView {
         None
     }
     
-    pub fn set_item_range(&mut self, cx: &mut Cx, range_start: u64, range_end: u64, view_window: u64) {
+    pub fn set_item_range(&mut self, cx: &mut Cx, range_start: u64, range_end: u64) {
         self.range_start = range_start;
         self.range_end = range_end;
-        self.view_window = view_window;
+        
         if self.tail_range {
             self.tail_range(cx);
         }
@@ -413,7 +434,7 @@ impl ListView {
     }
     
     pub fn update_scroll_bar(&mut self, cx: &mut Cx) {
-        let scroll_pos = ((self.first_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
+        let scroll_pos = ((self.first_id - self.range_start) as f64 / ((self.range_end - self.range_start).max( self.view_window+1) - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
         // move the scrollbar to the right 'top' position
         self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
     }
@@ -442,7 +463,11 @@ impl Widget for ListView {
         let mut scroll_to = None;
         self.scroll_bar.handle_event_with(cx, event, &mut | _cx, action | {
             // snap the scrollbar to a top-index with scroll_pos 0
-            if let ScrollBarAction::Scroll {scroll_pos, ..} = action {
+            if let ScrollBarAction::Scroll {scroll_pos, view_total, view_visible} = action {
+                //if scroll_pos+0.5 >= view_total - view_visible{
+                //    log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
+               // }
+                //    log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
                 scroll_to = Some(scroll_pos)
             }
         });
