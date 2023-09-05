@@ -421,6 +421,9 @@ impl Widget for ListView {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area);
                     // ok so fingerdown eh.
+                    if let ScrollState::Pulldown{..} = &self.scroll_state {
+                        self.scroll_state = ScrollState::Stopped;
+                    };
                     self.drag_state = DragState::SwipeDrag {
                         last_abs: e.abs.index(vi),
                         delta: 0.0,
