@@ -31,7 +31,7 @@ enum ListDrawState {
     Begin,
     Down {index: u64, pos: f64, viewport: Rect},
     Up {index: u64, pos: f64, hit_bottom: bool, viewport: Rect},
-    Tail {index: u64, pos: f64, viewport: Rect},
+    DownAgain {index: u64, pos: f64, viewport: Rect},
     End {viewport: Rect}
 }
 
@@ -42,9 +42,9 @@ pub enum InfiniteListAction {
     None
 }
 impl ListDrawState {
-    fn is_tail(&self) -> bool {
+    fn is_down_again(&self) -> bool {
         match self {
-            Self::Tail {..} => true,
+            Self::DownAgain {..} => true,
             _ => false
         }
     }
@@ -271,8 +271,8 @@ impl ListView {
                     }, Layout::flow_down());
                     return Some(self.first_id)
                 }
-                ListDrawState::Down {index, pos, viewport} | ListDrawState::Tail {index, pos, viewport} => {
-                    let is_tail = draw_state.is_tail();
+                ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
+                    let is_down_again = draw_state.is_down_again();
                     let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
@@ -284,7 +284,7 @@ impl ListView {
                     
                     if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) {
                         // lets scan upwards
-                        if self.first_id>0 && !is_tail {
+                        if self.first_id>0 && !is_down_again {
                             self.draw_state.set(ListDrawState::Up {
                                 index: self.first_id - 1,
                                 pos: self.first_scroll,
@@ -304,8 +304,8 @@ impl ListView {
                             return None
                         }
                     }
-                    if is_tail {
-                        self.draw_state.set(ListDrawState::Tail {
+                    if is_down_again {
+                        self.draw_state.set(ListDrawState::DownAgain {
                             index: index + 1,
                             pos: pos + rect.size.index(vi),
                             viewport
@@ -342,7 +342,7 @@ impl ListView {
                             if let Some(last_index) = self.draw_align_list.iter().map( | v | v.index).max() {
                                 // lets sum up all the items
                                 let total_height: f64 = self.draw_align_list.iter().map( | v | v.size.index(vi)).sum();
-                                self.draw_state.set(ListDrawState::Tail {
+                                self.draw_state.set(ListDrawState::DownAgain {
                                     index: last_index + 1,
                                     pos: total_height,
                                     viewport
@@ -401,18 +401,18 @@ impl ListView {
         self.range_start = range_start;
         self.range_end = range_end;
         self.view_window = view_window;
-        if self.tail_range{
+        if self.tail_range {
             self.tail_range(cx);
         }
     }
     
-    pub fn tail_range(&mut self, cx: &mut Cx){
+    pub fn tail_range(&mut self, cx: &mut Cx) {
         self.first_id = self.range_end.max(1) - 1;
         self.first_scroll = 0.0;
         self.update_scroll_bar(cx);
     }
     
-    pub fn update_scroll_bar(&mut self, cx: &mut Cx){
+    pub fn update_scroll_bar(&mut self, cx: &mut Cx) {
         let scroll_pos = ((self.first_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
         // move the scrollbar to the right 'top' position
         self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
@@ -451,7 +451,7 @@ impl Widget for ListView {
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
             self.first_id = scroll_to;
             self.first_scroll = 0.0;
-            if self.tail_range{
+            if self.tail_range {
                 self.tail_range = false;
                 dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
             }
@@ -506,11 +506,11 @@ impl Widget for ListView {
         if !self.scroll_bar.is_area_captured(cx) {
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
-                    if self.tail_range{
+                    if self.tail_range {
                         self.tail_range = false;
                         dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                     }
-
+                    
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
                     dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
@@ -519,7 +519,7 @@ impl Widget for ListView {
                 Hit::FingerDown(e) => {
                     cx.set_key_focus(self.area);
                     // ok so fingerdown eh.
-                    if self.tail_range{
+                    if self.tail_range {
                         self.tail_range = false;
                         dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                     }
@@ -536,7 +536,7 @@ impl Widget for ListView {
                 Hit::KeyDown(ke) => match ke.key_code {
                     KeyCode::End => {
                         self.tail_range = true;
-                         dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+                        dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         self.area.redraw(cx);
                     },
                     KeyCode::ArrowDown => {
@@ -661,7 +661,7 @@ impl ListViewRef {
         }
     }
     
-    pub fn set_tail_range(&self, tail_range:bool){
+    pub fn set_tail_range(&self, tail_range: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.tail_range = tail_range
         }
