@@ -70,7 +70,7 @@ pub struct ListView {
     #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] draw_align_list: Vec<AlignItem>,
-    #[rust(true)] tail_range: bool,
+    #[live(true)] tail_range: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
