@@ -22,7 +22,8 @@ enum DragState {
 
 enum ScrollState {
     Stopped,
-    Flick {delta: f64, next_frame: NextFrame}
+    Flick {delta: f64, next_frame: NextFrame},
+    Pulldown{next_frame: NextFrame},
 }
 
 #[derive(Live)]
@@ -37,16 +38,25 @@ pub struct ListView {
     #[live(0.1)] flick_scroll_minimum: f64,
     #[live(0.98)] flick_scroll_decay: f64,
     #[live(0.2)] swipe_drag_duration: f64,
+    #[live(100.0)] max_pull_down: f64,
     #[rust] first_id: u64,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
     #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
+    #[rust] draw_align_list: Vec<AlignItem>,
+    
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
     #[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
+}
+
+struct AlignItem {
+    align_range: TurtleAlignRange,
+    size: DVec2,
+    index: u64
 }
 
 impl LiveHook for ListView {
@@ -98,9 +108,59 @@ impl ListView {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
+        self.draw_align_list.clear();
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
+        let vi = self.vec_index;
+        let list = &mut self.draw_align_list;
+        if list.len()>0 {
+            list.sort_by( | a, b | a.index.cmp(&b.index));
+            // ok so we have to find out if our top is < 0.0
+            let first_index = list.iter().position( | v | v.index == self.first_id).unwrap();
+            // now we scan down and up to move items into place
+            let mut first_pos = self.first_scroll;
+            for i in (0..first_index).rev() {
+                let item = &list[i];
+                first_pos -= item.size.index(vi);
+            }
+            
+            if list.first().unwrap().index == self.range_start && first_pos > 0.0{
+                // trigger snap back animation with a certain animation speed
+                
+                // how do we do a pull down effect at the top
+                let mut pos = first_pos.min(self.max_pull_down); // lets do a maximum for first scroll
+                for item in list {
+                    let shift = DVec2::from_index_pair(vi, pos, 0.0);
+                    cx.shift_align_range(&item.align_range, shift);
+                    pos += item.size.index(vi)
+                }
+                self.first_scroll = first_pos.min(self.max_pull_down);
+                self.first_id = self.range_start;
+            }
+            else {
+                let mut pos = self.first_scroll;
+                let mut new_first_scroll = pos;
+                for i in (0..first_index).rev() {
+                    let item = &list[i];
+                    pos -= item.size.index(vi);
+                    let shift = DVec2::from_index_pair(vi, pos, 0.0);
+                    cx.shift_align_range(&item.align_range, shift);
+                    new_first_scroll = pos;
+                }
+                
+                let mut pos = self.first_scroll;
+                for i in first_index..list.len() {
+                    let item = &list[i];
+                    let shift = DVec2::from_index_pair(vi, pos, 0.0);
+                    cx.shift_align_range(&item.align_range, shift);
+                    pos += item.size.index(vi);
+                }
+                self.first_scroll = new_first_scroll;
+                self.first_id = list.first().unwrap().index;
+            }
+        }
+        
         let rect = cx.turtle().rect();
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
@@ -110,116 +170,130 @@ impl ListView {
     
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<u64> {
         let vi = self.vec_index;
-        match self.draw_state.get() {
-            Some(ListDrawState::Begin) => {
-                let viewport = cx.turtle().padded_rect();
-                self.draw_state.set(ListDrawState::Down {
-                    index: self.first_id,
-                    scroll: self.first_scroll,
-                    viewport,
-                });
-                
-                cx.begin_turtle(Walk {
-                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y) + DVec2::from_index_pair(vi, self.first_scroll, 0.0)),
-                    margin: Default::default(),
-                    width: Size::Fill,
-                    height: Size::Fit
-                }, Layout::flow_down());
-                return Some(self.first_id)
-            }
-            Some(ListDrawState::Down {index, scroll, viewport}) => {
-                let did_draw = cx.turtle_has_align_items();
-                let rect = cx.end_turtle();
-                
-                if did_draw && rect.pos.index(vi) + rect.size.index(vi) < viewport.pos.index(vi) && index + 1 < self.range_end {
-                    self.first_id = index + 1;
-                    self.first_scroll = (rect.pos.index(vi) + rect.size.index(vi)) - viewport.pos.index(vi);
-                    if self.first_id + 1 == self.range_end && self.first_scroll < 0.0 {
-                        self.first_scroll = 0.0;
-                    }
+        if let Some(draw_state) = self.draw_state.get() {
+            match draw_state {
+                ListDrawState::Begin => {
+                    let viewport = cx.turtle().padded_rect();
+                    self.draw_state.set(ListDrawState::Down {
+                        index: self.first_id,
+                        pos: self.first_scroll,
+                        viewport,
+                    });
+                    
+                    cx.begin_turtle(Walk {
+                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                        margin: Default::default(),
+                        width: Size::Fill,
+                        height: Size::Fit
+                    }, Layout::flow_down());
+                    return Some(self.first_id)
                 }
-                
-                if !did_draw
-                    || rect.pos.index(vi) + rect.size.index(vi) > viewport.pos.index(vi) + viewport.size.index(vi)
-                /* || index + 1 == self.range_end*/ {
-                    if self.first_id > self.range_start && self.first_scroll > 0.0 {
-                        self.draw_state.set(ListDrawState::Up {
-                            index: self.first_id - 1,
-                            scroll: self.first_scroll,
-                            viewport
-                        });
-                        cx.begin_turtle(Walk {
-                            abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
-                            margin: Default::default(),
-                            width: Size::Fill,
-                            height: Size::Fit
-                        }, Layout::flow_down());
-                        return Some(self.first_id - 1);
+                ListDrawState::Down {index, pos, viewport} | ListDrawState::Tail {index, pos, viewport} => {
+                    let is_tail = draw_state.is_tail();
+                    
+                    let did_draw = cx.turtle_has_align_items();
+                    let align_range = cx.get_turtle_align_range();
+                    let rect = cx.end_turtle();
+                    self.draw_align_list.push(AlignItem {
+                        align_range,
+                        size: rect.size,
+                        index
+                    });
+                    
+                    if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) {
+                        // lets scan upwards
+                        if self.first_id>0 && !is_tail {
+                            self.draw_state.set(ListDrawState::Up {
+                                index: self.first_id - 1,
+                                pos: self.first_scroll,
+                                viewport
+                            });
+                            cx.begin_turtle(Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                margin: Default::default(),
+                                width: Size::Fill,
+                                height: Size::Fit
+                            }, Layout::flow_down());
+                            return Some(self.first_id - 1);
+                        }
+                        else {
+                            self.draw_state.set(ListDrawState::End);
+                            return None
+                        }
                     }
-                    else {
+                    
+                    self.draw_state.set(ListDrawState::Down {
+                        index: index + 1,
+                        pos: pos + rect.size.index(vi),
+                        viewport
+                    });
+                    cx.begin_turtle(Walk {
+                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                        margin: Default::default(),
+                        width: Size::Fill,
+                        height: Size::Fit
+                    }, Layout::flow_down());
+                    return Some(index + 1)
+                }
+                ListDrawState::Up {index, pos, viewport} => {
+                    let did_draw = cx.turtle_has_align_items();
+                    let align_range = cx.get_turtle_align_range();
+                    let rect = cx.end_turtle();
+                    self.draw_align_list.push(AlignItem {
+                        align_range,
+                        size: rect.size,
+                        index
+                    });
+                    
+                    if !did_draw || pos - rect.size.index(vi) < 0.0 {
                         self.draw_state.set(ListDrawState::End);
                         return None
                     }
-                }
-                
-                let scroll = scroll + rect.size.index(vi);
-                
-                self.draw_state.set(ListDrawState::Down {
-                    index: index + 1,
-                    scroll,
-                    viewport
-                });
-                cx.begin_turtle(Walk {
-                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y) + DVec2::from_index_pair(vi, scroll, 0.0)),
-                    margin: Default::default(),
-                    width: Size::Fill,
-                    height: Size::Fit
-                }, Layout::flow_down());
-                return Some(index + 1)
-            }
-            Some(ListDrawState::Up {index, scroll, viewport}) => {
-                let did_draw = cx.turtle_has_align_items();
-                let used = cx.turtle().used();
-                let shift = DVec2::from_index_pair(vi, scroll - used.index(vi), 0.0);
-                cx.turtle_mut().set_shift(shift);
-                
-                let rect = cx.end_turtle();
-                if !did_draw || rect.pos.index(vi) + rect.size.index(vi) + shift.index(vi) < viewport.pos.index(vi) {
-                    self.draw_state.set(ListDrawState::End);
-                    if self.first_id == self.range_start && self.first_scroll < 0.0 {
-                        self.first_scroll = 0.0;
+                    
+                    if index == self.range_start {
+                        // we are at range start, but if we snap to top, we might need to walk further down as well
+                        if pos - rect.size.index(vi) > 0.0 {
+                            // scan the tail
+                            if let Some(last) = self.draw_align_list.last() {
+                                // lets sum up all the items
+                                let total_height: f64 = self.draw_align_list.iter().map( | v | v.size.index(vi)).sum();
+                                self.draw_state.set(ListDrawState::Tail {
+                                    index: last.index + 1,
+                                    pos: total_height,
+                                    viewport
+                                });
+                                cx.begin_turtle(Walk {
+                                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                    margin: Default::default(),
+                                    width: Size::Fill,
+                                    height: Size::Fit
+                                }, Layout::flow_down());
+                                return Some(self.first_id - 1);
+                            }
+                        }
+                        self.draw_state.set(ListDrawState::End);
+                        return None
                     }
-                    return None
+                    
+                    self.draw_state.set(ListDrawState::Up {
+                        index: self.first_id - 1,
+                        pos: pos - rect.size.index(vi),
+                        viewport
+                    });
+                    
+                    cx.begin_turtle(Walk {
+                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                        margin: Default::default(),
+                        width: Size::Fill,
+                        height: Size::Fit
+                    }, Layout::flow_down());
+                    
+                    return Some(self.first_id - 1);
                 }
-                self.first_id = index;
-                self.first_scroll = scroll - used.index(vi);
-                
-                
-                
-                if index == self.range_start {
-                    self.draw_state.set(ListDrawState::End);
-                    return None
-                }
-                
-                self.draw_state.set(ListDrawState::Up {
-                    index: self.first_id - 1,
-                    scroll: self.first_scroll,
-                    viewport
-                });
-                
-                cx.begin_turtle(Walk {
-                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
-                    margin: Default::default(),
-                    width: Size::Fill,
-                    height: Size::Fit
-                }, Layout::flow_down());
-                
-                return Some(self.first_id - 1);
-            }
-            _ => {
-                return None
+                _ => ()
             }
         }
+        None
     }
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
@@ -238,12 +312,9 @@ impl ListView {
         self.view_window = view_window;
     }
     
-    fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64) {
+    fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top:bool) {
         self.first_scroll += delta;
-        if self.first_id == self.range_start && self.first_scroll > 0.0 {
-            self.first_scroll = 0.0;
-        }
-        if self.first_id + 1 == self.range_end && self.first_scroll < 0.0 {
+        if self.first_id == self.range_start && self.first_scroll > 0.0 && clip_top{
             self.first_scroll = 0.0;
         }
         let scroll_pos = ((self.first_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
@@ -255,9 +326,19 @@ impl ListView {
 #[derive(Clone)]
 enum ListDrawState {
     Begin,
-    Down {index: u64, scroll: f64, viewport: Rect},
-    Up {index: u64, scroll: f64, viewport: Rect},
+    Down {index: u64, pos: f64, viewport: Rect},
+    Up {index: u64, pos: f64, viewport: Rect},
+    Tail {index: u64, pos: f64, viewport: Rect},
     End
+}
+
+impl ListDrawState {
+    fn is_tail(&self) -> bool {
+        match self {
+            Self::Tail {..} => true,
+            _ => false
+        }
+    }
 }
 
 #[derive(Clone, WidgetAction)]
@@ -297,26 +378,43 @@ impl Widget for ListView {
             });
         }
         
-        if let ScrollState::Flick {delta, next_frame} = &mut self.scroll_state {
-            if let Some(_) = next_frame.is_event(event) {
-                *delta = *delta * self.flick_scroll_decay;
-                if delta.abs()>self.flick_scroll_minimum {
-                    *next_frame = cx.new_next_frame();
-                    let delta = *delta;
-                    self.delta_top_scroll(cx, delta);
-                    dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
-                    self.area.redraw(cx);
-                } else {
-                    self.scroll_state = ScrollState::Stopped;
+        match &mut self.scroll_state{
+            ScrollState::Flick {delta, next_frame} =>{
+                if let Some(_) = next_frame.is_event(event) {
+                    *delta = *delta * self.flick_scroll_decay;
+                    if delta.abs()>self.flick_scroll_minimum {
+                        *next_frame = cx.new_next_frame();
+                        let delta = *delta;
+                        self.delta_top_scroll(cx, delta, true);
+                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                        self.area.redraw(cx);
+                    } else {
+                        self.scroll_state = ScrollState::Stopped;
+                    }
                 }
             }
+            ScrollState::Pulldown{next_frame}=>{
+                if let Some(_) = next_frame.is_event(event) {
+                    // we have to bounce back
+                    if self.first_id == self.range_start && self.first_scroll > 0.0{
+                        self.first_scroll *= 0.9;
+                        *next_frame = cx.new_next_frame();
+                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                        self.area.redraw(cx);
+                    }
+                    else{
+                        self.scroll_state = ScrollState::Stopped
+                    }
+                }
+            }
+            ScrollState::Stopped=>()
         }
         let vi = self.vec_index;
-        if !self.scroll_bar.is_area_captured(cx){
+        if !self.scroll_bar.is_area_captured(cx) {
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
                     self.scroll_state = ScrollState::Stopped;
-                    self.delta_top_scroll(cx, -e.scroll.index(vi));
+                    self.delta_top_scroll(cx, -e.scroll.index(vi), true);
                     dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 },
@@ -369,7 +467,7 @@ impl Widget for ListView {
                                     delta: new_delta
                                 };
                             }
-                            self.delta_top_scroll(cx, new_delta);
+                            self.delta_top_scroll(cx, new_delta, false);
                             dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                             self.area.redraw(cx);
                         },
@@ -377,7 +475,7 @@ impl Widget for ListView {
                             let new_delta = e.abs.index(vi) - *last_abs;
                             *delta = new_delta;
                             *last_abs = e.abs.index(vi);
-                            self.delta_top_scroll(cx, new_delta);
+                            self.delta_top_scroll(cx, new_delta, false);
                             dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                             self.area.redraw(cx);
                         },
@@ -393,6 +491,10 @@ impl Widget for ListView {
                             };
                         }
                     }
+                    if self.first_id == self.range_start && self.first_scroll > 0.0{
+                        self.scroll_state = ScrollState::Pulldown{next_frame:cx.new_next_frame()};
+                    }
+                    
                     self.drag_state = DragState::None;
                     // ok so. lets check our gap from 'drag'
                     // here we kinda have to take our last delta and animate it
@@ -426,24 +528,24 @@ impl Widget for ListView {
 pub struct ListViewRef(WidgetRef);
 
 impl ListViewRef {
-    pub fn set_first_id_and_scroll(&self, id:u64, s:f64){
+    pub fn set_first_id_and_scroll(&self, id: u64, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
-            inner.first_scroll =s;
+            inner.first_scroll = s;
         }
     }
-
-    pub fn set_first_id(&self, id:u64){
+    
+    pub fn set_first_id(&self, id: u64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
         }
     }
     
-    pub fn first_id(&self)->u64{
-         if let Some(inner) = self.borrow() {
-             inner.first_id 
+    pub fn first_id(&self) -> u64 {
+        if let Some(inner) = self.borrow() {
+            inner.first_id
         }
-        else{
+        else {
             0
         }
     }
@@ -483,7 +585,7 @@ impl ListViewRef {
 pub struct ListViewSet(WidgetSet);
 
 impl ListViewSet {
-    pub fn set_first_id(&self, id:u64){
+    pub fn set_first_id(&self, id: u64) {
         for list in self.iter() {
             list.set_first_id(id)
         }
