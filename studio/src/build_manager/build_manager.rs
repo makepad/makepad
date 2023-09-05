@@ -85,8 +85,6 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {hover: 0.0}
-                        /*draw_name: {hover: 0.0}
-                        draw_icon: {hover: 0.0}*/
                     }
                 }
                 on = {
@@ -94,8 +92,6 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {hover: 1.0}
-                        /*draw_name: {hover: 1.0}
-                        draw_icon: {hover: 1.0}*/
                     },
                 }
             }
@@ -106,16 +102,12 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {selected: 0.0}
-                        /*draw_name: {selected: 0.0}
-                        draw_icon: {selected: 0.0}*/
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_bg: {selected: 1.0}
-                        /*draw_name: {selected: 1.0}
-                        draw_icon: {selected: 1.0}*/
                     }
                 }
             }
