@@ -677,7 +677,7 @@ impl Event {
                     match t.state {
                         TouchState::Start => {
                             
-                            if !t.handled.get().is_empty() {
+                            if !options.capture_overload && !t.handled.get().is_empty() {
                                 continue;
                             }
                             
