@@ -300,11 +300,12 @@ impl AppMain for App {
         }
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
-            let unix_path = self.file_system.file_node_path(file_id);
+            let file_path = self.file_system.file_node_path(file_id);
             let tab_name = self.file_system.file_node_name(file_id);
             // ok lets open the file
             let tab_id = LiveId::unique();
-            self.file_system.request_open_file(tab_id, unix_path);
+            log!("{}", file_path);
+            self.file_system.request_open_file(tab_id, file_path);
             
             // lets add a file tab 'somewhere'
             dock.create_tab(cx, live_id!(open_files), tab_id, live_id!(CodeEditor), tab_name);

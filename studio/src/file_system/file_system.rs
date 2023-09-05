@@ -169,9 +169,11 @@ impl FileSystem {
         let mut path = self.root_path.clone();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
-            path.push_str("/");
-            path.push_str(&edge.name);
+            path.insert_str(0, &edge.name);
             file_node = &self.file_nodes[edge.file_node_id];
+            if file_node.parent_edge.is_some(){
+                path.insert_str(0, "/");
+            }
         }
         path
     }
