@@ -113,7 +113,7 @@ impl ListView {
     
     fn end(&mut self, cx: &mut Cx2d) {
         let vi = self.vec_index;
-        if let Some(ListDrawState::End{viewport:_}) = self.draw_state.get() {
+        if let Some(ListDrawState::End{viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
             if list.len()>0 {
                 list.sort_by( | a, b | a.index.cmp(&b.index));
@@ -125,16 +125,18 @@ impl ListView {
                     let item = &list[i];
                     first_pos -= item.size.index(vi);
                 }
-               // let mut last_pos = 0.0;
-                /*let mut beyond_end = None;
+                let mut last_pos = self.first_scroll;
+                let mut last_item_pos = None;
                 for i in first_index..list.len() {
                     let item = &list[i];
-                    if item.index >= self.range_end{
-                        beyond_end = Some(last_pos);
-                        break
-                    }
                     last_pos += item.size.index(vi);
-                }*/
+                    if item.index < self.range_end{
+                        last_item_pos = Some(last_pos);
+                    }
+                    else{
+                        break;
+                    }
+                }
                 
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0{
                     let mut pos = first_pos.min(self.max_pull_down); // lets do a maximum for first scroll
@@ -147,9 +149,19 @@ impl ListView {
                     self.first_id = self.range_start;
                 }
                 else {
+                    // ok so. now what. if our last ranged item is < end
+                    // we shift back with the same
+                    let shift = if let Some(last_item_pos) = last_item_pos{
+                        // the bottom of last item needs to be aligned to the viewport
+                        
+                        (viewport.size.index(vi) - last_item_pos).max(0.0)
+                    }
+                    else{
+                        0.0
+                    };
                     
-                    let first_scroll = self.first_scroll;
-                    let mut pos = first_scroll;
+                    let start_pos = self.first_scroll+ shift;
+                    let mut pos = start_pos;
                     for i in (0..first_index).rev() {
                         let item = &list[i];
                         let visible = pos >= 0.0;
@@ -162,7 +174,7 @@ impl ListView {
                         }
                     }
                     
-                    let mut pos = first_scroll;
+                    let mut pos = start_pos;
                     for i in first_index..list.len() {
                         let item = &list[i];
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
