@@ -304,7 +304,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         for i in 0..15{
-            log!("LINE LINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINELINE{}",i); 
+            log!("Line {}",i); 
             //std::thread::sleep(std::time::Duration::from_millis(10))
         }
         crate::makepad_widgets::live_design(cx);
