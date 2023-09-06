@@ -12,12 +12,8 @@ use {
         makepad_shader_compiler::*,
         makepad_live_id::*,
         live_traits::*,
-        draw_vars::{
-            DrawVars,
-        },
-        os::{
-            CxOsDrawShader,
-        },
+        draw_vars::DrawVars,
+        os::CxOsDrawShader,
         cx::Cx
     }
 };
@@ -184,7 +180,7 @@ pub struct DrawShaderInput {
 
 #[cfg(any(target_os = "android", target_os = "linux", target_arch = "wasm32"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL;
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;

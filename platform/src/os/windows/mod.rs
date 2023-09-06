@@ -1,5 +1,5 @@
-#[macro_use]
-pub mod implement_com;
+//#[macro_use]
+//pub mod implement_com;
 #[macro_use]
 pub mod win32_app;
 pub mod win32_window;
