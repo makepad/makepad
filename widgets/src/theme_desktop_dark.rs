@@ -1616,8 +1616,67 @@ live_design!{
     LinkLabel = <LinkLabelBase> {
         width: Fit,
         height: Fit,
-        margin: {left: 5.0, top: 0.0, right: 0.0}
-        padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
+        margin: 0
+        padding: 0
+        align: {x: 0., y: 0.}
+        
+        label_walk: {
+            width: Fit,
+            height: Fit
+        }
+        
+        draw_icon: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+                
+                pressed = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+        }
+        
+
         draw_bg: {
             instance pressed: 0.0
             instance hover: 0.0
@@ -1633,10 +1692,12 @@ live_design!{
                 ), mix(0.0, 0.8, self.hover));
             }
         }
+
         draw_text: {
+            wrap: Word
             instance pressed: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_META> {}
+            text_style: <THEME_FONT_LABEL>{}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(

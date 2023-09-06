@@ -1075,6 +1075,14 @@ impl Walk {
         self.margin = v;
         self
     }
+    
+    pub fn with_add_padding(mut self, v: Padding) -> Self {
+        self.margin.top += v.top;
+        self.margin.left += v.left;
+        self.margin.right += v.right;
+        self.margin.bottom += v.bottom;
+        self
+    }
 }
 
 impl Padding {
