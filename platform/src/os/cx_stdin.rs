@@ -3,6 +3,7 @@ use {
     std::cell::Cell,
     crate::{
         cx::Cx,
+        cursor::MouseCursor,
         makepad_micro_serde::*,
         makepad_math::{dvec2},
         window::CxWindowPool,
@@ -123,12 +124,14 @@ pub enum HostToStdin{
     ReloadFile{
         file:String,
         contents:String
-    }
+    },
+    Dx11TextureGuid(String)
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost{
     ReadyToStart,
+    SetCursor(MouseCursor),
     DrawComplete
 }
 

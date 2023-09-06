@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use {
     std::{
         rc::Rc,
@@ -419,6 +420,7 @@ impl CocoaWindow {
         }))
     }
     
+    #[cfg(target_os = "macos")]
     pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DragItem>) {
         let mut dragged_files = Vec::new();
         for item in items{

@@ -77,17 +77,17 @@ impl Cx {
                 
                 match parsed {
                     Ok(msg) => match msg {
-                        HostToStdin::ReloadFile{file:_, contents:_}=>{
+                        HostToStdin::ReloadFile {file: _, contents: _} => {
                             // alright lets reload this file in our DSL system
                             
                         }
                         HostToStdin::MouseDown(e) => {
                             self.fingers.process_tap_count(
-                                dvec2(e.x,e.y),
+                                dvec2(e.x, e.y),
                                 e.time
                             );
                             self.fingers.mouse_down(e.button);
-
+                            
                             self.call_event_handler(&Event::MouseDown(e.into()));
                         }
                         HostToStdin::MouseMove(e) => {
@@ -128,13 +128,13 @@ impl Cx {
                                     *fb_shared.lock().unwrap().borrow_mut() = Some((shared_handle, shared_uid));
                                 }
                             }));
-        
+                            
                             // check signals
-                            if Signal::check_and_clear_ui_signal(){
+                            if Signal::check_and_clear_ui_signal() {
                                 self.handle_media_signals();
                                 self.call_event_handler(&Event::Signal);
                             }
-                            if self.check_live_file_watcher(){
+                            if self.was_live_edit() {
                                 self.call_event_handler(&Event::LiveEdit);
                                 self.redraw_all();
                             }
@@ -171,6 +171,7 @@ impl Cx {
                             // we need to make this shared texture handle into a true metal one
                             self.stdin_handle_repaint(metal_cx);
                         }
+                        _=>()
                     }
                     Err(err) => { // we should output a log string
                         error!("Cant parse stdin-JSON {} {:?}", line, err);
@@ -196,10 +197,13 @@ impl Cx {
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                        clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
                         //clear_color: PassClearColor::ClearWith(pass.clear_color),
                         texture_id: main_texture.texture_id()
                     }];
+                },
+                CxOsOp::SetCursor(cursor) => {
+                    let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
                 },
                 _ => ()
                 /*

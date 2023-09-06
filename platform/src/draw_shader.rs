@@ -75,6 +75,15 @@ pub struct CxDrawShaders {
     pub error_fingerprints: Vec<Vec<LiveNode >>,
 }
 
+impl CxDrawShaders{
+    pub fn reset_for_live_reload(&mut self){
+        self.ptr_to_item.clear();
+        self.fingerprints.clear();
+        self.error_set.clear();
+        self.error_fingerprints.clear();
+    }
+}
+
 impl Cx {
     pub fn flush_draw_shaders(&mut self) {
         self.draw_shaders.generation += 1;
@@ -175,7 +184,7 @@ pub struct DrawShaderInput {
 
 #[cfg(any(target_os = "android", target_os = "linux", target_arch = "wasm32"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;

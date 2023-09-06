@@ -177,7 +177,7 @@ impl Database {
             textures: HashMap::new(),
             in_flight: Vec::new(),
             thread_pool: TagThreadPool::new(cx, use_cores),
-            image_path: "./sdxl_images".to_string(),
+            image_path: "./local/sdxl_images".to_string(),
             image_files: Vec::new(),
             prompt_files: Vec::new(),
             //image_index: HashMap::new(),
@@ -207,7 +207,7 @@ impl Database {
         updates
     }
     
-    pub fn get_image_texture(&mut self, image_id: &ImageId) -> Option<Texture> {
+    pub fn image_texture(&mut self, image_id: &ImageId) -> Option<Texture> {
         
         if let Some(texture) = self.textures.get_mut(&image_id) {
             texture.last_seen = Instant::now();
