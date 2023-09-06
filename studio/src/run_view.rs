@@ -165,8 +165,6 @@ impl RunView {
                 if new_size != self.last_size {
                     self.last_size = new_size;
 
-                    println!("host: run_view::draw: process.texture {}x{}",new_size.0,new_size.1);
-
                     process.texture.set_desc(cx, TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0.max(1)),

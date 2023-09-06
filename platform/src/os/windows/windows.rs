@@ -10,7 +10,7 @@ use {
         thread::Signal,
         os::{
             windows::{
-                windows_media::CxWindowsMedia,
+                //windows_media::CxWindowsMedia,
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
@@ -192,7 +192,7 @@ impl Cx {
             }
             Win32Event::Signal => {
                 if Signal::check_and_clear_ui_signal(){
-                    self.handle_media_signals();
+                    //self.handle_media_signals();
                     self.call_event_handler(&Event::Signal);
                 }
             }
@@ -221,10 +221,10 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 }
             }
         }
@@ -344,5 +344,5 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) media: CxWindowsMedia,
+    //pub (crate) media: CxWindowsMedia,
 }
