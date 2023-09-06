@@ -129,6 +129,9 @@ impl LiveHook for ListView {
         else {
             self.vec_index = Vec2Index::X
         }
+        if self.auto_tail{
+            self.tail_range = true;
+        }
     }
 }
 
@@ -140,6 +143,9 @@ impl ListView {
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
+        
+        // in this code we position all the drawn items 
+        
         let vi = self.vec_index;
         let mut at_end = false;
         let mut visible_items = 0;
@@ -149,12 +155,18 @@ impl ListView {
                 list.sort_by( | a, b | a.index.cmp(&b.index));
                 let first_index = list.iter().position( | v | v.index == self.first_id).unwrap();
                 
+                // find the position of the first item in our set
+                
                 let mut first_pos = self.first_scroll;
                 for i in (0..first_index).rev() {
                     let item = &list[i];
                     first_pos -= item.size.index(vi);
                 }
                 
+                // find the position of the last item in the range
+                // note that the listview requests items beyond the range so you can pad out the listview 
+                // when there is not enough data
+
                 let mut last_pos = self.first_scroll;
                 let mut last_item_pos = None;
                 for i in first_index..list.len() {
@@ -168,6 +180,8 @@ impl ListView {
                     }
                 }
                 
+                // compute if we are filling the viewport
+                // if not we have to trigger a stick-to-top
                 let mut not_filling_viewport = false;
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
@@ -180,6 +194,7 @@ impl ListView {
                     not_filling_viewport = total < viewport.size.index(vi);
                 }
                 
+                // in this case we manage the 'pull down' situation when we are at the top
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
                     let min = if let DragState::None = self.drag_state {
                         if let ScrollState::Stopped = self.scroll_state {
@@ -203,7 +218,8 @@ impl ListView {
                     self.first_id = self.range_start;
                 }
                 else {
-                    
+                    // this is the normal case, however we have to here compute
+                    // the 'stick to bottom' case 
                     let shift = if let Some(last_item_pos) = last_item_pos {
                         if self.align_top_when_empty && not_filling_viewport {
                             -first_pos
@@ -219,7 +235,8 @@ impl ListView {
                     else {
                         0.0
                     };
-                    let mut shifted = false;
+                    // first we scan upwards and move items in place
+                    let mut first_id_changed = false;
                     let start_pos = self.first_scroll + shift;
                     let mut pos = start_pos;
                     for i in (0..first_index).rev() {
@@ -231,13 +248,13 @@ impl ListView {
                         if visible { // move up
                             self.first_scroll = pos;
                             self.first_id = item.index;
-                            shifted = true;
+                            first_id_changed = true;
                             if item.index < self.range_end {
                                 visible_items += 1;
                             }
                         }
                     }
-                    
+                    // then we scan downwards
                     let mut pos = start_pos;
                     for i in first_index..list.len() {
                         let item = &list[i];
@@ -248,18 +265,20 @@ impl ListView {
                         if invisible { // move down
                             self.first_scroll = pos - item.size.index(vi);
                             self.first_id = item.index;
-                            shifted = true;
+                            first_id_changed = true;
                         }
                         else if item.index < self.range_end {
                             visible_items += 1;
                         }
                     }
-                    // overwrite first scroll to compensate for shift
-                    if !shifted {
+                    // overwrite first scroll for top/bottom aligns if we havent updated already
+                    if !first_id_changed {
                         self.first_scroll = start_pos;
                     }
                 }
-                //self.update_scroll_bar(cx);
+                if !self.scroll_bar.animator_in_state(cx, id!(hover.pressed)){
+                    self.update_scroll_bar(cx);
+                }
             }
         }
         else {
@@ -361,6 +380,8 @@ impl ListView {
                     });
                     if index == self.range_start {
                         // we are at range start, but if we snap to top, we might need to walk further down as well
+                        // therefore we now go 'down again' to make sure we have enough visible items
+                        // if we snap to the top 
                         if pos - rect.size.index(vi) > 0.0 {
                             // scan the tail
                             if let Some(last_index) = self.draw_align_list.iter().map( | v | v.index).max() {
