@@ -1,11 +1,9 @@
 
-use {
-    crate::{
-        widget::*,
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        scroll_bar::{ScrollBar, ScrollBarAction}
-    }
+use crate::{
+    widget::*,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    scroll_bar::{ScrollBar, ScrollBarAction}
 };
 
 live_design!{

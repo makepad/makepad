@@ -2,7 +2,7 @@ use {
     std::{
         io,
         io::prelude::*,
-        io::{BufReader},
+        io::BufReader,
     },
     crate::{
         makepad_live_id::*,
@@ -16,12 +16,12 @@ use {
         live_traits::LiveNew,
         thread::Signal,
         os::{
-            d3d11::{D3d11Cx},
+            d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, StdinToHost},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
-        cx_api::{CxOsOp},
-        cx::{Cx},
+        cx_api::CxOsOp,
+        cx::Cx,
     } 
 };
 
@@ -49,8 +49,12 @@ impl Cx {
     }
     
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
+
+        println!("client: stdin_event_loop");
+
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
         let fb_texture = Texture::new(self);
+        let mut dx11_shared_handle = makepad_windows::Win32::Foundation::HANDLE(0);
 
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
@@ -136,8 +140,20 @@ impl Cx {
                             // we need to make this shared texture handle into a true metal one
                             self.stdin_handle_repaint(d3d11_cx);
                         }
-                        HostToStdin::Dx11TextureGuid(_guid)=>{
-                            // we have a guid. we get this every 'tick' tho just in case.
+                        HostToStdin::Dx11SharedHandle(marshalled_handle) => {
+
+                            // convert u64 back to handle
+                            let handle = makepad_windows::Win32::Foundation::HANDLE(marshalled_handle as isize);
+
+                            if handle != dx11_shared_handle {
+                                
+                                // we got a new texture handle
+                                dx11_shared_handle = handle;
+
+                                // update texture
+                                let cxtexture = &mut self.textures[fb_texture.texture_id()];
+                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
+                            }
                         }
                     }
                     Err(err) => { // we should output a log string
