@@ -16,6 +16,7 @@ live_design!{
     import crate::hook_widget::HookWidgetBase;
     import crate::image::ImageBase;
     import crate::rotated_image::RotatedImageBase;
+    import crate::video::VideoBase;
     import crate::popup_menu::PopupMenuBase;
     import crate::label::LabelBase;
     import crate::link_label::LinkLabelBase;
@@ -195,6 +196,49 @@ live_design!{
                 ));
             }
             
+            shape: Solid,
+            fill: Image
+        }
+    }
+
+    Video = <VideoBase> {
+        width: 500
+        height: 500
+        draw_bg: {
+            texture y_image: texture2d
+            texture uv_image: texture2d
+            instance image_scale: vec2(1.0, 1.0)
+            instance image_pan: vec2(0.0, 0.0)
+            uniform image_alpha: 1.0
+
+            fn yuv_to_rgb(y: float, u: float, v: float) -> vec4 {
+                let c = y - 16.0;
+                let d = u - 128.0;
+                let e = v - 128.0;
+
+                let r = clamp((298.0 * c + 409.0 * e + 128.0) / 65536.0, 0.0, 1.0);
+                let g = clamp((298.0 * c - 100.0 * d - 208.0 * e + 128.0) / 65536.0, 0.0, 1.0);
+                let b = clamp((298.0 * c + 516.0 * d + 128.0) / 65536.0, 0.0, 1.0);
+
+                return vec4(r, g, b, 1.0);
+            }
+
+            fn get_color(self) -> vec4 {
+                let y_sample = sample2d(self.y_image, self.pos * self.image_scale + self.image_pan).z;
+                let uv_coords = (self.pos * self.image_scale + self.image_pan);
+                let uv_sample = sample2d(self.uv_image, uv_coords);
+
+                let u = uv_sample.x;
+                let v = uv_sample.y;
+
+                return yuv_to_rgb(y_sample * 255., u * 255., v * 255.);
+            }
+
+            fn pixel(self) -> vec4 {
+                let color = self.get_color();
+                return Pal::premul(vec4(color.xyz, color.w * self.image_alpha))
+            }
+
             shape: Solid,
             fill: Image
         }
@@ -533,6 +577,7 @@ live_design!{
     HookWidgetBase = <HookWidgetBase> {}
     ImageBase = <ImageBase> {}
     RotatedImageBase = <RotatedImageBase> {}
+    VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}
     ListViewBase = <ListViewBase> {}

@@ -106,6 +106,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
     crate::rotated_image::live_design(cx);
+    crate::video::live_design(cx);
     crate::view::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
@@ -125,7 +126,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
     crate::list_view::live_design(cx);
-    crate::video::live_design(cx);
     crate::slide_panel::live_design(cx);
     crate::tab::live_design(cx);
     crate::tab_bar::live_design(cx);
