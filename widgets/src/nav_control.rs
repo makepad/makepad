@@ -4,33 +4,14 @@ use crate::makepad_draw::*;
 live_design!{
     import makepad_draw::shader::std::*;
     
-    DrawFocusRect= {{DrawFocusRect}} {
-        fn pixel(self) -> vec4 {
-            return #000f
-        }
-    }
-    
-    NavControl= {{NavControl}} {
-        draw_label: {
-            text_style: {
-                font_size: 6
-            },
-            color: #a
-        }
-    }
-}
-
-#[derive(Live, LiveHook)]
-#[repr(C)]
-pub struct DrawFocusRect {
-    #[deref] draw_super: DrawQuad,
+    NavControlBase = {{NavControl}} {}
 }
 
 #[derive(Live, LiveHook)]
 pub struct NavControl {
     #[live] draw_list: DrawList2d,
-    #[live] draw_focus: DrawFocusRect,
-    #[live] draw_label: DrawText,
+    #[live] draw_focus: DrawQuad,
+    #[live] draw_text: DrawText,
     #[rust] _recent_focus: Area,
 }
 

@@ -7,22 +7,9 @@ use crate::database::*;
 use crate::comfyui::*;
 
 live_design!{
-    import makepad_widgets::button::Button;
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::multi_window::MultiWindow;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::text_input::TextInput;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::list_view::ListView;
-    import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::slide_panel::SlidePanel;
-    import makepad_widgets::check_box::CheckBox;
-    import makepad_widgets::frame::*;
-    import makepad_widgets::theme::*;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    import makepad_widgets::dock::*;
-    
     
     TEXT_BIG = 12.0
     
@@ -68,10 +55,10 @@ live_design!{
     
     
     SdxlDropDown = <DropDown> {
-        walk: {width: Fit}
-        layout: {padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}}
+        width: Fit
+        padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
         
-        draw_label: {
+        draw_text: {
             text_style: <H2_TEXT_REGULAR> {},
             fn get_color(self) -> vec4 {
                 return mix(
@@ -93,11 +80,11 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                walk: {width: Fill, height: Fit}
+                width: Fill,
+                height: Fit
                 
-                layout: {
-                    padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)},
-                }
+                
+                padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)}
                 
                 draw_bg: {
                     color: #x48,
@@ -137,9 +124,9 @@ live_design!{
     }
     
     BarLabel = <Label> {
-        walk: {margin: {left: 10}},
-        label: "Workflow",
-        draw_label: {
+        margin: {left: 10},
+        text: "Workflow",
+        draw_text: {
             text_style: <TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return (COLOR_LABEL)
@@ -150,10 +137,10 @@ live_design!{
     
     
     BarButton = <Button> {
-        layout: {padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}}
-        walk: {margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}}
-        label: "Cancel"
-        draw_label: {
+        padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
+        margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
+        text: "Cancel"
+        draw_text: {
             text_style: <TEXT_BOLD> {},
         }
         draw_bg: {
@@ -202,63 +189,87 @@ live_design!{
         }
     }
     
-    SettingsInput = <Frame> {
-        walk: {width: 150, height: Fit, margin: {top: 10}},
+    SettingsInput = <View> {
+        width: 150,
+        height: Fit,
+        margin: {top: 10},
         label = <BarLabel> {
-            walk: {width: Fit, margin: {left: 5}},
+            width: Fit,
+            margin: {left: 5},
             align: {x: 1.0}
         }
         input = <TextInput> {
-            layout: {padding: 0}
-            walk: {height: Fit, width: 50, margin: {top: 1, left: 2}}
-            label_walk: {width: Fit}
+            padding: 0
+            height: Fit,
+            width: 50,
+            margin: {top: 1, left: 2}
             text: "1344"
         }
     }
     
-    FillerH = <Frame> {
-        walk: {width: Fill, height: Fit}
+    FillerH = <View> {
+        width: Fill,
+        height: Fit
     }
     
-    FillerV = <Frame> {
-        walk: {width: Fit, height: Fill}
+    FillerV = <View> {
+        width: Fit,
+        height: Fill
     }
     
     
-    DividerV = <Frame> {
-        layout: {flow: Down, spacing: 0.0}
-        walk: {margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}, width: Fill, height: Fit}
-        <Rect> {
-            walk: {height: 2, width: Fill, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+    DividerV = <View> {
+        flow: Down,
+        spacing: 0.0
+        margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
+        width: Fill,
+        height: Fit
+            <RectView> {
+            height: 2,
+            width: Fill,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #x00000033}
         }
-        <Rect> {
-            walk: {height: 2, width: Fill, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+        <RectView> {
+            height: 2,
+            width: Fill,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #xFFFFFF18}
         }
     }
     
-    DividerH = <Frame> {
-        layout: {flow: Right, spacing: 0.0}
-        walk: {margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}, width: Fit, height: Fill}
-        <Rect> {
-            walk: {height: Fill, width: 2, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+    DividerH = <View> {
+        flow: Right,
+        spacing: 0.0
+        margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}
+        width: Fit,
+        height: Fill
+            <RectView> {
+            height: Fill,
+            width: 2,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #x00000033}
         }
-        <Rect> {
-            walk: {height: Fill, width: 2, margin: 0.0}
-            layout: {flow: Down, padding: 0.0},
+        <RectView> {
+            height: Fill,
+            width: 2,
+            margin: 0.0
+            flow: Down,
+            padding: 0.0
             draw_bg: {color: #xFFFFFF18}
         }
     }
     
     SdxlCheckBox = <CheckBox> {
-        layout: {padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}}
+        padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}
         label_walk: {margin: {left: 20.0, top: 8, bottom: 8, right: 10}}
-        state: {
+        animator: {
             selected = {
                 default: off
                 off = {
@@ -297,18 +308,19 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_label: {
+        draw_text: {
             text_style: <TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return (COLOR_LABEL)
             }
         }
-        label: "Slideshow"
+        text: "Slideshow"
     }
     
-    ProgressCircle = <Frame> {
+    ProgressCircle = <View> {
         show_bg: true,
-        walk: {width: 24, height: 24}
+        width: 24,
+        height: 24
         draw_bg: {
             instance progress: 0.0
             instance active: 0.0
@@ -346,10 +358,14 @@ live_design!{
         }
     }
     
-    PromptGroup = <Rect> {
+    PromptGroup = <RectView> {
         <DividerV> {}
-        walk: {height: Fit, width: Fill, margin: {bottom: 10, top: 0}}
-        layout: {flow: Down, spacing: 0, padding: 0}
+        height: Fit,
+        width: Fill,
+        margin: {bottom: 10, top: 0}
+        flow: Down,
+        spacing: 0,
+        padding: 0
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
@@ -360,7 +376,7 @@ live_design!{
                 return sdf.result
             }
         }
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -368,7 +384,7 @@ live_design!{
                     ease: OutExp
                     apply: {
                         draw_bg: {hover: 0.0}
-                        prompt = {draw_label: {hover: 0.0}}
+                        prompt = {draw_text: {hover: 0.0}}
                     }
                 }
                 on = {
@@ -378,7 +394,7 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {hover: 1.0}
-                        prompt = {draw_label: {hover: 1.0}}
+                        prompt = {draw_text: {hover: 1.0}}
                     }
                 }
             }
@@ -389,7 +405,7 @@ live_design!{
                     ease: OutExp
                     apply: {
                         draw_bg: {down: 0.0}
-                        prompt = {draw_label: {down: 0.0}}
+                        prompt = {draw_text: {down: 0.0}}
                     }
                 }
                 on = {
@@ -399,14 +415,14 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {down: 1.0}
-                        prompt = {draw_label: {down: 1.0}}
+                        prompt = {draw_text: {down: 1.0}}
                     }
                 }
             }
         }
         prompt = <Label> {
-            walk: {width: Fill}
-            draw_label: {
+            width: Fill
+            draw_text: {
                 text_style: <TEXT_BOLD> {},
                 instance hover: 0.0
                 instance down: 0.0
@@ -415,14 +431,15 @@ live_design!{
                 }
                 wrap: Word,
             }
-            label: ""
+            text: ""
         }
     }
     
-    ImageTile = <Frame> {
-        walk: {width: Fill, height: Fit},
+    ImageTile = <View> {
+        width: Fill,
+        height: Fit
         cursor: Hand
-        state: {
+        animator: {
             hover = {
                 default: off,
                 off = {
@@ -464,7 +481,8 @@ live_design!{
         }
         
         img = <Image> {
-            walk: {width: Fill, height: Fill}
+            width: Fill,
+            height: Fill
             min_width: 1920,
             min_height: 1080,
             fit: Horizontal,
@@ -477,7 +495,7 @@ live_design!{
                     let max_scale = vec2(0.92);
                     let scale = mix(vec2(1.0), max_scale, self.hover);
                     let pan = mix(vec2(0.0), (vec2(1.0) - max_scale) * 0.5, self.hover);
-                    let color = self.get_color(scale, pan) + mix(vec4(0.0), vec4(0.1), self.down);
+                    let color = self.get_color_scale_pan(scale, pan) + mix(vec4(0.0), vec4(0.1), self.down);
                     sdf.fill_keep(color);
                     sdf.stroke(
                         mix(mix(#x0000, #x0006, self.hover), #xfff2, self.down),
@@ -494,19 +512,20 @@ live_design!{
         ui: <MultiWindow> {
             <DesktopWindow> {
                 window: {inner_size: vec2(2000, 1024)},
-                caption_bar = {visible: true, caption_label = {label = {label: "SDXL Surf"}}},
-                
-                <Frame> {
-                    layout: {
-                        flow: Overlay,
-                    },
-                    walk: {
-                        width: Fill,
-                        height: Fill
-                    },
+                caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
+                hide_caption_on_fullscreen: true,
+                <View> {
+                    
+                    flow: Overlay,
+                    
+                    
+                    width: Fill,
+                    height: Fill
+                    
                     
                     dock = <Dock> {
-                        walk: {height: Fill, width: Fill}
+                        height: Fill,
+                        width: Fill
                         
                         root = Splitter {
                             axis: Horizontal,
@@ -537,69 +556,77 @@ live_design!{
                             kind: ImageView
                         }
                         
-                        ImageView = <Rect> {
+                        ImageView = <RectView> {
                             draw_bg: {color: #2}
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down, align: {x: 0.5, y: 0.5}}
+                            height: Fill,
+                            width: Fill
+                            flow: Down,
+                            align: {x: 0.5, y: 0.5}
                             cursor: Hand,
                             image = <Image> {
                                 fit: Smallest,
-                                walk: {width: Fill, height: Fill}
+                                width: Fill,
+                                height: Fill
                             }
                         }
                         
-                        InputPanel = <Rect> {
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down, padding: 0.0}
+                        InputPanel = <RectView> {
+                            height: Fill,
+                            width: Fill
+                            flow: Down,
+                            padding: 0.0
                             draw_bg: {color: (COLOR_PANEL_BG)}
-                            <Frame> {
-                                walk: {height: Fit, width: Fill}
-                                layout: {align: {x: 0.0, y: 0.5}, padding: 5}
+                            <View> {
+                                height: Fit,
+                                width: Fill
+                                align: {x: 0.0, y: 0.5}
+                                padding: 5
                                 
-                                <BarLabel> {
-                                    label: "Workflow"
+                                    <BarLabel> {
+                                    text: "Workflow"
                                 }
                                 
                                 workflow_dropdown = <SdxlDropDown> {}
                                 
                                 <BarLabel> {
-                                    label: "Batch size"
+                                    text: "Batch size"
                                 }
                                 batch_mode_dropdown = <SdxlDropDown> {
-                                    selected_item: 6
+                                    selected_item: 5
                                     labels: ["1", "2", "3", "4", "5", "6", "10000"]
                                 }
                                 
                                 <BarLabel> {
-                                    label: "Seed"
+                                    text: "Seed"
                                 }
                                 seed_input = <TextInput> {
-                                    draw_label: {text_style: <TEXT_BOLD> {}}
-                                    walk: {height: Fit, width: Fit, margin: {bottom: 0, left: 0}}
-                                    label_walk: {width: Fit}
+                                    draw_text: {text_style: <TEXT_BOLD> {}}
+                                    height: Fit,
+                                    width: Fit,
+                                    margin: {bottom: 0, left: 0}
                                 }
                                 
                                 render_batch = <BarButton> {
-                                    label: "Batch"
+                                    text: "Batch"
                                 }
                                 render_single = <BarButton> {
-                                    label: "Single"
+                                    text: "Single"
                                 }
                                 cancel_todo = <BarButton> {
-                                    label: "Cancel"
+                                    text: "Cancel"
                                 }
                                 
                                 <DividerH> {}
                                 play_button = <BarButton> {
-                                    label: "Play"
+                                    text: "Play"
                                 }
                                 slide_show_check_box = <SdxlCheckBox> {
-                                    label: "Slideshow"
+                                    text: "Slideshow"
                                 }
                                 
                                 slide_show_dropdown = <SdxlDropDown> {
                                     selected_item: 5
-                                    walk: {margin: 0},
+                                    margin: 0
                                     labels: ["0", "1", "2", "3", "4", "5", "7", "10"]
                                 }
                                 
@@ -609,12 +636,12 @@ live_design!{
                                 <FillerH> {}
                                 cluster_dropdown = <SdxlDropDown> {
                                     selected_item: 0
-                                    walk: {margin: 0},
+                                    margin: 0
                                     labels: ["All nodes", "Part 1", "Part 2"]
                                 }
                                 todo_label = <BarLabel> {
-                                    walk: {margin: {right: 5.0}}
-                                    label: "Todo 0"
+                                    margin: {right: 5.0}
+                                    text: "Todo 0"
                                 }
                                 progress1 = <ProgressCircle> {}
                                 progress2 = <ProgressCircle> {}
@@ -622,16 +649,18 @@ live_design!{
                                 progress4 = <ProgressCircle> {}
                                 progress5 = <ProgressCircle> {}
                                 progress6 = <ProgressCircle> {
-                                    walk: {margin: {right: 5.0}}
+                                    margin: {right: 5.0}
                                 }
                                 
                             }
-                            <Frame> {
+                            <View> {
                                 positive = <TextInput> {
                                     ascii_only: true,
-                                    walk: {width: Fill, height: Fill, margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0}},
+                                    width: Fill,
+                                    height: Fill,
+                                    margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
                                     text: "Positive"
-                                    draw_label: {
+                                    draw_text: {
                                         text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
                                     }
                                     draw_bg: {
@@ -642,8 +671,10 @@ live_design!{
                                 }
                                 negative = <TextInput> {
                                     ascii_only: true,
-                                    walk: {width: 200, height: Fill, margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0}},
-                                    draw_label: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
+                                    width: 200,
+                                    height: Fill,
+                                    margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
+                                    draw_text: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
                                     text: "text, watermark, cartoon"
                                     draw_bg: {
                                         color: (COLOR_TEXT_INPUT)
@@ -651,84 +682,98 @@ live_design!{
                                         border_color: #x00000044
                                     }
                                 }
-                                <Frame> {
-                                    walk: {width: Fill, height: Fill},
-                                    layout: {flow: Right}
-                                    <Frame> {
-                                        walk: {width: 100, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
-                                        settings_width = <SettingsInput> {label = {label: "width:"}, input = {text: "1344"}}
-                                        settings_height = <SettingsInput> {label = {label: "height:"}, input = {text: "768"}}
-                                        settings_steps = <SettingsInput> {label = {label: "steps:"}, input = {text: "20"}}
-                                        settings_scale = <SettingsInput> {label = {label: "scale:"}, input = {text: "0.5"}}
-                                        settings_total_steps = <SettingsInput> {label = {label: "total(0):"}, input = {text: "32"}}
+                                <View> {
+                                    width: Fill,
+                                    height: Fill
+                                    flow: Right
+                                        <View> {
+                                        width: 100,
+                                        height: Fit,
+                                        margin: {top: 10},
+                                        flow: Down
+                                        settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
+                                        settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
+                                        settings_steps = <SettingsInput> {label = {text: "steps:"}, input = {text: "20"}}
+                                        settings_scale = <SettingsInput> {label = {text: "scale:"}, input = {text: "0.5"}}
+                                        settings_total_steps = <SettingsInput> {label = {text: "total(0):"}, input = {text: "32"}}
                                     }
-                                    <Frame> {
-                                        walk: {width: Fit, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
-                                        settings_base_cfg = <SettingsInput> {label = {label: "base_cfg:"}, input = {text: "8.5"}}
-                                        settings_refiner_cfg = <SettingsInput> {label = {label: "refiner_cfg:"}, input = {text: "9.5"}}
-                                        settings_pos_score = <SettingsInput> {label = {label: "pos_score:"}, input = {text: "6"}}
-                                        settings_neg_score = <SettingsInput> {label = {label: "neg_score:"}, input = {text: "2"}}
+                                    <View> {
+                                        width: Fit,
+                                        height: Fit,
+                                        margin: {top: 10},
+                                        flow: Down
+                                        settings_base_cfg = <SettingsInput> {label = {text: "base_cfg:"}, input = {text: "8.5"}}
+                                        settings_refiner_cfg = <SettingsInput> {label = {text: "refiner_cfg:"}, input = {text: "9.5"}}
+                                        settings_pos_score = <SettingsInput> {label = {text: "pos_score:"}, input = {text: "6"}}
+                                        settings_neg_score = <SettingsInput> {label = {text: "neg_score:"}, input = {text: "2"}}
                                     }
-                                    <Frame> {
-                                        walk: {width: Fit, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
-                                        settings_base_start_step = <SettingsInput> {label = {label: "base_start_step:"}, input = {text: "0"}}
-                                        settings_base_end_step = <SettingsInput> {label = {label: "base_end_step:"}, input = {text: "20"}}
-                                        settings_refiner_start_step = <SettingsInput> {label = {label: "refiner_start_step:"}, input = {text: "20"}}
-                                        settings_refiner_end_step = <SettingsInput> {label = {label: "refiner_end_step:"}, input = {text: "1000"}}
+                                    <View> {
+                                        width: Fit,
+                                        height: Fit,
+                                        margin: {top: 10},
+                                        flow: Down
+                                        settings_base_start_step = <SettingsInput> {label = {text: "base_start_step:"}, input = {text: "0"}}
+                                        settings_base_end_step = <SettingsInput> {label = {text: "base_end_step:"}, input = {text: "20"}}
+                                        settings_refiner_start_step = <SettingsInput> {label = {text: "refiner_start_step:"}, input = {text: "20"}}
+                                        settings_refiner_end_step = <SettingsInput> {label = {text: "refiner_end_step:"}, input = {text: "1000"}}
                                     }
-                                    <Frame> {
-                                        walk: {width: Fit, height: Fit, margin: {top: 10}},
-                                        layout: {flow: Down}
-                                        settings_upscale_steps = <SettingsInput> {label = {label: "upscale_steps:"}, input = {text: "31"}}
-                                        settings_upscale_start_step = <SettingsInput> {label = {label: "upscale_start_step:"}, input = {text: "29"}}
-                                        settings_upscale_end_step = <SettingsInput> {label = {label: "upscale_end_step:"}, input = {text: "1000"}}
+                                    <View> {
+                                        width: Fit,
+                                        height: Fit,
+                                        margin: {top: 10},
+                                        flow: Down
+                                        settings_upscale_steps = <SettingsInput> {label = {text: "upscale_steps:"}, input = {text: "31"}}
+                                        settings_upscale_start_step = <SettingsInput> {label = {text: "upscale_start_step:"}, input = {text: "29"}}
+                                        settings_upscale_end_step = <SettingsInput> {label = {text: "upscale_end_step:"}, input = {text: "1000"}}
                                     }
                                     /*
-                                    <Frame> {
-                                        walk: {width: Fill, height: Fit, margin: {top: 10}},
-                                        <BarLabel> {label: "base_cfg:"}
+                                    <View> {
+                                        width: Fill, height: Fit, margin: {top: 10},
+                                        <BarLabel> {text: "base_cfg:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
-                                        <BarLabel> {label: "refiner_cfg:"}
+                                        <BarLabel> {text: "refiner_cfg:"}
                                         refiner_cfg_input = <SettingsInput> {text: "768"}
-                                        <BarLabel> {label: "pos_score:"}
+                                        <BarLabel> {text: "pos_score:"}
                                         positive_score_input = <SettingsInput> {text: "6.0"}
-                                        <BarLabel> {label: "neg_score:"}
+                                        <BarLabel> {text: "neg_score:"}
                                         negative_score_input = <SettingsInput> {text: "2.0"}
                                     }
-                                    <Frame> {
-                                        walk: {width: Fill, height: Fit, margin: {top: 10}},
-                                        <BarLabel> {label: "base_start_step:"}
+                                    <View> {
+                                        width: Fill, height: Fit, margin: {top: 10},
+                                        <BarLabel> {text: "base_start_step:"}
                                         base_cfg_input = <SettingsInput> {text: "1344"}
-                                        <BarLabel> {label: "base_end_step:"}
+                                        <BarLabel> {text: "base_end_step:"}
                                         refiner_cfg_input = <SettingsInput> {text: "768"}
-                                        <BarLabel> {label: "refiner_start_step:"}
+                                        <BarLabel> {text: "refiner_start_step:"}
                                         positive_score_input = <SettingsInput> {text: "6.0"}
-                                        <BarLabel> {label: "refiner_end_step:"}
+                                        <BarLabel> {text: "refiner_end_step:"}
                                         negative_score_input = <SettingsInput> {text: "2.0"}
                                     }*/
                                 }
                             }
                         }
                         
-                        ImageLibrary = <Rect> {
+                        ImageLibrary = <RectView> {
                             draw_bg: {color: (COLOR_PANEL_BG)}
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down},
-                            <Frame> {
-                                walk: {height: Fit, width: Fill}
-                                layout: {flow: Right, padding: {left: 10, right: 10, top: 10, bottom: 10}},
+                            height: Fill,
+                            width: Fill
+                            flow: Down
+                                <View> {
+                                height: Fit,
+                                width: Fill
+                                flow: Right,
+                                padding: {left: 10, right: 10, top: 10, bottom: 10},
                                 search = <TextInput> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 0}}
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 0}
                                     empty_message: "Search"
                                     draw_bg: {
                                         color: (COLOR_TEXT_INPUT)
                                         border_width: 1.0
                                         border_color: #x00000044
                                     }
-                                    draw_label: {
+                                    draw_text: {
                                         text_style: {font_size: (TEXT_BIG)}
                                         fn get_color(self) -> vec4 {
                                             return
@@ -750,27 +795,39 @@ live_design!{
                                 }
                             }
                             image_list = <ListView> {
-                                walk: {height: Fill, width: Fill, margin: {top: 0}}
-                                layout: {flow: Down, padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}}
+                                height: Fill,
+                                width: Fill,
+                                margin: {top: 0}
+                                flow: Down,
+                                padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}
                                 
                                 PromptGroup = <PromptGroup> {}
                                 
-                                Empty = <Frame> {}
+                                Empty = <View> {}
                                 
-                                ImageRow1 = <Frame> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 10}}
-                                    layout: {spacing: 20, flow: Right},
+                                ImageRow1 = <View> {
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 10}
+                                    spacing: 20,
+                                    flow: Right
                                     row1 = <ImageTile> {}
                                 }
-                                ImageRow2 = <Frame> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 10}}
-                                    layout: {spacing: 20, flow: Right},
+                                ImageRow2 = <View> {
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 10}
+                                    spacing: 20,
+                                    flow: Right
                                     row1 = <ImageTile> {}
                                     row2 = <ImageTile> {}
                                 }
-                                ImageRow3 = <Frame> {
-                                    walk: {height: Fit, width: Fill, margin: {bottom: 10}}
-                                    layout: {spacing: 20, flow: Right},
+                                ImageRow3 = <View> {
+                                    height: Fit,
+                                    width: Fill,
+                                    margin: {bottom: 10}
+                                    spacing: 20,
+                                    flow: Right
                                     row1 = <ImageTile> {}
                                     row2 = <ImageTile> {}
                                     row3 = <ImageTile> {}
@@ -779,42 +836,52 @@ live_design!{
                         }
                     }
                     
-                    big_image = <Rect> {
+                    big_image = <RectView> {
                         visible: false,
                         draw_bg: {draw_depth: 10.0}
                         draw_bg: {color: #0}
-                        walk: {height: All, width: All, abs_pos: vec2(0.0, 0.0)}
-                        layout: {flow: Overlay, align: {x: 0.5, y: 0.5}}
+                        height: All,
+                        width: All,
+                        abs_pos: vec2(0.0, 0.0)
+                        flow: Overlay,
+                        align: {x: 0.5, y: 0.5}
                         image1 = <Image> {
                             draw_bg: {draw_depth: 11.0}
                             fit: Smallest,
-                            walk: {width: Fill, height: Fill}
+                            width: Fill,
+                            height: Fill
                         }
                     }
                 }
             }
             <DesktopWindow> {
                 window: {inner_size: vec2(960, 540)},
-                second_image = <Rect> {
+                second_image = <RectView> {
                     draw_bg: {color: #0}
-                    walk: {height: Fill, width: Fill}
-                    layout: {flow: Overlay, align: {x: 0.5, y: 0.5}}
+                    height: Fill,
+                    width: Fill
+                    flow: Overlay,
+                    align: {x: 0.5, y: 0.5}
                     image1 = <Image> {
                         fit: Smallest,
-                        walk: {width: Fill, height: Fill}
+                        width: Fill,
+                        height: Fill
                     }
-                    prompt_frame = <Frame> {
-                        walk: {width: Fill, height: Fill}
-                        layout: {align: {y: 1.0}, padding: {left: 120, bottom: 40,right:120}}
+                    prompt_frame = <View> {
+                        width: Fill,
+                        height: Fill
+                        align: {y: 1.0}
+                        padding: {left: 120, bottom: 40, right: 120}
                         prompt = <Label> {
-                            walk: {width: Fill, height: Fit},
-                            draw_label: {
+                            width: Fill,
+                            height: Fit
+                            draw_text: {
                                 wrap: Word
                                 text_style: <TEXT_BOLD> {font_size: 20}
                                 
                                 color: #c
                             },
-                            label: "HELLO WORLD"
+                            text: "HELLO WORLD"
                         }
                     }
                 }
@@ -853,28 +920,6 @@ struct Workflow {
 impl Workflow {
     fn new(name: &str) -> Self {Self {name: name.to_string()}}
 }
-/*
-const KEYWORD_CLOUD:[(&'static str,&'static str);18]=[
-   ("", "Beautiful woman"),
-   ("", "Beautiful man"),
-   ("", "Dog"),
-   ("", "Ugly woman"),
-   ("", "Ugly man"),
-   ("", "wearing intricate tattoos"),
-   ("", "wearing intricate lingerie"),
-   ("", "as an android"),
-   ("", "made of metal"),
-   ("", "made of wood"),
-   ("", "In a desert"),
-   ("", "On the moon"),
-   ("", "In a sunset"),
-   ("", "At burningman"),
-   ("", "covered in stars"),
-   ("", "covered in rainbows"),
-   ("", "photographic"),
-   ("", "cinematic"),
-];*/
-
 
 #[derive(Live)]
 pub struct App {
@@ -885,13 +930,7 @@ pub struct App {
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
         Machine::new("DESKTOP-4:8188", id_lut!(m4)),
         Machine::new("DESKTOP-7:8188", id_lut!(m5)),
-        Machine::new("DESKTOP-8:8188", id_lut!(m6))/*
-        Machine::new("192.168.0.69:8188", id_lut!(m1)),
-        Machine::new("192.168.0.127:8188", id_lut!(m2)),
-        Machine::new("192.168.0.116:8188", id_lut!(m3)),
-        Machine::new("192.168.0.80:8188", id_lut!(m4)),
-        Machine::new("192.168.0.81:8188", id_lut!(m5)),
-        Machine::new("192.168.0.244:8188", id_lut!(m6)),*/
+        Machine::new("DESKTOP-8:8188", id_lut!(m6))
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
@@ -908,7 +947,7 @@ pub struct App {
     #[rust] current_image: Option<ImageId>,
     
     #[rust(Instant::now())] last_flip: Instant
-} 
+}
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
@@ -920,7 +959,7 @@ impl LiveHook for App {
         let _ = self.db.load_database();
         self.filtered.filter_db(&self.db, "", false);
         let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
-        let dd = self.ui.get_drop_down(id!(workflow_dropdown));
+        let dd = self.ui.drop_down(id!(workflow_dropdown));
         dd.set_labels(workflows);
         cx.start_interval(0.016);
         self.update_seed_display(cx);
@@ -929,7 +968,7 @@ impl LiveHook for App {
 
 impl App {
     fn send_prompt(&mut self, cx: &mut Cx, prompt_state: PromptState) {
-        // lets find a machine with the minimum queue size and
+        
         for machine in &mut self.machines {
             if machine.running.is_some() {
                 continue
@@ -964,8 +1003,6 @@ impl App {
             let ws = ws.replace("\"start_at_step\": 29", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.upscale_start_step));
             let ws = ws.replace("\"end_at_step\": 999", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.upscale_end_step));
             
-            
-            // lets store that we queued this image
             request.set_metadata_id(machine.id);
             request.set_body(ws.as_bytes().to_vec());
             Self::update_progress(cx, &self.ui, machine.id, true, 0, 1);
@@ -1026,10 +1063,9 @@ impl App {
             live_id!(m6) => id!(progress6),
             _ => panic!()
         };
-        ui.get_frame(progress_id).apply_over(cx, live!{
+        ui.view(progress_id).apply_over_and_redraw(cx, live!{
             draw_bg: {active: (if active {1.0}else {0.0}), progress: (steps as f64 / total as f64)}
         });
-        ui.redraw(cx);
     }
     
     
@@ -1052,14 +1088,13 @@ impl App {
     }
     
     fn update_seed_display(&mut self, cx: &mut Cx) {
-        self.ui.get_text_input(id!(seed_input)).set_text(&format!("{}", self.last_seed));
-        self.ui.redraw(cx);
+        self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}", self.last_seed));
     }
     
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.get_text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
-            self.ui.get_text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
+            self.ui.text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
+            self.ui.text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
             self.ui.redraw(cx);
             self.load_preset(&prompt_file.prompt.preset)
         }
@@ -1069,7 +1104,7 @@ impl App {
         self.current_image = Some(image_id);
         let prompt_hash = self.prompt_hash_from_current_image();
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.get_label(id!(second_image.prompt)).set_label(&prompt_file.prompt.positive);
+            self.ui.label(id!(second_image.prompt)).set_text(&prompt_file.prompt.positive);
         }
     }
     
@@ -1113,55 +1148,54 @@ impl App {
             }
         }
         todo += self.todo.len();
-        self.ui.get_label(id!(todo_label)).set_label(&format!("Todo {}", todo));
-        self.ui.redraw(cx);
+        self.ui.label(id!(todo_label)).set_text_and_redraw(cx, &format!("Todo {}", todo));
     }
     
     fn save_preset(&self) -> PromptPreset {
         PromptPreset {
-            workflow: self.ui.get_drop_down(id!(workflow_dropdown)).get_selected_label(),
-            width: self.ui.get_text_input(id!(settings_width.input)).get_text().parse::<u32>().unwrap_or(1344),
-            height: self.ui.get_text_input(id!(settings_height.input)).get_text().parse::<u32>().unwrap_or(768),
-            steps: self.ui.get_text_input(id!(settings_steps.input)).get_text().parse::<u32>().unwrap_or(20),
-            base_cfg: self.ui.get_text_input(id!(settings_base_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
-            refiner_cfg: self.ui.get_text_input(id!(settings_refiner_cfg.input)).get_text().parse::<f64>().unwrap_or(8.5),
-            positive_score: self.ui.get_text_input(id!(settings_pos_score.input)).get_text().parse::<f64>().unwrap_or(6.0),
-            negative_score: self.ui.get_text_input(id!(settings_neg_score.input)).get_text().parse::<f64>().unwrap_or(2.0),
-            base_start_step: self.ui.get_text_input(id!(settings_base_start_step.input)).get_text().parse::<u32>().unwrap_or(0),
-            base_end_step: self.ui.get_text_input(id!(settings_base_end_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            refiner_start_step: self.ui.get_text_input(id!(settings_refiner_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            refiner_end_step: self.ui.get_text_input(id!(settings_refiner_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
-            upscale_start_step: self.ui.get_text_input(id!(settings_upscale_start_step.input)).get_text().parse::<u32>().unwrap_or(20),
-            upscale_end_step: self.ui.get_text_input(id!(settings_upscale_end_step.input)).get_text().parse::<u32>().unwrap_or(1000),
-            upscale_steps: self.ui.get_text_input(id!(settings_upscale_steps.input)).get_text().parse::<u32>().unwrap_or(31),
-            scale: self.ui.get_text_input(id!(settings_scale.input)).get_text().parse::<f64>().unwrap_or(0.5),
-            total_steps: self.ui.get_text_input(id!(settings_total_steps.input)).get_text().parse::<u32>().unwrap_or(20),
+            workflow: self.ui.drop_down(id!(workflow_dropdown)).selected_label(),
+            width: self.ui.text_input(id!(settings_width.input)).text().parse::<u32>().unwrap_or(1344),
+            height: self.ui.text_input(id!(settings_height.input)).text().parse::<u32>().unwrap_or(768),
+            steps: self.ui.text_input(id!(settings_steps.input)).text().parse::<u32>().unwrap_or(20),
+            base_cfg: self.ui.text_input(id!(settings_base_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
+            refiner_cfg: self.ui.text_input(id!(settings_refiner_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
+            positive_score: self.ui.text_input(id!(settings_pos_score.input)).text().parse::<f64>().unwrap_or(6.0),
+            negative_score: self.ui.text_input(id!(settings_neg_score.input)).text().parse::<f64>().unwrap_or(2.0),
+            base_start_step: self.ui.text_input(id!(settings_base_start_step.input)).text().parse::<u32>().unwrap_or(0),
+            base_end_step: self.ui.text_input(id!(settings_base_end_step.input)).text().parse::<u32>().unwrap_or(20),
+            refiner_start_step: self.ui.text_input(id!(settings_refiner_start_step.input)).text().parse::<u32>().unwrap_or(20),
+            refiner_end_step: self.ui.text_input(id!(settings_refiner_end_step.input)).text().parse::<u32>().unwrap_or(1000),
+            upscale_start_step: self.ui.text_input(id!(settings_upscale_start_step.input)).text().parse::<u32>().unwrap_or(20),
+            upscale_end_step: self.ui.text_input(id!(settings_upscale_end_step.input)).text().parse::<u32>().unwrap_or(1000),
+            upscale_steps: self.ui.text_input(id!(settings_upscale_steps.input)).text().parse::<u32>().unwrap_or(31),
+            scale: self.ui.text_input(id!(settings_scale.input)).text().parse::<f64>().unwrap_or(0.5),
+            total_steps: self.ui.text_input(id!(settings_total_steps.input)).text().parse::<u32>().unwrap_or(20),
         }
     }
     
     fn load_preset(&self, preset: &PromptPreset) {
-        self.ui.get_drop_down(id!(workflow_dropdown)).set_selected_by_label(&preset.workflow);
-        self.ui.get_text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
-        self.ui.get_text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
-        self.ui.get_text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
-        self.ui.get_text_input(id!(settings_base_cfg.input)).set_text(&format!("{}", preset.base_cfg));
-        self.ui.get_text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
-        self.ui.get_text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
-        self.ui.get_text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
-        self.ui.get_text_input(id!(settings_base_start_step.input)).set_text(&format!("{}", preset.base_start_step));
-        self.ui.get_text_input(id!(settings_base_end_step.input)).set_text(&format!("{}", preset.base_end_step));
-        self.ui.get_text_input(id!(settings_refiner_start_step.input)).set_text(&format!("{}", preset.refiner_start_step));
-        self.ui.get_text_input(id!(settings_refiner_end_step.input)).set_text(&format!("{}", preset.refiner_end_step));
-        self.ui.get_text_input(id!(settings_upscale_start_step.input)).set_text(&format!("{}", preset.upscale_start_step));
-        self.ui.get_text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
-        self.ui.get_text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
-        self.ui.get_text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
-        self.ui.get_text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));
+        self.ui.drop_down(id!(workflow_dropdown)).set_selected_by_label(&preset.workflow);
+        self.ui.text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
+        self.ui.text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
+        self.ui.text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
+        self.ui.text_input(id!(settings_base_cfg.input)).set_text(&format!("{}", preset.base_cfg));
+        self.ui.text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
+        self.ui.text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
+        self.ui.text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
+        self.ui.text_input(id!(settings_base_start_step.input)).set_text(&format!("{}", preset.base_start_step));
+        self.ui.text_input(id!(settings_base_end_step.input)).set_text(&format!("{}", preset.base_end_step));
+        self.ui.text_input(id!(settings_refiner_start_step.input)).set_text(&format!("{}", preset.refiner_start_step));
+        self.ui.text_input(id!(settings_refiner_end_step.input)).set_text(&format!("{}", preset.refiner_end_step));
+        self.ui.text_input(id!(settings_upscale_start_step.input)).set_text(&format!("{}", preset.upscale_start_step));
+        self.ui.text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
+        self.ui.text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
+        self.ui.text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
+        self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));
     }
     
     fn render(&mut self, cx: &mut Cx, batch_size: usize) {
-        let positive = self.ui.get_text_input(id!(positive)).get_text();
-        let negative = self.ui.get_text_input(id!(negative)).get_text();
+        let positive = self.ui.text_input(id!(positive)).text();
+        let negative = self.ui.text_input(id!(negative)).text();
         
         //self.todo.clear();
         if batch_size != 1 {
@@ -1189,7 +1223,7 @@ impl App {
     }
     
     fn set_slide_show(&mut self, cx: &mut Cx, check: bool) {
-        let check_box = self.ui.get_check_box(id!(slide_show_check_box));
+        let check_box = self.ui.check_box(id!(slide_show_check_box));
         check_box.set_selected(cx, check);
         if check {
             self.last_flip = Instant::now();
@@ -1198,8 +1232,8 @@ impl App {
     
     fn handle_slide_show(&mut self, cx: &mut Cx) {
         // lets get the slideshow values
-        if self.ui.get_check_box(id!(slide_show_check_box)).selected(cx) {
-            let time = self.ui.get_drop_down(id!(slide_show_dropdown)).get_selected_label().parse::<f64>().unwrap_or(0.0);
+        if self.ui.check_box(id!(slide_show_check_box)).selected(cx) {
+            let time = self.ui.drop_down(id!(slide_show_dropdown)).selected_label().parse::<f64>().unwrap_or(0.0);
             // ok lets check our last-change instant
             if Instant::now() - self.last_flip > Duration::from_millis((time * 1000.0)as u64) {
                 self.select_prev_image(cx);
@@ -1217,13 +1251,12 @@ impl App {
     
     fn play(&mut self, cx: &mut Cx) {
         self.set_current_image_by_item_id_and_row(cx, 0, 0);
-        self.ui.get_list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
+        self.ui.list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
         self.set_slide_show(cx, true);
-        
     }
     
     fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.get_list_view(id!(image_list));
+        let image_list = self.ui.list_view(id!(image_list));
         for event in event.network_responses() {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => {
@@ -1252,7 +1285,7 @@ impl App {
                                         if let Some(image) = output.images.first() {
                                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
                                                 if let Some(running) = machine.running.take() {
-                                                    self.ui.get_text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
+                                                    self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
                                                     machine.fetching = Some(running);
                                                     Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
                                                     self.fetch_image(cx, event.request_id, &image.filename);
@@ -1303,7 +1336,7 @@ impl App {
                                     
                                     self.filtered.filter_db(&self.db, "", false);
                                     
-                                    if self.db.get_image_texture(&image_id).is_some() {
+                                    if self.db.image_texture(&image_id).is_some() {
                                         self.ui.redraw(cx);
                                     }
                                     
@@ -1325,7 +1358,7 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.get_list_view(id!(image_list));
+        let image_list = self.ui.list_view(id!(image_list));
         
         if self.db.handle_decoded_images(cx) {
             self.ui.redraw(cx);
@@ -1336,19 +1369,13 @@ impl AppMain for App {
         }
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            /*
-        if let Some(change) = self.ui.get_text_input(id!(positive)).changed(&actions) {
-            self.ui.get_label(id!(second_image.prompt)).set_label(&change);
-            self.ui.redraw(cx);
-        }*/
-            
             
             if let Some(current_image) = &self.current_image {
-                let tex = self.db.get_image_texture(current_image);
+                let tex = self.db.image_texture(current_image);
                 if tex.is_some() {
-                    self.ui.get_image(id!(image_view.image)).set_texture(tex.clone());
-                    self.ui.get_image(id!(big_image.image1)).set_texture(tex.clone());
-                    self.ui.get_image(id!(second_image.image1)).set_texture(tex);
+                    self.ui.image(id!(image_view.image)).set_texture(tex.clone());
+                    self.ui.image(id!(big_image.image1)).set_texture(tex.clone());
+                    self.ui.image(id!(second_image.image1)).set_texture(tex);
                 }
             }
             
@@ -1356,24 +1383,24 @@ impl AppMain for App {
                 
                 if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                     // alright now we draw the items
-                    image_list.set_item_range(0, self.filtered.list.len() as u64, 1);
+                    image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
                     while let Some(item_id) = image_list.next_visible_item(cx) {
                         if let Some(item) = self.filtered.list.get(item_id as usize) {
                             match item {
                                 ImageListItem::Prompt {prompt_hash} => {
                                     let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
-                                    let item = image_list.get_item(cx, item_id, live_id!(PromptGroup)).unwrap();
-                                    item.get_label(id!(prompt)).set_label(&group.prompt.positive);
+                                    let item = image_list.item(cx, item_id, live_id!(PromptGroup)).unwrap();
+                                    item.label(id!(prompt)).set_text(&group.prompt.positive);
                                     item.draw_widget_all(cx);
                                 }
                                 ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
-                                    let item = image_list.get_item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
-                                    let rows = item.get_frame_set(ids!(row1, row2, row3));
+                                    let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
+                                    let rows = item.view_set(ids!(row1, row2, row3));
                                     for (index, row) in rows.iter().enumerate() {
                                         if index >= *image_count {break}
                                         // alright we need to query our png cache for an image.
-                                        let tex = self.db.get_image_texture(&image_files[index]);
-                                        row.get_image(id!(img)).set_texture(tex);
+                                        let tex = self.db.image_texture(&image_files[index]);
+                                        row.image(id!(img)).set_texture(tex);
                                     }
                                     item.draw_widget_all(cx);
                                 }
@@ -1389,7 +1416,7 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, modifiers, ..}) = event {
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..}) = event {
             if modifiers.logo || modifiers.control {
                 self.clear_todo(cx);
             }
@@ -1397,7 +1424,7 @@ impl AppMain for App {
                 self.render(cx, 1);
             }
             else {
-                let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+                let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
                 self.render(cx, batch_size);
             }
         }
@@ -1409,8 +1436,6 @@ impl AppMain for App {
                 self.load_seed_from_current_image(cx);
             }
         }
-        
-        
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
@@ -1425,53 +1450,51 @@ impl AppMain for App {
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyP, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
-                let prompt_frame = self.ui.get_frame(id!(second_image.prompt_frame));
+                let prompt_frame = self.ui.view(id!(second_image.prompt_frame));
                 if prompt_frame.visible() {
-                    prompt_frame.set_visible(false);
+                    prompt_frame.set_visible_and_redraw(cx, false);
                 }
                 else {
                     //cx.set_cursor(MouseCursor::Hidden);
-                    prompt_frame.set_visible(true);
+                    prompt_frame.set_visible_and_redraw(cx, true);
                 }
-                self.ui.redraw(cx);
             }
         }
         
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) = event {
-            let big_image = self.ui.get_frame(id!(big_image));
+            let big_image = self.ui.view(id!(big_image));
             if big_image.visible() {
-                big_image.set_visible(false);
+                big_image.set_visible_and_redraw(cx, false);
             }
             else {
                 //cx.set_cursor(MouseCursor::Hidden);
-                big_image.set_visible(true);
+                big_image.set_visible_and_redraw(cx, true);
             }
-            self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(play_button)).clicked(&actions) {
+        if self.ui.button(id!(play_button)).clicked(&actions) {
             self.play(cx);
         }
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.play(cx);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.select_next_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.select_prev_image(cx);
                 self.set_slide_show(cx, false);
             }
         }
         
-        if let Some(ke) = self.ui.get_frame_set(ids!(image_view, big_image)).key_down(&actions) {
+        if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.select_next_image(cx);
@@ -1485,59 +1508,51 @@ impl AppMain for App {
             }
         }
         
-        
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, false);
             }
         }
         if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, modifiers, ..}) = event {
-            if self.ui.get_frame(id!(big_image)).visible() || modifiers.logo {
+            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                 self.set_slide_show(cx, true);
             }
         }
         
-        if self.ui.get_button(id!(render_batch)).clicked(&actions) {
-            let batch_size = self.ui.get_drop_down(id!(batch_mode_dropdown)).get_selected_label().parse::<usize>().unwrap();
+        if self.ui.button(id!(render_batch)).clicked(&actions) {
+            let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
             self.render(cx, batch_size);
-            self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(render_single)).clicked(&actions) {
+        if self.ui.button(id!(render_single)).clicked(&actions) {
             self.render(cx, 1);
-            self.ui.redraw(cx);
         }
         
-        if self.ui.get_button(id!(cancel_todo)).clicked(&actions) {
+        if self.ui.button(id!(cancel_todo)).clicked(&actions) {
             self.clear_todo(cx);
-            self.ui.redraw(cx);
         }
         
-        if let Some(change) = self.ui.get_text_input(id!(search)).changed(&actions) {
+        if let Some(change) = self.ui.text_input(id!(search)).changed(&actions) {
             self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
             image_list.set_first_id_and_scroll(0, 0.0);
         }
         
-        
-        
-        if let Some(e) = self.ui.get_frame(id!(image_view)).finger_down(&actions) {
+        if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.get_frame(id!(big_image)).set_visible(true);
-                self.ui.redraw(cx);
+                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
             }
         }
         
-        if let Some(e) = self.ui.get_frame(id!(big_image)).finger_down(&actions) {
+        if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
             if e.tap_count >1 {
-                self.ui.get_frame(id!(big_image)).set_visible(false);
-                self.ui.redraw(cx);
+                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, false);
             }
         }
         
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
-            let rows = item.get_frame_set(ids!(row1, row2));
+            let rows = item.view_set(ids!(row1, row2));
             for (row_index, row) in rows.iter().enumerate() {
                 if let Some(fd) = row.finger_down(&actions) {
                     self.set_current_image_by_item_id_and_row(cx, item_id, row_index);
@@ -1550,7 +1565,7 @@ impl AppMain for App {
                     }
                 }
             }
-            if let Some(fd) = item.as_frame().finger_down(&actions) {
+            if let Some(fd) = item.as_view().finger_down(&actions) {
                 if fd.tap_count == 2 {
                     if let ImageListItem::Prompt {prompt_hash} = self.filtered.list[item_id as usize] {
                         self.load_inputs_from_prompt_hash(cx, prompt_hash);

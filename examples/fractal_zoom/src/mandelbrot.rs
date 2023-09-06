@@ -403,7 +403,7 @@ pub struct Mandelbrot {
     // thew view container that contains our mandelbrot UI
     #[rust] view_area: Area,
     
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     // prepending #[rust] makes derive(Live) ignore these fields
     // and they dont get DSL accessors
     #[rust] next_frame: NextFrame,
@@ -454,7 +454,7 @@ impl Widget for Mandelbrot {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.view_area.redraw(cx)
@@ -542,7 +542,7 @@ impl Mandelbrot {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
-        //self.state_handle_event(cx, event);
+        //self.animator_handle_event(cx, event);
         //if let Event::Signal(_) = event {
         // this batches up all the input signals into a single animation frame
         //  self.next_frame = cx.new_next_frame();
