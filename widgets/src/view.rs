@@ -62,7 +62,7 @@ pub struct View { // draw info per UI element
     
     #[live(true)] visible: bool,
     
-    #[live(false)] grab_key_focus: bool,
+    #[live(true)] grab_key_focus: bool,
     
     #[live(false)] block_signal_event: bool,
     #[live] cursor: Option<MouseCursor>,
