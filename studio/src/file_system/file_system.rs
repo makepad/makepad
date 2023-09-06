@@ -99,6 +99,9 @@ impl FileSystem {
                     }
                     FileResponse::SaveFile(result)=>match result{
                         Ok((_path, old, new))=>{
+                            // alright file has been saved
+                            // now we need to check if a live_design!{} changed or something outside it
+                            
                             for i in 0..old.len().min(new.len()){
                                 if old.as_bytes()[i] != new.as_bytes()[i]{
                                     if i > 10300{ // 
