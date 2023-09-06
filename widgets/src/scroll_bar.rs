@@ -65,7 +65,7 @@ impl ScrollBar {
     }
     
     // sets the scroll pos from finger position
-    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f64) -> bool {
+    pub fn set_scroll_pos_from_finger(&mut self,finger: f64) -> bool {
         let vy = self.view_visible / self.view_total;
         let norm_handle = vy.max(self.min_handle_size / self.scroll_size);
         
@@ -78,12 +78,6 @@ impl ScrollBar {
         self.scroll_pos = new_scroll_pos;
         self.scroll_target = new_scroll_pos;
         changed
-        /*
-        if changed {
-            self.update_shader_scroll_pos(cx);
-            return self.make_scroll_action();
-        }
-        return ScrollBarAction::None;*/
     }
     
     // writes the norm_scroll value into the shader
@@ -288,7 +282,7 @@ impl ScrollBar {
                     let bar_size = norm_handle * self.scroll_size;
                     if rel < bar_start || rel > bar_start + bar_size { // clicked outside
                         self.drag_point = Some(bar_size * 0.5);
-                        if self.set_scroll_pos_from_finger(cx, rel - self.drag_point.unwrap()){
+                        if self.set_scroll_pos_from_finger(rel - self.drag_point.unwrap()){
                             dispatch_action(cx, self.make_scroll_action());
                         }
                     }
@@ -322,12 +316,12 @@ impl ScrollBar {
                     else {
                         match self.axis {
                             Axis::Horizontal => {
-                                if self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap()){
+                                if self.set_scroll_pos_from_finger(rel.x - self.drag_point.unwrap()){
                                     dispatch_action(cx, self.make_scroll_action());
                                 }
                             },
                             Axis::Vertical => {
-                                if self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap()){
+                                if self.set_scroll_pos_from_finger(rel.y - self.drag_point.unwrap()){
                                     dispatch_action(cx, self.make_scroll_action());
                                 }
                             }
