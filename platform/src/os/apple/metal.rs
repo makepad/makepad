@@ -35,13 +35,11 @@ use {
             TextureDesc,
         },
     },
-    std::{
-        sync::{
-            Arc,
-            Condvar,
-            Mutex,
-        }
-    }
+    std::sync::{
+        Arc,
+        Condvar,
+        Mutex,
+    },
 };
 
 #[cfg(target_os = "macos")]

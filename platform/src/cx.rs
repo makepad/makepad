@@ -15,16 +15,10 @@ use {
             LiveRegistry,
             LiveFileChange
         },
-        makepad_shader_compiler::{
-            ShaderRegistry
-        },
-        draw_shader::{
-            CxDrawShaders
-        },
+        makepad_shader_compiler::ShaderRegistry,
+        draw_shader::CxDrawShaders,
         draw_matrix::CxDrawMatrixPool,
-        os::{
-            CxOs,
-        },
+        os::CxOs,
         debug::Debug,
         event::{
             DrawEvent,
@@ -39,23 +33,13 @@ use {
             CxCommandSetting,
             MenuCommand
         },
-        cx_api::{CxOsOp},
-        area::{
-            Area,
-        },
+        cx_api::CxOsOp,
+        area::Area,
         gpu_info::GpuInfo,
-        window::{
-            CxWindowPool,
-        },
-        draw_list::{
-            CxDrawListPool
-        },
-        pass::{
-            CxPassPool,
-        },
-        texture::{
-            CxTexturePool
-        },
+        window::CxWindowPool,
+        draw_list::CxDrawListPool,
+        pass::CxPassPool,
+        texture::CxTexturePool,
         geometry::{
             Geometry,
             CxGeometryPool,
@@ -77,7 +61,7 @@ pub struct Cx {
     pub passes: CxPassPool,
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
-    pub (crate) textures: CxTexturePool,
+    pub textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
     
     pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,

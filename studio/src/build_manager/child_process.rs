@@ -1,13 +1,11 @@
-use {
-    std::{
-        process::{Command, Child, Stdio},
-        sync::mpsc::{self, Sender, Receiver},
-        thread,
-        io::prelude::*,
-        io::{BufReader},
-        str,
-        path::{PathBuf},
-    }
+use std::{
+    process::{Command, Child, Stdio},
+    sync::mpsc::{self, Sender, Receiver},
+    thread,
+    io::prelude::*,
+    io::BufReader,
+    str,
+    path::PathBuf,
 };
 
 pub struct ChildProcess {

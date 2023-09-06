@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{RefCell},
+        cell::RefCell,
     },
     crate::{
         makepad_live_id::*,
@@ -17,7 +17,7 @@ use {
             },
             cx_native::EventFlow,
         },
-        pass::{CxPassParent},
+        pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
     }
 };

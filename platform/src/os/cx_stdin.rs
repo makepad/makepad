@@ -5,7 +5,7 @@ use {
         cx::Cx,
         cursor::MouseCursor,
         makepad_micro_serde::*,
-        makepad_math::{dvec2},
+        makepad_math::dvec2,
         window::CxWindowPool,
         area::Area,
         event::{
@@ -125,7 +125,8 @@ pub enum HostToStdin{
         file:String,
         contents:String
     },
-    Dx11TextureGuid(String)
+    
+    Dx11SharedHandle(u64)
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

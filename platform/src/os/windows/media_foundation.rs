@@ -4,9 +4,7 @@ use {
         makepad_live_id::*,
         thread::Signal,
         video::*,
-        os::{
-            windows::win32_app::{TRUE},
-        },
+        os::windows::win32_app::TRUE,
         windows_crate::{
             core::{
                 //Interface,
@@ -14,7 +12,6 @@ use {
                 GUID,
                 HRESULT,
                 PCWSTR,
-                AsImpl
             },
             Win32::System::Com::{
                 CLSCTX_ALL,
@@ -51,9 +48,7 @@ use {
                 MFVideoFormat_NV12,
                 MFVideoFormat_MJPG,
             },
-            Win32::UI::Shell::PropertiesSystem::{
-                PROPERTYKEY
-            },
+            Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
             Win32::Media::Audio::{
                 MMDeviceEnumerator,
                 IMMNotificationClient_Impl,
@@ -116,7 +111,7 @@ impl MediaFoundationAccess {
         unsafe {
             //CoInitialize(None);
             CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
-            let change_listener: IMMNotificationClient = MediaFoundationChangeListener {change_signal:change_signal.clone()}.into();
+            let change_listener: IMMNotificationClient = MediaFoundationChangeListener { change_signal: change_signal.clone() };
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
             
