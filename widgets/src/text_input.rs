@@ -627,7 +627,7 @@ impl TextInput {
         }
         self.draw_bg.end(cx);
         
-        if cx.has_key_focus(self.draw_bg.area()) {
+        if  cx.has_key_focus(self.draw_bg.area()) {
             // ok so. if we have the IME we should inject a tracking point
             let ime_x = self.draw_text.get_cursor_pos(cx, 0.5, self.cursor_head)
                 .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;

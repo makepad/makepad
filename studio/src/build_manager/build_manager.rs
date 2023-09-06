@@ -114,10 +114,18 @@ live_design!{
         }
     }
     
-    LogItemWait = <LogItem> {
+    LogItemLocation = <LogItem> {
+        margin:{left: 5}
         icon = <WaitIcon> {},
-        label = <Label> {width: Fill draw_text: {wrap: Word}}
-        link_label = <LinkLabel> {}
+        location = <LinkLabel> {margin:0, text:""}
+        body = <Label> {width: Fill, margin:{left:5}, padding:0, draw_text: {wrap: Word}}
+    }
+    
+    
+    LogItemBare = <LogItem> {
+        margin:{left: 5}
+        icon = <WaitIcon> {},
+        body = <Label> {width: Fill, margin:0, padding:0, draw_text: {wrap: Word}}
     }
     
     LogItemEmpty = <RectView> {
@@ -135,10 +143,15 @@ live_design!{
     }
     
     LogList = <ListView> {
+        grab_key_focus: true
+        auto_tail: true
+        drag_scrolling: false
         height: Fill, width: Fill
         flow: Down
-        WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
-        WaitOdd = <LogItemWait> {draw_bg: {is_even: 0.0}}
+        LocationEven = <LogItemLocation> {draw_bg: {is_even: 1.0}}
+        LocationOdd = <LogItemLocation> {draw_bg: {is_even: 0.0}}
+        BareEven = <LogItemBare> {draw_bg: {is_even: 1.0}}
+        BareOdd = <LogItemBare> {draw_bg: {is_even: 0.0}}
         EmptyEven = <LogItemEmpty> {draw_bg: {is_even: 1.0}}
         EmptyOdd = <LogItemEmpty> {draw_bg: {is_even: 0.0}}
     }
@@ -188,16 +201,16 @@ impl BuildManager {
             if let Some(msg) = self.messages.get(item_id as usize){
                 match msg {
                     BuildMsg::Bare(msg) => {
-                        let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
+                        let template = if is_even{live_id!(BareEven)}else{live_id!(BareOdd)};
                         let item = list.item(cx, item_id, template).unwrap().as_view();
-                        item.label(id!(label)).set_text(&msg.line);
+                        item.widget(id!(body)).set_text(&msg.line);
                         item.draw_widget_all(cx);
                     }
                     BuildMsg::Location(msg) => {
-                        let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
+                        let template = if is_even{live_id!(LocationEven)}else{live_id!(LocationOdd)};
                         let item = list.item(cx, item_id, template).unwrap().as_view();
-                        item.label(id!(link_label)).set_text(&msg.file_name);
-                        item.label(id!(label)).set_text(&msg.msg);
+                        item.widget(id!(location)).set_text(&format!("{}: {}",msg.file_name, msg.range.start().line));
+                        item.widget(id!(body)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
                     _=>()

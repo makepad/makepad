@@ -68,21 +68,11 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
     
-    WebSocketClose(LiveId),
-    WebSocketOpen(LiveId),
-    WebSocketError(WebSocketErrorEvent),
-    WebSocketMessage(WebSocketMessageEvent),
-    
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
     NetworkResponses(Vec<NetworkResponseEvent>),
-    /*
-    HttpResponse(HttpResponseEvent),
-    HttpRequestError(HttpRequestErrorEvent),
-    HttpResponseProgress(HttpProgressEvent),
-    HttpUploadProgress(HttpProgressEvent),
-    */ 
+
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }

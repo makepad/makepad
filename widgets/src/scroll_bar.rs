@@ -65,23 +65,19 @@ impl ScrollBar {
     }
     
     // sets the scroll pos from finger position
-    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f64) -> ScrollBarAction {
+    pub fn set_scroll_pos_from_finger(&mut self,finger: f64) -> bool {
         let vy = self.view_visible / self.view_total;
         let norm_handle = vy.max(self.min_handle_size / self.scroll_size);
         
         let new_scroll_pos = (
             (self.view_total * (1. - vy) * (finger / self.scroll_size)) / (1. - norm_handle)
         ).max(0.).min(self.view_total - self.view_visible);
-        log!("SCROLL POS {} {}", new_scroll_pos, self.view_total - self.view_visible);
+        //log!("SCROLL POS {} {}", new_scroll_pos, self.view_total - self.view_visible);
         // lets snap new_scroll_pos
         let changed = self.scroll_pos != new_scroll_pos;
         self.scroll_pos = new_scroll_pos;
         self.scroll_target = new_scroll_pos;
-        if changed {
-            self.update_shader_scroll_pos(cx);
-            return self.make_scroll_action();
-        }
-        return ScrollBarAction::None;
+        changed
     }
     
     // writes the norm_scroll value into the shader
@@ -103,7 +99,6 @@ impl ScrollBar {
     }
     
     pub fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
-        
         if self.smoothing.is_none() {
             return false;
         }
@@ -135,7 +130,6 @@ impl ScrollBar {
     }
     
     pub fn set_scroll_pos_no_action(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
@@ -146,7 +140,6 @@ impl ScrollBar {
         return false
     }
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
@@ -160,7 +153,6 @@ impl ScrollBar {
     
     
     pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        // clamp scroll_pos to
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
             self.scroll_target = scroll_pos;
@@ -288,8 +280,9 @@ impl ScrollBar {
                     let bar_size = norm_handle * self.scroll_size;
                     if rel < bar_start || rel > bar_start + bar_size { // clicked outside
                         self.drag_point = Some(bar_size * 0.5);
-                        let action = self.set_scroll_pos_from_finger(cx, rel - self.drag_point.unwrap());
-                        return dispatch_action(cx, action);
+                        if self.set_scroll_pos_from_finger(rel - self.drag_point.unwrap()){
+                            dispatch_action(cx, self.make_scroll_action());
+                        }
                     }
                     else { // clicked on
                         self.drag_point = Some(rel - bar_start); // store the drag delta
@@ -321,16 +314,18 @@ impl ScrollBar {
                     else {
                         match self.axis {
                             Axis::Horizontal => {
-                                let action = self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap());
-                                return dispatch_action(cx, action);
+                                if self.set_scroll_pos_from_finger(rel.x - self.drag_point.unwrap()){
+                                    dispatch_action(cx, self.make_scroll_action());
+                                }
                             },
                             Axis::Vertical => {
-                                let action = self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap());
-                                return dispatch_action(cx, action);
+                                if self.set_scroll_pos_from_finger(rel.y - self.drag_point.unwrap()){
+                                    dispatch_action(cx, self.make_scroll_action());
+                                }
                             }
                         }
                     }
-                },
+                 },
                 _ => ()
             };
         }

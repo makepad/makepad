@@ -15,7 +15,7 @@ pub struct Label {
     #[live] draw_text: DrawText,
     #[walk] walk: Walk,
     #[live] align: Align,
-
+    #[live] padding: Padding,
     //margin: Margin,
     #[live] text: RcStringMut,
 } 
@@ -36,7 +36,7 @@ impl Widget for Label {
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
-        self.draw_text.draw_walk(cx, walk, self.align, self.text.as_ref());
+        self.draw_text.draw_walk(cx, walk.with_add_padding(self.padding), self.align, self.text.as_ref());
         WidgetDraw::done()
     }
     

@@ -274,7 +274,6 @@ live_design!{
             }
             
             news_feed = <ListView> {
-                tail_range: false,
                 height: Fill, width: Fill
                 flow: Down
                 TopSpace = <View> {height: 80}
@@ -305,7 +304,8 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         for i in 0..15{
-            log!("LINE {}",i)
+            log!("Line {}",i); 
+            //std::thread::sleep(std::time::Duration::from_millis(10))
         }
         crate::makepad_widgets::live_design(cx);
     }
