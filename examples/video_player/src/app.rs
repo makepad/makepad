@@ -1,8 +1,8 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::video::Video;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     
     // TEST = dep("crate://self/resources/test.mp4")
     TEST2 = dep("crate://self/resources/test2.mp4")
@@ -10,28 +10,21 @@ live_design!{
 
     App = {{App}} {
         ui: <DesktopWindow>{
-            window: {inner_size: vec2(564, 945)},
+            window: { inner_size: vec2(564, 945) },
             show_bg: true
 
-            layout: {
-                flow: Down,
-                spacing: 20,
-                align: {
-                    x: 0.5,
-                    y: 0.5
-                }
-            },
-            walk: {
-                width: Fill,
-                height: Fill
-            },
-            draw_bg: {
-                color: #2
-            }
+            flow: Down,
+            spacing: 20,
+            align: { x: 0.5, y: 0.5 }
+
+            width: Fill,
+            height: Fill
+
+            draw_bg: { color: #2 }
             
             <Video> {
                 source: (TEST2)
-                walk: { width: 400, height: 709.5 }
+                width: 400, height: 709.5
                 is_looping: true
             }
         }
