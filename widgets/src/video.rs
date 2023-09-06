@@ -70,7 +70,9 @@ pub struct Video {
     #[rust]
     latest_chunk: Option<(u128, u128)>,
     #[rust]
-    vec_pool: VecPool,
+    vec_pool_y: VecPool,
+    #[rust]
+    vec_pool_uv: VecPool,
 
     #[rust]
     id: LiveId,
@@ -247,8 +249,8 @@ impl Video {
 
                 let pixel_data = &frame_group[frame_data_start..frame_data_end];
 
-                let mut y_data = self.vec_pool.acquire(self.video_width * self.video_height);
-                let mut uv_data = self.vec_pool.acquire((self.video_width / 2) * (self.video_height / 2));
+                let mut y_data = self.vec_pool_y.acquire(self.video_width * self.video_height);
+                let mut uv_data = self.vec_pool_uv.acquire((self.video_width / 2) * (self.video_height / 2));
 
                 split_nv12_data(
                     pixel_data,
@@ -356,10 +358,8 @@ impl Video {
         y_texture.swap_image_u32(cx, &mut y_data.borrow_mut());
         uv_texture.swap_image_u32(cx, &mut uv_data.borrow_mut());
 
-        // TODO: simplify and probably remove Rc
-
-        self.vec_pool.release(y_data.replace(Vec::new()));
-        self.vec_pool.release(uv_data.replace(Vec::new()));        
+        self.vec_pool_y.release(y_data.borrow().to_vec());
+        self.vec_pool_uv.release(uv_data.borrow().to_vec());        
     }
 
     fn initialize_decoding(&self, cx: &mut Cx) {
@@ -437,13 +437,13 @@ impl VecPool {
         }
     }
 
-    // TODO: rework this to avoid zeroing out the vec
     pub fn acquire(&self, capacity: usize) -> Vec<u32> {
         let mut pool = self.pool.borrow_mut();
         match pool.pop() {
             Some(mut vec) => {
-                vec.clear();
-                vec.resize(capacity, 0);
+                if vec.capacity() < capacity {
+                    vec.resize(capacity, 0);
+                }
                 vec
             }
             None => vec![0u32; capacity],
