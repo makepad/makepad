@@ -213,6 +213,7 @@ impl ListView {
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(&item.align_range, shift);
                         pos += item.size.index(vi);
+                        visible_items += 1;
                     }
                     self.first_scroll = first_pos.min(min);
                     self.first_id = self.range_start;
