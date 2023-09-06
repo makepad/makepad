@@ -38,7 +38,6 @@ enum ListDrawState {
 #[derive(Clone, WidgetAction)]
 pub enum InfiniteListAction {
     Scroll,
-    TailRange(bool),
     None
 }
 impl ListDrawState {
@@ -64,6 +63,7 @@ pub struct ListView {
     #[live(100.0)] max_pull_down: f64,
     #[live(true)] align_top_when_empty: bool,
     #[live(false)] grab_key_focus: bool,
+    #[live(true)] drag_scrolling: bool,
     #[rust] first_id: u64,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
@@ -71,7 +71,7 @@ pub struct ListView {
     #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] draw_align_list: Vec<AlignItem>,
-    
+    #[rust] detect_tail_in_draw: bool,
     #[live(false)] auto_tail: bool,
     #[rust(false)] tail_range: bool,
     
@@ -288,6 +288,12 @@ impl ListView {
         if at_end || self.view_window == 0{
             self.view_window = visible_items.max(4) - 3;
         }
+        if self.detect_tail_in_draw{
+            self.detect_tail_in_draw = false;
+            if at_end{
+                self.tail_range = true;
+            }
+        }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
         self.items.retain_visible();
@@ -493,11 +499,9 @@ impl Widget for ListView {
                 self.first_id = self.range_end.max(1) - 1;
                 self.first_scroll = 0.0;
                 self.tail_range = true;
-                dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
             }
             else if self.tail_range {
                 self.tail_range = false;
-                dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
             }
 
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
@@ -557,9 +561,8 @@ impl Widget for ListView {
                 Hit::FingerScroll(e) => {
                     if self.tail_range {
                         self.tail_range = false;
-                        dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                     }
-                    
+                    self.detect_tail_in_draw = true;
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
                     dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
@@ -572,24 +575,23 @@ impl Widget for ListView {
                     // ok so fingerdown eh.
                     if self.tail_range {
                         self.tail_range = false;
-                        dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                     }
-                    
-                    if let ScrollState::Pulldown {..} = &self.scroll_state {
-                        self.scroll_state = ScrollState::Stopped;
-                    };
-                    self.drag_state = DragState::SwipeDrag {
-                        last_abs: e.abs.index(vi),
-                        delta: 0.0,
-                        initial_time: e.time
-                    };
+                    if self.drag_scrolling{
+                        if let ScrollState::Pulldown {..} = &self.scroll_state {
+                            self.scroll_state = ScrollState::Stopped;
+                        };
+                        self.drag_state = DragState::SwipeDrag {
+                            last_abs: e.abs.index(vi),
+                            delta: 0.0,
+                            initial_time: e.time
+                        };
+                    }
                 }
                 Hit::KeyDown(ke) => match ke.key_code {
                     KeyCode::Home => {
                         self.first_id = 0;
                         self.first_scroll = 0.0;
                         self.tail_range = false;
-                        dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
                     },
@@ -598,7 +600,6 @@ impl Widget for ListView {
                         self.first_scroll = 0.0;
                         if self.auto_tail {
                             self.tail_range = true;
-                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         }
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
@@ -607,7 +608,6 @@ impl Widget for ListView {
                         self.first_id = self.first_id.max(self.view_window) - self.view_window;
                         self.first_scroll = 0.0;
                         self.tail_range = false;
-                        dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
                     },
@@ -618,12 +618,10 @@ impl Widget for ListView {
                             self.first_id = self.range_end.max(1) - 1;
                             if self.auto_tail {
                                 self.tail_range = true;
-                                dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                             }
                         }
                         else {
                             self.tail_range = false;
-                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         }
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
@@ -634,12 +632,10 @@ impl Widget for ListView {
                             self.first_id = self.range_end.max(1) - 1;
                             if self.auto_tail {
                                 self.tail_range = true;
-                                dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                             }
                         }
                         else {
                             self.tail_range = false;
-                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         }
                         self.first_scroll = 0.0;
                         self.update_scroll_bar(cx);
@@ -655,59 +651,62 @@ impl Widget for ListView {
                             self.area.redraw(cx);
                             self.tail_range = false;
                             self.update_scroll_bar(cx);
-                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         }
                     },
                     _ => ()
                 }
                 Hit::FingerMove(e) => {
                     cx.set_cursor(MouseCursor::Default);
-                    
-                    // ok we kinda have to set the scroll pos to our abs position
-                    match &mut self.drag_state {
-                        DragState::SwipeDrag {last_abs, delta, initial_time} => {
-                            let new_delta = e.abs.index(vi) - *last_abs;
-                            if e.time - *initial_time < self.swipe_drag_duration {
+                    if self.drag_scrolling{
+                        // ok we kinda have to set the scroll pos to our abs position
+                        match &mut self.drag_state {
+                            DragState::SwipeDrag {last_abs, delta, initial_time} => {
+                                let new_delta = e.abs.index(vi) - *last_abs;
+                                if e.time - *initial_time < self.swipe_drag_duration {
+                                    *delta = new_delta;
+                                    *last_abs = e.abs.index(vi);
+                                }
+                                else {
+                                    // After a short span of time, the flick motion is considered a normal drag
+                                    self.scroll_state = ScrollState::Stopped;
+                                    self.drag_state = DragState::NormalDrag {
+                                        last_abs: e.abs.index(vi),
+                                        delta: new_delta
+                                    };
+                                }
+                                self.delta_top_scroll(cx, new_delta, false);
+                                self.detect_tail_in_draw = true;
+                                dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                                self.area.redraw(cx);
+                            },
+                            DragState::NormalDrag {last_abs, delta} => {
+                                let new_delta = e.abs.index(vi) - *last_abs;
                                 *delta = new_delta;
                                 *last_abs = e.abs.index(vi);
-                            }
-                            else {
-                                // After a short span of time, the flick motion is considered a normal drag
-                                self.scroll_state = ScrollState::Stopped;
-                                self.drag_state = DragState::NormalDrag {
-                                    last_abs: e.abs.index(vi),
-                                    delta: new_delta
-                                };
-                            }
-                            self.delta_top_scroll(cx, new_delta, false);
-                            dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
-                            self.area.redraw(cx);
-                        },
-                        DragState::NormalDrag {last_abs, delta} => {
-                            let new_delta = e.abs.index(vi) - *last_abs;
-                            *delta = new_delta;
-                            *last_abs = e.abs.index(vi);
-                            self.delta_top_scroll(cx, new_delta, false);
-                            dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
-                            self.area.redraw(cx);
-                        },
-                        DragState::None => {}
+                                self.delta_top_scroll(cx, new_delta, false);
+                                self.detect_tail_in_draw = true;
+                                dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                                self.area.redraw(cx);
+                            },
+                            DragState::None => {}
+                        }
                     }
                 }
                 Hit::FingerUp(_) => {
-                    if let DragState::SwipeDrag {delta, ..} = &mut self.drag_state {
-                        if delta.abs()>self.flick_scroll_minimum {
-                            self.scroll_state = ScrollState::Flick {
-                                delta: *delta,
-                                next_frame: cx.new_next_frame()
-                            };
+                    if self.drag_scrolling{
+                        if let DragState::SwipeDrag {delta, ..} = &mut self.drag_state {
+                            if delta.abs()>self.flick_scroll_minimum {
+                                self.scroll_state = ScrollState::Flick {
+                                    delta: *delta,
+                                    next_frame: cx.new_next_frame()
+                                };
+                            }
                         }
+                        if self.first_id == self.range_start && self.first_scroll > 0.0 {
+                            self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
+                        }
+                        self.drag_state = DragState::None;
                     }
-                    if self.first_id == self.range_start && self.first_scroll > 0.0 {
-                        self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
-                    }
-                    
-                    self.drag_state = DragState::None;
                     // ok so. lets check our gap from 'drag'
                     // here we kinda have to take our last delta and animate it
                 }
