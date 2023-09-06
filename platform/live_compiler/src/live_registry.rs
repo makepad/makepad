@@ -429,6 +429,58 @@ impl LiveRegistry {
         Ok(tokens)
     }
     /*
+    pub fn tokenize_from_str_live_design(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<Vec<TokenWithSpan>, LiveError> {
+        let mut line_chars = Vec::new();
+        let mut state = State::default();
+        let mut scratch = String::new();
+        let mut tokens = Vec::new();
+        let mut pos = start_pos;
+        let mut bool in_live_design = false;
+        for line_str in source.lines() {
+            line_chars.clear();
+            line_chars.extend(line_str.chars());
+            let mut cursor = Cursor::new(&line_chars, &mut scratch);
+            loop {
+                let (next_state, full_token) = state.next(&mut cursor);
+                if let Some(full_token) = full_token {
+                    if let FullToken::Ident(live_id!(live_design)) = &full_token.token{
+                        in_live_design = true;
+                    }
+                    
+                    
+                    let span = TextSpan {
+                        file_id,
+                        start: pos,
+                        end: TextPos {column: pos.column + full_token.len as u32, line: pos.line}
+                    };
+                    match full_token.token {
+                        FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
+                            return Err(LiveError {
+                                origin: live_error_origin!(),
+                                span: span.into(),
+                                message: "Error tokenizing".to_string()
+                            })
+                        },
+                        _ => if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
+                            // lets build up the span info
+                            tokens.push(TokenWithSpan {span, token: live_token})
+                        },
+                    }
+                    pos.column += full_token.len as u32;
+                }
+                else {
+                    break;
+                }
+                state = next_state;
+            }
+            pos.line += 1;
+            pos.column = 0;
+        }
+        tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
+        Ok(tokens)
+    }*/
+    
+    /*
     // called by the live editor to update a live file
     pub fn live_edit_file<'a, CB>(
         &mut self,
