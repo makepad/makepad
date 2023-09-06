@@ -432,7 +432,25 @@ impl Cx {
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
     
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId,  d3d11_cx: &D3d11Cx) {
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId,  d3d11_cx: &D3d11Cx,fb_texture: &Texture) {
+        // let time1 = Cx::profile_time_ns();
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        
+        let render_target_view = self.textures[fb_texture.texture_id()].os.render_target_view.clone();
+        self.setup_pass_render_targets(pass_id, &render_target_view, d3d11_cx);
+        
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        self.render_view(
+            pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+            &d3d11_cx,
+        );
+    }
+    
+    pub fn draw_pass_to_magic_texture(&mut self, pass_id: PassId,  d3d11_cx: &D3d11Cx) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -784,7 +802,7 @@ impl CxOsTexture {
         
         let mut texture = None;
         unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
-        let resource: ID3D11Resource = texture.unwrap().cast().unwrap();
+        let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
         let mut shader_resource_view = None;
         unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
         let mut render_target_view = None;
@@ -840,7 +858,7 @@ impl CxOsTexture {
         
         let mut texture = None;
         unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
-        let resource: ID3D11Resource = texture.unwrap().cast().unwrap();
+        let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
         //let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
         
         let dsv_desc = D3D11_DEPTH_STENCIL_VIEW_DESC {
@@ -898,7 +916,7 @@ impl CxOsTexture {
         
         let mut texture = None;
         unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)).unwrap()};
-        let resource: ID3D11Resource = texture.unwrap().cast().unwrap();
+        let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
         let mut shader_resource_view = None;
         unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
 
@@ -914,46 +932,47 @@ impl CxOsTexture {
         width: u32,
         height: u32,
     ) {
-        let texture_desc = D3D11_TEXTURE2D_DESC {
-            Width: width as u32,
-            Height: height as u32,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        
-        let mut texture = None;
-        unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
-        let resource: ID3D11Resource = texture.unwrap().cast().unwrap();
-        let mut shader_resource_view = None;
-        unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
+        if (width != self.width) || (height != self.height) {
 
-        // get IDXGIResource interface on newly created texture object
-        let dxgi_resource: IDXGIResource = resource.cast().unwrap();
-        //let mut dxgi_resource_ptr = None;
-        //unsafe { resource.query(IDXGIResource::IID,Some(&mut dxgi_resource_ptr)).unwrap() };
-        //let dxgi_resource = dxgi_resource_ptr.as_ref().unwrap().into();
+            let texture_desc = D3D11_TEXTURE2D_DESC {
+                Width: width as u32,
+                Height: height as u32,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 2,  // D3D11_RESOURCE_MISC_SHARED
+            };
+            
+            let mut texture = None;
+            unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
+            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
+            let mut shader_resource_view = None;
+            unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
 
-        println!("host: got IDXGIResource interface from texture resource: {:?}",dxgi_resource);
+            // get IDXGIResource interface on newly created texture object
+            let dxgi_resource: IDXGIResource = resource.cast().unwrap();
+            //let mut dxgi_resource_ptr = None;
+            //unsafe { resource.query(IDXGIResource::IID,Some(&mut dxgi_resource_ptr)).unwrap() };
+            //let dxgi_resource = dxgi_resource_ptr.as_ref().unwrap().into();
 
-        // get shared handle of this resource
-        let handle = unsafe { dxgi_resource.GetSharedHandle().unwrap() };
+            // get shared handle of this resource
+            let handle = unsafe { dxgi_resource.GetSharedHandle().unwrap() };
 
-        println!("host: shared handle: {:?}",handle);
+            println!("host: new shared handle to be sent: {:?}",handle);
 
-        self.width = width;
-        self.height = height;
-        self.texture = texture;
-        self.shader_resource_view = shader_resource_view;
-        self.shared_handle = handle;
+            self.width = width;
+            self.height = height;
+            self.texture = texture;
+            self.shader_resource_view = shader_resource_view;
+            self.shared_handle = handle;
+        }
     }
 
     pub fn update_from_shared_handle(&mut self,
@@ -961,15 +980,24 @@ impl CxOsTexture {
         handle: HANDLE,
     ) {
         let mut texture: Option<ID3D11Texture2D> = None;
-        unsafe { d3d11_cx.device.OpenSharedResource(handle,&mut texture).unwrap() };
-        println!("newly generated 2D texture for handle {:?}: {:?}",handle,texture);
+        log!("client: got texture handle {:?} from host",handle);
+        if let Ok(()) = unsafe { d3d11_cx.device.OpenSharedResource(handle,&mut texture) } {
 
-        let resource: ID3D11Resource = texture.unwrap().cast().unwrap();
-        let mut shader_resource_view = None;
-        unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
+            log!("newly generated 2D texture for handle {:?}: {:?}",handle,texture);
 
-        self.texture = texture;
-        self.shader_resource_view = shader_resource_view;
+            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
+            let mut shader_resource_view = None;
+            unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
+            let mut render_target_view = None;
+            unsafe {d3d11_cx.device.CreateRenderTargetView(&resource, None, Some(&mut render_target_view)).unwrap()};
+    
+            self.texture = texture;
+            self.render_target_view = render_target_view;
+            self.shader_resource_view = shader_resource_view;
+        }
+        else {
+            log!("unable to use handle {:?}, flushing...",handle);
+        }
     }
 }
 
