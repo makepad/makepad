@@ -62,6 +62,8 @@ pub struct View { // draw info per UI element
     
     #[live(true)] visible: bool,
     
+    #[live(false)] grab_key_focus: bool,
+    
     #[live(false)] block_signal_event: bool,
     #[live] cursor: Option<MouseCursor>,
     #[live] scroll_bars: Option<LivePtr>,
@@ -454,7 +456,9 @@ impl Widget for View {
         if self.visible && (self.cursor.is_some() || self.animator.live_ptr.is_some()){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(e) => {
-                    cx.set_key_focus(self.area());
+                    if self.grab_key_focus{
+                        cx.set_key_focus(self.area());
+                    }
                     dispatch_action(cx, ViewAction::FingerDown(e).into_action(uid));
                     if self.animator.live_ptr.is_some(){
                         self.animator_play(cx, id!(down.on));
