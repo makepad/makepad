@@ -27,22 +27,25 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_handle_repaint(&mut self, _d3d11_cx: &mut D3d11Cx) {
+    pub (crate) fn stdin_handle_repaint(&mut self, _d3d11_cx: &mut D3d11Cx,fb_texture: &Texture) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    //self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                    log!("Window");
+                    self.draw_pass_to_texture(*pass_id, _d3d11_cx, fb_texture);
                     let _ = io::stdout().write_all(StdinToHost::DrawComplete.to_json().as_bytes());
                 }
                 CxPassParent::Pass(_) => {
+                    log!("CxPassParent::Pass");
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    //self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass_to_magic_texture(*pass_id, _d3d11_cx);
                 },
                 CxPassParent::None => {
-                    //self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    log!("CxPassParent::None");
+                    self.draw_pass_to_magic_texture(*pass_id, _d3d11_cx);
                 }
             }
         }
@@ -50,11 +53,11 @@ impl Cx {
     
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
 
-        println!("client: stdin_event_loop");
+        log!("client: stdin_event_loop");
 
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
         let fb_texture = Texture::new(self);
-        let mut dx11_shared_handle = makepad_windows::Win32::Foundation::HANDLE(0);
+        let mut dx11_shared_handle = windows::Win32::Foundation::HANDLE(0);
 
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
@@ -117,7 +120,7 @@ impl Cx {
                             // poll the service for updates
                             // check signals
                             if Signal::check_and_clear_ui_signal(){
-                                self.handle_media_signals();
+                                //self.handle_media_signals();
                                 self.call_event_handler(&Event::Signal);
                             }
                             if self.was_live_edit(){
@@ -138,12 +141,12 @@ impl Cx {
                             }
                             
                             // we need to make this shared texture handle into a true metal one
-                            self.stdin_handle_repaint(d3d11_cx);
+                            self.stdin_handle_repaint(d3d11_cx,&fb_texture);
                         }
                         HostToStdin::Dx11SharedHandle(marshalled_handle) => {
 
                             // convert u64 back to handle
-                            let handle = makepad_windows::Win32::Foundation::HANDLE(marshalled_handle as isize);
+                            let handle = windows::Win32::Foundation::HANDLE(marshalled_handle as isize);
 
                             if handle != dx11_shared_handle {
                                 
