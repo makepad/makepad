@@ -274,7 +274,6 @@ live_design!{
             }
             
             news_feed = <ListView> {
-                tail_range: false,
                 height: Fill, width: Fill
                 flow: Down
                 TopSpace = <View> {height: 80}
