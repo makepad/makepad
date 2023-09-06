@@ -285,7 +285,7 @@ impl ListView {
             log!("Draw state not at end in listview, please review your next_visible_item loop")
         }
         let rect = cx.turtle().rect();
-        if at_end || self.view_window == 0{
+        if at_end || self.view_window == 0 || self.view_window > visible_items{
             self.view_window = visible_items.max(4) - 3;
         }
         if self.detect_tail_in_draw{
