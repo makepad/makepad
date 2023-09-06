@@ -135,6 +135,8 @@ live_design!{
     }
     
     LogList = <ListView> {
+        grab_key_focus: true
+        auto_tail: true
         height: Fill, width: Fill
         flow: Down
         WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}

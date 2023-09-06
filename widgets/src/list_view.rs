@@ -57,13 +57,13 @@ pub struct ListView {
     
     #[rust] range_start: u64,
     #[rust(u64::MAX)] range_end: u64,
-    #[rust(10u64)] view_window: u64,
+    #[rust(0u64)] view_window: u64,
     #[live(0.1)] flick_scroll_minimum: f64,
     #[live(0.98)] flick_scroll_decay: f64,
     #[live(0.2)] swipe_drag_duration: f64,
     #[live(100.0)] max_pull_down: f64,
     #[live(true)] align_top_when_empty: bool,
-    #[live(false)] uses_keyboard: bool,
+    #[live(false)] grab_key_focus: bool,
     #[rust] first_id: u64,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
@@ -71,7 +71,9 @@ pub struct ListView {
     #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] draw_align_list: Vec<AlignItem>,
-    #[live(true)] tail_range: bool,
+    
+    #[live(false)] auto_tail: bool,
+    #[rust(false)] tail_range: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
@@ -208,7 +210,7 @@ impl ListView {
                         }
                         else {
                             let ret = (viewport.size.index(vi) - last_item_pos).max(0.0);
-                            if ret > 0.0{
+                            if ret > 0.0 {
                                 at_end = true;
                             }
                             ret
@@ -222,7 +224,7 @@ impl ListView {
                     let mut pos = start_pos;
                     for i in (0..first_index).rev() {
                         let item = &list[i];
-                        let visible = pos >= 0.0;
+                        let visible = pos > 0.0;
                         pos -= item.size.index(vi);
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(&item.align_range, shift);
@@ -230,7 +232,7 @@ impl ListView {
                             self.first_scroll = pos;
                             self.first_id = item.index;
                             shifted = true;
-                            if item.index < self.range_end{
+                            if item.index < self.range_end {
                                 visible_items += 1;
                             }
                         }
@@ -248,24 +250,24 @@ impl ListView {
                             self.first_id = item.index;
                             shifted = true;
                         }
-                        else if item.index < self.range_end{
+                        else if item.index < self.range_end {
                             visible_items += 1;
                         }
                     }
                     // overwrite first scroll to compensate for shift
-                    if !shifted{
+                    if !shifted {
                         self.first_scroll = start_pos;
                     }
                 }
-                self.update_scroll_bar(cx);
+                //self.update_scroll_bar(cx);
             }
         }
         else {
             log!("Draw state not at end in listview, please review your next_visible_item loop")
         }
         let rect = cx.turtle().rect();
-        if at_end{ 
-            self.view_window = visible_items.max(3)-2;
+        if at_end || self.view_window == 0{
+            self.view_window = visible_items.max(4) - 3;
         }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
@@ -421,21 +423,18 @@ impl ListView {
     
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: u64, range_end: u64) {
         self.range_start = range_start;
-        self.range_end = range_end;
-        
-        if self.tail_range {
-            self.tail_range(cx);
+        if self.range_end != range_end {
+            self.range_end = range_end;
+            if self.tail_range{
+                self.first_id = self.range_end.max(1) - 1;
+                self.first_scroll = 0.0;
+            }
+            self.update_scroll_bar(cx);
         }
     }
     
-    pub fn tail_range(&mut self, cx: &mut Cx) {
-        self.first_id = self.range_end.max(1) - 1;
-        self.first_scroll = 0.0;
-        self.update_scroll_bar(cx);
-    }
-    
     pub fn update_scroll_bar(&mut self, cx: &mut Cx) {
-        let scroll_pos = ((self.first_id - self.range_start) as f64 / ((self.range_end - self.range_start).max( self.view_window+1) - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
+        let scroll_pos = ((self.first_id - self.range_start) as f64 / ((self.range_end - self.range_start).max(self.view_window + 1) - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
         // move the scrollbar to the right 'top' position
         self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
     }
@@ -464,24 +463,25 @@ impl Widget for ListView {
         let mut scroll_to = None;
         self.scroll_bar.handle_event_with(cx, event, &mut | _cx, action | {
             // snap the scrollbar to a top-index with scroll_pos 0
-            if let ScrollBarAction::Scroll {scroll_pos, view_total:_, view_visible:_} = action {
-                //if scroll_pos+0.5 >= view_total - view_visible{
-                 //   log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
-               // }
-                //    log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
-                scroll_to = Some(scroll_pos)
+            if let ScrollBarAction::Scroll {scroll_pos, view_total, view_visible} = action {
+                scroll_to = Some((scroll_pos, scroll_pos+0.5 >= view_total - view_visible))
             }
         });
-        if let Some(scroll_to) = scroll_to {
-            //log!("SCROLL pos! {}",self.scroll_bar.get_scroll_pos());
-            // reverse compute the top_id
-            let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
-            self.first_id = scroll_to;
-            self.first_scroll = 0.0;
-            if self.tail_range {
+        if let Some((scroll_to, at_end)) = scroll_to {
+            if at_end && self.auto_tail{
+                self.first_id = self.range_end.max(1) - 1;
+                self.first_scroll = 0.0;
+                self.tail_range = true;
+                dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+            }
+            else if self.tail_range {
                 self.tail_range = false;
                 dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
             }
+
+            let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
+            self.first_id = scroll_to;
+            self.first_scroll = 0.0;
             dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
             self.area.redraw(cx);
         }
@@ -530,8 +530,8 @@ impl Widget for ListView {
             ScrollState::Stopped => ()
         }
         let vi = self.vec_index;
-        let is_scroll = if let Event::Scroll(_) = event{true} else {false};
-        if !self.scroll_bar.is_area_captured(cx) || is_scroll{
+        let is_scroll = if let Event::Scroll(_) = event {true} else {false};
+        if !self.scroll_bar.is_area_captured(cx) || is_scroll {
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
                     if self.tail_range {
@@ -545,7 +545,7 @@ impl Widget for ListView {
                     self.area.redraw(cx);
                 },
                 Hit::FingerDown(e) => {
-                    if self.uses_keyboard{
+                    if self.grab_key_focus {
                         cx.set_key_focus(self.area);
                     }
                     // ok so fingerdown eh.
@@ -564,17 +564,64 @@ impl Widget for ListView {
                     };
                 }
                 Hit::KeyDown(ke) => match ke.key_code {
-                    KeyCode::End => {
-                        self.tail_range = true;
+                    KeyCode::Home => {
+                        self.first_id = 0;
+                        self.first_scroll = 0.0;
+                        self.tail_range = false;
                         dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+                        self.update_scroll_bar(cx);
+                        self.area.redraw(cx);
+                    },
+                    KeyCode::End => {
+                        self.first_id = self.range_end.max(1) - 1;
+                        self.first_scroll = 0.0;
+                        if self.auto_tail {
+                            self.tail_range = true;
+                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+                        }
+                        self.update_scroll_bar(cx);
+                        self.area.redraw(cx);
+                    },
+                    KeyCode::PageUp => {
+                        self.first_id = self.first_id.max(self.view_window) - self.view_window;
+                        self.first_scroll = 0.0;
+                        self.tail_range = false;
+                        dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+                        self.update_scroll_bar(cx);
+                        self.area.redraw(cx);
+                    },
+                    KeyCode::PageDown => {
+                        self.first_id += self.view_window;
+                        self.first_scroll = 0.0;
+                        if self.first_id >= self.range_end.max(1) {
+                            self.first_id = self.range_end.max(1) - 1;
+                            if self.auto_tail {
+                                self.tail_range = true;
+                                dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+                            }
+                        }
+                        else {
+                            self.tail_range = false;
+                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+                        }
+                        self.update_scroll_bar(cx);
                         self.area.redraw(cx);
                     },
                     KeyCode::ArrowDown => {
                         self.first_id += 1;
                         if self.first_id >= self.range_end.max(1) {
-                            self.first_id = self.range_end - 1;
+                            self.first_id = self.range_end.max(1) - 1;
+                            if self.auto_tail {
+                                self.tail_range = true;
+                                dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
+                            }
+                        }
+                        else {
+                            self.tail_range = false;
+                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         }
                         self.first_scroll = 0.0;
+                        self.update_scroll_bar(cx);
                         self.area.redraw(cx);
                     },
                     KeyCode::ArrowUp => {
@@ -585,6 +632,9 @@ impl Widget for ListView {
                             }
                             self.first_scroll = 0.0;
                             self.area.redraw(cx);
+                            self.tail_range = false;
+                            self.update_scroll_bar(cx);
+                            dispatch_action(cx, InfiniteListAction::TailRange(self.tail_range).into_action(uid));
                         }
                     },
                     _ => ()
