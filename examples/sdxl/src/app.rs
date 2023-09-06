@@ -1383,7 +1383,7 @@ impl AppMain for App {
                 
                 if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                     // alright now we draw the items
-                    image_list.set_item_range(0, self.filtered.list.len() as u64, 1);
+                    image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
                     while let Some(item_id) = image_list.next_visible_item(cx) {
                         if let Some(item) = self.filtered.list.get(item_id as usize) {
                             match item {

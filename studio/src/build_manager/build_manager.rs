@@ -116,7 +116,7 @@ live_design!{
     
     LogItemWait = <LogItem> {
         icon = <WaitIcon> {},
-        label = <Label> {width: Fill draw_text: {wrap: Word}}
+        label = <TextInput> {width: Fill padding:0, draw_text: {wrap: Word}}
         link_label = <LinkLabel> {}
     }
     
@@ -137,7 +137,7 @@ live_design!{
     LogList = <ListView> {
         grab_key_focus: true
         auto_tail: true
-        drag_scrolling: true
+        drag_scrolling: false
         height: Fill, width: Fill
         flow: Down
         WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
@@ -193,14 +193,14 @@ impl BuildManager {
                     BuildMsg::Bare(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
                         let item = list.item(cx, item_id, template).unwrap().as_view();
-                        item.label(id!(label)).set_text(&msg.line);
+                        item.widget(id!(label)).set_text(&msg.line);
                         item.draw_widget_all(cx);
                     }
                     BuildMsg::Location(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
                         let item = list.item(cx, item_id, template).unwrap().as_view();
                         item.label(id!(link_label)).set_text(&msg.file_name);
-                        item.label(id!(label)).set_text(&msg.msg);
+                        item.widget(id!(label)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
                     _=>()
