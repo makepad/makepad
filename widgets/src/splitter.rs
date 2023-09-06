@@ -5,93 +5,8 @@ use crate::{
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    
-    DrawSplitter= {{DrawSplitter}} {
-        uniform border_radius: 1.0
-        uniform splitter_pad: 1.0
-        uniform splitter_grabber: 110.0
-
-        instance pressed: 0.0
-        instance hover: 0.0
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.clear(COLOR_BG_APP);
-            
-            if self.is_vertical > 0.5 {
-                sdf.box(
-                    self.splitter_pad,
-                    self.rect_size.y * 0.5 - self.splitter_grabber * 0.5,
-                    self.rect_size.x - 2.0 * self.splitter_pad,
-                    self.splitter_grabber,
-                    self.border_radius
-                );
-            }
-            else {
-                sdf.box(
-                    self.rect_size.x * 0.5 - self.splitter_grabber * 0.5,
-                    self.splitter_pad,
-                    self.splitter_grabber,
-                    self.rect_size.y - 2.0 * self.splitter_pad,
-                    self.border_radius
-                );
-            }
-            return sdf.fill_keep(mix(
-                COLOR_BG_APP,
-                mix(
-                    COLOR_CONTROL_HOVER,
-                    COLOR_CONTROL_PRESSED,
-                    self.pressed
-                ),
-                self.hover
-            ));
-        }
-    }
-    
-    Splitter= {{Splitter}} {
-        split_bar_size: (DIM_SPLITTER_SIZE)
-        min_horizontal: (DIM_SPLITTER_MIN_HORIZONTAL)
-        max_horizontal: (DIM_SPLITTER_MAX_HORIZONTAL)
-        min_vertical: (DIM_SPLITTER_MIN_VERTICAL)
-        max_vertical: (DIM_SPLITTER_MAX_VERTICAL)
-        
-        state: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_splitter: {pressed: 0.0, hover: 0.0}
-                    }
-                }
-                
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                        state_down: Forward {duration: 0.01}
-                    }
-                    apply: {
-                        draw_splitter: {
-                            pressed: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
-                        }
-                    }
-                }
-                
-                pressed = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_splitter: {
-                            pressed: [{time: 0.0, value: 1.0}],
-                            hover: 1.0,
-                        }
-                    }
-                }
-            }
-        }
-    }
+    DrawSplitter= {{DrawSplitter}} {}
+    SplitterBase = {{Splitter}} {}
 }
 
 
@@ -111,7 +26,7 @@ pub struct Splitter {
     #[rust] drag_start_align: Option<SplitterAlign>,
     #[rust] area_a: Area,
     #[rust] area_b: Area,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[live] min_vertical: f64,
     #[live] max_vertical: f64,
@@ -125,7 +40,7 @@ pub struct Splitter {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[live] a: WidgetRef,
     #[live] b: WidgetRef,
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
 }
 
 impl LiveHook for Splitter{
@@ -162,7 +77,7 @@ impl Widget for Splitter {
         }
     }
     
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
     
@@ -268,33 +183,33 @@ impl Splitter {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
         Hit::FingerHoverIn(_) => {
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                 Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
-            self.animate_state(cx, id!(hover.on));
+            self.animator_play(cx, id!(hover.on));
         }
         Hit::FingerHoverOut(_) => {
-            self.animate_state(cx, id!(hover.off));
+            self.animator_play(cx, id!(hover.off));
         },
         Hit::FingerDown(_) => {
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                 Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
-            self.animate_state(cx, id!(hover.pressed));
+            self.animator_play(cx, id!(hover.pressed));
             self.drag_start_align = Some(self.align);
         }
         Hit::FingerUp(f) => {
             self.drag_start_align = None;
             if f.is_over && f.device.has_hovers() {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             else {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
         }
         Hit::FingerMove(f) => {

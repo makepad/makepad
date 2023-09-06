@@ -763,8 +763,8 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 } => {
                     writeln!(f, "<DSL> {} :token_start:{}, token_count:{} expand_index:{:?}", node.id, token_start, token_count, expand_index).unwrap();
                 },
-                LiveValue::Import(module_path) => {
-                    writeln!(f, "<Import> {}::{}", module_path, node.id).unwrap();
+                LiveValue::Import(live_import) => {
+                    writeln!(f, "<Import> {}::{} as {}", live_import.module_id, live_import.import_id, node.id).unwrap();
                 }
                 /*LiveValue::Registry(component_id) => {
                     writeln!(f, "<Registry> {}::{}", component_id, node.id).unwrap();

@@ -1,90 +1,8 @@
 use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import crate::theme::*;
-    
-    DrawScrollBar= {{DrawScrollBar}} {
-        //draw_depth: 5.0
-        uniform border_radius: 1.5
-        instance bar_width:6.0
-        instance pressed: 0.0
-        instance hover: 0.0
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            if self.is_vertical > 0.5 {
-                sdf.box(
-                    1.,
-                    self.rect_size.y * self.norm_scroll,
-                    self.bar_width,
-                    self.rect_size.y * self.norm_handle,
-                    self.border_radius
-                );
-            }
-            else {
-                sdf.box(
-                    self.rect_size.x * self.norm_scroll,
-                    1.,
-                    self.rect_size.x * self.norm_handle,
-                    self.bar_width,
-                    self.border_radius
-                );
-            }
-            return sdf.fill(mix(
-                COLOR_SCROLL_BAR_DEFAULT,
-                mix(
-                    COLOR_CONTROL_HOVER,
-                    COLOR_CONTROL_PRESSED,
-                    self.pressed
-                ),
-                self.hover
-            ));
-        }
-    }
-    
-    ScrollBar= {{ScrollBar}} {
-        bar_size: 10.0,
-        bar_side_margin: 3.0
-        min_handle_size: 30.0
-        
-        state: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bar: {pressed: 0.0, hover: 0.0}
-                    }
-                }
-                
-                on = {
-                    cursor: Default,
-                    from: {
-                        all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
-                    }
-                    apply: {
-                        draw_bar: {
-                            pressed: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
-                        }
-                    }
-                }
-                
-                pressed = {
-                    cursor: Default,
-                    from: {all: Snap}
-                    apply: {
-                        draw_bar: {
-                            pressed: 1.0,
-                            hover: 1.0,
-                        }
-                    }
-                }
-            }
-        }
-    }
+    DrawScrollBar= {{DrawScrollBar}} {}
+    ScrollBarBase= {{ScrollBar}} {}
 }
 
 #[derive(Live, LiveHook)]
@@ -98,7 +16,7 @@ pub struct ScrollBar {
     #[live] use_vertical_finger_scroll: bool,
     #[live] smoothing: Option<f64>,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
@@ -147,23 +65,19 @@ impl ScrollBar {
     }
     
     // sets the scroll pos from finger position
-    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f64) -> ScrollBarAction {
+    pub fn set_scroll_pos_from_finger(&mut self,finger: f64) -> bool {
         let vy = self.view_visible / self.view_total;
         let norm_handle = vy.max(self.min_handle_size / self.scroll_size);
         
         let new_scroll_pos = (
             (self.view_total * (1. - vy) * (finger / self.scroll_size)) / (1. - norm_handle)
         ).max(0.).min(self.view_total - self.view_visible);
-        
+        //log!("SCROLL POS {} {}", new_scroll_pos, self.view_total - self.view_visible);
         // lets snap new_scroll_pos
         let changed = self.scroll_pos != new_scroll_pos;
         self.scroll_pos = new_scroll_pos;
         self.scroll_target = new_scroll_pos;
-        if changed {
-            self.update_shader_scroll_pos(cx);
-            return self.make_scroll_action();
-        }
-        return ScrollBarAction::None;
+        changed
     }
     
     // writes the norm_scroll value into the shader
@@ -185,7 +99,6 @@ impl ScrollBar {
     }
     
     pub fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
-        
         if self.smoothing.is_none() {
             return false;
         }
@@ -217,7 +130,6 @@ impl ScrollBar {
     }
     
     pub fn set_scroll_pos_no_action(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
@@ -228,7 +140,6 @@ impl ScrollBar {
         return false
     }
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
@@ -242,7 +153,6 @@ impl ScrollBar {
     
     
     pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        // clamp scroll_pos to
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
             self.scroll_target = scroll_pos;
@@ -343,10 +253,13 @@ impl ScrollBar {
             }
         }
     }
+    pub fn is_area_captured(&self, cx:&Cx)->bool{
+        cx.fingers.is_area_captured(self.draw_bar.area())
+    }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if self.visible {
-            self.state_handle_event(cx, event);
+            self.animator_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some() {
                 if self.move_towards_scroll_target(cx) {
                     self.next_frame = cx.new_next_frame();
@@ -356,7 +269,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.draw_bar.area()) {
                 Hit::FingerDown(fe) => {
-                    self.animate_state(cx, id!(hover.pressed));
+                    self.animator_play(cx, id!(hover.pressed));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         Axis::Horizontal => rel.x,
@@ -367,26 +280,27 @@ impl ScrollBar {
                     let bar_size = norm_handle * self.scroll_size;
                     if rel < bar_start || rel > bar_start + bar_size { // clicked outside
                         self.drag_point = Some(bar_size * 0.5);
-                        let action = self.set_scroll_pos_from_finger(cx, rel - self.drag_point.unwrap());
-                        return dispatch_action(cx, action);
+                        if self.set_scroll_pos_from_finger(rel - self.drag_point.unwrap()){
+                            dispatch_action(cx, self.make_scroll_action());
+                        }
                     }
                     else { // clicked on
                         self.drag_point = Some(rel - bar_start); // store the drag delta
                     }
                 },
                 Hit::FingerHoverIn(_) => {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 },
                 Hit::FingerHoverOut(_) => {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 },
                 Hit::FingerUp(fe) => {
                     self.drag_point = None;
                     if fe.is_over && fe.device.has_hovers() {
-                        self.animate_state(cx, id!(hover.on));
+                        self.animator_play(cx, id!(hover.on));
                     }
                     else {
-                        self.animate_state(cx, id!(hover.off));
+                        self.animator_play(cx, id!(hover.off));
                     }
                     return;
                 },
@@ -400,16 +314,18 @@ impl ScrollBar {
                     else {
                         match self.axis {
                             Axis::Horizontal => {
-                                let action = self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap());
-                                return dispatch_action(cx, action);
+                                if self.set_scroll_pos_from_finger(rel.x - self.drag_point.unwrap()){
+                                    dispatch_action(cx, self.make_scroll_action());
+                                }
                             },
                             Axis::Vertical => {
-                                let action = self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap());
-                                return dispatch_action(cx, action);
+                                if self.set_scroll_pos_from_finger(rel.y - self.drag_point.unwrap()){
+                                    dispatch_action(cx, self.make_scroll_action());
+                                }
                             }
                         }
                     }
-                },
+                 },
                 _ => ()
             };
         }

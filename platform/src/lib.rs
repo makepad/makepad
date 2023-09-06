@@ -29,7 +29,7 @@ mod pass;
 mod texture;
 mod cursor;
 mod menu;
-mod live_state;
+mod animator;
 mod gpu_info;
 mod geometry;
 mod debug;
@@ -45,7 +45,7 @@ mod app_main;
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
@@ -213,6 +213,7 @@ pub use {
         },
         live_prims::{
             LiveDependency,
+            RcStringMut,
         },
         live_traits::{
             LiveHookDeref,
@@ -225,13 +226,13 @@ pub use {
             ToLiveValue,
             ApplyFrom,
         },
-        live_state::{
+        animator::{
             Ease,
             Play,
             Animate,
-            LiveState,
-            LiveStateImpl,
-            StateAction,
+            Animator,
+            AnimatorImpl,
+            AnimatorAction,
         },
         draw_vars::{
             shader_enum,
