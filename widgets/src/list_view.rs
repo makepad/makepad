@@ -290,7 +290,7 @@ impl ListView {
         }
         if self.detect_tail_in_draw{
             self.detect_tail_in_draw = false;
-            if at_end{
+            if self.auto_tail && at_end{
                 self.tail_range = true;
             }
         }
@@ -616,13 +616,8 @@ impl Widget for ListView {
                         self.first_scroll = 0.0;
                         if self.first_id >= self.range_end.max(1) {
                             self.first_id = self.range_end.max(1) - 1;
-                            if self.auto_tail {
-                                self.tail_range = true;
-                            }
                         }
-                        else {
-                            self.tail_range = false;
-                        }
+                        self.detect_tail_in_draw = true;
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
                     },
@@ -630,13 +625,8 @@ impl Widget for ListView {
                         self.first_id += 1;
                         if self.first_id >= self.range_end.max(1) {
                             self.first_id = self.range_end.max(1) - 1;
-                            if self.auto_tail {
-                                self.tail_range = true;
-                            }
                         }
-                        else {
-                            self.tail_range = false;
-                        }
+                        self.detect_tail_in_draw = true;
                         self.first_scroll = 0.0;
                         self.update_scroll_bar(cx);
                         self.area.redraw(cx);
