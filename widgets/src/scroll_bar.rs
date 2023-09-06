@@ -99,8 +99,6 @@ impl ScrollBar {
     }
     
     pub fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
-        log!("move_towards_scroll_target");
-        
         if self.smoothing.is_none() {
             return false;
         }
