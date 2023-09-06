@@ -82,7 +82,7 @@ impl<'a> DataBindingMap<'a> {
         // alright so. we have a direction.
         if self.is_data_to_widgets() {
             let mut any_found = false;
-            for widget in self.ui.get_widgets(widgets).iter() {
+            for widget in self.ui.widgets(widgets).iter() {
                 any_found = true;
                 let uid = widget.widget_uid();
                 if !self.store.mutated_by.contains(&uid) {
@@ -97,7 +97,7 @@ impl<'a> DataBindingMap<'a> {
             if self.actions.len() == 0 {
                 return
             }
-            for widget in self.ui.get_widgets(widgets).iter() {
+            for widget in self.ui.widgets(widgets).iter() {
                 if widget.widget_to_data(self.cx, self.actions, &mut self.store.nodes, data_id) {
                     self.store.set_mutated_by(widget.widget_uid());
                 }
@@ -111,7 +111,7 @@ impl<'a> DataBindingMap<'a> {
             if let Some(v) = self.store.nodes.read_field_value(data) {
                 let mut ui_nodes = LiveNodeVec::new();
                 ui_nodes.write_field_value(widget_val[1], map(v.clone()));
-                let widgets = self.ui.get_widgets(&[widget_val[0]]);
+                let widgets = self.ui.widgets(&[widget_val[0]]);
                 for mut widget in widgets.iter(){
                     widget.apply_over(self.cx, &ui_nodes)
                 }

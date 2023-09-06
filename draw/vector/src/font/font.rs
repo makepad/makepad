@@ -9,6 +9,6 @@ pub struct TTFFont {
     pub descender: f64,
     pub line_gap: f64,
     pub bounds: Rectangle,
-    pub glyphs: Vec<Glyph>,
+    pub cached_decoded_glyphs: Vec<Option<Box<Glyph>>>,
 }
 

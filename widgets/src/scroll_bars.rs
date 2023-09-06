@@ -4,10 +4,7 @@ use crate::{
 };
 
 live_design!{
-    ScrollBars = {{ScrollBars}} {
-        show_scroll_x: true,
-        show_scroll_y: true,
-    }
+    ScrollBarsBase = {{ScrollBars}} {}
 }
 
 #[derive(Live, LiveHook)]

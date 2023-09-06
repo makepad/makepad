@@ -67,30 +67,6 @@ fn main_java(url:&str)->String{
     "#)
 }
 
-fn get_target_from_args(args: &[String]) -> Result<&str, String> {
-    if args.is_empty() {
-        return Err("Not enough arguments to build".into());
-    }
-    if args[0] == "-p" {
-        if args.len()<2 { 
-            return Err("Not enough arguments to build".into());
-        }
-        Ok(&args[1])
-    }
-    else {
-        Ok(&args[0])
-    }
-}
-
-fn get_target_crate_dir(target: &str) -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().unwrap();
-    if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid", "-p", target]) {
-        return Ok(output.trim_start_matches("file://").split('#').next().unwrap().into())
-    } else {
-        Err(format!("Failed to get crate dir for: {}", target))
-    }
-}
-
 fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:&[AndroidTarget]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
 
@@ -142,11 +118,11 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
     Ok(())
 }
 
-fn prepare_build(underscore_target: &str, java_url: &str, app_label: &str) -> Result<BuildPaths, String> {
+fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str) -> Result<BuildPaths, String> {
     let cwd = std::env::current_dir().unwrap();
 
-    let tmp_dir = cwd.join(format!("target/linux-android-apk/{underscore_target}/tmp"));
-    let out_dir = cwd.join(format!("target/linux-android-apk/{underscore_target}/apk"));
+    let tmp_dir = cwd.join(format!("target/makepad-android-apk/{underscore_build_crate}/tmp"));
+    let out_dir = cwd.join(format!("target/makepad-android-apk/{underscore_build_crate}/apk"));
     
     // lets remove tmp and out dir
     let _ = rmdir(&tmp_dir);
@@ -335,27 +311,27 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
     Ok(())
 }
 
-fn add_resources(sdk_dir: &Path, target: &str, build_paths: &BuildPaths) -> Result<(), String> {
+fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let mut assets_to_add: Vec<String> = Vec::new();
 
-    let target_crate_dir = get_target_crate_dir(target) ?;
-    let local_resources_path = target_crate_dir.join("resources");
+    let build_crate_dir = get_crate_dir(build_crate) ?;
+    let local_resources_path = build_crate_dir.join("resources");
     if local_resources_path.is_dir() {
-        let underscore_target = target.replace('-', "_");
-        let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{underscore_target}/resources"));
+        let underscore_build_crate = build_crate.replace('-', "_");
+        let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{underscore_build_crate}/resources"));
         mkdir(&dst_dir) ?;
         cp_all(&local_resources_path, &dst_dir, false) ?;
 
         let assets = ls(&dst_dir) ?;
         for path in &assets {
             let path = path.display();
-            assets_to_add.push(format!("assets/makepad/{underscore_target}/resources/{path}"));
+            assets_to_add.push(format!("assets/makepad/{underscore_build_crate}/resources/{path}"));
         }
     }
 
     let mut dependencies = HashSet::new();
-    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", target]) {
+    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate]) {
         for line in cargo_tree_output.lines().skip(1) {
             if let Some((name, path)) = extract_dependency_info(line) {
                 let resources_path = Path::new(&path).join("resources");
@@ -431,14 +407,14 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
 }
 
 pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], android_targets:&[AndroidTarget]) -> Result<BuildResult, String> {
-    let target = get_target_from_args(args)?;
-    let underscore_target = target.replace('-', "_");
+    let build_crate = get_build_crate_from_args(args)?;
+    let underscore_build_crate = build_crate.replace('-', "_");
 
-    let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_target}"));
-    let app_label = app_label.unwrap_or_else(|| format!("{underscore_target}"));
+    let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_build_crate}"));
+    let app_label = app_label.unwrap_or_else(|| format!("{underscore_build_crate}"));
 
     rust_build(sdk_dir, host_os, args, android_targets)?;
-    let build_paths = prepare_build(target, &java_url, &app_label)?;
+    let build_paths = prepare_build(build_crate, &java_url, &app_label)?;
 
     println!("Compiling APK & R.java files");
     build_r_class(sdk_dir, &build_paths)?;
@@ -447,8 +423,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     println!("Building APK");
     build_dex(sdk_dir, &build_paths)?;
     build_unaligned_apk(sdk_dir, &build_paths)?;
-    add_rust_library(sdk_dir, &underscore_target, &build_paths, android_targets)?;
-    add_resources(sdk_dir, target, &build_paths)?;
+    add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets)?;
+    add_resources(sdk_dir, build_crate, &build_paths)?;
     build_zipaligned_apk(sdk_dir, &build_paths)?;
     sign_apk(sdk_dir, &build_paths)?;
 

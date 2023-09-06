@@ -6,6 +6,30 @@ use std::{
     process::{Command, Stdio}
 };
 
+pub fn get_crate_dir(build_crate: &str) -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir().unwrap();
+    if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid", "-p", build_crate]) {
+        return Ok(output.trim_start_matches("file://").split('#').next().unwrap().into())
+    } else {
+        Err(format!("Failed to get crate dir for: {}", build_crate))
+    }
+}
+
+pub fn get_build_crate_from_args(args: &[String]) -> Result<&str, String> {
+    if args.is_empty() {
+        return Err("Not enough arguments to build".into());
+    }
+    if args[0] == "-p" {
+        if args.len()<2 { 
+            return Err("Not enough arguments to build".into());
+        }
+        Ok(&args[1])
+    }
+    else {
+        Ok(&args[0])
+    }
+}
+
 pub fn shell(cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
     let mut cmd_build = Command::new(cmd);
     

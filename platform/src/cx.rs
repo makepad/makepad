@@ -159,7 +159,7 @@ pub enum OsType {
     Unknown,
     Windows,
     Macos,
-    IOS,
+    Ios,
     Android(AndroidParams),
     LinuxWindow (LinuxWindowParams),
     LinuxDirect,
@@ -176,7 +176,7 @@ impl OsType {
     pub fn is_single_window(&self)->bool{
         match self{
             OsType::Web(_) => true,
-            OsType::IOS=>true,
+            OsType::Ios=>true,
             OsType::Android(_) => true,
             OsType::LinuxDirect=> true,
             _=> false

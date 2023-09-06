@@ -14,7 +14,6 @@ pub struct Layout {
     #[live] pub padding: Padding,
     #[live] pub align: Align,
     #[live] pub flow: Flow,
-    #[live(1.0)] pub scale: f64,
     #[live] pub spacing: f64
 }
 
@@ -24,7 +23,6 @@ impl Default for Layout{
             scroll: dvec2(0.0,0.0),
             clip_x: true,
             clip_y: true,
-            scale: 1.0,
             padding: Padding::default(),
             align: Align{x:0.0,y:0.0},
             flow: Flow::Right,
@@ -246,8 +244,8 @@ impl<'a> Cx2d<'a> {
                 parent.pos + parent.child_spacing(self.turtle_walks.len()) 
             };
             
-            let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow) * layout.scale;
-            let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow) * layout.scale;
+            let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
+            let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow);
             
             // figure out new clipping rect
             let (x0, x1) = if layout.clip_x {
@@ -269,12 +267,12 @@ impl<'a> Cx2d<'a> {
                 })
             }else {(f64::NAN,f64::NAN)};//parent.draw_clip.0.y, parent.draw_clip.1.y)};
             
-            (o - layout.scroll, w, h, (dvec2(x0, y0), (dvec2(x1, y1))* layout.scale))
+            (o - layout.scroll, w, h, (dvec2(x0, y0), (dvec2(x1, y1))))
         }
         else {
             let o = DVec2 {x: walk.margin.left, y: walk.margin.top};
-            let w = walk.width.fixed_or_nan() * layout.scale;
-            let h = walk.height.fixed_or_nan() * layout.scale;
+            let w = walk.width.fixed_or_nan();
+            let h = walk.height.fixed_or_nan();
             
             (o, w, h, (dvec2(o.x, o.y), dvec2(o.x + w, o.y + h)))
         };
@@ -527,14 +525,14 @@ impl<'a> Cx2d<'a> {
     }
     
     fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
-        let current_dpi_factor = self.current_dpi_factor();
+        //let current_dpi_factor = self.current_dpi_factor();
         let dx = if dx.is_nan() {0.0}else {dx} + turtle_shift.x;
         let dy = if dy.is_nan() {0.0}else {dy} + turtle_shift.y;
         if dx == 0.0 && dy == 0.0 {
             return 
         }
-        let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
-        let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
+        //let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
+        //let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
         let d = dvec2(dx, dy);
         let mut c = align_start;
         while c < align_end {
@@ -651,10 +649,26 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn get_turtle_align_range(&self) -> TurtleAlignRange {
+        TurtleAlignRange{
+            start:  self.turtles.last().unwrap().align_start,
+            end: self.align_list.len()
+        }
+    }
+    
+    pub fn shift_align_range(&mut self, range: &TurtleAlignRange, shift: DVec2) {
+        self.move_align_list(shift.x, shift.y, range.start, range.end, true, dvec2(0.0,0.0));
+    }
+    
     pub fn add_rect_area(&mut self, area: &mut Area, rect: Rect) {
         //let turtle = self.turtle();
         self.add_aligned_rect_area(area, rect)
     }
+}
+
+pub struct TurtleAlignRange{
+    start: usize,
+    end: usize
 }
 
 impl Turtle {
@@ -690,6 +704,8 @@ impl Turtle {
         self.width_used = width_used;
         self.height_used = height_used;
     }
+    
+    
     /*
     pub fn move_pos(&mut self, dx: f64, dy: f64) {
         self.pos.x += dx;
@@ -914,11 +930,6 @@ impl Layout {
         self
     }
     
-    pub fn with_scale(mut self, s: f64) -> Self {
-        self.scale = s;
-        self
-    }
-    
     pub fn with_align_x(mut self, v: f64) -> Self {
         self.align.x = v;
         self
@@ -1062,6 +1073,14 @@ impl Walk {
     
     pub fn with_margin(mut self, v: Margin) -> Self {
         self.margin = v;
+        self
+    }
+    
+    pub fn with_add_padding(mut self, v: Padding) -> Self {
+        self.margin.top += v.top;
+        self.margin.left += v.left;
+        self.margin.right += v.right;
+        self.margin.bottom += v.bottom;
         self
     }
 }

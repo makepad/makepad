@@ -32,32 +32,32 @@ use {
     },
 };
 
-pub trait LiveStateImpl {
+pub trait AnimatorImpl {
     
-    fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
-    fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
-    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+    fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
+    fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
+    fn animator_toggle(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
         if is_state_1 {
             if let Animate::Yes = animate {
-                self.animate_state(cx, state1)
+                self.animator_play(cx, state1)
             }
             else {
-                self.cut_state(cx, state1)
+                self.animator_cut(cx, state1)
             }
         }
         else {
             if let Animate::Yes = animate {
-                self.animate_state(cx, state2)
+                self.animator_play(cx, state2)
             }
             else {
-                self.cut_state(cx, state2)
+                self.animator_cut(cx, state2)
             }
         }
     }
-    fn is_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
-    fn apply_animating_state(&mut self, cx: &mut Cx);
-    fn after_apply_state_changed(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]);
-    fn state_handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction;
+    fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
+    fn animator_apply_state(&mut self, cx: &mut Cx);
+    fn animator_after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]);
+    fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event) -> AnimatorAction;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -519,20 +519,20 @@ impl Ease {
 }
 
 #[derive(Default)]
-pub struct LiveState {
+pub struct Animator {
     pub live_ptr: LiveRef,
     pub state: Option<Vec<LiveNode >>,
     pub next_frame: NextFrame,
 }
 
 #[derive(Copy, Clone)]
-pub enum StateAction {
+pub enum AnimatorAction {
     Animating {redraw: bool},
     None
 }
 
-impl LiveHook for LiveState {}
-impl LiveNew for LiveState {
+impl LiveHook for Animator {}
+impl LiveNew for Animator {
     fn new(_cx: &mut Cx) -> Self {Self::default()}
     
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
@@ -545,7 +545,7 @@ impl LiveNew for LiveState {
         }
     }
 }
-impl LiveApply for LiveState {
+impl LiveApply for Animator {
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(file_id) = from.file_id() {
             self.live_ptr = Some(cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, start_index));
@@ -570,7 +570,7 @@ impl LiveApply for LiveState {
     }
 }
 
-impl StateAction {
+impl AnimatorAction {
     pub fn must_redraw(&self) -> bool {
         match self {
             Self::Animating {redraw} => *redraw,
@@ -584,7 +584,7 @@ impl StateAction {
         }
     }
 }
-impl LiveState {
+impl Animator {
     
     pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
         if let Some(state) = self.state.take() {
@@ -603,14 +603,14 @@ impl LiveState {
         self.state.is_none()
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> AnimatorAction {
         
         if let Event::NextFrame(nf) = event {
             if !nf.set.contains(&self.next_frame) {
-                return StateAction::None
+                return AnimatorAction::None
             }
             if self.state.is_none() {
-                return StateAction::None
+                return AnimatorAction::None
             }
             let state_nodes = self.state.as_mut().unwrap();
             
@@ -653,9 +653,9 @@ impl LiveState {
                 self.next_frame = cx.new_next_frame();
             }
             
-            return StateAction::Animating {redraw}
+            return AnimatorAction::Animating {redraw}
         }
-        StateAction::None
+        AnimatorAction::None
     }
     
     // this find the last keyframe value from an array node
@@ -871,7 +871,7 @@ impl LiveState {
         false
     }
     
-    pub fn is_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool {
+    pub fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool {
         // if we aren't initialized, look if our state id is a default
         if self.need_init() {
             if let Some(live_ptr) = self.live_ptr {

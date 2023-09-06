@@ -37,10 +37,10 @@ pub struct DrawApp {
 
 #[derive(Live)]
 pub struct RunView {
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[live] draw_bg: DrawApp,
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     #[live] frame_delta: f64,
     #[rust] last_size: (usize, usize),
     #[rust] tick: Timer,
@@ -50,7 +50,7 @@ pub struct RunView {
 
 
 impl LiveHook for RunView {
-    fn before_live_design(cx:&mut Cx){
+    fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, RunView)
     }
     
@@ -63,10 +63,21 @@ impl LiveHook for RunView {
 impl RunView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, manager: &mut BuildManager) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
             self.frame += 1;
+            
+            // ugly hack but whatever for now.
+            #[cfg(target_os = "windows")]
+            for client in &manager.clients {
+                for process in client.processes.values() {
+                    let guid = cx.get_dx11_shared_texture_guid(process.texture);
+                    manager.send_host_to_stdin(None, HostToStdin::Dx11TextureGuid {
+                        guid
+                    })
+                }
+            }
             
             // what shall we do, a timer? or do we do a next-frame
             manager.send_host_to_stdin(None, HostToStdin::Tick {
@@ -76,36 +87,36 @@ impl RunView {
         }
         // lets send mouse events
         let rect = self.draw_bg.area().get_rect(cx);
-        match event{
-            Event::MouseDown(e)=>{
+        match event {
+            Event::MouseDown(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::MouseDown(StdinMouseDown{
+                manager.send_host_to_stdin(None, HostToStdin::MouseDown(StdinMouseDown {
                     time: e.time,
                     x: rel.x,
                     y: rel.y,
                     button: e.button,
                 }));
             }
-            Event::MouseMove(e)=>{
+            Event::MouseMove(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::MouseMove(StdinMouseMove{
+                manager.send_host_to_stdin(None, HostToStdin::MouseMove(StdinMouseMove {
                     time: e.time,
                     x: rel.x,
                     y: rel.y,
                 }));
             }
-            Event::MouseUp(e)=>{
+            Event::MouseUp(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::MouseUp(StdinMouseUp{
+                manager.send_host_to_stdin(None, HostToStdin::MouseUp(StdinMouseUp {
                     time: e.time,
                     button: e.button,
                     x: rel.x,
                     y: rel.y,
                 }));
-            }          
-            Event::Scroll(e)=>{
+            }
+            Event::Scroll(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::Scroll(StdinScroll{
+                manager.send_host_to_stdin(None, HostToStdin::Scroll(StdinScroll {
                     is_mouse: e.is_mouse,
                     time: e.time,
                     x: rel.x,
@@ -113,13 +124,16 @@ impl RunView {
                     sx: e.scroll.x,
                     sy: e.scroll.y
                 }));
-            }  
-            _=>()
+            }
+            _ => ()
         }
     }
     
     pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, _manager: &mut BuildManager) {
         match msg {
+            StdinToHost::SetCursor(cursor) => {
+                cx.set_cursor(cursor)
+            }
             StdinToHost::ReadyToStart => {
                 // cause a resize event to fire
                 self.last_size = Default::default();
@@ -140,7 +154,7 @@ impl RunView {
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
         let dpi_factor = cx.current_dpi_factor();
-        let walk = if let Some(walk) = self.draw_state.get(){walk}else{panic!()};
+        let walk = if let Some(walk) = self.draw_state.get() {walk}else {panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
         for client in &manager.clients {
@@ -161,7 +175,7 @@ impl RunView {
                         dpi_factor: dpi_factor,
                     }));
                 }
-
+                
                 self.draw_bg.set_texture(0, &process.texture);
                 
                 break
@@ -171,12 +185,12 @@ impl RunView {
     }
 }
 
-impl Widget for RunView{
-    fn get_walk(&self)->Walk{
+impl Widget for RunView {
+    fn walk(&self) -> Walk {
         self.walk
     }
     
-    fn redraw(&mut self, cx:&mut Cx){
+    fn redraw(&mut self, cx: &mut Cx) {
         self.draw_bg.redraw(cx)
     }
     
@@ -190,5 +204,5 @@ impl Widget for RunView{
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
-pub struct RunViewRef(WidgetRef); 
+pub struct RunViewRef(WidgetRef);
 
