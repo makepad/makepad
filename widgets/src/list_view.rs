@@ -63,6 +63,7 @@ pub struct ListView {
     #[live(0.2)] swipe_drag_duration: f64,
     #[live(100.0)] max_pull_down: f64,
     #[live(true)] align_top_when_empty: bool,
+    #[live(false)] uses_keyboard: bool,
     #[rust] first_id: u64,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
@@ -465,13 +466,14 @@ impl Widget for ListView {
             // snap the scrollbar to a top-index with scroll_pos 0
             if let ScrollBarAction::Scroll {scroll_pos, view_total:_, view_visible:_} = action {
                 //if scroll_pos+0.5 >= view_total - view_visible{
-                //    log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
+                 //   log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
                // }
                 //    log!("SCROLL EVENT! {} {}", scroll_pos, view_total-view_visible);
                 scroll_to = Some(scroll_pos)
             }
         });
         if let Some(scroll_to) = scroll_to {
+            //log!("SCROLL pos! {}",self.scroll_bar.get_scroll_pos());
             // reverse compute the top_id
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
             self.first_id = scroll_to;
@@ -543,7 +545,9 @@ impl Widget for ListView {
                     self.area.redraw(cx);
                 },
                 Hit::FingerDown(e) => {
-                    cx.set_key_focus(self.area);
+                    if self.uses_keyboard{
+                        cx.set_key_focus(self.area);
+                    }
                     // ok so fingerdown eh.
                     if self.tail_range {
                         self.tail_range = false;
