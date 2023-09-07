@@ -21,7 +21,6 @@ use {
         },
     },
 };
-type DWORD = u64;
 
 pub struct DropTarget { }
 
