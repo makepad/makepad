@@ -15,3 +15,5 @@ makepad-rust-tokenizer = {path = "../../libs/rust_tokenizer", version = "0.3.0"}
 
 [features]
 nightly=[]
+
+[workspace]

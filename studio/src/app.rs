@@ -75,7 +75,7 @@ live_design!{
                 open_files = Tabs {
                     tabs: [welcome, file1],
                     no_close: true,
-                    selected: 0
+                    selected: 1
                 }
                 
                 run_views = Tabs {
@@ -214,7 +214,16 @@ impl AppMain for App {
             }
         }
           
-        self.file_system.handle_event(cx, event, &self.ui, &mut self.build_manager);
+        for action in self.file_system.handle_event(cx, event, &self.ui){
+            match action{
+                FileSystemAction::RecompileNeeded=>{
+                    self.build_manager.start_recompile_timer(cx);
+                    run_view.recompile_started(cx);
+                }
+                FileSystemAction::LiveReloadNeeded=>{
+                }
+            }
+        }
         
         if let Some(mut run_view) = run_view.borrow_mut() {
             run_view.handle_event(cx, event, &mut self.build_manager);
@@ -304,7 +313,6 @@ impl AppMain for App {
             let tab_name = self.file_system.file_node_name(file_id);
             // ok lets open the file
             let tab_id = LiveId::unique();
-            log!("{}", file_path);
             self.file_system.request_open_file(tab_id, file_path);
             
             // lets add a file tab 'somewhere'

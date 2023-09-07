@@ -115,7 +115,6 @@ live_design!{
     }
     
     LogItemLocation = <LogItem> {
-        margin:{left: 5}
         icon = <WaitIcon> {},
         location = <LinkLabel> {margin:0, text:""}
         body = <Label> {width: Fill, margin:{left:5}, padding:0, draw_text: {wrap: Word}}
@@ -123,7 +122,6 @@ live_design!{
     
     
     LogItemBare = <LogItem> {
-        margin:{left: 5}
         icon = <WaitIcon> {},
         body = <Label> {width: Fill, margin:0, padding:0, draw_text: {wrap: Word}}
     }
