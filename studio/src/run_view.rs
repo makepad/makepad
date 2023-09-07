@@ -70,6 +70,7 @@ impl LiveHook for RunView {
 impl RunView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, manager: &mut BuildManager) {
+
         self.animator_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
@@ -79,10 +80,10 @@ impl RunView {
             #[cfg(target_os = "windows")]
             for client in &manager.clients {
                 for process in client.processes.values() {
-                    let guid = cx.get_dx11_shared_texture_guid(process.texture);
-                    manager.send_host_to_stdin(None, HostToStdin::Dx11TextureGuid {
-                        guid
-                    })
+                    let handle = cx.get_shared_handle(&process.texture);
+
+                    let marshalled_handle = handle.0 as u64;  // hack: unsure if HANDLE is supported in microserde yet, so convert to u64
+                    manager.send_host_to_stdin(None, HostToStdin::Dx11SharedHandle(marshalled_handle));
                 }
             }
             
@@ -171,12 +172,13 @@ impl RunView {
                 let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
                 if new_size != self.last_size {
                     self.last_size = new_size;
+
                     process.texture.set_desc(cx, TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),
                     });
-                    
+
                     manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
                         width: rect.size.x,
                         height: rect.size.y,
