@@ -1,19 +1,15 @@
-use {
-    crate::{
-        makepad_code_editor::code_editor::*,
-        makepad_platform::*,
-        makepad_draw::*,
-        makepad_widgets::*,
-        makepad_widgets::file_tree::*,
-        makepad_widgets::dock::*,
-        file_system::file_system::*,
-        run_view::*,
-        build_manager::{
-            build_manager::{
-                BuildManager,
-                BuildManagerAction
-            },
-        },
+use crate::{
+    makepad_code_editor::code_editor::*,
+    makepad_platform::*,
+    makepad_draw::*,
+    makepad_widgets::*,
+    makepad_widgets::file_tree::*,
+    makepad_widgets::dock::*,
+    file_system::file_system::*,
+    run_view::*,
+    build_manager::build_manager::{
+        BuildManager,
+        BuildManagerAction
     },
 };
 

@@ -214,7 +214,7 @@ impl BuildManager {
                     _=>()
                 }
             }
-            else{ // draw empty items
+            else { // draw empty items
                 let template = if is_even{live_id!(EmptyEven)}else{live_id!(EmptyOdd)};
                 let item = list.item(cx, item_id, template).unwrap().as_view();
                 item.draw_widget_all(cx);
