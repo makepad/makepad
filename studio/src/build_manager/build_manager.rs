@@ -18,7 +18,6 @@ use {
             FileNotification,
             FileRequest,
             FileResponse,
-            unix_path::{UnixPath},
         },
         makepad_widgets::*,
         makepad_widgets::list_view::ListView,
@@ -61,7 +60,7 @@ live_design!{
     
     LogItem = <RectView> {
         height: Fit, width: Fill
-        padding: {top: 5, bottom: 5}
+        padding: {top: 7, bottom: 7}
         
         draw_bg: {
             instance is_even: 0.0
@@ -86,8 +85,6 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {hover: 0.0}
-                        /*draw_name: {hover: 0.0}
-                        draw_icon: {hover: 0.0}*/
                     }
                 }
                 on = {
@@ -95,8 +92,6 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {hover: 1.0}
-                        /*draw_name: {hover: 1.0}
-                        draw_icon: {hover: 1.0}*/
                     },
                 }
             }
@@ -107,26 +102,28 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {selected: 0.0}
-                        /*draw_name: {selected: 0.0}
-                        draw_icon: {selected: 0.0}*/
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_bg: {selected: 1.0}
-                        /*draw_name: {selected: 1.0}
-                        draw_icon: {selected: 1.0}*/
                     }
                 }
             }
         }
     }
     
-    LogItemWait = <LogItem> {
+    LogItemLocation = <LogItem> {
         icon = <WaitIcon> {},
-        label = <Label> {width: Fill draw_text: {wrap: Word}}
-        link_label = <LinkLabel> {}
+        location = <LinkLabel> {margin:0, text:""}
+        body = <Label> {width: Fill, margin:{left:5}, padding:0, draw_text: {wrap: Word}}
+    }
+    
+    
+    LogItemBare = <LogItem> {
+        icon = <WaitIcon> {},
+        body = <Label> {width: Fill, margin:0, padding:0, draw_text: {wrap: Word}}
     }
     
     LogItemEmpty = <RectView> {
@@ -144,10 +141,15 @@ live_design!{
     }
     
     LogList = <ListView> {
+        grab_key_focus: true
+        auto_tail: true
+        drag_scrolling: false
         height: Fill, width: Fill
         flow: Down
-        WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
-        WaitOdd = <LogItemWait> {draw_bg: {is_even: 0.0}}
+        LocationEven = <LogItemLocation> {draw_bg: {is_even: 1.0}}
+        LocationOdd = <LogItemLocation> {draw_bg: {is_even: 0.0}}
+        BareEven = <LogItemBare> {draw_bg: {is_even: 1.0}}
+        BareOdd = <LogItemBare> {draw_bg: {is_even: 0.0}}
         EmptyEven = <LogItemEmpty> {draw_bg: {is_even: 1.0}}
         EmptyOdd = <LogItemEmpty> {draw_bg: {is_even: 0.0}}
     }
@@ -173,7 +175,7 @@ pub struct BuildManager {
     #[live] recompile_timeout: f64,
     #[rust] pub clients: Vec<BuildClientWrap>,
     #[rust] recompile_timer: Timer,
-    #[rust] pub messages: Vec<BuildMsg>,
+    #[rust] pub log: Vec<LogItem>,
 }
 
 pub enum BuildManagerAction {
@@ -188,31 +190,31 @@ const WHAT_TO_BUILD: &'static str = "makepad-example-news-feed";
 
 impl BuildManager {
     
-    pub fn draw_log_list(&self, cx: &mut Cx2d, list: &mut ListView) {
+    pub fn draw_log(&self, cx: &mut Cx2d, list: &mut ListView) {
 
-        list.set_item_range(0, self.messages.len() as u64, 1);
+        list.set_item_range(cx, 0, self.log.len() as u64);
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id&1 == 0;
-            
-            if let Some(msg) = self.messages.get(item_id as usize){
-                match msg {
-                    BuildMsg::Bare(msg) => {
-                        let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
+            //log!("GOT ITEM ID {}", item_id);
+            if let Some(log_item) = self.log.get(item_id as usize){
+                match log_item {
+                    LogItem::Bare(msg) => {
+                        let template = if is_even{live_id!(BareEven)}else{live_id!(BareOdd)};
                         let item = list.item(cx, item_id, template).unwrap().as_view();
-                        item.label(id!(label)).set_text(&msg.line);
+                        item.widget(id!(body)).set_text(&msg.line);
                         item.draw_widget_all(cx);
                     }
-                    BuildMsg::Location(msg) => {
-                        let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
+                    LogItem::Location(msg) => {
+                        let template = if is_even{live_id!(LocationEven)}else{live_id!(LocationOdd)};
                         let item = list.item(cx, item_id, template).unwrap().as_view();
-                        item.label(id!(link_label)).set_text(&msg.file_name);
-                        item.label(id!(label)).set_text(&msg.msg);
+                        item.widget(id!(location)).set_text(&format!("{}: {}",msg.file_name, msg.range.start().line));
+                        item.widget(id!(body)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
                     _=>()
                 }
             }
-            else{ // draw empty items
+            else { // draw empty items
                 let template = if is_even{live_id!(EmptyEven)}else{live_id!(EmptyOdd)};
                 let item = list.item(cx, item_id, template).unwrap().as_view();
                 item.draw_widget_all(cx);
@@ -263,12 +265,16 @@ impl BuildManager {
     pub fn file_change(&mut self, _cx: &mut Cx) {
         for wrap in &mut self.clients {
             if let Some(process) = wrap.processes.get_mut(WHAT_TO_BUILD) {
-                self.messages.clear();
+                self.log.clear();
                 process.cmd_id = wrap.client.send_cmd(BuildCmd::CargoRun {
                     what: WHAT_TO_BUILD.into(),
                 });
             }
         }
+    }
+    
+    pub fn clear_log(&mut self){
+        self.log.clear();
     }
     
     pub fn start_recompile_timer(&mut self, cx:&mut Cx){
@@ -303,7 +309,7 @@ impl BuildManager {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if self.recompile_timer.is_event(event) {
             self.file_change(cx);
-            self.messages.clear();
+            self.clear_log();
             /*state.editor_state.messages.clear();
             for doc in &mut state.editor_state.documents.values_mut() {
                 if let Some(inner) = &mut doc.inner {
@@ -314,15 +320,15 @@ impl BuildManager {
         }
         let mut any_msg = false;
         for wrap in &mut self.clients {
-            let messages = &mut self.messages;
+            let log = &mut self.log;
             //let editor_state = &mut state.editor_state;
             wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
                 
                 //let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
-                match &wrap.msg {
-                    BuildMsg::Location(_loc) => {
-                        messages.push(wrap.msg);
+                match &wrap.item {
+                    LogItem::Location(_loc) => {
+                        log.push(wrap.item);
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
                         /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                             let doc = &mut editor_state.documents[*doc_id];
@@ -335,12 +341,12 @@ impl BuildManager {
                         }*/
                         //editor_state.messages.push(BuildMsg::Location(loc));
                     }
-                    BuildMsg::Bare(_) => {
-                        messages.push(wrap.msg);
+                    LogItem::Bare(_) => {
+                        log.push(wrap.item);
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
                         //editor_state.messages.push(wrap.msg);
                     }
-                    BuildMsg::StdinToHost(line) => {
+                    LogItem::StdinToHost(line) => {
                         let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
                         match msg {
                             Ok(msg) => {

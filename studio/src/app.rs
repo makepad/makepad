@@ -1,19 +1,15 @@
-use {
-    crate::{
-        makepad_code_editor::code_editor::*,
-        makepad_platform::*,
-        makepad_draw::*,
-        makepad_widgets::*,
-        makepad_widgets::file_tree::*,
-        makepad_widgets::dock::*,
-        file_system::file_system::*,
-        run_view::*,
-        build_manager::{
-            build_manager::{
-                BuildManager,
-                BuildManagerAction
-            },
-        },
+use crate::{
+    makepad_code_editor::code_editor::*,
+    makepad_platform::*,
+    makepad_draw::*,
+    makepad_widgets::*,
+    makepad_widgets::file_tree::*,
+    makepad_widgets::dock::*,
+    file_system::file_system::*,
+    run_view::*,
+    build_manager::build_manager::{
+        BuildManager,
+        BuildManagerAction
     },
 };
 
@@ -75,7 +71,7 @@ live_design!{
                 open_files = Tabs {
                     tabs: [welcome, file1],
                     no_close: true,
-                    selected: 0
+                    selected: 1
                 }
                 
                 run_views = Tabs {
@@ -191,7 +187,7 @@ impl AppMain for App {
                     run_view.draw(cx, &self.build_manager);
                 }
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
-                    self.build_manager.draw_log_list(cx, &mut *list_view);
+                    self.build_manager.draw_log(cx, &mut *list_view);
                 }
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
@@ -204,17 +200,33 @@ impl AppMain for App {
             return
         }
         
+        
         if let Event::KeyDown(KeyEvent {
-            key_code: KeyCode::Backtick,
-            modifiers: KeyModifiers {logo, ..},
+            key_code,
+            modifiers: KeyModifiers {logo,control, ..},
             ..
         }) = event {
-            if *logo{
-                self.build_manager.file_change(cx);
+            if *control || *logo{
+                if let KeyCode::Backtick = key_code{
+                     self.build_manager.file_change(cx);
+                }
+                else if let KeyCode::KeyK = key_code{
+                    self.build_manager.clear_log();
+                    log_list.redraw(cx);
+                }
             }
         }
           
-        self.file_system.handle_event(cx, event, &self.ui, &mut self.build_manager);
+        for action in self.file_system.handle_event(cx, event, &self.ui){
+            match action{
+                FileSystemAction::RecompileNeeded=>{
+                    self.build_manager.start_recompile_timer(cx);
+                    run_view.recompile_started(cx);
+                }
+                FileSystemAction::LiveReloadNeeded=>{
+                }
+            }
+        }
         
         if let Some(mut run_view) = run_view.borrow_mut() {
             run_view.handle_event(cx, event, &mut self.build_manager);
@@ -239,6 +251,7 @@ impl AppMain for App {
         for action in self.build_manager.handle_event(cx, event) {
             match action {
                 BuildManagerAction::RedrawLog => {
+                    // if the log_list is tailing, set the new len
                     log_list.redraw(cx);
                 }
                 BuildManagerAction::StdinToHost {cmd_id, msg} => if let Some(mut run_view) = run_view.borrow_mut() {
@@ -299,11 +312,11 @@ impl AppMain for App {
         }
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
-            let unix_path = self.file_system.file_node_path(file_id);
+            let file_path = self.file_system.file_node_path(file_id);
             let tab_name = self.file_system.file_node_name(file_id);
             // ok lets open the file
             let tab_id = LiveId::unique();
-            self.file_system.request_open_file(tab_id, unix_path);
+            self.file_system.request_open_file(tab_id, file_path);
             
             // lets add a file tab 'somewhere'
             dock.create_tab(cx, live_id!(open_files), tab_id, live_id!(CodeEditor), tab_name);
