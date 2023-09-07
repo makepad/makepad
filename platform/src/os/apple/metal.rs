@@ -459,11 +459,14 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, _stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
+                if stdin_frame.is_some(){
+                    Self::stdin_send_draw_complete();
+                }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
         ]};
