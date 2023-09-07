@@ -27,6 +27,8 @@ mod waiter;
 mod weak;
 mod weak_ref_count;
 
+pub struct Thing{}
+
 #[doc(hidden)]
 pub use abi::*;
 pub use agile_reference::*;

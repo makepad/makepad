@@ -50,6 +50,10 @@ pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
 pub use ::windows as windows_crate;
+
+#[cfg(target_os = "windows")]
+pub use ::windows_core as windows_core_crate;
+
 pub use makepad_futures;
  
 pub use {
