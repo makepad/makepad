@@ -39,8 +39,13 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.3.0" }
 path = "../libs/futures_legacy"
 version = "0.3"
 
+[target.'cfg(windows)'.dependencies.windows-core]
+#path = "../tools/windows_strip/windows-core"
+version = "0.51.1"
+
 [target.'cfg(windows)'.dependencies.windows]
-#version = "0.44"
+#path = "../tools/windows_strip/windows"
+version = "0.51.1"
 features = [
     "Win32_Foundation", 
     "Win32_UI_WindowsAndMessaging",
@@ -71,6 +76,7 @@ features = [
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_Media_MediaFoundation",
+    "Win32_System_Variant",
     "Devices_Enumeration",
     "Devices_Midi",
     "Foundation_Collections",

@@ -7,6 +7,7 @@ use {
         os::windows::win32_app::TRUE,
         windows_crate::{
             core::{
+                AsImpl,
                 //Interface,
                 PWSTR,
                 GUID,
@@ -77,7 +78,7 @@ impl MfInput {
     fn activate(&mut self, video_format: VideoFormat, callback: Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >) {
         if self.active_format.is_some() {panic!()};
         self.active_format = Some(video_format.format_id);
-        let cb = self.reader_callback.as_impl();
+        let cb = unsafe{self.reader_callback.as_impl()};
         *cb.config.lock().unwrap() = Some(SourceReaderConfig{
             video_format,
             callback
@@ -111,7 +112,7 @@ impl MediaFoundationAccess {
         unsafe {
             //CoInitialize(None);
             CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
-            let change_listener: IMMNotificationClient = MediaFoundationChangeListener { change_signal: change_signal.clone() };
+            let change_listener: IMMNotificationClient = MediaFoundationChangeListener { change_signal: change_signal.clone() }.into();
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
             
@@ -298,7 +299,7 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
         _dwstreamindex: u32,
         _dwstreamflags: u32,
         _lltimestamp: i64,
-        psample: &Option<IMFSample>
+        psample: Option<&IMFSample>
     ) -> crate::windows_crate::core::Result<()> {
         unsafe{
             if let Some(sample) = psample{
@@ -359,7 +360,7 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
     fn OnEvent(
         &self,
         _dwstreamindex: u32,
-        _pevent: &Option<IMFMediaEvent>
+        _pevent: Option<&IMFMediaEvent>
     ) -> crate::windows_crate::core::Result<()> {
         Ok(())
     }

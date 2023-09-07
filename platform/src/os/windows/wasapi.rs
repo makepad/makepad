@@ -21,6 +21,8 @@ use {
                 CoCreateInstance,
                 CLSCTX_ALL,
                 //STGM_READ,
+            },
+            Win32::System::Variant::{
                 VT_LPWSTR
             },
             Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
@@ -339,7 +341,7 @@ struct WasapiBase {
 impl WasapiBaseRef {
     pub fn signal_termination(&mut self) {
         self.is_terminated = true;
-        unsafe {SetEvent(self.event)};
+        unsafe {SetEvent(self.event).unwrap()};
     }
 }
 
