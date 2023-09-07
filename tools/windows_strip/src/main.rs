@@ -316,6 +316,8 @@ fn remove_node(output: &mut Node, what: &[LiveId]) {
 
 fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(String, Vec<TokenWithString>)>) {
     
+    println!("processing {}",file);
+
     let source = parse_file(file, cache).unwrap();
     let symbols = source.parse_use();
     let symbols = filter_symbols(symbols, id!(crate.windows));
@@ -505,6 +507,8 @@ fn main() {
     generate_outputs_from_file("./platform/src/os/windows/winrt_midi.rs", &mut output, &mut cache);
     generate_outputs_from_file("./platform/src/os/windows/media_foundation.rs", &mut output, &mut cache);
     generate_outputs_from_file("./tools/windows_strip/dep_of_deps.rs", &mut output, &mut cache);
+
+    generate_outputs_from_file("./platform/src/os/windows/win32_droptarget.rs", &mut output, &mut cache);
     
     fn generate_string_from_outputs(node: &Node, output: &mut String) {
         match node {
