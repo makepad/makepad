@@ -303,10 +303,10 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        for i in 0..15{
-            log!("Work! {}",i); 
+        //for i in 0..15{
+            //log!("Work! {}",i); 
             //std::thread::sleep(std::time::Duration::from_millis(10))
-        }
+        //}
         crate::makepad_widgets::live_design(cx);
     }
 }
@@ -346,15 +346,11 @@ impl AppMain for App {
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
-        
+
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
-            // check for actions inside the list item
             if item.button(id!(likes)).clicked(&actions) {
                 log!("Live! {}", item_id);
             }
-        }
-        
-        if self.ui.button(id!(button1)).clicked(&actions) {
         }
     }
 }
