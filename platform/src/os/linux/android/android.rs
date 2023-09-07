@@ -2,7 +2,7 @@ use {
     std::rc::Rc,
     std::cell::{RefCell},
     std::ffi::CString,
-    std::os::raw::{c_char, c_void},
+    std::os::raw::{c_void},
     std::time::Instant,
     self::super::{
         android_media::CxAndroidMedia,
