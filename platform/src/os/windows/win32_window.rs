@@ -94,6 +94,7 @@ use {
                 WM_EXITSIZEMOVE,
                 WM_SIZE,
                 WM_DPICHANGED,
+                WM_DROPFILES,
                 WM_DESTROY,
                 HTTOPLEFT,
                 HTBOTTOMLEFT,
@@ -316,7 +317,7 @@ impl Win32Window {
             
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const _ as isize);
 
-            RegisterDragDrop(hwnd, self as *const IDropTarget);
+            //RegisterDragDrop(hwnd, self as *const IDropTarget);
             
             self.set_outer_size(size);
             
@@ -602,7 +603,7 @@ impl Win32Window {
                 );
             },
             WM_DROPFILES => { // one or more files are being dropped onto the window
-                log!("WM_DROPFILES {:?}",WPARAM);
+                crate::log!("WM_DROPFILES {:?}",wparam);
             },
 
             _ => {
