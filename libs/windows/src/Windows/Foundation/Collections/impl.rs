@@ -720,7 +720,7 @@ impl<T: ::windows_core::RuntimeType + 'static> IVectorView_Vtbl<T> {
         iid == &<IVectorView<T> as ::windows_core::ComInterface>::IID
     }
 }
-#[::windows_implement::implement(IIterable<T>)]
+//#[::windows_implement::implement(IIterable<T>)]
 struct StockIterable<T>
 where
     T: ::windows_core::RuntimeType + 'static,
@@ -743,7 +743,7 @@ where
     }
 }
 
-#[::windows_implement::implement(IIterator<T>)]
+//#[::windows_implement::implement(IIterator<T>)]
 struct StockIterator<T>
 where
     T: ::windows_core::RuntimeType + 'static,
@@ -810,7 +810,7 @@ where
         Ok(StockIterable { values }.into())
     }
 }
-#[::windows_implement::implement(IMapView<K, V>, IIterable<IKeyValuePair<K, V>>)]
+//#[::windows_implement::implement(IMapView<K, V>, IIterable<IKeyValuePair<K, V>>)]
 struct StockMapView<K, V>
 where
     K: ::windows_core::RuntimeType + 'static,
@@ -861,7 +861,7 @@ where
     }
 }
 
-#[::windows_implement::implement(IIterator<IKeyValuePair<K, V>>)]
+//#[::windows_implement::implement(IIterator<IKeyValuePair<K, V>>)]
 struct StockMapViewIterator<'a, K, V>
 where
     K: ::windows_core::RuntimeType + 'static,
@@ -920,7 +920,7 @@ where
     }
 }
 
-#[::windows_implement::implement(IKeyValuePair<K, V>)]
+//#[::windows_implement::implement(IKeyValuePair<K, V>)]
 struct StockKeyValuePair<K, V>
 where
     K: ::windows_core::RuntimeType + 'static,
@@ -960,7 +960,7 @@ where
         Ok(StockMapView { map }.into())
     }
 }
-#[::windows_implement::implement(IVectorView<T>, IIterable<T>)]
+//#[::windows_implement::implement(IVectorView<T>, IIterable<T>)]
 struct StockVectorView<T>
 where
     T: ::windows_core::RuntimeType + 'static,
@@ -1016,7 +1016,7 @@ where
     }
 }
 
-#[::windows_implement::implement(IIterator<T>)]
+//#[::windows_implement::implement(IIterator<T>)]
 struct StockVectorViewIterator<T>
 where
     T: ::windows_core::RuntimeType + 'static,
@@ -1083,3 +1083,1116 @@ where
         Ok(StockVectorView { values }.into())
     }
 }
+
+#[repr(C)] struct StockIterable_Impl < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : ::
+std :: clone :: Clone,
+{
+    identity : * const :: windows :: core :: IInspectable_Vtbl, vtables :
+    (* const < IIterable < T < >, > as :: windows :: core :: Interface > ::
+    Vtable,), this : StockIterable :: < T >, count : :: windows :: core :: imp
+    :: WeakRefCount,
+} impl < T > StockIterable_Impl :: < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : ::
+std :: clone :: Clone,
+{
+    const VTABLES :
+    (< IIterable < T < >, > as :: windows :: core :: Interface > :: Vtable,) =
+    (< IIterable < T < >, > as :: windows :: core :: Interface > :: Vtable ::
+    new :: < Self, StockIterable :: < T >, - 1 > (),) ; const IDENTITY : ::
+    windows :: core :: IInspectable_Vtbl = :: windows :: core ::
+    IInspectable_Vtbl :: new :: < Self, IIterable < T < >, >, 0 > () ; fn
+    new(this : StockIterable :: < T >) -> Self
+    {
+        Self
+        {
+            identity : & Self :: IDENTITY, vtables : (& Self :: VTABLES.0,),
+            this, count : :: windows :: core :: imp :: WeakRefCount :: new(),
+        }
+    }
+} impl < T > :: windows :: core :: IUnknownImpl for StockIterable_Impl :: < T
+> where T : :: windows_core :: RuntimeType + 'static, < T as :: windows_core
+:: Type < T > > :: Default : :: std :: clone :: Clone,
+{
+    type Impl = StockIterable :: < T > ; fn get_impl(& self) -> & Self :: Impl
+    { & self.this } unsafe fn
+    QueryInterface(& self, iid : & :: windows :: core :: GUID, interface : *
+    mut * const :: core :: ffi :: c_void) -> :: windows :: core :: HRESULT
+    {
+        unsafe
+        {
+            * interface = if iid == & < :: windows :: core :: IUnknown as ::
+            windows :: core :: ComInterface > :: IID || iid == & < :: windows
+            :: core :: IInspectable as :: windows :: core :: ComInterface > ::
+            IID || iid == & < :: windows :: core :: imp :: IAgileObject as ::
+            windows :: core :: ComInterface > :: IID
+            { & self.identity as * const _ as * const _ } else if < IIterable
+            < T < >, > as :: windows :: core :: Interface > :: Vtable ::
+            matches(iid) { & self.vtables.0 as * const _ as * const _ } else
+            { :: core :: ptr :: null_mut() } ; if! (* interface).is_null()
+            {
+                self.count.add_ref() ; return :: windows :: core :: HRESULT(0)
+                ;
+            } * interface =
+            self.count.query(iid, & self.identity as * const _ as * mut _) ;
+            if(* interface).is_null()
+            { :: windows :: core :: HRESULT(0x8000_4002 as u32 as i32) } else
+            { :: windows :: core :: HRESULT(0) }
+        }
+    } fn AddRef(& self) -> u32 { self.count.add_ref() } unsafe fn
+    Release(& self) -> u32
+    {
+        let remaining = self.count.release() ; if remaining == 0
+        {
+            unsafe
+            {
+                _ = :: std :: boxed :: Box ::
+                from_raw(self as * const Self as * mut Self) ;
+            }
+        } remaining
+    }
+} impl < T > StockIterable :: < T > where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : :: std :: clone
+:: Clone,
+{
+    #[doc = r" Try casting as the provided interface"] #[doc = r""]
+    #[doc = r" # Safety"] #[doc = r""]
+    #[doc =
+    r" This function can only be safely called if `self` has been heap allocated and pinned using"]
+    #[doc = r" the mechanisms provided by `implement` macro."] unsafe fn cast
+    < I : :: windows :: core :: ComInterface > (& self) -> :: windows :: core
+    :: Result < I >
+    {
+        let boxed =
+        (self as * const _ as * const * mut :: core :: ffi ::
+        c_void).sub(1 + 1) as * mut StockIterable_Impl :: < T > ; let mut
+        result = None ; < StockIterable_Impl :: < T > as :: windows :: core ::
+        IUnknownImpl > ::
+        QueryInterface(& * boxed, & I :: IID, & mut result as * mut _ as
+        _).and_some(result)
+    }
+} impl < T > :: core :: convert :: From < StockIterable :: < T > > for ::
+windows :: core :: IUnknown where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : :: std :: clone
+:: Clone,
+{
+    fn from(this : StockIterable :: < T >) -> Self
+    {
+        let this = StockIterable_Impl :: < T > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockIterable :: < T > > for ::
+windows :: core :: IInspectable where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : :: std :: clone
+:: Clone,
+{
+    fn from(this : StockIterable :: < T >) -> Self
+    {
+        let this = StockIterable_Impl :: < T > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockIterable :: < T > > for
+IIterable < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : :: std :: clone :: Clone,
+{
+    fn from(this : StockIterable :: < T >) -> Self
+    {
+        let this = StockIterable_Impl :: < T > :: new(this) ; let this =
+        :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.0 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < T > :: windows :: core :: AsImpl < StockIterable :: < T > > for
+IIterable < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : :: std :: clone :: Clone,
+{
+    unsafe fn as_impl(& self) -> & StockIterable :: < T >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 0) as * mut
+            StockIterable_Impl :: < T > ; & (* this).this
+        }
+    }
+} /*struct StockIterable < T > where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T >> :: Default : :: std :: clone ::
+Clone, { values : std :: vec :: Vec < T :: Default >, }*/
+#[repr(C)] struct StockIterator_Impl < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : ::
+std :: clone :: Clone,
+{
+    identity : * const :: windows :: core :: IInspectable_Vtbl, vtables :
+    (* const < IIterator < T < >, > as :: windows :: core :: Interface > ::
+    Vtable,), this : StockIterator :: < T >, count : :: windows :: core :: imp
+    :: WeakRefCount,
+} impl < T > StockIterator_Impl :: < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : ::
+std :: clone :: Clone,
+{
+    const VTABLES :
+    (< IIterator < T < >, > as :: windows :: core :: Interface > :: Vtable,) =
+    (< IIterator < T < >, > as :: windows :: core :: Interface > :: Vtable ::
+    new :: < Self, StockIterator :: < T >, - 1 > (),) ; const IDENTITY : ::
+    windows :: core :: IInspectable_Vtbl = :: windows :: core ::
+    IInspectable_Vtbl :: new :: < Self, IIterator < T < >, >, 0 > () ; fn
+    new(this : StockIterator :: < T >) -> Self
+    {
+        Self
+        {
+            identity : & Self :: IDENTITY, vtables : (& Self :: VTABLES.0,),
+            this, count : :: windows :: core :: imp :: WeakRefCount :: new(),
+        }
+    }
+} impl < T > :: windows :: core :: IUnknownImpl for StockIterator_Impl :: < T
+> where T : :: windows_core :: RuntimeType + 'static, < T as :: windows_core
+:: Type < T > > :: Default : :: std :: clone :: Clone,
+{
+    type Impl = StockIterator :: < T > ; fn get_impl(& self) -> & Self :: Impl
+    { & self.this } unsafe fn
+    QueryInterface(& self, iid : & :: windows :: core :: GUID, interface : *
+    mut * const :: core :: ffi :: c_void) -> :: windows :: core :: HRESULT
+    {
+        unsafe
+        {
+            * interface = if iid == & < :: windows :: core :: IUnknown as ::
+            windows :: core :: ComInterface > :: IID || iid == & < :: windows
+            :: core :: IInspectable as :: windows :: core :: ComInterface > ::
+            IID || iid == & < :: windows :: core :: imp :: IAgileObject as ::
+            windows :: core :: ComInterface > :: IID
+            { & self.identity as * const _ as * const _ } else if < IIterator
+            < T < >, > as :: windows :: core :: Interface > :: Vtable ::
+            matches(iid) { & self.vtables.0 as * const _ as * const _ } else
+            { :: core :: ptr :: null_mut() } ; if! (* interface).is_null()
+            {
+                self.count.add_ref() ; return :: windows :: core :: HRESULT(0)
+                ;
+            } * interface =
+            self.count.query(iid, & self.identity as * const _ as * mut _) ;
+            if(* interface).is_null()
+            { :: windows :: core :: HRESULT(0x8000_4002 as u32 as i32) } else
+            { :: windows :: core :: HRESULT(0) }
+        }
+    } fn AddRef(& self) -> u32 { self.count.add_ref() } unsafe fn
+    Release(& self) -> u32
+    {
+        let remaining = self.count.release() ; if remaining == 0
+        {
+            unsafe
+            {
+                _ = :: std :: boxed :: Box ::
+                from_raw(self as * const Self as * mut Self) ;
+            }
+        } remaining
+    }
+} impl < T > StockIterator :: < T > where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : :: std :: clone
+:: Clone,
+{
+    #[doc = r" Try casting as the provided interface"] #[doc = r""]
+    #[doc = r" # Safety"] #[doc = r""]
+    #[doc =
+    r" This function can only be safely called if `self` has been heap allocated and pinned using"]
+    #[doc = r" the mechanisms provided by `implement` macro."] #[allow(dead_code)] unsafe fn cast
+    < I : :: windows :: core :: ComInterface > (& self) -> :: windows :: core
+    :: Result < I >
+    {
+        let boxed =
+        (self as * const _ as * const * mut :: core :: ffi ::
+        c_void).sub(1 + 1) as * mut StockIterator_Impl :: < T > ; let mut
+        result = None ; < StockIterator_Impl :: < T > as :: windows :: core ::
+        IUnknownImpl > ::
+        QueryInterface(& * boxed, & I :: IID, & mut result as * mut _ as
+        _).and_some(result)
+    }
+} impl < T > :: core :: convert :: From < StockIterator :: < T > > for ::
+windows :: core :: IUnknown where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : :: std :: clone
+:: Clone,
+{
+    fn from(this : StockIterator :: < T >) -> Self
+    {
+        let this = StockIterator_Impl :: < T > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockIterator :: < T > > for ::
+windows :: core :: IInspectable where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : :: std :: clone
+:: Clone,
+{
+    fn from(this : StockIterator :: < T >) -> Self
+    {
+        let this = StockIterator_Impl :: < T > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockIterator :: < T > > for
+IIterator < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : :: std :: clone :: Clone,
+{
+    fn from(this : StockIterator :: < T >) -> Self
+    {
+        let this = StockIterator_Impl :: < T > :: new(this) ; let this =
+        :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.0 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < T > :: windows :: core :: AsImpl < StockIterator :: < T > > for
+IIterator < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : :: std :: clone :: Clone,
+{
+    unsafe fn as_impl(& self) -> & StockIterator :: < T >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 0) as * mut
+            StockIterator_Impl :: < T > ; & (* this).this
+        }
+    }
+} /*struct StockIterator < T > where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T >> :: Default : :: std :: clone ::
+Clone,
+{
+    owner : IIterable < T >, current : :: std :: sync :: atomic ::
+    AtomicUsize,
+}*/
+#[repr(C)] struct StockMapView_Impl < K, V > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    identity : * const :: windows :: core :: IInspectable_Vtbl, vtables :
+    (* const < IMapView < K < >, V < >, > as :: windows :: core :: Interface >
+    :: Vtable, * const < IIterable < IKeyValuePair < K < >, V < >, >, > as ::
+    windows :: core :: Interface > :: Vtable,), this : StockMapView :: < K, V
+    >, count : :: windows :: core :: imp :: WeakRefCount,
+} impl < K, V > StockMapView_Impl :: < K, V > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    const VTABLES :
+    (< IMapView < K < >, V < >, > as :: windows :: core :: Interface > ::
+    Vtable, < IIterable < IKeyValuePair < K < >, V < >, >, > as :: windows ::
+    core :: Interface > :: Vtable,) =
+    (< IMapView < K < >, V < >, > as :: windows :: core :: Interface > ::
+    Vtable :: new :: < Self, StockMapView :: < K, V >, - 1 > (), < IIterable <
+    IKeyValuePair < K < >, V < >, >, > as :: windows :: core :: Interface > ::
+    Vtable :: new :: < Self, StockMapView :: < K, V >, - 2 > (),) ; const
+    IDENTITY : :: windows :: core :: IInspectable_Vtbl = :: windows :: core ::
+    IInspectable_Vtbl :: new :: < Self, IMapView < K < >, V < >, >, 0 > () ;
+    fn new(this : StockMapView :: < K, V >) -> Self
+    {
+        Self
+        {
+            identity : & Self :: IDENTITY, vtables :
+            (& Self :: VTABLES.0, & Self :: VTABLES.1,), this, count : ::
+            windows :: core :: imp :: WeakRefCount :: new(),
+        }
+    }
+} impl < K, V > :: windows :: core :: IUnknownImpl for StockMapView_Impl :: <
+K, V > where K : :: windows_core :: RuntimeType + 'static, V : :: windows_core
+:: RuntimeType + 'static, < K as :: windows_core :: Type < K > > :: Default :
+std :: clone :: Clone + std :: cmp :: Ord, < V as :: windows_core :: Type < V
+> > :: Default : std :: clone :: Clone,
+{
+    type Impl = StockMapView :: < K, V > ; fn get_impl(& self) -> & Self ::
+    Impl { & self.this } unsafe fn
+    QueryInterface(& self, iid : & :: windows :: core :: GUID, interface : *
+    mut * const :: core :: ffi :: c_void) -> :: windows :: core :: HRESULT
+    {
+        unsafe
+        {
+            * interface = if iid == & < :: windows :: core :: IUnknown as ::
+            windows :: core :: ComInterface > :: IID || iid == & < :: windows
+            :: core :: IInspectable as :: windows :: core :: ComInterface > ::
+            IID || iid == & < :: windows :: core :: imp :: IAgileObject as ::
+            windows :: core :: ComInterface > :: IID
+            { & self.identity as * const _ as * const _ } else if < IMapView <
+            K < >, V < >, > as :: windows :: core :: Interface > :: Vtable ::
+            matches(iid) { & self.vtables.0 as * const _ as * const _ } else
+            if < IIterable < IKeyValuePair < K < >, V < >, >, > as :: windows
+            :: core :: Interface > :: Vtable :: matches(iid)
+            { & self.vtables.1 as * const _ as * const _ } else
+            { :: core :: ptr :: null_mut() } ; if! (* interface).is_null()
+            {
+                self.count.add_ref() ; return :: windows :: core :: HRESULT(0)
+                ;
+            } * interface =
+            self.count.query(iid, & self.identity as * const _ as * mut _) ;
+            if(* interface).is_null()
+            { :: windows :: core :: HRESULT(0x8000_4002 as u32 as i32) } else
+            { :: windows :: core :: HRESULT(0) }
+        }
+    } fn AddRef(& self) -> u32 { self.count.add_ref() } unsafe fn
+    Release(& self) -> u32
+    {
+        let remaining = self.count.release() ; if remaining == 0
+        {
+            unsafe
+            {
+                _ = :: std :: boxed :: Box ::
+                from_raw(self as * const Self as * mut Self) ;
+            }
+        } remaining
+    }
+} impl < K, V > StockMapView :: < K, V > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    #[doc = r" Try casting as the provided interface"] #[doc = r""]
+    #[doc = r" # Safety"] #[doc = r""]
+    #[doc =
+    r" This function can only be safely called if `self` has been heap allocated and pinned using"]
+    #[doc = r" the mechanisms provided by `implement` macro."] unsafe fn cast
+    < I : :: windows :: core :: ComInterface > (& self) -> :: windows :: core
+    :: Result < I >
+    {
+        let boxed =
+        (self as * const _ as * const * mut :: core :: ffi ::
+        c_void).sub(1 + 2) as * mut StockMapView_Impl :: < K, V > ; let mut
+        result = None ; < StockMapView_Impl :: < K, V > as :: windows :: core
+        :: IUnknownImpl > ::
+        QueryInterface(& * boxed, & I :: IID, & mut result as * mut _ as
+        _).and_some(result)
+    }
+} impl < K, V > :: core :: convert :: From < StockMapView :: < K, V > > for ::
+windows :: core :: IUnknown where K : :: windows_core :: RuntimeType +
+'static, V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core
+:: Type < K > > :: Default : std :: clone :: Clone + std :: cmp :: Ord, < V as
+:: windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    fn from(this : StockMapView :: < K, V >) -> Self
+    {
+        let this = StockMapView_Impl :: < K, V > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < K, V > :: core :: convert :: From < StockMapView :: < K, V > > for ::
+windows :: core :: IInspectable where K : :: windows_core :: RuntimeType +
+'static, V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core
+:: Type < K > > :: Default : std :: clone :: Clone + std :: cmp :: Ord, < V as
+:: windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    fn from(this : StockMapView :: < K, V >) -> Self
+    {
+        let this = StockMapView_Impl :: < K, V > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < K, V > :: core :: convert :: From < StockMapView :: < K, V > > for
+IMapView < K < >, V < >, > where K : :: windows_core :: RuntimeType + 'static,
+V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core :: Type <
+K > > :: Default : std :: clone :: Clone + std :: cmp :: Ord, < V as ::
+windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    fn from(this : StockMapView :: < K, V >) -> Self
+    {
+        let this = StockMapView_Impl :: < K, V > :: new(this) ; let this =
+        :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.0 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < K, V > :: windows :: core :: AsImpl < StockMapView :: < K, V > > for
+IMapView < K < >, V < >, > where K : :: windows_core :: RuntimeType + 'static,
+V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core :: Type <
+K > > :: Default : std :: clone :: Clone + std :: cmp :: Ord, < V as ::
+windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    unsafe fn as_impl(& self) -> & StockMapView :: < K, V >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 0) as * mut
+            StockMapView_Impl :: < K, V > ; & (* this).this
+        }
+    }
+} impl < K, V > :: core :: convert :: From < StockMapView :: < K, V > > for
+IIterable < IKeyValuePair < K < >, V < >, >, > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    fn from(this : StockMapView :: < K, V >) -> Self
+    {
+        let this = StockMapView_Impl :: < K, V > :: new(this) ; let this =
+        :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.1 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < K, V > :: windows :: core :: AsImpl < StockMapView :: < K, V > > for
+IIterable < IKeyValuePair < K < >, V < >, >, > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    unsafe fn as_impl(& self) -> & StockMapView :: < K, V >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 1) as * mut
+            StockMapView_Impl :: < K, V > ; & (* this).this
+        }
+    }
+} /*struct StockMapView < K, V > where K : :: windows_core :: RuntimeType +
+'static, V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core
+:: Type < K >> :: Default : std :: clone :: Clone + std :: cmp :: Ord, < V as
+:: windows_core :: Type < V >> :: Default : std :: clone :: Clone,
+{ map : std :: collections :: BTreeMap < K :: Default, V :: Default >, }*/
+#[repr(C)] struct StockMapViewIterator_Impl < 'a, K, V > where K : ::
+windows_core :: RuntimeType + 'static, V : :: windows_core :: RuntimeType +
+'static, < K as :: windows_core :: Type < K > > :: Default : std :: clone ::
+Clone + std :: cmp :: Ord, < V as :: windows_core :: Type < V > > :: Default :
+std :: clone :: Clone,
+{
+    identity : * const :: windows :: core :: IInspectable_Vtbl, vtables :
+    (* const < IIterator < IKeyValuePair < K < >, V < >, >, > as :: windows ::
+    core :: Interface > :: Vtable,), this : StockMapViewIterator :: < 'a, K, V
+    >, count : :: windows :: core :: imp :: WeakRefCount,
+} impl < 'a, K, V > StockMapViewIterator_Impl :: < 'a, K, V > where K : ::
+windows_core :: RuntimeType + 'static, V : :: windows_core :: RuntimeType +
+'static, < K as :: windows_core :: Type < K > > :: Default : std :: clone ::
+Clone + std :: cmp :: Ord, < V as :: windows_core :: Type < V > > :: Default :
+std :: clone :: Clone,
+{
+    const VTABLES :
+    (< IIterator < IKeyValuePair < K < >, V < >, >, > as :: windows :: core ::
+    Interface > :: Vtable,) =
+    (< IIterator < IKeyValuePair < K < >, V < >, >, > as :: windows :: core ::
+    Interface > :: Vtable :: new :: < Self, StockMapViewIterator :: < 'a, K, V
+    >, - 1 > (),) ; const IDENTITY : :: windows :: core :: IInspectable_Vtbl =
+    :: windows :: core :: IInspectable_Vtbl :: new :: < Self, IIterator <
+    IKeyValuePair < K < >, V < >, >, >, 0 > () ; fn
+    new(this : StockMapViewIterator :: < 'a, K, V >) -> Self
+    {
+        Self
+        {
+            identity : & Self :: IDENTITY, vtables : (& Self :: VTABLES.0,),
+            this, count : :: windows :: core :: imp :: WeakRefCount :: new(),
+        }
+    }
+} impl < 'a, K, V > :: windows :: core :: IUnknownImpl for
+StockMapViewIterator_Impl :: < 'a, K, V > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    type Impl = StockMapViewIterator :: < 'a, K, V > ; fn get_impl(& self) ->
+    & Self :: Impl { & self.this } unsafe fn
+    QueryInterface(& self, iid : & :: windows :: core :: GUID, interface : *
+    mut * const :: core :: ffi :: c_void) -> :: windows :: core :: HRESULT
+    {
+        unsafe
+        {
+            * interface = if iid == & < :: windows :: core :: IUnknown as ::
+            windows :: core :: ComInterface > :: IID || iid == & < :: windows
+            :: core :: IInspectable as :: windows :: core :: ComInterface > ::
+            IID || iid == & < :: windows :: core :: imp :: IAgileObject as ::
+            windows :: core :: ComInterface > :: IID
+            { & self.identity as * const _ as * const _ } else if < IIterator
+            < IKeyValuePair < K < >, V < >, >, > as :: windows :: core ::
+            Interface > :: Vtable :: matches(iid)
+            { & self.vtables.0 as * const _ as * const _ } else
+            { :: core :: ptr :: null_mut() } ; if! (* interface).is_null()
+            {
+                self.count.add_ref() ; return :: windows :: core :: HRESULT(0)
+                ;
+            } * interface =
+            self.count.query(iid, & self.identity as * const _ as * mut _) ;
+            if(* interface).is_null()
+            { :: windows :: core :: HRESULT(0x8000_4002 as u32 as i32) } else
+            { :: windows :: core :: HRESULT(0) }
+        }
+    } fn AddRef(& self) -> u32 { self.count.add_ref() } unsafe fn
+    Release(& self) -> u32
+    {
+        let remaining = self.count.release() ; if remaining == 0
+        {
+            unsafe
+            {
+                _ = :: std :: boxed :: Box ::
+                from_raw(self as * const Self as * mut Self) ;
+            }
+        } remaining
+    }
+} impl < 'a, K, V > StockMapViewIterator :: < 'a, K, V > where K : ::
+windows_core :: RuntimeType + 'static, V : :: windows_core :: RuntimeType +
+'static, < K as :: windows_core :: Type < K > > :: Default : std :: clone ::
+Clone + std :: cmp :: Ord, < V as :: windows_core :: Type < V > > :: Default :
+std :: clone :: Clone,
+{
+    #[doc = r" Try casting as the provided interface"] #[doc = r""]
+    #[doc = r" # Safety"] #[doc = r""]
+    #[doc =
+    r" This function can only be safely called if `self` has been heap allocated and pinned using"]
+    #[doc = r" the mechanisms provided by `implement` macro."] #[allow(dead_code)] unsafe fn cast
+    < I : :: windows :: core :: ComInterface > (& self) -> :: windows :: core
+    :: Result < I >
+    {
+        let boxed =
+        (self as * const _ as * const * mut :: core :: ffi ::
+        c_void).sub(1 + 1) as * mut StockMapViewIterator_Impl :: < 'a, K, V >
+        ; let mut result = None ; < StockMapViewIterator_Impl :: < 'a, K, V >
+        as :: windows :: core :: IUnknownImpl > ::
+        QueryInterface(& * boxed, & I :: IID, & mut result as * mut _ as
+        _).and_some(result)
+    }
+} impl < 'a, K, V > :: core :: convert :: From < StockMapViewIterator :: < 'a,
+K, V > > for :: windows :: core :: IUnknown where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    fn from(this : StockMapViewIterator :: < 'a, K, V >) -> Self
+    {
+        let this = StockMapViewIterator_Impl :: < 'a, K, V > :: new(this) ;
+        let boxed = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < 'a, K, V > :: core :: convert :: From < StockMapViewIterator :: < 'a,
+K, V > > for :: windows :: core :: IInspectable where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone + std :: cmp
+:: Ord, < V as :: windows_core :: Type < V > > :: Default : std :: clone ::
+Clone,
+{
+    fn from(this : StockMapViewIterator :: < 'a, K, V >) -> Self
+    {
+        let this = StockMapViewIterator_Impl :: < 'a, K, V > :: new(this) ;
+        let boxed = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < 'a, K, V > :: core :: convert :: From < StockMapViewIterator :: < 'a,
+K, V > > for IIterator < IKeyValuePair < K < >, V < >, >, > where K : ::
+windows_core :: RuntimeType + 'static, V : :: windows_core :: RuntimeType +
+'static, < K as :: windows_core :: Type < K > > :: Default : std :: clone ::
+Clone + std :: cmp :: Ord, < V as :: windows_core :: Type < V > > :: Default :
+std :: clone :: Clone,
+{
+    fn from(this : StockMapViewIterator :: < 'a, K, V >) -> Self
+    {
+        let this = StockMapViewIterator_Impl :: < 'a, K, V > :: new(this) ;
+        let this = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.0 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < 'a, K, V > :: windows :: core :: AsImpl < StockMapViewIterator :: <
+'a, K, V > > for IIterator < IKeyValuePair < K < >, V < >, >, > where K : ::
+windows_core :: RuntimeType + 'static, V : :: windows_core :: RuntimeType +
+'static, < K as :: windows_core :: Type < K > > :: Default : std :: clone ::
+Clone + std :: cmp :: Ord, < V as :: windows_core :: Type < V > > :: Default :
+std :: clone :: Clone,
+{
+    unsafe fn as_impl(& self) -> & StockMapViewIterator :: < 'a, K, V >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 0) as * mut
+            StockMapViewIterator_Impl :: < 'a, K, V > ; & (* this).this
+        }
+    }
+} /*struct StockMapViewIterator < 'a, K, V > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K >> :: Default : std :: clone :: Clone + std :: cmp ::
+Ord, < V as :: windows_core :: Type < V >> :: Default : std :: clone :: Clone,
+{
+    _owner : IIterable < IKeyValuePair < K, V >>, current : :: std :: sync ::
+    RwLock < std :: collections :: btree_map :: Iter < 'a, K :: Default, V ::
+    Default >>,
+}*/
+#[repr(C)] struct StockKeyValuePair_Impl < K, V > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone, < V as ::
+windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    identity : * const :: windows :: core :: IInspectable_Vtbl, vtables :
+    (* const < IKeyValuePair < K < >, V < >, > as :: windows :: core ::
+    Interface > :: Vtable,), this : StockKeyValuePair :: < K, V >, count : ::
+    windows :: core :: imp :: WeakRefCount,
+} impl < K, V > StockKeyValuePair_Impl :: < K, V > where K : :: windows_core
+:: RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as
+:: windows_core :: Type < K > > :: Default : std :: clone :: Clone, < V as ::
+windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    const VTABLES :
+    (< IKeyValuePair < K < >, V < >, > as :: windows :: core :: Interface > ::
+    Vtable,) =
+    (< IKeyValuePair < K < >, V < >, > as :: windows :: core :: Interface > ::
+    Vtable :: new :: < Self, StockKeyValuePair :: < K, V >, - 1 > (),) ; const
+    IDENTITY : :: windows :: core :: IInspectable_Vtbl = :: windows :: core ::
+    IInspectable_Vtbl :: new :: < Self, IKeyValuePair < K < >, V < >, >, 0 >
+    () ; fn new(this : StockKeyValuePair :: < K, V >) -> Self
+    {
+        Self
+        {
+            identity : & Self :: IDENTITY, vtables : (& Self :: VTABLES.0,),
+            this, count : :: windows :: core :: imp :: WeakRefCount :: new(),
+        }
+    }
+} impl < K, V > :: windows :: core :: IUnknownImpl for StockKeyValuePair_Impl
+:: < K, V > where K : :: windows_core :: RuntimeType + 'static, V : ::
+windows_core :: RuntimeType + 'static, < K as :: windows_core :: Type < K > >
+:: Default : std :: clone :: Clone, < V as :: windows_core :: Type < V > > ::
+Default : std :: clone :: Clone,
+{
+    type Impl = StockKeyValuePair :: < K, V > ; fn get_impl(& self) -> & Self
+    :: Impl { & self.this } unsafe fn
+    QueryInterface(& self, iid : & :: windows :: core :: GUID, interface : *
+    mut * const :: core :: ffi :: c_void) -> :: windows :: core :: HRESULT
+    {
+        unsafe
+        {
+            * interface = if iid == & < :: windows :: core :: IUnknown as ::
+            windows :: core :: ComInterface > :: IID || iid == & < :: windows
+            :: core :: IInspectable as :: windows :: core :: ComInterface > ::
+            IID || iid == & < :: windows :: core :: imp :: IAgileObject as ::
+            windows :: core :: ComInterface > :: IID
+            { & self.identity as * const _ as * const _ } else if <
+            IKeyValuePair < K < >, V < >, > as :: windows :: core :: Interface
+            > :: Vtable :: matches(iid)
+            { & self.vtables.0 as * const _ as * const _ } else
+            { :: core :: ptr :: null_mut() } ; if! (* interface).is_null()
+            {
+                self.count.add_ref() ; return :: windows :: core :: HRESULT(0)
+                ;
+            } * interface =
+            self.count.query(iid, & self.identity as * const _ as * mut _) ;
+            if(* interface).is_null()
+            { :: windows :: core :: HRESULT(0x8000_4002 as u32 as i32) } else
+            { :: windows :: core :: HRESULT(0) }
+        }
+    } fn AddRef(& self) -> u32 { self.count.add_ref() } unsafe fn
+    Release(& self) -> u32
+    {
+        let remaining = self.count.release() ; if remaining == 0
+        {
+            unsafe
+            {
+                _ = :: std :: boxed :: Box ::
+                from_raw(self as * const Self as * mut Self) ;
+            }
+        } remaining
+    }
+} impl < K, V > StockKeyValuePair :: < K, V > where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone, < V as ::
+windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    #[doc = r" Try casting as the provided interface"] #[doc = r""]
+    #[doc = r" # Safety"] #[doc = r""]
+    #[doc =
+    r" This function can only be safely called if `self` has been heap allocated and pinned using"]
+    #[doc = r" the mechanisms provided by `implement` macro."] #[allow(dead_code)] unsafe fn cast
+    < I : :: windows :: core :: ComInterface > (& self) -> :: windows :: core
+    :: Result < I >
+    {
+        let boxed =
+        (self as * const _ as * const * mut :: core :: ffi ::
+        c_void).sub(1 + 1) as * mut StockKeyValuePair_Impl :: < K, V > ; let
+        mut result = None ; < StockKeyValuePair_Impl :: < K, V > as :: windows
+        :: core :: IUnknownImpl > ::
+        QueryInterface(& * boxed, & I :: IID, & mut result as * mut _ as
+        _).and_some(result)
+    }
+} impl < K, V > :: core :: convert :: From < StockKeyValuePair :: < K, V > >
+for :: windows :: core :: IUnknown where K : :: windows_core :: RuntimeType +
+'static, V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core
+:: Type < K > > :: Default : std :: clone :: Clone, < V as :: windows_core ::
+Type < V > > :: Default : std :: clone :: Clone,
+{
+    fn from(this : StockKeyValuePair :: < K, V >) -> Self
+    {
+        let this = StockKeyValuePair_Impl :: < K, V > :: new(this) ; let boxed
+        = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < K, V > :: core :: convert :: From < StockKeyValuePair :: < K, V > >
+for :: windows :: core :: IInspectable where K : :: windows_core ::
+RuntimeType + 'static, V : :: windows_core :: RuntimeType + 'static, < K as ::
+windows_core :: Type < K > > :: Default : std :: clone :: Clone, < V as ::
+windows_core :: Type < V > > :: Default : std :: clone :: Clone,
+{
+    fn from(this : StockKeyValuePair :: < K, V >) -> Self
+    {
+        let this = StockKeyValuePair_Impl :: < K, V > :: new(this) ; let boxed
+        = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < K, V > :: core :: convert :: From < StockKeyValuePair :: < K, V > >
+for IKeyValuePair < K < >, V < >, > where K : :: windows_core :: RuntimeType +
+'static, V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core
+:: Type < K > > :: Default : std :: clone :: Clone, < V as :: windows_core ::
+Type < V > > :: Default : std :: clone :: Clone,
+{
+    fn from(this : StockKeyValuePair :: < K, V >) -> Self
+    {
+        let this = StockKeyValuePair_Impl :: < K, V > :: new(this) ; let this = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.0 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < K, V > :: windows :: core :: AsImpl < StockKeyValuePair :: < K, V > >
+for IKeyValuePair < K < >, V < >, > where K : :: windows_core :: RuntimeType +
+'static, V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core
+:: Type < K > > :: Default : std :: clone :: Clone, < V as :: windows_core ::
+Type < V > > :: Default : std :: clone :: Clone,
+{
+    unsafe fn as_impl(& self) -> & StockKeyValuePair :: < K, V >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 0) as * mut
+            StockKeyValuePair_Impl :: < K, V > ; & (* this).this
+        }
+    }
+} /*struct StockKeyValuePair < K, V > where K : :: windows_core :: RuntimeType +
+'static, V : :: windows_core :: RuntimeType + 'static, < K as :: windows_core
+:: Type < K >> :: Default : std :: clone :: Clone, < V as :: windows_core ::
+Type < V >> :: Default : std :: clone :: Clone,
+{ key : K :: Default, value : V :: Default, }*/
+#[repr(C)] struct StockVectorView_Impl < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : std
+:: clone :: Clone + std :: cmp :: PartialEq,
+{
+    identity : * const :: windows :: core :: IInspectable_Vtbl, vtables :
+    (* const < IVectorView < T < >, > as :: windows :: core :: Interface > ::
+    Vtable, * const < IIterable < T < >, > as :: windows :: core :: Interface
+    > :: Vtable,), this : StockVectorView :: < T >, count : :: windows :: core
+    :: imp :: WeakRefCount,
+} impl < T > StockVectorView_Impl :: < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : std
+:: clone :: Clone + std :: cmp :: PartialEq,
+{
+    const VTABLES :
+    (< IVectorView < T < >, > as :: windows :: core :: Interface > :: Vtable,
+    < IIterable < T < >, > as :: windows :: core :: Interface > :: Vtable,) =
+    (< IVectorView < T < >, > as :: windows :: core :: Interface > :: Vtable
+    :: new :: < Self, StockVectorView :: < T >, - 1 > (), < IIterable < T < >,
+    > as :: windows :: core :: Interface > :: Vtable :: new :: < Self,
+    StockVectorView :: < T >, - 2 > (),) ; const IDENTITY : :: windows :: core
+    :: IInspectable_Vtbl = :: windows :: core :: IInspectable_Vtbl :: new :: <
+    Self, IVectorView < T < >, >, 0 > () ; fn
+    new(this : StockVectorView :: < T >) -> Self
+    {
+        Self
+        {
+            identity : & Self :: IDENTITY, vtables :
+            (& Self :: VTABLES.0, & Self :: VTABLES.1,), this, count : ::
+            windows :: core :: imp :: WeakRefCount :: new(),
+        }
+    }
+} impl < T > :: windows :: core :: IUnknownImpl for StockVectorView_Impl :: <
+T > where T : :: windows_core :: RuntimeType + 'static, < T as :: windows_core
+:: Type < T > > :: Default : std :: clone :: Clone + std :: cmp :: PartialEq,
+{
+    type Impl = StockVectorView :: < T > ; fn get_impl(& self) -> & Self ::
+    Impl { & self.this } unsafe fn
+    QueryInterface(& self, iid : & :: windows :: core :: GUID, interface : *
+    mut * const :: core :: ffi :: c_void) -> :: windows :: core :: HRESULT
+    {
+        unsafe
+        {
+            * interface = if iid == & < :: windows :: core :: IUnknown as ::
+            windows :: core :: ComInterface > :: IID || iid == & < :: windows
+            :: core :: IInspectable as :: windows :: core :: ComInterface > ::
+            IID || iid == & < :: windows :: core :: imp :: IAgileObject as ::
+            windows :: core :: ComInterface > :: IID
+            { & self.identity as * const _ as * const _ } else if <
+            IVectorView < T < >, > as :: windows :: core :: Interface > ::
+            Vtable :: matches(iid)
+            { & self.vtables.0 as * const _ as * const _ } else if < IIterable
+            < T < >, > as :: windows :: core :: Interface > :: Vtable ::
+            matches(iid) { & self.vtables.1 as * const _ as * const _ } else
+            { :: core :: ptr :: null_mut() } ; if! (* interface).is_null()
+            {
+                self.count.add_ref() ; return :: windows :: core :: HRESULT(0)
+                ;
+            } * interface =
+            self.count.query(iid, & self.identity as * const _ as * mut _) ;
+            if(* interface).is_null()
+            { :: windows :: core :: HRESULT(0x8000_4002 as u32 as i32) } else
+            { :: windows :: core :: HRESULT(0) }
+        }
+    } fn AddRef(& self) -> u32 { self.count.add_ref() } unsafe fn
+    Release(& self) -> u32
+    {
+        let remaining = self.count.release() ; if remaining == 0
+        {
+            unsafe
+            {
+                _ = :: std :: boxed :: Box ::
+                from_raw(self as * const Self as * mut Self) ;
+            }
+        } remaining
+    }
+} impl < T > StockVectorView :: < T > where T : :: windows_core :: RuntimeType
++ 'static, < T as :: windows_core :: Type < T > > :: Default : std :: clone ::
+Clone + std :: cmp :: PartialEq,
+{
+    #[doc = r" Try casting as the provided interface"] #[doc = r""]
+    #[doc = r" # Safety"] #[doc = r""]
+    #[doc =
+    r" This function can only be safely called if `self` has been heap allocated and pinned using"]
+    #[doc = r" the mechanisms provided by `implement` macro."] unsafe fn cast
+    < I : :: windows :: core :: ComInterface > (& self) -> :: windows :: core
+    :: Result < I >
+    {
+        let boxed =
+        (self as * const _ as * const * mut :: core :: ffi ::
+        c_void).sub(1 + 2) as * mut StockVectorView_Impl :: < T > ; let mut
+        result = None ; < StockVectorView_Impl :: < T > as :: windows :: core
+        :: IUnknownImpl > ::
+        QueryInterface(& * boxed, & I :: IID, & mut result as * mut _ as
+        _).and_some(result)
+    }
+} impl < T > :: core :: convert :: From < StockVectorView :: < T > > for ::
+windows :: core :: IUnknown where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : std :: clone ::
+Clone + std :: cmp :: PartialEq,
+{
+    fn from(this : StockVectorView :: < T >) -> Self
+    {
+        let this = StockVectorView_Impl :: < T > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockVectorView :: < T > > for ::
+windows :: core :: IInspectable where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : std :: clone ::
+Clone + std :: cmp :: PartialEq,
+{
+    fn from(this : StockVectorView :: < T >) -> Self
+    {
+        let this = StockVectorView_Impl :: < T > :: new(this) ; let boxed = ::
+        core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockVectorView :: < T > > for
+IVectorView < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : std :: clone :: Clone + std ::
+cmp :: PartialEq,
+{
+    fn from(this : StockVectorView :: < T >) -> Self
+    {
+        let this = StockVectorView_Impl :: < T > :: new(this) ; let this =
+        :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.0 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < T > :: windows :: core :: AsImpl < StockVectorView :: < T > > for
+IVectorView < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : std :: clone :: Clone + std ::
+cmp :: PartialEq,
+{
+    unsafe fn as_impl(& self) -> & StockVectorView :: < T >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 0) as * mut
+            StockVectorView_Impl :: < T > ; & (* this).this
+        }
+    }
+} impl < T > :: core :: convert :: From < StockVectorView :: < T > > for
+IIterable < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : std :: clone :: Clone + std ::
+cmp :: PartialEq,
+{
+    fn from(this : StockVectorView :: < T >) -> Self
+    {
+        let this = StockVectorView_Impl :: < T > :: new(this) ; let this =
+        :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.1 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < T > :: windows :: core :: AsImpl < StockVectorView :: < T > > for
+IIterable < T < >, > where T : :: windows_core :: RuntimeType + 'static, < T
+as :: windows_core :: Type < T > > :: Default : std :: clone :: Clone + std ::
+cmp :: PartialEq,
+{
+    unsafe fn as_impl(& self) -> & StockVectorView :: < T >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 1) as * mut
+            StockVectorView_Impl :: < T > ; & (* this).this
+        }
+    }
+} /*struct StockVectorView < T > where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T >> :: Default : std :: clone ::
+Clone + std :: cmp :: PartialEq,
+{ values : std :: vec :: Vec < T :: Default >, }*/
+#[repr(C)] struct StockVectorViewIterator_Impl < T > where T : :: windows_core
+:: RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default :
+std :: clone :: Clone + std :: cmp :: PartialEq,
+{
+    identity : * const :: windows :: core :: IInspectable_Vtbl, vtables :
+    (* const < IIterator < T < >, > as :: windows :: core :: Interface > ::
+    Vtable,), this : StockVectorViewIterator :: < T >, count : :: windows ::
+    core :: imp :: WeakRefCount,
+} impl < T > StockVectorViewIterator_Impl :: < T > where T : :: windows_core
+:: RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default :
+std :: clone :: Clone + std :: cmp :: PartialEq,
+{
+    const VTABLES :
+    (< IIterator < T < >, > as :: windows :: core :: Interface > :: Vtable,) =
+    (< IIterator < T < >, > as :: windows :: core :: Interface > :: Vtable ::
+    new :: < Self, StockVectorViewIterator :: < T >, - 1 > (),) ; const
+    IDENTITY : :: windows :: core :: IInspectable_Vtbl = :: windows :: core ::
+    IInspectable_Vtbl :: new :: < Self, IIterator < T < >, >, 0 > () ; fn
+    new(this : StockVectorViewIterator :: < T >) -> Self
+    {
+        Self
+        {
+            identity : & Self :: IDENTITY, vtables : (& Self :: VTABLES.0,),
+            this, count : :: windows :: core :: imp :: WeakRefCount :: new(),
+        }
+    }
+} impl < T > :: windows :: core :: IUnknownImpl for
+StockVectorViewIterator_Impl :: < T > where T : :: windows_core :: RuntimeType
++ 'static, < T as :: windows_core :: Type < T > > :: Default : std :: clone ::
+Clone + std :: cmp :: PartialEq,
+{
+    type Impl = StockVectorViewIterator :: < T > ; fn get_impl(& self) -> &
+    Self :: Impl { & self.this } unsafe fn
+    QueryInterface(& self, iid : & :: windows :: core :: GUID, interface : *
+    mut * const :: core :: ffi :: c_void) -> :: windows :: core :: HRESULT
+    {
+        unsafe
+        {
+            * interface = if iid == & < :: windows :: core :: IUnknown as ::
+            windows :: core :: ComInterface > :: IID || iid == & < :: windows
+            :: core :: IInspectable as :: windows :: core :: ComInterface > ::
+            IID || iid == & < :: windows :: core :: imp :: IAgileObject as ::
+            windows :: core :: ComInterface > :: IID
+            { & self.identity as * const _ as * const _ } else if < IIterator
+            < T < >, > as :: windows :: core :: Interface > :: Vtable ::
+            matches(iid) { & self.vtables.0 as * const _ as * const _ } else
+            { :: core :: ptr :: null_mut() } ; if! (* interface).is_null()
+            {
+                self.count.add_ref() ; return :: windows :: core :: HRESULT(0)
+                ;
+            } * interface =
+            self.count.query(iid, & self.identity as * const _ as * mut _) ;
+            if(* interface).is_null()
+            { :: windows :: core :: HRESULT(0x8000_4002 as u32 as i32) } else
+            { :: windows :: core :: HRESULT(0) }
+        }
+    } fn AddRef(& self) -> u32 { self.count.add_ref() } unsafe fn
+    Release(& self) -> u32
+    {
+        let remaining = self.count.release() ; if remaining == 0
+        {
+            unsafe
+            {
+                _ = :: std :: boxed :: Box ::
+                from_raw(self as * const Self as * mut Self) ;
+            }
+        } remaining
+    }
+} impl < T > StockVectorViewIterator :: < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : std
+:: clone :: Clone + std :: cmp :: PartialEq,
+{
+    #[doc = r" Try casting as the provided interface"] #[doc = r""]
+    #[doc = r" # Safety"] #[doc = r""]
+    #[doc =
+    r" This function can only be safely called if `self` has been heap allocated and pinned using"]
+    #[doc = r" the mechanisms provided by `implement` macro."] #[allow(dead_code)] unsafe fn cast
+    < I : :: windows :: core :: ComInterface > (& self) -> :: windows :: core
+    :: Result < I >
+    {
+        let boxed =
+        (self as * const _ as * const * mut :: core :: ffi ::
+        c_void).sub(1 + 1) as * mut StockVectorViewIterator_Impl :: < T > ;
+        let mut result = None ; < StockVectorViewIterator_Impl :: < T > as ::
+        windows :: core :: IUnknownImpl > ::
+        QueryInterface(& * boxed, & I :: IID, & mut result as * mut _ as
+        _).and_some(result)
+    }
+} impl < T > :: core :: convert :: From < StockVectorViewIterator :: < T > >
+for :: windows :: core :: IUnknown where T : :: windows_core :: RuntimeType +
+'static, < T as :: windows_core :: Type < T > > :: Default : std :: clone ::
+Clone + std :: cmp :: PartialEq,
+{
+    fn from(this : StockVectorViewIterator :: < T >) -> Self
+    {
+        let this = StockVectorViewIterator_Impl :: < T > :: new(this) ; let
+        boxed = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockVectorViewIterator :: < T > >
+for :: windows :: core :: IInspectable where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T > > :: Default : std
+:: clone :: Clone + std :: cmp :: PartialEq,
+{
+    fn from(this : StockVectorViewIterator :: < T >) -> Self
+    {
+        let this = StockVectorViewIterator_Impl :: < T > :: new(this) ; let
+        boxed = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; unsafe
+        { :: core :: mem :: transmute(& boxed.identity) }
+    }
+} impl < T > :: core :: convert :: From < StockVectorViewIterator :: < T > >
+for IIterator < T < >, > where T : :: windows_core :: RuntimeType + 'static, <
+T as :: windows_core :: Type < T > > :: Default : std :: clone :: Clone + std
+:: cmp :: PartialEq,
+{
+    fn from(this : StockVectorViewIterator :: < T >) -> Self
+    {
+        let this = StockVectorViewIterator_Impl :: < T > :: new(this) ; let
+        this = :: core :: mem :: ManuallyDrop ::
+        new(:: std :: boxed :: Box :: new(this)) ; let vtable_ptr = &
+        this.vtables.0 ; unsafe { :: core :: mem :: transmute(vtable_ptr) }
+    }
+} impl < T > :: windows :: core :: AsImpl < StockVectorViewIterator :: < T > >
+for IIterator < T < >, > where T : :: windows_core :: RuntimeType + 'static, <
+T as :: windows_core :: Type < T > > :: Default : std :: clone :: Clone + std
+:: cmp :: PartialEq,
+{
+    unsafe fn as_impl(& self) -> & StockVectorViewIterator :: < T >
+    {
+        let this = :: windows :: core :: Interface :: as_raw(self) ; unsafe
+        {
+            let this =
+            (this as * mut * mut :: core :: ffi :: c_void).sub(1 + 0) as * mut
+            StockVectorViewIterator_Impl :: < T > ; & (* this).this
+        }
+    }
+}/* struct StockVectorViewIterator < T > where T : :: windows_core ::
+RuntimeType + 'static, < T as :: windows_core :: Type < T >> :: Default : std
+:: clone :: Clone + std :: cmp :: PartialEq,
+{
+    owner : IIterable < T >, current : :: std :: sync :: atomic ::
+    AtomicUsize,
+}*/
+
