@@ -187,7 +187,7 @@ impl AppMain for App {
                     run_view.draw(cx, &self.build_manager);
                 }
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
-                    self.build_manager.draw_log_list(cx, &mut *list_view);
+                    self.build_manager.draw_log(cx, &mut *list_view);
                 }
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
@@ -200,13 +200,20 @@ impl AppMain for App {
             return
         }
         
+        
         if let Event::KeyDown(KeyEvent {
-            key_code: KeyCode::Backtick,
-            modifiers: KeyModifiers {logo, ..},
+            key_code,
+            modifiers: KeyModifiers {logo,control, ..},
             ..
         }) = event {
-            if *logo{
-                self.build_manager.file_change(cx);
+            if *control || *logo{
+                if let KeyCode::Backtick = key_code{
+                     self.build_manager.file_change(cx);
+                }
+                else if let KeyCode::KeyK = key_code{
+                    self.build_manager.clear_log();
+                    log_list.redraw(cx);
+                }
             }
         }
           

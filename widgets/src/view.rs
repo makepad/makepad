@@ -147,7 +147,9 @@ impl LiveHook for View {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     self.draw_order.push(id);
-                    return self.children.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
+                    return self.children.get_or_insert(cx, id, | cx | {
+                        WidgetRef::new(cx)
+                    })
                         .apply(cx, from, index, nodes);
                 }
                 else {
