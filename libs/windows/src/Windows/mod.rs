@@ -2291,7 +2291,7 @@ pub const D3D11_INPUT_PER_VERTEX_DATA: D3D11_INPUT_CLASSIFICATION = D3D11_INPUT_
 
 pub const D3D11_INPUT_PER_INSTANCE_DATA: D3D11_INPUT_CLASSIFICATION = D3D11_INPUT_CLASSIFICATION(1i32);
 
-#[repr(transparent)]pub struct ID3D11Device(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Device(pub ::windows::core::IUnknown);
 impl ID3D11Device {
     pub unsafe fn CreateBuffer(&self, pdesc: *const D3D11_BUFFER_DESC, pinitialdata: ::core::option::Option<*const D3D11_SUBRESOURCE_DATA>, ppbuffer: ::core::option::Option<*mut ::core::option::Option<ID3D11Buffer>>) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).CreateBuffer)(::windows::core::Vtable::as_raw(self), pdesc, ::core::mem::transmute(pinitialdata.unwrap_or(::std::ptr::null())), ::core::mem::transmute(ppbuffer.unwrap_or(::std::ptr::null_mut()))).ok()
@@ -5257,7 +5257,7 @@ where
     D3D11CreateDevice(padapter.into().abi(), drivertype, software.into(), flags, ::core::mem::transmute(pfeaturelevels.map_or(::core::ptr::null(), |slice| slice.as_ptr())), pfeaturelevels.map_or(0, |slice| slice.len() as _), sdkversion, ::core::mem::transmute(ppdevice.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pfeaturelevel.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(ppimmediatecontext.unwrap_or(::std::ptr::null_mut()))).ok()
 }
 
-#[repr(transparent)]pub struct ID3D11Resource(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Resource(pub ::windows::core::IUnknown);
 impl ID3D11Resource {
     pub unsafe fn GetDevice(&self) -> ::windows::core::Result<ID3D11Device> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
@@ -9329,6 +9329,115 @@ impl IDXGIFactory2_Vtbl {
         iid == &<IDXGIFactory2 as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIFactory as ::windows::core::Interface>::IID || iid == &<IDXGIFactory1 as ::windows::core::Interface>::IID
     }
 }
+
+// manually added for DX11 shared handles:
+
+#[repr(transparent)]pub struct IDXGIResource(::windows::core::IUnknown);
+impl IDXGIResource {
+    pub unsafe fn GetEvictionPriority(&self,/* out */pEvictionPriority: &mut u32) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).GetEvictionPriority)(::windows::core::Vtable::as_raw(self),pEvictionPriority)
+    }
+    pub unsafe fn GetSharedHandle(&self,/* out */pSharedHandle: &mut super::super::Foundation::HANDLE) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).GetSharedHandle)(::windows::core::Vtable::as_raw(self),pSharedHandle)
+    }
+    pub unsafe fn GetUsage(&self,/* out */pUsage: &mut DXGI_USAGE) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).GetUsage)(::windows::core::Vtable::as_raw(self),pUsage)
+    }
+    pub unsafe fn SetEvictionPriority(&self,EvictionPriority: u32) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).SetEvictionPriority)(::windows::core::Vtable::as_raw(self),EvictionPriority)
+    }
+}
+
+impl ::core::cmp::Eq for IDXGIResource { }
+
+impl ::core::cmp::PartialEq for IDXGIResource {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl ::core::clone::Clone for IDXGIResource {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl ::core::fmt::Debug for IDXGIResource {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IDXGIResource").field(&self.0).finish()
+    }
+}
+
+unsafe impl ::core::marker::Send for IDXGIResource { }
+
+unsafe impl ::core::marker::Sync for IDXGIResource { }
+
+unsafe impl ::windows::core::Vtable for IDXGIResource {
+    type Vtable = IDXGIResource_Vtbl;
+}
+
+unsafe impl ::windows::core::Interface for IDXGIResource {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x035f3ab4_482e_4e50_b41f_8a7f8bd8960b);
+}
+
+::windows::core::interface_hierarchy!(IDXGIResource,::windows::core::IUnknown, IDXGIObject, IDXGIDeviceSubObject);
+
+#[repr(C)]
+pub struct IDXGIResource_Vtbl {
+    pub base__: IDXGIDeviceSubObject_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub GetEvictionPriority: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pEvictionPriority: *mut u32) -> ::windows::core::HRESULT,
+    pub GetSharedHandle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pSharedHandle: *mut super::super::Foundation::HANDLE) -> ::windows::core::HRESULT,
+    pub GetUsage: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pUsage: *mut DXGI_USAGE) -> ::windows::core::HRESULT,
+    pub SetEvictionPriority: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,EvictionPriority: u32) -> ::windows::core::HRESULT,
+}
+
+pub trait IDXGIResource_Impl: Sized + IDXGIDeviceSubObject_Impl {
+    fn GetEvictionPriority(&self,pEvictionPriority: *mut u32) -> ::windows::core::HRESULT;
+    fn GetSharedHandle(&self,pSharedHandle: *mut super::super::Foundation::HANDLE) -> ::windows::core::HRESULT;
+    fn GetUsage(&self,pUsage: *mut DXGI_USAGE) -> ::windows::core::HRESULT;
+    fn SetEvictionPriority(&self,EvictionPriority: u32) -> ::windows::core::HRESULT;
+}
+
+impl ::windows::core::RuntimeName for IDXGIResource { }
+
+impl IDXGIResource_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIResource_Impl, const OFFSET: isize>() -> IDXGIResource_Vtbl {
+        unsafe extern "system" fn GetEvictionPriority<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIResource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void,pEvictionPriority: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetEvictionPriority(pEvictionPriority)
+        }
+        unsafe extern "system" fn GetSharedHandle<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIResource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void,pSharedHandle: *mut super::super::Foundation::HANDLE) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetSharedHandle(pSharedHandle)
+        }
+        unsafe extern "system" fn GetUsage<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIResource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void,pUsage: *mut DXGI_USAGE) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetUsage(pUsage)
+        }
+        unsafe extern "system" fn SetEvictionPriority<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIResource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void,EvictionPriority: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetEvictionPriority(EvictionPriority)
+        }
+        Self {
+            base__: IDXGIDeviceSubObject_Vtbl::new::<Identity, Impl, OFFSET>(),
+            GetEvictionPriority: GetEvictionPriority::<Identity, Impl, OFFSET>,
+            GetSharedHandle: GetSharedHandle::<Identity, Impl, OFFSET>,
+            GetUsage: GetUsage::<Identity, Impl, OFFSET>,
+            SetEvictionPriority: SetEvictionPriority::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IDXGIResource as ::windows::core::Interface>::IID || iid == &<IDXGIDeviceSubObject as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID
+    }
+}
+
+
+// ----
 
 #[repr(transparent)]pub struct IDXGISwapChain1(::windows::core::IUnknown);
 impl IDXGISwapChain1 {

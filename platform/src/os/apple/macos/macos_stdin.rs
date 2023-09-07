@@ -1,10 +1,10 @@
 use {
     std::{
         sync::{Arc, Mutex},
-        cell::{RefCell},
+        cell::RefCell,
         io,
         io::prelude::*,
-        io::{BufReader},
+        io::BufReader,
     },
     crate::{
         makepad_live_id::*,
@@ -27,8 +27,8 @@ use {
             cx_stdin::{HostToStdin, StdinToHost},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
-        cx_api::{CxOsOp},
-        cx::{Cx},
+        cx_api::CxOsOp,
+        cx::Cx,
     }
 };
 

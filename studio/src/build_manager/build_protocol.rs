@@ -1,8 +1,6 @@
-use {
-    crate::{
-        makepad_code_editor::Range,
-        makepad_micro_serde::{SerBin, DeBin, DeBinErr},
-    }
+use crate::{
+    makepad_code_editor::Range,
+    makepad_micro_serde::{SerBin, DeBin, DeBinErr},
 };
 
 

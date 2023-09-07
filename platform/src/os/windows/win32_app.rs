@@ -67,9 +67,7 @@ use {
                 PROCESS_PER_MONITOR_DPI_AWARE,
                 MDT_EFFECTIVE_DPI
             },
-            Win32::System::Threading::{
-                ExitProcess
-            },
+            Win32::System::Threading::ExitProcess,
             Win32::System::LibraryLoader::{
                 GetModuleHandleW,
                 LoadLibraryA,
@@ -80,7 +78,7 @@ use {
                 QueryPerformanceFrequency,
             }
         },
-        event::{TimerEvent},
+        event::TimerEvent,
         cursor::MouseCursor,
         os::cx_native::EventFlow,
         os::windows::win32_event::Win32Event,
@@ -135,7 +133,7 @@ impl Win32App {
                 | CS_VREDRAW
                 | CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
-            hInstance: unsafe {GetModuleHandleW(None).unwrap()},
+            hInstance: unsafe {GetModuleHandleW(None).unwrap().into()},
             hIcon: unsafe {LoadIconW(None, IDI_WINLOGO).unwrap()}, //h_icon,
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
             hbrBackground: unsafe{CreateSolidBrush(COLORREF(0x3f3f3f3f))},
@@ -155,10 +153,10 @@ impl Win32App {
         }
         
         let mut time_start = 0i64;
-        unsafe{QueryPerformanceCounter(&mut time_start)};
+        unsafe { QueryPerformanceCounter(&mut time_start).unwrap() };
 
         let mut time_freq = 0i64;
-        unsafe{QueryPerformanceFrequency(&mut time_freq)};
+        unsafe { QueryPerformanceFrequency(&mut time_freq).unwrap() };
 
         let win32_app = Win32App {
             window_class_name,
@@ -235,7 +233,7 @@ impl Win32App {
                     Win32Timer::Timer {win32_id, repeats, ..} => if win32_id == in_win32_id {
                         hit_timer = Some(win32_app.timers[slot].clone());
                         if !repeats {
-                            KillTimer(None, in_win32_id);
+                            KillTimer(None, in_win32_id).unwrap();
                             win32_app.timers[slot] = Win32Timer::Free;
                         }
                         break;
@@ -311,7 +309,7 @@ impl Win32App {
             if let Win32Timer::Timer {win32_id, timer_id, ..} = self.timers[slot] {
                 if timer_id == which_timer_id {
                     self.timers[slot] = Win32Timer::Free;
-                    unsafe {KillTimer(None, win32_id);}
+                    unsafe { KillTimer(None, win32_id).unwrap(); }
                 }
             }
         }
@@ -333,7 +331,7 @@ impl Win32App {
         for slot in 0..self.timers.len() {
             if let Win32Timer::Resize {win32_id} = self.timers[slot] {
                 self.timers[slot] = Win32Timer::Free;
-                unsafe {KillTimer(None, win32_id);}
+                unsafe { KillTimer(None, win32_id).unwrap(); }
             }
         }
     }
@@ -341,7 +339,7 @@ impl Win32App {
     pub fn time_now(&self) -> f64 {
         unsafe {
             let mut time_now = 0i64;
-            QueryPerformanceCounter(&mut time_now);
+            QueryPerformanceCounter(&mut time_now).unwrap();
             (time_now - self.time_start) as f64 / self.time_freq as f64
         }
     }
