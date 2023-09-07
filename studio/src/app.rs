@@ -270,6 +270,7 @@ impl AppMain for App {
         }
         
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
+            log!("should_tab_start_drag: dock.tab_start_drag()");
             dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
                 path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
                 internal_id: Some(tab_id)
@@ -277,6 +278,7 @@ impl AppMain for App {
         }
         
         if let Some(drag) = dock.should_accept_drag(&actions) {
+            log!("should_accept_drag: dock.accept_drag()");
             if drag.items.len() == 1 {
                 if drag.modifiers.logo {
                     dock.accept_drag(cx, drag, DragResponse::Copy);
@@ -288,6 +290,7 @@ impl AppMain for App {
         }
         
         if let Some(drop) = dock.has_drop(&actions) {
+            log!("has_drop: drop_clone(), drop_move() or drop_create()");
             if let DragItem::FilePath {path, internal_id} = &drop.items[0] {
                 if let Some(internal_id) = internal_id { // from inside the dock
                     if drop.modifiers.logo {
