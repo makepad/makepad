@@ -5,7 +5,8 @@ use std::{
     str,
 };
 
-#[cfg(any(target_os = "android", target_os = "linux", target_os="macos"))]
+#[allow(unused_imports)]
+#[cfg(any(target_os = "android", target_os = "linux", target_os="macos", target_os="ios"))]
 use std::{
     ffi::{OsStr, OsString},
     path::{PathBuf, Path},

@@ -1,4 +1,4 @@
-use proc_macro::{TokenStream};
+use proc_macro::TokenStream;
 use makepad_micro_proc_macro::*;
 
 pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {

@@ -1,8 +1,6 @@
-use {
-    crate::{
-        makepad_code_editor::Range,
-        makepad_micro_serde::{SerBin, DeBin, DeBinErr},
-    }
+use crate::{
+    makepad_code_editor::Range,
+    makepad_micro_serde::{SerBin, DeBin, DeBinErr},
 };
 
 
@@ -16,10 +14,10 @@ pub struct BuildCmdWrap {
 }
 
 impl BuildCmdId{
-    pub fn wrap_msg(&self, msg:BuildMsg)->BuildMsgWrap{
-        BuildMsgWrap{
+    pub fn wrap_msg(&self, item:LogItem)->LogItemWrap{
+        LogItemWrap{
             cmd_id: *self,
-            msg,
+            item,
         }
     }
 }
@@ -31,13 +29,13 @@ pub enum BuildCmd {
 }
 
 #[derive(Clone, Debug)]
-pub struct BuildMsgWrap {
+pub struct LogItemWrap {
     pub cmd_id: BuildCmdId,
-    pub msg: BuildMsg
+    pub item: LogItem
 }
 
 #[derive(Clone, Copy, Debug, SerBin, DeBin)]
-pub enum BuildMsgLevel{
+pub enum LogItemLevel{
     Warning,
     Error,
     Log,
@@ -46,22 +44,22 @@ pub enum BuildMsgLevel{
 }
 
 #[derive(Clone, Debug)]
-pub struct BuildMsgLocation{
-    pub level: BuildMsgLevel,
+pub struct LogItemLocation{
+    pub level: LogItemLevel,
     pub file_name: String,
     pub range: Range,
     pub msg: String
 }
 
 #[derive(Clone, Debug)]
-pub struct BuildMsgBare{
-    pub level: BuildMsgLevel,
+pub struct LogItemBare{
+    pub level: LogItemLevel,
     pub line: String,
 }
 
 #[derive(Clone, Debug)]
-pub enum BuildMsg {
-    Bare(BuildMsgBare),
-    Location(BuildMsgLocation),
+pub enum LogItem {
+    Bare(LogItemBare),
+    Location(LogItemLocation),
     StdinToHost(String),
 }

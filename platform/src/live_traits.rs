@@ -159,8 +159,6 @@ pub enum ApplyFrom {
     NewFromDoc {file_id: LiveFileId}, // newed from DSL
     UpdateFromDoc {file_id: LiveFileId}, // live DSL substantially updated
     
-    LiveEdit, // applying a live edit mutation
-    
     New, // Bare new without file info
     Animate, // from animate
     AnimatorInit,
