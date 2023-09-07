@@ -57,7 +57,7 @@ impl Cx {
 
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
         let fb_texture = Texture::new(self);
-        let mut dx11_shared_handle = windows::Win32::Foundation::HANDLE(0);
+        let mut dx11_shared_handle = crate::windows::Win32::Foundation::HANDLE(0);
 
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
@@ -152,7 +152,7 @@ impl Cx {
                         HostToStdin::Dx11SharedHandle(marshalled_handle) => {
 
                             // convert u64 back to handle
-                            let handle = windows::Win32::Foundation::HANDLE(marshalled_handle as isize);
+                            let handle = crate::windows::Win32::Foundation::HANDLE(marshalled_handle as isize);
 
                             if handle != dx11_shared_handle {
                                 

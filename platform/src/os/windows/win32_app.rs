@@ -5,7 +5,7 @@ use {
         mem,
     },
     crate::{
-        windows_crate::{
+        windows::{
             core::HRESULT,
             core::PCWSTR,
             core::PCSTR,
@@ -133,7 +133,7 @@ impl Win32App {
                 | CS_VREDRAW
                 | CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
-            hInstance: unsafe {GetModuleHandleW(None).unwrap().into()},
+            hInstance: unsafe {GetModuleHandleW(None).unwrap().into()}, 
             hIcon: unsafe {LoadIconW(None, IDI_WINLOGO).unwrap()}, //h_icon,
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
             hbrBackground: unsafe{CreateSolidBrush(COLORREF(0x3f3f3f3f))},

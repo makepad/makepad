@@ -8,7 +8,7 @@ use {
         os::windows::win32_app::FALSE,
         audio::*,
         thread::Signal,
-        windows_crate::{
+        windows::{
             core::PCWSTR,
             Win32::Foundation::{
                 WAIT_OBJECT_0,
@@ -377,7 +377,7 @@ impl WasapiBase {
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 def_period,
                 def_period,
-                &wave_format as *const _ as *const crate::windows_crate::Win32::Media::Audio::WAVEFORMATEX,
+                &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
                 None
             ).is_err(){
                 return Err(())
@@ -533,21 +533,21 @@ implement_com!{
 }
 
 impl IMMNotificationClient_Impl for WasapiChangeListener {
-    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows::core::Result<()> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows_crate::core::PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows::core::PCWSTR) -> crate::windows::core::Result<()> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows_crate::core::Result<()> {
+    fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows::core::Result<()> {
         Ok(())
     }
     

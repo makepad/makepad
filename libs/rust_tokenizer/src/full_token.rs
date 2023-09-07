@@ -1,6 +1,5 @@
 use {
     std::{
-        rc::Rc,
         ops::Deref,
         ops::DerefMut,
     },

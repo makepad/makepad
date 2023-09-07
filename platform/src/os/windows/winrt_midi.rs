@@ -6,7 +6,7 @@ use {
         thread::Signal,
         makepad_live_id::{LiveId},
         midi::*,
-        windows_crate::{
+        windows::{
             Foundation::{
                 EventRegistrationToken,
                 TypedEventHandler,
@@ -26,7 +26,7 @@ use {
 };
 
 
-type WindowsResult<T> = crate::windows_crate::core::Result<T>;
+type WindowsResult<T> = crate::windows::core::Result<T>;
 
 pub struct OsMidiInput(mpsc::Receiver<(MidiPortId, MidiData) >);
 
