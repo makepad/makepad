@@ -8,7 +8,7 @@ use {
     },
     
     crate::{
-        windows_crate::{
+        windows::{
             core::PCWSTR,
             Win32::Foundation::{
                 HWND,

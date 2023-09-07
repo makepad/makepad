@@ -3,7 +3,7 @@ use crate::{
     makepad_math::*,
     makepad_error_log::*,
     os::{
-        windows::win32_app::{TRUE, FALSE},
+        windows::win32_app::{TRUE, FALSE,},
         windows::win32_window::Win32Window,
     },
     texture::Texture,
@@ -17,7 +17,7 @@ use crate::{
         TextureFormat,
         TextureDesc,
     },  
-    windows_crate::{
+    windows::{
         core::{
             PCSTR,
             ComInterface,
@@ -84,7 +84,7 @@ use crate::{
                     ID3D11InputLayout,
                     ID3D11Buffer,
                     D3D11CreateDevice,
-                    ID3D11Resource
+                    ID3D11Resource,
                 },
                 Direct3D::{
                     Fxc::D3DCompile,
@@ -119,11 +119,8 @@ use crate::{
                 },
             },
         },
-    }
+    },
 };
-
-//use std::ffi::c_void;
-//use std::sync::Mutex;
 
 impl Cx {
     
