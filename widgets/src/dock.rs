@@ -1,11 +1,9 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        widget::*,
-        makepad_draw::*,
-        splitter::{SplitterAction, Splitter, SplitterAlign},
-        tab_bar::{TabBarAction, TabBar},
-    },
+use crate::{
+    makepad_derive_widget::*,
+    widget::*,
+    makepad_draw::*,
+    splitter::{SplitterAction, Splitter, SplitterAlign},
+    tab_bar::{TabBarAction, TabBar},
 };
 
 live_design!{
@@ -931,7 +929,7 @@ impl DockRef {
         None
     }
     
-    
+    // user wants to drag, set dh accordingly
     pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent, dr: DragResponse) {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
