@@ -67,6 +67,7 @@ pub struct ListView {
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
     #[live] capture_overload: bool,
+    #[live(false)] keep_invisible: bool,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] draw_align_list: Vec<AlignItem>,
     #[rust] detect_tail_in_draw: bool,
@@ -295,7 +296,9 @@ impl ListView {
         }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
-        self.items.retain_visible();
+        if !self.keep_invisible{
+            self.items.retain_visible();
+        }
         cx.end_turtle_with_area(&mut self.area);
     }
     
