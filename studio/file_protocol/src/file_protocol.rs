@@ -2,8 +2,6 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
-        unix_path::UnixPathBuf,
-        unix_str::UnixString,
     },
 };
 
@@ -37,10 +35,10 @@ pub enum FileRequest {
     /// Requests the collab server to add the client as a participant to the file with the given id.
     /// If the client is the first participant for the file, this also causes the file to be opened
     /// on the server.
-    OpenFile(UnixPathBuf),
+    OpenFile(String),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
-    SaveFile(UnixPathBuf, String),
+    SaveFile(String, String),
 
 }
 
@@ -60,17 +58,17 @@ pub enum FileResponse {
     LoadFileTree(Result<FileTreeData, FileError>),
     /// The result of requesting the collab server to add the client as a participant to the file
     /// with the given id.
-    OpenFile(Result<(UnixPathBuf, String), FileError>),
+    OpenFile(Result<(String, String), FileError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
-    SaveFile(Result<(UnixPathBuf,String,String), FileError>),
+    SaveFile(Result<(String,String,String), FileError>),
 }
 
 /// A type for representing data about a file tree.
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct FileTreeData {
     /// The path to the root of this file tree.
-    pub root_path: UnixPathBuf,
+    pub root_path: String,
     /// Data about the root of this file tree.
     pub root: FileNodeData,
 }
@@ -90,7 +88,7 @@ pub enum FileNodeData {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct DirectoryEntry {
     /// The name of this entry.
-    pub name: UnixString,
+    pub name: String,
     /// The node for this entry.
     pub node: FileNodeData,
 }
@@ -107,7 +105,7 @@ pub enum FileNotification {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileError {
     Unknown(String),
-    CannotOpen(UnixPathBuf)
+    CannotOpen(String)
 }
 
 /// An identifier for files on the collab server.

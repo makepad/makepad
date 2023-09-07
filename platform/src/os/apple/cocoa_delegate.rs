@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use {
     std::{
         rc::Rc,
@@ -343,13 +344,16 @@ pub fn define_cocoa_view_class() -> *const Class {
                 );
                 (*this).set_ivar("markedText", marked_text);
             }
-            let types = [NSPasteboardTypeFileURL];
-            let types_nsarray: ObjcId = msg_send![
-                class!(NSArray),
-                arrayWithObjects: types.as_ptr()
-                count: types.len()
-            ];
-            let _: () = msg_send![this, registerForDraggedTypes: types_nsarray];
+            
+            #[cfg(target_os = "macos")]{
+                let types = [NSPasteboardTypeFileURL];
+                let types_nsarray: ObjcId = msg_send![
+                    class!(NSArray),
+                    arrayWithObjects: types.as_ptr()
+                    count: types.len()
+                ];
+                let _: () = msg_send![this, registerForDraggedTypes: types_nsarray];
+            }
             
             this
         }
@@ -631,26 +635,30 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_change_event();
     }
     
-    
+    #[cfg(target_os = "macos")]
     extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: ObjcId, _point: NSPoint, _operation: NSDragOperation) {
         let window = get_cocoa_window(this);
         window.do_callback(CocoaEvent::DragEnd);
     }
     
+    #[cfg(target_os = "macos")]
     extern fn dragging_entered(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
         dragging(this, sender)
     }
     
+    #[cfg(target_os = "macos")]
     extern fn dragging_updated(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
         dragging(this, sender)
     }
     
+    #[cfg(target_os = "macos")]
     extern fn dragging_exited(this: &Object, _: Sel, sender: ObjcId) {
         dragging(this, sender);
     }
     
+    #[cfg(target_os = "macos")]
     fn dragging(this: &Object, sender: ObjcId) -> NSDragOperation {
         
         let window = get_cocoa_window(this);
@@ -683,12 +691,13 @@ pub fn define_cocoa_view_class() -> *const Class {
             DragResponse::Move => NSDragOperation::Move,
         }
     }
-    
+    #[cfg(target_os = "macos")]
     extern fn dragging_ended(this: &Object, _: Sel, _sender: ObjcId) {
         let window = get_cocoa_window(this);
         window.end_live_resize();
     }
     
+    #[cfg(target_os = "macos")]
     fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DragItem >>, DVec2) {
         //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
@@ -753,6 +762,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         (Rc::new(items), pos)
     }
     
+    #[cfg(target_os = "macos")]
     extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
         //let window = get_cocoa_window(this);
         //window.end_live_resize();
@@ -838,13 +848,14 @@ pub fn define_cocoa_view_class() -> *const Class {
         
         decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, ObjcId));
         
-        decl.add_method(sel!(draggingSession: endedAtPoint: operation:), dragging_session_ended_at_point_operation as extern fn(&Object, Sel, ObjcId, NSPoint, NSDragOperation));
-        
-        decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, ObjcId) -> NSDragOperation);
-        decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, ObjcId));
-        decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, ObjcId) -> NSDragOperation);
-        decl.add_method(sel!(performDragOperation:), perform_drag_operation as extern fn(&Object, Sel, ObjcId));
-        decl.add_method(sel!(draggingEnded:), dragging_ended as extern fn(&Object, Sel, ObjcId));
+        #[cfg(target_os = "macos")]{
+            decl.add_method(sel!(draggingSession: endedAtPoint: operation:), dragging_session_ended_at_point_operation as extern fn(&Object, Sel, ObjcId, NSPoint, NSDragOperation));
+            decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, ObjcId) -> NSDragOperation);
+            decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, ObjcId));
+            decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, ObjcId) -> NSDragOperation);
+            decl.add_method(sel!(performDragOperation:), perform_drag_operation as extern fn(&Object, Sel, ObjcId));
+            decl.add_method(sel!(draggingEnded:), dragging_ended as extern fn(&Object, Sel, ObjcId));
+        }
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
     decl.add_ivar::<ObjcId>("markedText");

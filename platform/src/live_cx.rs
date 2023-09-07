@@ -177,8 +177,7 @@ impl Cx {
                 if let Ok(next) = next{
                     if let Some(content_str) = content{
                         if content_str != &next{
-                            crate::log!("Live reloading application: {}",file_name.clone());
-
+                            //crate::log!("Live reloading application: {}",file_name.clone());
                             changed_files.push(LiveFileChange{
                                 file_name:file_name.clone(), 
                                 content: next.clone()
@@ -198,7 +197,7 @@ impl Cx {
         });
     }
     
-    pub fn check_live_file_watcher(&mut self)->bool{
+    pub fn was_live_edit(&mut self)->bool{
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
@@ -216,6 +215,7 @@ impl Cx {
             for err in errs {
                 error!("check_live_file_watcher: Error expanding live file {}", err);
             }
+            self.draw_shaders.reset_for_live_reload();
             true
         }
         else{

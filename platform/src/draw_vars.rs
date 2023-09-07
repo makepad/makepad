@@ -206,7 +206,7 @@ impl DrawVars {
             if cx.draw_shaders.error_fingerprints.iter().find( | fp | **fp == fingerprint).is_some() {
                 return;
             }
-            
+
             fn live_type_to_shader_ty(live_type: LiveType) -> Option<ShaderTy> {
                 if live_type == LiveType::of::<f32>() {Some(ShaderTy::Float)}
                 else if live_type == LiveType::of::<Vec2>() {Some(ShaderTy::Vec2)}
@@ -588,11 +588,6 @@ impl DrawVars {
     
     pub fn after_apply_update_self(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         // alright. so.if we are ApplyFrom::
-        if let ApplyFrom::LiveEdit = from {
-            // alright, we might have to update something here.
-            return
-        }
-        
         if from.is_from_doc() {
             self.init_slicer(cx);
         }
