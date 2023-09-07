@@ -177,7 +177,9 @@ pub fn implement(attributes: proc_macro::TokenStream, original_type: proc_macro:
 
     let mut tokens: proc_macro::TokenStream = tokens.into();
     tokens.extend(core::iter::once(original_type));
-    tokens
+    //eprintln!("{}", tokens.to_string());
+    //tokens;
+    return proc_macro::TokenStream::new();
 }
 
 #[derive(Default)]

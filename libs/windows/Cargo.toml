@@ -34,10 +34,10 @@ targets = []
 path = "../windows-core"
 version = "0.51.1"
 
-[dependencies.windows-implement]
-version = "0.51.1"
-path = "../windows-implement"
-optional = true
+#[dependencies.windows-implement]
+#version = "0.51.1"
+#path = "../windows-implement"
+#optional = true
 
 #[dependencies.windows-interface]
 #version = "0.51.1"
@@ -727,7 +727,7 @@ Win32_Web_InternetExplorer = ["Win32_Web"]
 default = []
 deprecated = []
 implement = [
-    "windows-implement",
+    #"windows-implement",
     #"windows-interface",
     "windows-core/implement",
 ]
