@@ -1,11 +1,15 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, VideoColorFormat};
-use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
-
-const DEFAULT_FPS_INTERVAL: f64 = 33.0;
+use crate::{
+    makepad_derive_widget::*, makepad_draw::*, makepad_platform::thread::*, widget::*,
+    VideoColorFormat,
+};
+use std::{thread, collections::VecDeque, time::Instant, sync::{Arc, Mutex}, sync::mpsc::channel};
 
 live_design! {
     VideoBase = {{Video}} {}
 }
+
+// TODO: dynamically calculate this based on frame rate and size
+// const CHUNK_DURATION_US: u128 = 1_000_000 / 2;
 
 #[derive(Live)]
 pub struct Video {
@@ -44,11 +48,9 @@ pub struct Video {
 
     // Buffering
     #[rust]
-    frames_buffer: RingBuffer,
+    frames_buffer: SharedRingBuffer,
 
     // Frame
-    #[rust]
-    current_frame_index: usize,
     #[rust]
     current_frame_ts: u128,
     #[rust]
@@ -64,25 +66,16 @@ pub struct Video {
 
     // Decoding
     #[rust]
-    decoding_threshold: f64,
+    video_recv: ToUIReceiver<Vec<u8>>,
     #[rust]
     decoding_state: DecodingState,
     #[rust]
-    latest_chunk: Option<(u128, u128)>,
+    vec_pool_y: SharedVecPool,
     #[rust]
-    vec_pool_y: VecPool,
-    #[rust]
-    vec_pool_uv: VecPool,
+    vec_pool_uv: SharedVecPool,
 
     #[rust]
     id: LiveId,
-}
-
-#[derive(Clone)]
-struct VideoFrame {
-    y_data: Rc<RefCell<Vec<u32>>>,
-    uv_data: Rc<RefCell<Vec<u32>>>,
-    timestamp_us: u128,
 }
 
 #[derive(Clone, Default, PartialEq, WidgetRef)]
@@ -91,14 +84,13 @@ pub struct VideoRef(WidgetRef);
 #[derive(Clone, Default, WidgetSet)]
 pub struct VideoSet(WidgetSet);
 
-impl VideoSet {
-}
+impl VideoSet {}
 
 #[derive(Default, PartialEq)]
 enum DecodingState {
     #[default]
     NotStarted,
-    Idle,
+    _Idle,
     Decoding,
     Finished,
 }
@@ -113,7 +105,7 @@ impl Default for MyInstant {
 
 impl LiveHook for Video {
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Video)
+        register_widget!(cx, Video);
     }
 
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
@@ -180,7 +172,7 @@ impl Video {
 
             if self.decoding_state == DecodingState::Finished
                 || self.decoding_state == DecodingState::Decoding
-                    && self.frames_buffer.data.len() > 5
+                    && self.frames_buffer.lock().unwrap().data.len() > 5
             {
                 self.process_tick(cx);
             }
@@ -208,11 +200,11 @@ impl Video {
                 self.frame_ts_interval
             );
 
-            self.resize_frames_buffer();
-
             cx.decode_next_video_chunk(self.id, 45);
             self.decoding_state = DecodingState::Decoding;
 
+            self.begin_buffering_thread();
+            
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
         }
 
@@ -223,65 +215,16 @@ impl Video {
             cx.fetch_next_video_frames(self.id, 30);
         }
 
-        // let start = Instant::now();
         if let Event::VideoStream(event) = event {
             makepad_error_log::log!("<<<<<<<<<<<<<<< VideoStream Event");
-            let mut cursor = 0;
-            let frame_group = &event.frame_group;
-
-            // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
-            let metadata_size = 20;
-
-            while cursor < frame_group.len() {
-                // might have to update for different endinaess on other platforms
-                let timestamp =
-                    u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
-                let y_stride =
-                    u32::from_be_bytes(frame_group[cursor + 8..cursor + 12].try_into().unwrap());
-                let uv_stride =
-                    u32::from_be_bytes(frame_group[cursor + 12..cursor + 16].try_into().unwrap());
-                let frame_length =
-                    u32::from_be_bytes(frame_group[cursor + 16..cursor + 20].try_into().unwrap())
-                        as usize;
-
-                let frame_data_start = cursor + metadata_size;
-                let frame_data_end = frame_data_start + frame_length;
-
-                let pixel_data = &frame_group[frame_data_start..frame_data_end];
-
-                let mut y_data = self.vec_pool_y.acquire(self.video_width * self.video_height);
-                let mut uv_data = self.vec_pool_uv.acquire((self.video_width / 2) * (self.video_height / 2));
-
-                split_nv12_data(
-                    pixel_data,
-                    self.video_width,
-                    self.video_height,
-                    y_stride as usize,
-                    uv_stride as usize,
-                    y_data.as_mut_slice(),
-                    uv_data.as_mut_slice(),
-                );
-
-                self.frames_buffer.push(VideoFrame {
-                    y_data: Rc::new(RefCell::new(y_data)),
-                    uv_data: Rc::new(RefCell::new(uv_data)),
-                    timestamp_us: timestamp,
-                });
-
-                cursor = frame_data_end;
-            }
-
-            // let elapsed = start.elapsed();
-
-            // let elapsed_ms = elapsed.as_secs() * 1000 + elapsed.subsec_millis() as u64;
-            // makepad_error_log::log!("STREAM EVENT TOOK: {}", elapsed_ms);
+            let _ = self.video_recv.sender().send(event.frame_group.clone()); // unecessary cloning
         }
     }
 
     fn should_request_decoding(&self) -> bool {
         match self.decoding_state {
             DecodingState::Decoding => false,
-            DecodingState::Finished => self.frames_buffer.data.len() < 10,
+            DecodingState::Finished => self.frames_buffer.lock().unwrap().data.len() < 10,
             _ => todo!(),
         }
     }
@@ -290,14 +233,18 @@ impl Video {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update.0).as_micros();
         self.accumulated_time += elapsed;
-
-        match self.frames_buffer.get() {
+    
+        // block to limit the scope of the lock guard
+        let maybe_current_frame = {
+            self.frames_buffer.lock().unwrap().get()
+        };
+    
+        match maybe_current_frame {
             Some(current_frame) => {
                 if self.accumulated_time >= current_frame.timestamp_us {
                     self.update_textures(cx, current_frame.y_data, current_frame.uv_data);
-
-                    self.redraw(cx);
-
+                    self.redraw(cx);    
+                    
                     // if at latest frame, restart
                     if self.current_frame_ts >= self.total_duration {
                         if self.is_looping {
@@ -319,47 +266,55 @@ impl Video {
                 makepad_error_log::log!("Empty Buffer");
             }
         }
-    }
+    }    
 
     fn update_textures(
         &mut self,
         cx: &mut Cx,
-        y_data: Rc<RefCell<Vec<u32>>>,
-        uv_data: Rc<RefCell<Vec<u32>>>,
+        y_data: Arc<Mutex<Vec<u32>>>,
+        uv_data: Arc<Mutex<Vec<u32>>>,
     ) {
-        if let None = self.y_texture {
-            self.y_texture = Some(Texture::new(cx));
+        if self.y_texture.is_none() {
+            let texture = Texture::new(cx);
+            texture.set_desc(
+                cx,
+                TextureDesc {
+                    format: TextureFormat::ImageBGRA,
+                    width: Some(self.video_width),
+                    height: Some(self.video_height),
+                },
+            );
+            self.y_texture = Some(texture);
         }
-        if let None = self.uv_texture {
-            self.uv_texture = Some(Texture::new(cx));
+
+        if self.uv_texture.is_none() {
+            let texture = Texture::new(cx);
+            texture.set_desc(
+                cx,
+                TextureDesc {
+                    format: TextureFormat::ImageBGRA,
+                    width: Some(self.video_width / 2),
+                    height: Some(self.video_height / 2),
+                },
+            );
+            self.uv_texture = Some(texture);
         }
 
         let y_texture = self.y_texture.as_mut().unwrap();
         let uv_texture = self.uv_texture.as_mut().unwrap();
 
-        y_texture.set_desc(
-            cx,
-            TextureDesc {
-                format: TextureFormat::ImageBGRA,
-                width: Some(self.video_width),
-                height: Some(self.video_height),
-            },
-        );
+        {
+            let mut y_data_locked = y_data.lock().unwrap();
+            y_texture.swap_image_u32(cx, &mut *y_data_locked);
+        }
 
-        uv_texture.set_desc(
-            cx,
-            TextureDesc {
-                format: TextureFormat::ImageBGRA,
-                width: Some(self.video_width / 2),
-                height: Some(self.video_height / 2),
-            },
-        );
+        {
+            let mut uv_data_locked = uv_data.lock().unwrap();
+            uv_texture.swap_image_u32(cx, &mut *uv_data_locked);
+        }
 
-        y_texture.swap_image_u32(cx, &mut y_data.borrow_mut());
-        uv_texture.swap_image_u32(cx, &mut uv_data.borrow_mut());
-
-        self.vec_pool_y.release(y_data.borrow().to_vec());
-        self.vec_pool_uv.release(uv_data.borrow().to_vec());        
+        self.vec_pool_y.lock().unwrap().release(y_data.lock().unwrap().to_vec());
+        self.vec_pool_uv.lock().unwrap().release(uv_data.lock().unwrap().to_vec());
     }
 
     fn initialize_decoding(&self, cx: &mut Cx) {
@@ -373,27 +328,41 @@ impl Video {
         }
     }
 
-    fn resize_frames_buffer(&mut self) {
-        let chunk_duration_seconds = CHUNK_DURATION_US as f64 / 1_000_000.0;
-        let estimated_frames_per_chunk =
-            (self.original_frame_rate as f64 * chunk_duration_seconds).ceil() as usize;
+    fn begin_buffering_thread(&mut self) {
+        let frames_buffer = Arc::clone(&self.frames_buffer);
+        let vec_pool_y = Arc::clone(&self.vec_pool_y);
+        let vec_pool_uv = Arc::clone(&self.vec_pool_uv);
+        
+        let video_width = self.video_width.clone();
+        let video_height = self.video_height.clone();
 
-        self.frames_buffer.capacity = (estimated_frames_per_chunk as f64 * 1.2).ceil() as usize;
+        let (_new_sender, new_receiver) = channel();
+        let old_receiver = std::mem::replace(&mut self.video_recv.receiver, new_receiver);
+    
+        thread::spawn(move || loop {
+            let frame_group = old_receiver.recv().unwrap();
+            deserialize_chunk(
+                Arc::clone(&frames_buffer),
+                Arc::clone(&vec_pool_y),
+                Arc::clone(&vec_pool_uv),
+                &frame_group,
+                video_width,
+                video_height,
+            );
+        });
     }
 
-    fn cleanup_decoding(&mut self, cx: &mut Cx) {
+    fn cleanup_decoding(&mut self, _cx: &mut Cx) {
         //cx.cleanup_video_decoding(self.id);
         //cx.cancel_timeout
     }
 }
 
-// TODO: dynamically calculate this based on frame rate and size
-const CHUNK_DURATION_US: u128 = 1_000_000 / 2;
-
+type SharedRingBuffer = Arc<Mutex<RingBuffer>>;
+#[derive(Clone)]
 struct RingBuffer {
     data: VecDeque<VideoFrame>,
     last_added_index: Option<usize>,
-    capacity: usize,
 }
 
 impl RingBuffer {
@@ -418,28 +387,28 @@ impl RingBuffer {
 impl Default for RingBuffer {
     fn default() -> Self {
         Self {
-            capacity: 0,
             data: VecDeque::new(),
             last_added_index: None,
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
+struct VideoFrame {
+    y_data: Arc<Mutex<Vec<u32>>>,
+    uv_data: Arc<Mutex<Vec<u32>>>,
+    timestamp_us: u128,
+}
+
+type SharedVecPool = Arc<Mutex<VecPool>>;
+#[derive(Default, Clone)]
 pub struct VecPool {
-    pool: RefCell<Vec<Vec<u32>>>,
+    pool: Vec<Vec<u32>>,
 }
 
 impl VecPool {
-    pub fn new() -> Self {
-        Self {
-            pool: RefCell::new(Vec::new()),
-        }
-    }
-
-    pub fn acquire(&self, capacity: usize) -> Vec<u32> {
-        let mut pool = self.pool.borrow_mut();
-        match pool.pop() {
+    pub fn acquire(&mut self, capacity: usize) -> Vec<u32> {
+        match self.pool.pop() {
             Some(mut vec) => {
                 if vec.capacity() < capacity {
                     vec.resize(capacity, 0);
@@ -450,9 +419,59 @@ impl VecPool {
         }
     }
 
-    pub fn release(&self, vec: Vec<u32>) {
-        let mut pool = self.pool.borrow_mut();
-        pool.push(vec);
+    pub fn release(&mut self, vec: Vec<u32>) {
+        self.pool.push(vec);
+    }
+}
+
+fn deserialize_chunk(
+    frames_buffer: SharedRingBuffer,
+    vec_pool_y: SharedVecPool,
+    vec_pool_uv: SharedVecPool,
+    frame_group: &[u8],
+    video_width: usize,
+    video_height: usize,
+) {
+    let mut cursor = 0;
+
+    // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
+    let metadata_size = 20;
+
+    while cursor < frame_group.len() {
+        // might have to update for different endinaess on other platforms
+        let timestamp =
+            u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
+        let y_stride = u32::from_be_bytes(frame_group[cursor + 8..cursor + 12].try_into().unwrap());
+        let uv_stride =
+            u32::from_be_bytes(frame_group[cursor + 12..cursor + 16].try_into().unwrap());
+        let frame_length =
+            u32::from_be_bytes(frame_group[cursor + 16..cursor + 20].try_into().unwrap()) as usize;
+
+        let frame_data_start = cursor + metadata_size;
+        let frame_data_end = frame_data_start + frame_length;
+
+        let pixel_data = &frame_group[frame_data_start..frame_data_end];
+
+        let mut y_data = vec_pool_y.lock().unwrap().acquire(video_width * video_height);
+        let mut uv_data = vec_pool_uv.lock().unwrap().acquire((video_width / 2) * (video_height / 2));
+
+        split_nv12_data(
+            pixel_data,
+            video_width,
+            video_height,
+            y_stride as usize,
+            uv_stride as usize,
+            y_data.as_mut_slice(),
+            uv_data.as_mut_slice(),
+        );
+
+        frames_buffer.lock().unwrap().push(VideoFrame {
+            y_data: Arc::new(Mutex::new(y_data)),
+            uv_data: Arc::new(Mutex::new(uv_data)),
+            timestamp_us: timestamp,
+        });
+
+        cursor = frame_data_end;
     }
 }
 
@@ -469,8 +488,14 @@ fn split_nv12_data(
     let mut uv_idx = 0;
 
     if y_data.len() < width * height || uv_data.len() < (width / 2) * (height / 2) {
-        makepad_error_log::log!("y_data len: {}, uv_data len: {}, width: {}, height: {}", y_data.len(), uv_data.len(), width, height);
-        return; 
+        makepad_error_log::log!(
+            "y_data len: {}, uv_data len: {}, width: {}, height: {}",
+            y_data.len(),
+            uv_data.len(),
+            width,
+            height
+        );
+        return;
     }
 
     // Extract and convert Y data

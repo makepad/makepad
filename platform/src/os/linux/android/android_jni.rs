@@ -2,7 +2,7 @@
 
 use {
     std::rc::Rc,
-    self::super::jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, jboolean, JNIEnv, JNI_ABORT},
+    self::super::jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
     crate::{
         makepad_live_id::*,
         area::Area,
