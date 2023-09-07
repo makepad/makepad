@@ -15,7 +15,7 @@ use {
     std::{
         collections::HashMap,
         fmt,
-        path::{PathBuf},
+        path::PathBuf,
         sync::{Arc, RwLock, Mutex, mpsc::Sender},
     },
 };

@@ -5,13 +5,11 @@ use {
     crate::{
         implement_com,
         makepad_live_id::*,
-        os::windows::win32_app::{FALSE},
+        os::windows::win32_app::FALSE,
         audio::*,
         thread::Signal,
         windows_crate::{
-            core::{
-                PCWSTR,
-            },
+            core::PCWSTR,
             Win32::Foundation::{
                 WAIT_OBJECT_0,
                 HANDLE,
@@ -25,12 +23,8 @@ use {
                 //STGM_READ,
                 VT_LPWSTR
             },
-            Win32::UI::Shell::PropertiesSystem::{
-                PROPERTYKEY
-            },
-            Win32::Media::KernelStreaming::{
-                WAVE_FORMAT_EXTENSIBLE,
-            },
+            Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
+            Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
             Win32::Media::Multimedia::{
                 KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
                 //WAVE_FORMAT_IEEE_FLOAT
