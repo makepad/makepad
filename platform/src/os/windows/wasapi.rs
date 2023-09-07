@@ -345,7 +345,6 @@ impl WasapiBaseRef {
     }
 }
 
-
 impl WasapiBase {
     pub fn get_ref(&self) -> WasapiBaseRef {
         WasapiBaseRef {
