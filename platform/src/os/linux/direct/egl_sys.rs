@@ -2,7 +2,6 @@ use std::os::raw::{
     c_void,
     c_uint,
     c_ulong,
-    c_char,
 };
 
 pub const EGL_PLATFORM_GBM_KHR: u32 = 12759;
@@ -119,7 +118,7 @@ unsafe extern "C" fn(
 
 #[link(name = "EGL")]
 extern "C" {
-    pub fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
+    pub fn eglGetProcAddress(procname: *const u8) -> *mut c_void;
     pub fn eglBindAPI(api: EGLenum) -> EGLBoolean;
     pub fn eglCreateContext(
         dpy: EGLDisplay,

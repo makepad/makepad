@@ -53,7 +53,7 @@ const ANDROID_META_ALT_MASK: i32 = 50;
 
 #[link(name = "EGL")]
 extern "C" {
-    fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
+    fn eglGetProcAddress(procname: *const u8) -> *mut c_void;
 }
 
 impl Cx {
