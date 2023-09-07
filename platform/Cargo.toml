@@ -39,12 +39,8 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.3.0" }
 path = "../libs/futures_legacy"
 version = "0.3"
 
-[target.'cfg(windows)'.dependencies.windows-core]
-#path = "../tools/windows_strip/windows-core"
-version = "0.51.1"
-
-[target.'cfg(windows)'.dependencies.windows]
-#path = "../tools/windows_strip/windows"
+[target.'cfg(windows)'.dependencies.makepad-windows]
+path = "../libs/windows"
 version = "0.51.1"
 features = [
     "Win32_Foundation", 
