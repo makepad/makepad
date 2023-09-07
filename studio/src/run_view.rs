@@ -94,6 +94,18 @@ impl RunView {
             })
         }
         // lets send mouse events
+        match event.hits(cx, self.draw_app.area()){
+            Hit::FingerDown(_)=>{
+                cx.set_key_focus(self.draw_app.area());
+            }
+            Hit::KeyDown(e)=>{
+                manager.send_host_to_stdin(None, HostToStdin::KeyDown(e));
+            }
+            Hit::KeyUp(e)=>{
+                manager.send_host_to_stdin(None, HostToStdin::KeyUp(e));
+            }
+            _=>()
+        }
         let rect = self.draw_app.area().get_rect(cx);
         match event {
             Event::MouseDown(e) => {

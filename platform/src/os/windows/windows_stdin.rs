@@ -79,6 +79,12 @@ impl Cx {
                             // alright lets reload this file in our DSL system
                             
                         }
+                        HostToStdin::KeyDown(e) => {
+                            self.call_event_handler(&Event::KeyDown(e));
+                        }
+                        HostToStdin::KeyUp(e) => {
+                            self.call_event_handler(&Event::KeyUp(e));
+                        }
                         HostToStdin::MouseDown(e) => {
                             self.fingers.process_tap_count(
                                 dvec2(e.x,e.y),
