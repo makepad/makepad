@@ -775,8 +775,10 @@ impl ListViewRef {
         let uid = self.widget_uid();
         for action in actions {
             if action.container_uid == uid {
+                
                 if let Some(inner) = self.borrow() {
                     for ((item_id, _), item) in inner.items.iter() {
+                        
                         if item.widget_uid() == action.item_uid {
                             set.push((*item_id, item.clone()))
                         }

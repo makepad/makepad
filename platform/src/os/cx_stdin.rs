@@ -9,6 +9,7 @@ use {
         window::CxWindowPool,
         area::Area,
         event::{
+            KeyEvent,
             ScrollEvent,
             MouseDownEvent,
             MouseUpEvent,
@@ -120,6 +121,8 @@ pub enum HostToStdin{
     MouseDown(StdinMouseDown),
     MouseUp(StdinMouseUp),
     MouseMove(StdinMouseMove),
+    KeyDown(KeyEvent),
+    KeyUp(KeyEvent),
     Scroll(StdinScroll),
     ReloadFile{
         file:String,

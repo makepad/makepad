@@ -121,7 +121,7 @@ impl Button {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
+#[derive(Clone, Debug, PartialEq, WidgetRef)]
 pub struct ButtonRef(WidgetRef); 
 
 impl ButtonRef {
@@ -152,7 +152,7 @@ impl ButtonRef {
 
 }
 
-#[derive(Clone, WidgetSet)]
+#[derive(Clone, Debug, WidgetSet)]
 pub struct ButtonSet(WidgetSet);
 impl ButtonSet{
     pub fn clicked(&self, actions: &WidgetActions)->bool{
