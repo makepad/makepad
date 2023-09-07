@@ -49,7 +49,7 @@ pub enum Event {
     MouseMove(MouseMoveEvent),
     MouseUp(MouseUpEvent),
     TouchUpdate(TouchUpdateEvent),
-    Scroll(ScrollEvent),
+    Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
     
     Timer(TimerEvent),
     
