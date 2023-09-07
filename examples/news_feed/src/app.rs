@@ -73,9 +73,6 @@ live_design!{
             instance hover: 0.0
             instance pressed: 0.0
             text_style: {
-                font: {
-                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
-                }
                 font_size: 11.0
             }
             fn get_color(self) -> vec4 {
@@ -303,10 +300,10 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        //for i in 0..15{
-            //log!("Work! {}",i); 
-            //std::thread::sleep(std::time::Duration::from_millis(10))
-        //}
+        for i in 0..30{
+            log!("Work! {}",i); 
+          //std::thread::sleep(std::time::Duration::from_millis(10))
+        }
         crate::makepad_widgets::live_design(cx);
     }
 }
