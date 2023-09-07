@@ -452,7 +452,7 @@ fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(S
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows_core::ComInterface for {}", sym_id));
             
             push_unique(output, &sym, out);
-        }
+        } 
         
         if let Some((_, is_com)) = mod_tokens.at(&format!("pub struct {}_Vtbl", sym_id)) {
             
@@ -472,11 +472,6 @@ fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(S
             // fetch impl tokens
             
             let impl_tokens = parse_file(&format!("{}/impl.rs", path), cache).unwrap();
-            
-           /* let mut out = String::new();
-            sym[sym_end] = LiveId::from_str_with_lut(&format!("{}_RuntimeName", sym_id)).unwrap();
-            add_impl(&mut out, impl_tokens, format!("impl ::windows_core::RuntimeName for {}", sym_id));
-            push_unique(output, &sym, out);*/ 
  
             if let Some((_, is_trait)) = impl_tokens.at(&format!("pub trait {}_Impl", sym_id)){
                 let is_trait = is_trait.find_close(Delim::Brace).unwrap();
