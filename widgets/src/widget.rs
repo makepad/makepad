@@ -582,6 +582,7 @@ impl LiveApply for WidgetRef {
             if let Some(component) = &mut *inner {
                 if component.type_id() != live_type {
                     *inner = None; // type changed, drop old component
+                    log!("TYPECHANGE");
                 }
                 else {
                     return component.apply(cx, from, index, nodes);
@@ -589,6 +590,9 @@ impl LiveApply for WidgetRef {
             }
             if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<WidgetRegistry>().new(cx, live_type) {
+                    if cx.debug.marker() == 1{
+                        panic!()
+                    }
                 *inner = Some(component);
                 if let Some(component) = &mut *inner {
                     return component.apply(cx, from, index, nodes);
@@ -628,6 +632,12 @@ pub struct WidgetActionItem {
     pub container_uid: WidgetUid,
     pub item_uid: WidgetUid,
     pub action: Box<dyn WidgetAction>
+}
+
+impl Debug for WidgetActionItem {
+    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
+        write!(f, "WidgetActionItem{{wiget_uid: {:?}, container_uid: {:?}, item_uid:{:?}}}", self.widget_uid, self.container_uid, self.item_uid)
+    }
 }
 
 pub type WidgetActions = Vec<WidgetActionItem>;

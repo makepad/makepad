@@ -390,7 +390,7 @@ impl Egl {
         
         gl_sys::load_with( | s | {
             let s = CString::new(s).unwrap();
-            unsafe {eglGetProcAddress(s.as_ptr())}
+            unsafe {eglGetProcAddress(s.as_ptr() as *const u8)}
         });
         
         Some(Self {

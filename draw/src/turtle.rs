@@ -525,14 +525,14 @@ impl<'a> Cx2d<'a> {
     }
     
     fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
-        let current_dpi_factor = self.current_dpi_factor();
+        //let current_dpi_factor = self.current_dpi_factor();
         let dx = if dx.is_nan() {0.0}else {dx} + turtle_shift.x;
         let dy = if dy.is_nan() {0.0}else {dy} + turtle_shift.y;
         if dx == 0.0 && dy == 0.0 {
             return 
         }
-        let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
-        let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
+        //let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
+        //let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
         let d = dvec2(dx, dy);
         let mut c = align_start;
         while c < align_end {
@@ -649,10 +649,26 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn get_turtle_align_range(&self) -> TurtleAlignRange {
+        TurtleAlignRange{
+            start:  self.turtles.last().unwrap().align_start,
+            end: self.align_list.len()
+        }
+    }
+    
+    pub fn shift_align_range(&mut self, range: &TurtleAlignRange, shift: DVec2) {
+        self.move_align_list(shift.x, shift.y, range.start, range.end, true, dvec2(0.0,0.0));
+    }
+    
     pub fn add_rect_area(&mut self, area: &mut Area, rect: Rect) {
         //let turtle = self.turtle();
         self.add_aligned_rect_area(area, rect)
     }
+}
+
+pub struct TurtleAlignRange{
+    start: usize,
+    end: usize
 }
 
 impl Turtle {
@@ -688,6 +704,8 @@ impl Turtle {
         self.width_used = width_used;
         self.height_used = height_used;
     }
+    
+    
     /*
     pub fn move_pos(&mut self, dx: f64, dy: f64) {
         self.pos.x += dx;
@@ -1055,6 +1073,14 @@ impl Walk {
     
     pub fn with_margin(mut self, v: Margin) -> Self {
         self.margin = v;
+        self
+    }
+    
+    pub fn with_add_padding(mut self, v: Padding) -> Self {
+        self.margin.top += v.top;
+        self.margin.left += v.left;
+        self.margin.right += v.right;
+        self.margin.bottom += v.bottom;
         self
     }
 }

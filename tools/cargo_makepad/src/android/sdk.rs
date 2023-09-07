@@ -37,14 +37,14 @@ fn url_file_name(url: &str) -> &str {
 pub fn rustup_toolchain_install(targets:&[AndroidTarget]) -> Result<(), String> {
     println!("Installing Rust toolchains for android");
     println!("Installing nightly");
-    shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
+    shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "install",
         "nightly"
     ]) ?;
     for target in targets{
         let toolchain = target.toolchain();
         println!("Installing rust nightly for {}", toolchain);
-        shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
+        shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
             "target",
             "add",
             toolchain,

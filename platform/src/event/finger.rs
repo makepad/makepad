@@ -3,6 +3,7 @@
 use {
     std::cell::{Cell},
     crate::{
+        makepad_micro_serde::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
             LivePropType,
@@ -31,7 +32,7 @@ use {
 // Mouse events
 
 
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
@@ -312,6 +313,9 @@ impl CxFingers {
         self.captures.iter_mut().find( | v | v.area == area)
     }
     
+    pub fn is_area_captured(&self, area: Area) -> bool {
+        self.captures.iter().find( | v | v.area == area).is_some()
+    }
     
     pub (crate) fn release_digit(&mut self, digit_id: DigitId) {
         while let Some(index) = self.captures.iter_mut().position( | v | v.digit_id == digit_id) {
@@ -674,7 +678,7 @@ impl Event {
                     match t.state {
                         TouchState::Start => {
                             
-                            if !t.handled.get().is_empty() {
+                            if !options.capture_overload && !t.handled.get().is_empty() {
                                 continue;
                             }
                             

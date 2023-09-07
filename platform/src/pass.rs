@@ -1,36 +1,26 @@
-use {
-    crate::{
-        makepad_live_compiler::{
-            LiveType,
-            LiveNode,
-            LiveId,
-            LiveModuleId,
-            LiveTypeInfo,
-            LiveNodeSliceApi
-        },
-        live_traits::{LiveNew, LiveApply, ApplyFrom},
-        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
-        makepad_live_id::*,
-        makepad_math::*,
-        id_pool::*,
-        area::Area,
-        window::{
-            WindowId,
-        },
-        os::{
-            CxOsPass,
-        },
-        cx::{
-            Cx,
-        },
-        draw_list::{
-            DrawListId
-        },
-        live_traits::*,
-        texture::{
-            Texture,
-            TextureId
-        }
+use crate::{
+    makepad_live_compiler::{
+        LiveType,
+        LiveNode,
+        LiveId,
+        LiveModuleId,
+        LiveTypeInfo,
+        LiveNodeSliceApi
+    },
+    live_traits::{LiveNew, LiveApply, ApplyFrom},
+    makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
+    makepad_live_id::*,
+    makepad_math::*,
+    id_pool::*,
+    area::Area,
+    window::WindowId,
+    os::CxOsPass,
+    cx::Cx,
+    draw_list::DrawListId,
+    live_traits::*,
+    texture::{
+        Texture,
+        TextureId
     }
 };
 
