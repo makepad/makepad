@@ -285,7 +285,7 @@ impl BuildManager {
                         let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
                         item.apply_over(cx, live!{draw_bg:{is_even:(if is_even{1.0} else{0.0})}});
                         item.page_flip(id!(icon)).set_active_page(map_level_to_icon(msg.level));
-                        item.widget(id!(location)).set_text(&format!("{}: {}",msg.file_name, msg.range.start().line));
+                        item.widget(id!(location)).set_text(&format!("{}: {}:{}",msg.file_name, msg.range.start().line, msg.range.start().byte));
                         item.widget(id!(body)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
