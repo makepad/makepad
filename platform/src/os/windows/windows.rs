@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{RefCell},
+        cell::RefCell,
     },
     crate::{
         makepad_live_id::*,
@@ -17,7 +17,7 @@ use {
             },
             cx_native::EventFlow,
         },
-        pass::{CxPassParent},
+        pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
     }
 };
@@ -30,6 +30,14 @@ impl Cx {
         cx.borrow_mut().os_type = OsType::Windows;
         
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
+        
+        for arg in std::env::args() {
+            if arg == "--stdin-loop" {
+                let mut cx = cx.borrow_mut();
+                let mut d3d11_cx = d3d11_cx.borrow_mut();
+                return cx.stdin_event_loop(&mut d3d11_cx);
+            }
+        }
         
         let d3d11_windows = Rc::new(RefCell::new(Vec::new()));
         
@@ -213,13 +221,16 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 }
             }
         }
+    }
+    
+    pub(crate) fn handle_networking_events(&mut self) {
     }
     
     fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App)->EventFlow {
@@ -301,17 +312,17 @@ impl Cx {
                 },
                 CxOsOp::UpdateMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{id:_, request:_} => {
-                    todo!()
+                CxOsOp::HttpRequest{request_id:_, request:_} => {
+                    //todo!()
                 },
-                CxOsOp::WebSocketOpen{id:_, request:_,}=>{
-                    todo!()
+                CxOsOp::WebSocketOpen{request_id:_, request:_,}=>{
+                    //todo!()
                 }
-                CxOsOp::WebSocketSendBinary{id:_, data:_}=>{
-                    todo!()
+                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
+                    //todo!()
                 }
-                CxOsOp::WebSocketSendString{id:_, data:_}=>{
-                    todo!()
+                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
+                    //todo!()
                 }
             }
         }

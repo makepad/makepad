@@ -9,7 +9,6 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
     
     DrawWave = {{DrawWave}} {
         texture wave_texture: texture2d
@@ -46,10 +45,10 @@ live_design!{
     }
     
     DisplayAudio = {{DisplayAudio}} {
-        walk: {
+        
             width: Fill,
             height: Fill
-        }
+        
     }
 }
 
@@ -64,7 +63,7 @@ struct DrawWave {
 
 #[derive(Live)]
 pub struct DisplayAudio {
-    #[live] walk: Walk,
+    #[walk] walk: Walk,
     #[live] draw_wave: DrawWave,
     #[live] wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
@@ -86,7 +85,7 @@ impl Widget for DisplayAudio {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.draw_wave.redraw(cx)

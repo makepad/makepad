@@ -14,7 +14,7 @@ use {
         makepad_error_log::*,
         makepad_live_id::*,
         cx::Cx,
-        os::{CxOsTexture},
+        os::CxOsTexture,
         live_traits::*,
     },
     std::rc::Rc,

@@ -1,51 +1,19 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    frame::*,
+    view::*,
     widget::*,
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::frame::*;
-    import makepad_widgets::label::Label;
-    //registry Widget::*;
-    
-    SlidePanel = {{SlidePanel}} {
-        state: {
-            closed = {
-                default: off,
-                on = {
-                    redraw: true,
-                    from: {
-                        all: Forward {duration: 0.5}
-                    }
-                    ease: InQuad
-                    apply: {
-                        closed: 1.0
-                    }
-                }
-                
-                off = {
-                    redraw: true,
-                    from: {
-                        all: Forward {duration: 0.5}
-                    }
-                    ease: OutQuad
-                    apply: {
-                        closed: 0.0
-                    }
-                }
-            }
-        }
-    }
+    SlidePanelBase = {{SlidePanel}} {}
 }
 
 
 #[derive(Live)]
 pub struct SlidePanel {
-    #[deref] frame: Frame,
-    #[state] state: LiveState,
+    #[deref] frame: View,
+    #[animator] animator: Animator,
     #[live] closed: f64,
     #[live] side: SlideSide,
     #[rust] next_frame: NextFrame
@@ -76,8 +44,8 @@ impl Widget for SlidePanel {
         });
     }
     
-    fn get_walk(&self) -> Walk {
-        self.frame.get_walk()
+    fn walk(&self) -> Walk {
+        self.frame.walk()
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
@@ -90,13 +58,13 @@ impl Widget for SlidePanel {
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
         // ok lets set abs pos
-        let pos = cx.turtle().eval_width(walk.width, walk.margin, Flow::Overlay);
+        let rect = cx.peek_walk_turtle(walk);
         match self.side{
             SlideSide::Top=>{
-                walk.abs_pos = Some(dvec2(0.0, -pos * self.closed));
+                walk.abs_pos = Some(dvec2(0.0, -rect.size.y * self.closed));
             }
             SlideSide::Left=>{
-                walk.abs_pos = Some(dvec2(-pos * self.closed, 0.0));
+                walk.abs_pos = Some(dvec2(-rect.size.x * self.closed, 0.0));
             }
         }
         self.frame.draw_walk_widget(cx, walk)
@@ -113,7 +81,7 @@ pub enum SlideSide{
 impl SlidePanel {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidePanelAction)) {
         // lets handle mousedown, setfocus
-        if self.state_handle_event(cx, event).must_redraw() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.frame.redraw(cx);
         }
         match event {
@@ -143,21 +111,21 @@ pub struct SlidePanelRef(WidgetRef);
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animate_state(cx, id!(closed.on))
+            inner.animator_play(cx, id!(closed.on))
         }
     }
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animate_state(cx, id!(closed.off))
+            inner.animator_play(cx, id!(closed.off))
         }
     }
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.is_in_state(cx, id!(closed.on)){
-                inner.animate_state(cx, id!(closed.off))
+            if inner.animator_in_state(cx, id!(closed.on)){
+                inner.animator_play(cx, id!(closed.off))
             }
             else{
-                inner.animate_state(cx, id!(closed.on))
+                inner.animator_play(cx, id!(closed.on))
             }
         }
     }

@@ -9,11 +9,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    
-    MultiWindow = {{MultiWindow}} {
-    }
+    MultiWindowBase = {{MultiWindow}} {}
 }
 
 #[derive(Live)]
@@ -72,7 +68,7 @@ impl Widget for MultiWindow {
         }
     }
     
-    fn get_walk(&self) -> Walk {Walk::default()}
+    fn walk(&self) -> Walk {Walk::default()}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
         self.draw_state.begin(cx, DrawState::Window(0));

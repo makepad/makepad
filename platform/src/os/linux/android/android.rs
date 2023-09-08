@@ -53,7 +53,7 @@ const ANDROID_META_ALT_MASK: i32 = 50;
 
 #[link(name = "EGL")]
 extern "C" {
-    fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
+    fn eglGetProcAddress(procname: *const u8) -> *mut c_void;
 }
 
 impl Cx {
@@ -352,12 +352,12 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_http_response(&mut self, id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
+    pub fn from_java_on_http_response(&mut self, request_id: u64, metadata_id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
         let e = Event::NetworkResponses(vec![
             NetworkResponseEvent{
-                id: LiveId(id),
+                request_id: LiveId(request_id),
                 response: NetworkResponse::HttpResponse(HttpResponse::new(
-                    LiveId(0),
+                    LiveId(metadata_id),
                     status_code,
                     headers,
                     Some(body)
@@ -368,10 +368,10 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_http_request_error(&mut self, id: u64, error: String, to_java: AndroidToJava) {
+    pub fn from_java_on_http_request_error(&mut self, request_id: u64, _metadata_id: u64, error: String, to_java: AndroidToJava) {
         let e = Event::NetworkResponses(vec![
             NetworkResponseEvent{
-                id: LiveId(id),
+                request_id: LiveId(request_id),
                 response: NetworkResponse::HttpRequestError(error)
             }
         ]);
@@ -519,8 +519,8 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(selected) => {
                     to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::HttpRequest{id, request} => {
-                    to_java.http_request(id, request)
+                CxOsOp::HttpRequest{request_id, request} => {
+                    to_java.http_request(request_id, request)
                 },
                 _ => ()
             }

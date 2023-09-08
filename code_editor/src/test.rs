@@ -207,11 +207,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -276,7 +276,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -4225,11 +4225,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -4294,7 +4294,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -8243,11 +8243,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -8312,7 +8312,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -12261,11 +12261,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -12330,7 +12330,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
@@ -16279,11 +16279,11 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
+        
             width: Fill,
             height: Fill,
             margin: 0,
-        },
+        
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -16348,7 +16348,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 
