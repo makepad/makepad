@@ -216,7 +216,6 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
             (makepad_java_classes_dir.join("ByteArrayMediaDataSource.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("VideoDecoder.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("VideoDecoderRunnable.java").to_str().unwrap()),
-            (makepad_java_classes_dir.join("VideoFrame.java").to_str().unwrap()),
             (build_paths.java_file.to_str().unwrap())
         ]   
     ) ?; 
@@ -251,7 +250,6 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
             (compiled_java_classes_dir.join("ByteArrayMediaDataSource.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("VideoDecoder.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("VideoDecoderRunnable.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("VideoFrame.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap()),
             (build_paths.java_class.to_str().unwrap()),
         ]
