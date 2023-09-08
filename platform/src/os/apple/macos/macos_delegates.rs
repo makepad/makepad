@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use {
     std::{
         rc::Rc,
@@ -14,16 +13,18 @@ use {
         },
         os::{
             apple::apple_sys::*,
-            cocoa_app::{
-                get_cocoa_class_global,
-                get_cocoa_app_global
+            macos::{
+                macos_app::{
+                    get_macos_app_global
+                },
+                macos_event::{
+                    MacosEvent
+                },
+                macos_window::{
+                    get_cocoa_window
+                },
             },
-            cocoa_event::{
-                CocoaEvent
-            },
-            cocoa_window::{
-                get_cocoa_window
-            },
+            apple_classes::get_apple_class_global,
             apple_util::{
                 nsstring_to_string,
                 get_event_key_modifier,
@@ -48,15 +49,15 @@ use {
 
 
 
-pub fn define_cocoa_timer_delegate() -> *const Class {
+pub fn define_macos_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
-        let ca = get_cocoa_app_global();
+        let ca = get_macos_app_global();
         ca.send_timer_received(nstimer);
     }
     
     extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        let ca = get_cocoa_app_global();
+        let ca = get_macos_app_global();
         ca.send_paint_event();
     }
     
@@ -87,7 +88,7 @@ pub fn define_menu_target_class() -> *const Class {
     
     extern fn menu_action(this: &Object, _sel: Sel, _item: ObjcId) {
         //println!("markedRange");
-        let ca = get_cocoa_app_global();
+        let ca = get_macos_app_global();
         unsafe {
             let command_u64: u64 = *this.get_ivar("command_usize");
             /*let cmd = if let Ok(status_map) = ca.status_map.lock() {
@@ -128,14 +129,14 @@ pub fn define_menu_delegate() -> *const Class {
 }
 /*
 struct CocoaPostInit {
-    cocoa_app_ptr: *mut CocoaApp,
+    cocoa_app_ptr: *mut MacosApp,
     signal_id: u64,
 }*/
 /*
 pub fn define_cocoa_post_delegate() -> *const Class {
     
     extern fn received_post(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        let ca = get_cocoa_app_global();
+        let ca = get_macos_app_global();
         //unsafe {
             //let signal_id: u64 = *this.get_ivar("signal_id");
             /*let status = if let Ok(status_map) = ca.status_map.lock() {
@@ -163,7 +164,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     return decl.register();
 }*/
 
-pub fn define_cocoa_window_delegate() -> *const Class {
+pub fn define_macos_window_delegate() -> *const Class {
     
     extern fn window_should_close(this: &Object, _: Sel, _: ObjcId) -> BOOL {
         let cw = get_cocoa_window(this);
@@ -307,7 +308,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     return decl.register();
 }
 
-pub fn define_cocoa_window_class() -> *const Class {
+pub fn define_macos_window_class() -> *const Class {
     extern fn yes(_: &Object, _: Sel) -> BOOL {
         YES
     }
@@ -458,7 +459,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn reset_cursor_rects(this: &Object, _sel: Sel) {
         unsafe {
-            let cocoa_app = get_cocoa_app_global();
+            let cocoa_app = get_macos_app_global();
             let current_cursor = cocoa_app.current_cursor.clone();
             let cursor_id = *cocoa_app.cursors.entry(current_cursor.clone()).or_insert_with( || {
                 load_mouse_cursor(current_cursor.clone())
@@ -531,14 +532,14 @@ pub fn define_cocoa_view_class() -> *const Class {
         unsafe {
             let marked_text: ObjcId = *this.get_ivar("markedText");
             let mutable_string = marked_text.mutable_string();
-            let _: () = msg_send![mutable_string, setString: get_cocoa_class_global().const_empty_string.as_id()];
+            let _: () = msg_send![mutable_string, setString: get_apple_class_global().const_empty_string.as_id()];
             let input_context: ObjcId = msg_send![this, inputContext];
             let _: () = msg_send![input_context, discardMarkedText];
         }
     }
     
     extern fn valid_attributes_for_marked_text(_this: &Object, _sel: Sel) -> ObjcId {
-        get_cocoa_class_global().const_attributes_for_marked_text
+        get_apple_class_global().const_attributes_for_marked_text
     }
     
     extern fn attributed_substring_for_proposed_range(_this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> ObjcId {
@@ -635,30 +636,25 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_change_event();
     }
     
-    #[cfg(target_os = "macos")]
     extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: ObjcId, _point: NSPoint, _operation: NSDragOperation) {
         let window = get_cocoa_window(this);
-        window.do_callback(CocoaEvent::DragEnd);
+        window.do_callback(MacosEvent::DragEnd);
     }
     
-    #[cfg(target_os = "macos")]
     extern fn dragging_entered(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
         dragging(this, sender)
     }
     
-    #[cfg(target_os = "macos")]
     extern fn dragging_updated(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
         dragging(this, sender)
     }
     
-    #[cfg(target_os = "macos")]
     extern fn dragging_exited(this: &Object, _: Sel, sender: ObjcId) {
         dragging(this, sender);
     }
     
-    #[cfg(target_os = "macos")]
     fn dragging(this: &Object, sender: ObjcId) -> NSDragOperation {
         
         let window = get_cocoa_window(this);
@@ -676,7 +672,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             get_event_key_modifier(ns_event)
         };
         
-        window.do_callback(CocoaEvent::Drag(DragEvent {
+        window.do_callback(MacosEvent::Drag(DragEvent {
             modifiers,
             handled: Cell::new(false),
             abs: pos,
@@ -691,13 +687,12 @@ pub fn define_cocoa_view_class() -> *const Class {
             DragResponse::Move => NSDragOperation::Move,
         }
     }
-    #[cfg(target_os = "macos")]
+
     extern fn dragging_ended(this: &Object, _: Sel, _sender: ObjcId) {
         let window = get_cocoa_window(this);
         window.end_live_resize();
     }
     
-    #[cfg(target_os = "macos")]
     fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DragItem >>, DVec2) {
         //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
@@ -762,7 +757,6 @@ pub fn define_cocoa_view_class() -> *const Class {
         (Rc::new(items), pos)
     }
     
-    #[cfg(target_os = "macos")]
     extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
         //let window = get_cocoa_window(this);
         //window.end_live_resize();
@@ -773,7 +767,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         };    
         let window = get_cocoa_window(this);
         let (items, pos) = get_drag_items_from_pasteboard(this, sender);
-        window.do_callback(CocoaEvent::Drop(DropEvent {
+        window.do_callback(MacosEvent::Drop(DropEvent {
             modifiers,
             handled: Cell::new(false),
             abs: pos,

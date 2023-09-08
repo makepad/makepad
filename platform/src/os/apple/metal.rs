@@ -1,7 +1,7 @@
 use {
     makepad_objc_sys::{
         msg_send,
-        runtime::{YES, NO},
+        runtime::{YES},
         sel,
         class,
         sel_impl,
@@ -21,15 +21,10 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
-            
-            cocoa_app::CocoaApp,
-            cocoa_window::CocoaWindow,
         },
         draw_list::DrawListId,
-        event::WindowGeom,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth, PassId},
-        window::WindowId,
         texture::{
             TextureFormat,
             TextureDesc,
@@ -463,13 +458,14 @@ impl Cx {
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
                 if stdin_frame.is_some(){
+                    #[cfg(target_os = "macos")]
                     Self::stdin_send_draw_complete();
                 }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
-    }
+    } 
     
     
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
@@ -522,94 +518,10 @@ impl DrawPassMode {
 }
 
 pub struct MetalCx {
-    device: ObjcId,
+    pub device: ObjcId,
     command_queue: ObjcId
 }
 
-
-#[derive(Clone)]
-pub struct MetalWindow {
-    pub window_id: WindowId,
-    pub window_geom: WindowGeom,
-    cal_size: DVec2,
-    pub ca_layer: ObjcId,
-    pub cocoa_window: Box<CocoaWindow>,
-    pub is_resizing: bool
-}
-
-impl MetalWindow {
-    pub (crate) fn new(
-        window_id: WindowId,
-        metal_cx: &MetalCx,
-        cocoa_app: &mut CocoaApp,
-        inner_size: DVec2,
-        position: Option<DVec2>,
-        title: &str
-    ) -> MetalWindow {
-        
-        let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
-        
-        let mut cocoa_window = Box::new(CocoaWindow::new(cocoa_app, window_id));
-        
-        cocoa_window.init(title, inner_size, position);
-        unsafe {
-            let () = msg_send![ca_layer, setDevice: metal_cx.device];
-            let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
-            let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
-            let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
-            let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
-            let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
-            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
-            let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
-            let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
-            
-            let view = cocoa_window.view;
-            let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
-            let () = msg_send![view, setWantsLayer: YES];
-            let () = msg_send![view, setLayerContentsPlacement: 11];
-            let () = msg_send![view, setLayer: ca_layer];
-        }
-        
-        MetalWindow {
-            is_resizing: false,
-            window_id,
-            cal_size: DVec2::default(),
-            ca_layer,
-            window_geom: cocoa_window.get_window_geom(),
-            cocoa_window
-        }
-    }
-    
-    pub (crate) fn start_resize(&mut self) {
-        self.is_resizing = true;
-        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
-    }
-    
-    pub (crate) fn stop_resize(&mut self) {
-        self.is_resizing = false;
-        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
-    }
-    
-    pub (crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
-        let cal_size = DVec2 {
-            x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
-            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
-        };
-        if self.cal_size != cal_size {
-            self.cal_size = cal_size;
-            unsafe {
-                let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x, height: cal_size.y}];
-                let () = msg_send![self.ca_layer, setContentsScale: self.window_geom.dpi_factor];
-            }
-            true
-        }
-        else {
-            false
-        }
-    }
-    
-}
 
 #[derive(Clone, Default)]
 pub struct CxOsView {
