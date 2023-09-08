@@ -294,7 +294,7 @@ impl Cx {
                 // lets send mousebutton ups to fix missing it.
                 // TODO! make this more resilient
                 self.call_event_handler(&Event::MouseUp(MouseUpEvent{
-                    abs: dvec2(0.0,0.0),
+                    abs: dvec2(f64::NAN,f64::NAN),
                     button: 0,
                     window_id: CxWindowPool::id_zero(),
                     modifiers: Default::default(),

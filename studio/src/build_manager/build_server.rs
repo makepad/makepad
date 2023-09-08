@@ -154,7 +154,7 @@ impl BuildConnection {
                                     stderr_state = StdErrState::Running;
                                 }
                                 else if line.trim().starts_with("error: could not compile "){
-                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Log, line);
+                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
                                 }
                                 else{
                                     stderr_state = StdErrState::Desync;
@@ -248,6 +248,7 @@ pub trait MsgSender: Send {
     
     fn process_compiler_message(&self, cmd_id: BuildCmdId, msg: RustcCompilerMessage) {
         if let Some(msg) = msg.message {
+            
             let level = match msg.level.as_ref() {
                 "error" => LogItemLevel::Error,
                 "warning" => LogItemLevel::Warning,
