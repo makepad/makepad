@@ -172,6 +172,7 @@ impl AppMain for App {
         let log_list = self.ui.list_view(id!(log_list));
         
         if let Event::Draw(event) = event {
+            //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 
@@ -197,6 +198,7 @@ impl AppMain for App {
                     }
                 }
             }
+            //profile_end!(dt);
             return
         }
         
@@ -224,6 +226,8 @@ impl AppMain for App {
                     run_view.recompile_started(cx);
                 }
                 FileSystemAction::LiveReloadNeeded=>{
+                    self.build_manager.clear_log();
+                    log_list.redraw(cx);
                 }
             }
         }

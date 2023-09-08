@@ -112,7 +112,7 @@ impl<'a> DataBindingMap<'a> {
                 let mut ui_nodes = LiveNodeVec::new();
                 ui_nodes.write_field_value(widget_val[1], map(v.clone()));
                 let widgets = self.ui.widgets(&[widget_val[0]]);
-                for mut widget in widgets.iter(){
+                for widget in widgets.iter(){
                     widget.apply_over(self.cx, &ui_nodes)
                 }
                 /*else if self.debug_missing {
