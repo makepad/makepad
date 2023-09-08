@@ -18,7 +18,7 @@ use {
         span::{TextSpan, TextPos},
         live_error::{LiveError},
         live_document::LiveOriginal,
-        live_node::{LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
+        live_node::{LiveImport, LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
     }
 };
 
@@ -204,11 +204,19 @@ impl<'a> LiveParser<'a> {
                 }
             }
         }
+        let import_id = last_id;
+        if let LiveToken::Ident(live_id!(as)) = self.peek_token(){
+            self.skip_token();
+            last_id = self.expect_ident() ?;
+        }
         
         ld.nodes.push(LiveNode {
             origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
             id: last_id,
-            value: LiveValue::Import(LiveModuleId(crate_id, LiveId::from_str_with_lut(&module).unwrap()))
+            value: LiveValue::Import(Box::new(LiveImport{
+                module_id: LiveModuleId(crate_id, LiveId::from_str_with_lut(&module).unwrap()),
+                import_id,
+            }))
         });
         
         Ok(())
@@ -771,7 +779,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_live_class(&mut self, root: bool, prop_id: LiveId, ld: &mut LiveOriginal) -> Result<(), LiveError> {
-        
+        let mut nameless_id = 0;
         while self.peek_token() != LiveToken::Eof {
             match self.peek_token() {
                 LiveToken::Close(Delim::Brace) => {
@@ -795,9 +803,10 @@ impl<'a> LiveParser<'a> {
                     self.expect_token(LiveToken::Open(Delim::Brace))?;
                     ld.nodes.push(LiveNode {
                         origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
-                        id: LiveId::unique(),
+                        id: LiveId::from_str(&format!("nameless_{}", nameless_id)),
                         value: LiveValue::Clone(ident)
                     });
+                    nameless_id += 1;
                     self.expect_live_class(false, prop_id, ld) ?;
                 }
                 LiveToken::Ident(prop_id) => {

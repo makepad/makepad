@@ -7,23 +7,13 @@ use {
 live_design!{
     import makepad_draw::shader::std::*;
     
-    HookWidget= {{HookWidget}} {
-        walk: {
-            width: Fit,
-            height: Fit,
-            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
-        }
-        layout: {
-            align: {x: 0.5, y: 0.5},
-            padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
-        }
-    }
+    HookWidgetBase = {{HookWidget}} {}
 }
 
 #[derive(Live)]
 pub struct HookWidget {
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[rust] draw_state: DrawStateWrap<DrawState>,
 }
 
@@ -47,7 +37,7 @@ impl Widget for HookWidget{
     ) {
     }
 
-    fn get_walk(&self)->Walk{
+    fn walk(&self)->Walk{
         self.walk
     }
     

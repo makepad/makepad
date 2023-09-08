@@ -168,9 +168,9 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    if self.check_live_file_watcher(){
-                        // self.draw_shaders.ptr_to_item.clear();
-                        // self.draw_shaders.fingerprints.clear();
+                    if self.was_live_edit(){
+                        self.draw_shaders.ptr_to_item.clear();
+                        self.draw_shaders.fingerprints.clear();
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
                     }
@@ -413,19 +413,19 @@ impl Cx {
                 CxOsOp::UpdateMenu(menu) => {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
                 },
-                CxOsOp::HttpRequest{id, request} => {
-                    cocoa_app.make_http_request(id, request, self.os.network_response.sender.clone());
+                CxOsOp::HttpRequest{request_id, request} => {
+                    cocoa_app.make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::WebSocketOpen{id, request}=>{
-                    cocoa_app.web_socket_open(id, request, self.os.network_response.sender.clone());
+                CxOsOp::WebSocketOpen{request_id, request}=>{
+                    cocoa_app.web_socket_open(request_id, request, self.os.network_response.sender.clone());
                 }
-                CxOsOp::WebSocketSendBinary{id:_, data:_}=>{
+                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
                     todo!()
                 }
-                CxOsOp::WebSocketSendString{id:_, data:_}=>{
+                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
                     todo!()
                 }
             }

@@ -15,13 +15,9 @@ use {
             CxPassRect,
             Cx
         },
-        nav::{
-            CxNavTreeRc,
-        },
+        nav::CxNavTreeRc,
         icon_atlas::CxIconAtlasRc,
-        font_atlas::{
-            CxFontsAtlasRc,
-        },
+        font_atlas::CxFontsAtlasRc,
         draw_list_2d::DrawList2d,
         turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     }

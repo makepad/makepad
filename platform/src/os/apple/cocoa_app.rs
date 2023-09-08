@@ -1,4 +1,4 @@
-
+#[allow(unused_imports)]
 use {
     std::{
         rc::Rc,
@@ -142,6 +142,7 @@ pub struct CocoaApp {
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
     last_key_mod: KeyModifiers,
+    #[allow(unused)]
     pasteboard: ObjcId,
     startup_focus_hack_ran: bool,
     event_callback: Option<Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow >>,
@@ -388,6 +389,7 @@ impl CocoaApp {
                     //let is_return = if let KeyCode::Return = key_code{true} else{false};
                     
                     
+                    #[cfg(target_os = "macos")]
                     match key_code {
                         KeyCode::KeyV => if modifiers.logo || modifiers.control {
                             // was a paste
@@ -720,6 +722,7 @@ impl CocoaApp {
         self.do_callback(CocoaEvent::Paint);
     }
     
+    #[cfg(target_os = "macos")]
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
        unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];

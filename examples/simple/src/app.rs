@@ -9,32 +9,23 @@ use makepad_widgets::*;
 // as a code editor) can notify the Makepad runtime that a DSL code block has been changed, allowing
 // the runtime to automatically update the affected widgets.
 live_design!{
-    import makepad_widgets::button::Button;
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::frame::Frame;
-    import makepad_widgets::text_input::TextInput;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     
     // The `{{App}}` syntax is used to inherit a DSL object from a Rust struct. This tells the
     // Makepad runtime that our DSL object corresponds to a Rust struct named `App`. Whenever an
     // instance of `App` is initialized, the Makepad runtime will obtain its initial values from
     // this DSL object.
     App = {{App}} {
-        // The `ui` field on the struct `App` defines a frame widget. Frames are used as containers
+        // The `ui` field on the struct `App` defines a frame widget. Views are used as containers
         // for other widgets. Since the `ui` property on the DSL object `App` corresponds with the
         // `ui` field on the Rust struct `App`, the latter will be initialized from the DSL object
         // here below.
         ui: <DesktopWindow>{
-            
             show_bg: true
+            width: Fill,
+            height: Fill
             
-            // The `walk` property determines how the frame widget itself is laid out. In this
-            // case, the frame widget takes up the entire window.
-            walk: {
-                width: Fill,
-                height: Fill
-            },
             draw_bg: {
                 
                 
@@ -74,14 +65,14 @@ live_design!{
             // Because the child widgets flow downward, vertical alignment works somewhat
             // differently. In this case, children are centered vertically with respect to the
             // remainder of the frame after the previous children have been drawn.
-            <Frame>{
-                layout: {
+            <View>{
+                 
                     flow: Down,
                     spacing: 20,
                     align: {
                         x: 0.5,
                         y: 0.5
-                    }
+                    
                 },
                 button1 = <Button> {
                     draw_icon:{
@@ -90,19 +81,19 @@ live_design!{
                         //path:"M0,0 L20.0,0.0 L20.0,20.0 Z"
                     }
                     icon_walk:{margin:{left:10}, width:16,height:Fit}
-                    label: "Click to count"
+                    text: "Click to count"
                 }
                 input1 = <TextInput> {
-                    walk: {width: 100, height: 30},
+                    width: 100, height: 30
                     text: "Click to count"
                 }
                 
                 // A label to display the counter.
                 label1 = <Label> {
-                    draw_label: {
+                    draw_text: {
                         color: #f
                     },
-                    label: "Counter: 0"
+                    text: "Counter: 0"
                 }
             }
         }
@@ -170,16 +161,15 @@ impl AppMain for App{
         
         // Get a reference to our button from the frame, and check if one of the actions returned by
         // the frame was a notification that the button was clicked.
-        if self.ui.get_button(id!(button1)).clicked(&actions) {
+        if self.ui.button(id!(button1)).clicked(&actions) {
             //cx.spawn_async(Self::do_network_request(cx.get_ref(), self.ui.clone()))
             // Increment the counter.
             self.counter += 1;
             
             // Get a reference to our label from the frame, update its text, and schedule a redraw
             // for it.
-            let label = self.ui.get_label(id!(label1));
-            label.set_label(&format!("Counter: {}", self.counter));
-            label.redraw(cx);
+            let label = self.ui.label(id!(label1));
+            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
         }
     }
 }

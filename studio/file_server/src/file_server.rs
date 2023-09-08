@@ -8,8 +8,6 @@ use {
             FileNotification,
             FileRequest,
             FileResponse,
-            unix_str::UnixString,
-            unix_path::UnixPathBuf,
         },
     },
     std::{
@@ -81,8 +79,6 @@ impl FileServerConnection {
     
     // Handles a `LoadFileTree` request.
     fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, FileError> {
-        use std::os::unix::ffi::OsStringExt;
-        
         // A recursive helper function for traversing the entries of a directory and creating the
         // data structures that describe them.
         fn get_directory_entries(path: &Path, with_data: bool) -> Result<Vec<DirectoryEntry>, FileError> {
@@ -111,7 +107,7 @@ impl FileServerConnection {
                 }
                 // Create a `DirectoryEntry` for this entry and add it to the list of entries.
                 entries.push(DirectoryEntry {
-                    name: UnixString::from_vec(entry.file_name().into_vec()),
+                    name: entry.file_name().to_string_lossy().to_string(),
                     node: if entry_path.is_dir() {
                         // If this entry is a subdirectory, recursively create `DirectoryEntry`'s
                         // for its entries as well.
@@ -162,17 +158,15 @@ impl FileServerConnection {
         Ok(FileTreeData {root_path: "".into(), root})
     }
     
-    fn make_full_path(&self, unix_path:&UnixPathBuf)->PathBuf{
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
-        let path_buf = PathBuf::from(OsString::from_vec(unix_path.clone().into_unix_string().into_vec()));
+    fn make_full_path(&self, child_path:&String)->PathBuf{
         let mut path = self.shared.read().unwrap().root_path.clone();
-        path.push(path_buf);
+        path.push(child_path);
         path
     }
     
     // Handles an `OpenFile` request.
-    fn open_file(&self, unix_path: UnixPathBuf) -> Result<(UnixPathBuf, String), FileError> {
-        let path = self.make_full_path(&unix_path);
+    fn open_file(&self, child_path: String) -> Result<(String, String), FileError> {
+        let path = self.make_full_path(&child_path);
         
         let bytes = fs::read(&path).map_err(
             | error | FileError::Unknown(error.to_string())
@@ -186,16 +180,16 @@ impl FileServerConnection {
             .collect::<Vec<_ >>());*/
         
         let text = String::from_utf8_lossy(&bytes);
-        Ok((unix_path, text.to_string()))
+        Ok((child_path, text.to_string()))
     }
     
     // Handles an `ApplyDelta` request.
     fn save_file(
         &self,
-        unix_path: UnixPathBuf,
+        child_path: String,
         new_content: String,
-    ) -> Result<(UnixPathBuf, String, String), FileError> {
-        let path = self.make_full_path(&unix_path);
+    ) -> Result<(String, String, String), FileError> {
+        let path = self.make_full_path(&child_path);
         
         let old_content = String::from_utf8_lossy(&fs::read(&path).map_err(
             | error | FileError::Unknown(error.to_string())
@@ -205,7 +199,7 @@ impl FileServerConnection {
             | error | FileError::Unknown(error.to_string())
         ) ?;
         
-        Ok((unix_path, old_content, new_content))
+        Ok((child_path, old_content, new_content))
     }
 }
 

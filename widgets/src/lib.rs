@@ -34,9 +34,6 @@ pub mod scroll_shadow;
 pub mod rotated_image;
 pub mod slide_panel;
 
-pub mod swipe_list;
-
-pub mod list_box;
 pub mod file_tree;
 pub mod slides_view;
 pub mod color_picker;
@@ -46,26 +43,26 @@ pub mod window_menu;
 pub mod debug_view;
 pub mod nav_control;
 
-pub mod frame;
+pub mod view;
 pub mod widget;
 
 #[macro_use]
 pub mod data_binding;
 
-mod theme;
+mod base;
+mod theme_desktop_dark;
 pub mod image_cache;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
-    frame::*,
+    view::*,
     image::*,
     label::*,
     slider::*,
     check_box::*,
     drop_down::*,
     radio_button::*,
-    swipe_list::*,
     text_input::*,
     link_label::*,
     list_view::*,
@@ -100,13 +97,14 @@ pub fn live_design(cx: &mut Cx) {
     crate::debug_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
-    crate::theme::live_design(cx);
+    crate::base::live_design(cx);
+    crate::theme_desktop_dark::live_design(cx);
     crate::slider::live_design(cx);
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
     crate::rotated_image::live_design(cx);
-    crate::frame::live_design(cx);
+    crate::view::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
     crate::link_label::live_design(cx);
@@ -121,20 +119,16 @@ pub fn live_design(cx: &mut Cx) {
     crate::radio_button::live_design(cx);
     crate::popup_menu::live_design(cx);
     crate::drop_down::live_design(cx);
-    crate::swipe_list::live_design(cx);
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
     crate::list_view::live_design(cx);
     crate::slide_panel::live_design(cx);
-    //#[cfg(ide_widgets)]{
-        crate::tab::live_design(cx);
-        crate::tab_bar::live_design(cx);
-        crate::dock::live_design(cx);
-        crate::color_picker::live_design(cx);
-        crate::file_tree::live_design(cx);
-        crate::slides_view::live_design(cx);
-        crate::list_box::live_design(cx);
-        crate::tab_close_button::live_design(cx);
-    //}
+    crate::tab::live_design(cx);
+    crate::tab_bar::live_design(cx);
+    crate::dock::live_design(cx);
+    crate::color_picker::live_design(cx);
+    crate::file_tree::live_design(cx);
+    crate::slides_view::live_design(cx);
+    crate::tab_close_button::live_design(cx);
 }
