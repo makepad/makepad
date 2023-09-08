@@ -200,7 +200,7 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    text: "@This is realtime · 13h"
+                    text: "@Hello world· 13h"
                 }
                 text = <Label> {
                     width: Fill, height: Fit
@@ -342,7 +342,7 @@ impl AppMain for App {
 
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
-                log!("Live! {}", item_id);
+                log!("Test {}", item_id);
             }
         }
     }
