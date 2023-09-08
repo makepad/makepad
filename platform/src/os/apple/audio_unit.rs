@@ -10,6 +10,7 @@ use {
         os::apple::apple_sys::*,
         os::apple::apple_classes::*,
         os::apple::apple_util::*,
+        os::apple::macos::macos_app::get_macos_app_global,
         makepad_objc_sys::objc_block,
         makepad_objc_sys::objc_block_invoke,
     },
@@ -1144,7 +1145,7 @@ impl AudioUnit {
         
         let () = unsafe {msg_send![self.au_audio_unit, requestViewControllerWithCompletionHandler: &view_controller_complete]};
     }
-    /*
+    
     pub fn open_ui(&self) {
         if let Some(view_controller) = self.view_controller.lock().unwrap().as_ref() {
             let audio_view: ObjcId = unsafe {msg_send![*view_controller, view]};
@@ -1152,7 +1153,7 @@ impl AudioUnit {
             let win_view = cocoa_app.cocoa_windows[0].1;
             let () = unsafe {msg_send![win_view, addSubview: audio_view]};
         }
-    }*/
+    }
     
     pub fn send_mouse_down(&self) {
         if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
