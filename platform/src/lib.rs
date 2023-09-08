@@ -29,12 +29,11 @@ mod pass;
 mod texture;
 mod cursor;
 mod menu;
-mod live_state;
+mod animator;
 mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
-pub mod network;
 
 pub mod audio_stream;
 
@@ -46,11 +45,12 @@ mod app_main;
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
-pub use makepad_windows as windows_crate;
+pub use ::makepad_windows as windows;
+
 pub use makepad_futures;
  
 pub use {
@@ -103,9 +103,7 @@ pub use {
         LiveNodeSliceApi,
         LiveNodeVecApi,
     },
-    component_map::{
-        ComponentMap
-    },
+    component_map::ComponentMap,
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,
@@ -114,12 +112,8 @@ pub use {
     },
     crate::{
         os::*,
-        cx_api::{
-            CxOsApi,
-        },
-        media_api::{
-            CxMediaApi
-        },
+        cx_api::CxOsApi,
+        media_api::CxMediaApi,
         draw_list::{
             CxDrawItem,
             CxRectArea,
@@ -138,9 +132,7 @@ pub use {
             RectArea,
             InstanceArea
         },
-        menu::{
-            MenuCommand,
-        },
+        menu::MenuCommand,
         thread::Signal,
         event::{
             HttpRequest,
@@ -213,6 +205,7 @@ pub use {
         },
         live_prims::{
             LiveDependency,
+            RcStringMut,
         },
         live_traits::{
             LiveHookDeref,
@@ -225,13 +218,13 @@ pub use {
             ToLiveValue,
             ApplyFrom,
         },
-        live_state::{
+        animator::{
             Ease,
             Play,
             Animate,
-            LiveState,
-            LiveStateImpl,
-            StateAction,
+            Animator,
+            AnimatorImpl,
+            AnimatorAction,
         },
         draw_vars::{
             shader_enum,
@@ -245,10 +238,7 @@ pub use {
             GeometryRef,
             Geometry,
         },
-        gpu_info::{
-            GpuPerformance
-        },
-        
+        gpu_info::GpuPerformance,       
     },
 };
 

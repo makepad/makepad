@@ -58,26 +58,26 @@ live_design!{
     
     NumberBox= {{NumberBox}} {
        
-       layout:{padding:{left:14,top:1, bottom:1, right:5}}
-        draw_label:{text_style:{font_size: 12}}
+       padding:{left:14,top:1, bottom:1, right:5}
+        draw_text:{text_style:{font_size: 12}}
         label_align: {
             y: 0.0
         }
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_label: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                         draw_bg: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_label: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                         draw_bg: {hover: 1.0}
                     }
                 }
@@ -87,14 +87,14 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_label: {focus: 0.0}
+                        draw_text: {focus: 0.0}
                         draw_bg: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                         draw_bg: {focus: 1.0}
                     }
                 }
@@ -104,10 +104,10 @@ live_design!{
     
     NumberGrid= {{NumberGrid}} {
         number_box: <NumberBox> {}
-        walk: {
+        
             width: Fill,
             height: Fill
-        }
+        
     }
 }
 
@@ -131,10 +131,10 @@ pub struct DrawLabel {
 #[derive(Live, LiveHook)]
 pub struct NumberBox {
     #[live] draw_bg: DrawBg,
-    #[live] draw_label: DrawLabel,
+    #[live] draw_text: DrawLabel,
 
-    #[live] layout: Layout,
-    #[state] state: LiveState,
+    #[layout] layout: Layout,
+    #[animator] animator: Animator,
     
     #[live] label_align: Align,
 }
@@ -147,7 +147,7 @@ impl Widget for NumberGrid {
         });
     }
     
-    fn get_walk(&self) -> Walk {self.walk}
+    fn walk(&self) -> Walk {self.walk}
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx)
@@ -164,8 +164,8 @@ impl Widget for NumberGrid {
 #[derive(Live)]
 pub struct NumberGrid {
     #[live] scroll_bars: ScrollBars,
-    #[live] walk: Walk,
-    #[live] layout: Layout,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
     #[live] seed: u32,
     #[live] fast_path: bool,
     #[live] number_box: Option<LivePtr>,
@@ -189,15 +189,15 @@ impl LiveHook for NumberGrid{
 
 impl NumberBox {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
             },
@@ -214,11 +214,11 @@ impl NumberBox {
         
         self.draw_bg.last_number = self.draw_bg.number;
         self.draw_bg.number = number;
-        self.draw_label.last_number = self.draw_label.number;
-        self.draw_label.number = number;
+        self.draw_text.last_number = self.draw_text.number;
+        self.draw_text.number = number;
         
         self.draw_bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
-        self.draw_label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
+        self.draw_text.draw_walk(cx, Walk::fit(),self.label_align, fmt);
         self.draw_bg.end(cx);
     }
 }

@@ -15,7 +15,7 @@ use {
     std::{
         collections::HashMap,
         fmt,
-        path::{PathBuf},
+        path::PathBuf,
         sync::{Arc, RwLock, Mutex, mpsc::Sender},
     },
 };
@@ -148,36 +148,36 @@ impl BuildConnection {
                         match stderr_state{
                             StdErrState::First=>{
                                 if line.trim().starts_with("Compiling "){
-                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Wait, line);
+                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
                                 }
                                 else if line.trim().starts_with("Finished "){
                                     stderr_state = StdErrState::Running;
                                 }
                                 else if line.trim().starts_with("error: could not compile "){
-                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Log, line);
+                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Log, line);
                                 }
                                 else{
                                     stderr_state = StdErrState::Desync;
-                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);                                    
+                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);                                    
                                 }
                             }                            
                             StdErrState::Sync | StdErrState::Desync => {
-                                msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);
+                                msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
                             }
                             StdErrState::Running=>{
                                 if line.trim().starts_with("Running "){
-                                     msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Wait, format!("{}",line.trim()));
+                                     msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, format!("{}",line.trim()));
                                     stderr_state = StdErrState::Sync
                                 }
                                 else{
                                     stderr_state = StdErrState::Desync;
-                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);
+                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
                                 }
                             }
                         }
                     }
                     ChildStdIO::Term => {
-                        msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Log, "process terminated".into());
+                        msg_sender.send_bare_msg(cmd_id, LogItemLevel::Log, "process terminated".into());
                         break;
                     }
                     ChildStdIO::Kill => {
@@ -216,12 +216,12 @@ impl BuildConnection {
 
 pub trait MsgSender: Send {
     fn box_clone(&self) -> Box<dyn MsgSender>;
-    fn send_message(&self, wrap: BuildMsgWrap);
+    fn send_message(&self, wrap: LogItemWrap);
     
-    fn send_bare_msg(&self, cmd_id: BuildCmdId, level: BuildMsgLevel, line: String) {
+    fn send_bare_msg(&self, cmd_id: BuildCmdId, level: LogItemLevel, line: String) {
         let line = line.trim();
         self.send_message(
-            cmd_id.wrap_msg(BuildMsg::Bare(BuildMsgBare {
+            cmd_id.wrap_msg(LogItem::Bare(LogItemBare {
                 line:line.to_string(),
                 level
             }))
@@ -230,14 +230,14 @@ pub trait MsgSender: Send {
     
     fn send_stdin_to_host_msg(&self, cmd_id: BuildCmdId, line: String) {
         self.send_message(
-            cmd_id.wrap_msg(BuildMsg::StdinToHost(line))
+            cmd_id.wrap_msg(LogItem::StdinToHost(line))
         );
     }
     
     
-    fn send_location_msg(&self, cmd_id: BuildCmdId, level: BuildMsgLevel, file_name: String, range: Range, msg: String) {
+    fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogItemLevel, file_name: String, range: Range, msg: String) {
         self.send_message(
-            cmd_id.wrap_msg(BuildMsg::Location(BuildMsgLocation {
+            cmd_id.wrap_msg(LogItem::Location(LogItemLocation {
                 level,
                 file_name,
                 range,
@@ -249,13 +249,13 @@ pub trait MsgSender: Send {
     fn process_compiler_message(&self, cmd_id: BuildCmdId, msg: RustcCompilerMessage) {
         if let Some(msg) = msg.message {
             let level = match msg.level.as_ref() {
-                "error" => BuildMsgLevel::Error,
-                "warning" => BuildMsgLevel::Warning,
-                "log" => BuildMsgLevel::Log,
-                "failure-note" => BuildMsgLevel::Error,
-                "panic"=>BuildMsgLevel::Panic,
+                "error" => LogItemLevel::Error,
+                "warning" => LogItemLevel::Warning,
+                "log" => LogItemLevel::Log,
+                "failure-note" => LogItemLevel::Error,
+                "panic"=>LogItemLevel::Panic,
                 other => {
-                    self.send_bare_msg(cmd_id, BuildMsgLevel::Error, format!("process_compiler_message: unexpected level {}", other));
+                    self.send_bare_msg(cmd_id, LogItemLevel::Error, format!("process_compiler_message: unexpected level {}", other));
                     return
                 }
             };
@@ -280,19 +280,19 @@ pub trait MsgSender: Send {
                         msg.message.trim().ends_with("warnings emitted"){
                 }
                 else{
-                    self.send_bare_msg(cmd_id, BuildMsgLevel::Warning, msg.message);
+                    self.send_bare_msg(cmd_id, LogItemLevel::Warning, msg.message);
                 }
             }
         }
     }
 }
 
-impl<F: Clone + Fn(BuildMsgWrap) + Send + 'static> MsgSender for F {
+impl<F: Clone + Fn(LogItemWrap) + Send + 'static> MsgSender for F {
     fn box_clone(&self) -> Box<dyn MsgSender> {
         Box::new(self.clone())
     }
     
-    fn send_message(&self, wrap: BuildMsgWrap) {
+    fn send_message(&self, wrap: LogItemWrap) {
         self (wrap)
     }
 }

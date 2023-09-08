@@ -1,0 +1,21 @@
+[package]
+name = "windows-implement"
+version = "0.51.1"
+authors = ["Microsoft"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The implement macro for the windows crate"
+repository = "https://github.com/microsoft/windows-rs"
+rust-version = "1.64"
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = []
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", default-features = false, features = ["parsing", "proc-macro", "printing", "full", "derive"] }
+quote = "1.0"
+proc-macro2 = "1.0"

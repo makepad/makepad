@@ -1,7 +1,7 @@
 // missing deps so our windows-rs stripper doesnt have to traverse types
 use { 
-    crate::{
-        windows_crate::{
+    crate::{ 
+        windows::{  
             core::HRESULT,
             core::PCWSTR, 
             core::PCSTR, 
@@ -151,6 +151,7 @@ use {
                 D3D11_MAP,
                 D3D11_MAPPED_SUBRESOURCE,
                 D3D11_BOX,
+                D3D11_CPU_ACCESS_FLAG,
                 
                 D3D11_RENDER_TARGET_VIEW_DESC_0,
                 D3D11_QUERY,
@@ -235,6 +236,8 @@ use {
                 IDXGISwapChain,
             },
             Win32::Foundation::{
+                WAIT_EVENT,
+                HMODULE,
                 VARIANT_BOOL, 
                 VARIANT_FALSE, 
                 VARIANT_TRUE, 
@@ -244,7 +247,7 @@ use {
                 FILETIME,
                 LUID,
                 POINT,
-                HINSTANCE,
+                HINSTANCE, 
                 FARPROC,
                 DECIMAL,
                 DECIMAL_0,
@@ -253,7 +256,13 @@ use {
                 DECIMAL_1_0,
             },
             Win32::Graphics::Gdi::{
-                HDC,
+                HDC,  
+                HRGN,
+                HPEN,
+                HPALETTE,
+                HFONT,
+                HBITMAP, 
+                HGDIOBJ,
                 HBRUSH,
                 MONITOR_FROM_FLAGS,
                 GET_DEVICE_CAPS_INDEX,
@@ -285,6 +294,14 @@ use {
             Win32::Security::{
                 SECURITY_ATTRIBUTES
             },
+            Win32::System::Variant::{
+                VARIANT,
+                VARENUM,
+                VARIANT_0,
+                VARIANT_0_0,
+                VARIANT_0_0_0,
+                VARIANT_0_0_0_0,
+            },
             Win32::System::Com::{
                 COINIT,
                 IMPLTYPEFLAGS,
@@ -315,7 +332,6 @@ use {
                 TLIBATTR,
                 DISPATCH_FLAGS,
                 DISPPARAMS,
-                VARIANT,
                 EXCEPINFO,
                 STREAM_SEEK,
                 STGC,
@@ -327,21 +343,15 @@ use {
                 TYPEDESC_0,
                 ELEMDESC_0,
                 SYSKIND,
-                VARIANT_0,
                 LPEXCEPFINO_DEFERRED_FILLIN,
                 IEnumSTATSTG,
-                VARENUM,
                 IDLFLAGS,
-                VARIANT_0_0,
-                VARIANT_0_0_0,
-                VARIANT_0_0_0_0,
                 SAFEARRAY,
                 BLOB,
                 CY,
                 ADVANCED_FEATURE_FLAGS,
                 SAFEARRAYBOUND,
                 CY_0,
-                
             },
             Win32::System::Ole::{ 
                 CLIPBOARD_FORMAT,

@@ -13,8 +13,7 @@ use {
 
 live_design! {
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-
+    import makepad_widgets::theme_desktop_dark::*;
     TokenColors = {{TokenColors}} {
         unknown: #808080,
         branch_keyword: #C485BE,
@@ -79,18 +78,18 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-        walk: {
-            width: Fill,
-            height: Fill,
-            margin: 0,
-        },
+    
+        width: Fill,
+        height: Fill,
+        margin: 0,
+        scroll_bars: <ScrollBars>{}
         draw_bg:{
             draw_depth: 0.0,
             color:#3
         }
         draw_text: {
             draw_depth: 0.5,
-            text_style: <FONT_CODE> {}
+            text_style: <THEME_FONT_CODE> {}
         }
         draw_selection: {
             draw_depth: 1.0,
@@ -106,7 +105,7 @@ live_design! {
 pub struct CodeEditor {
     #[live]
     scroll_bars: ScrollBars,
-    #[live]
+    #[walk]
     walk: Walk,
     #[rust]
     draw_state: DrawStateWrap<Walk>,
@@ -155,7 +154,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn get_walk(&self) -> Walk {
+    fn walk(&self) -> Walk {
         self.walk
     }
 

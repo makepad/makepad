@@ -1,46 +1,41 @@
 use crate::{
     makepad_draw::*,
     file_tree::*,
-    frame::Frame,
+    view::View,
     widget::*,
-    label::*,
 };
 
 live_design!{
-    import makepad_widgets::theme::*
-    import makepad_widgets::frame::*
-    import makepad_widgets::splitter::Splitter
-    import makepad_widgets::file_tree::FileTree
-    import makepad_widgets::hook_widget::HookWidget
-    import makepad_widgets::label::Label
+    import makepad_widgets::base::*
+    import makepad_widgets::theme_desktop_dark::*
     import makepad_draw::shader::std::*
     
     Designer = {{Designer}} {
         has_view: true,
-        layout: {flow: Right},
-        container: <Box> {
+        flow: Right
+        container: <RoundedView> {
             draw_bg: {color: #3}
-            walk: {width: Fill, height: 400},
-            layout: {flow: Down, spacing: 10, padding:10}
-            <Box>{
-                walk: {width: Fill, height: Fit},
-                layout:{padding:5}
+            width: Fill, height: 400
+            flow: Down, spacing: 10, padding:10
+            <RoundedView>{
+                width: Fill, height: Fit
+                padding:5
                 draw_bg:{color:#5}
-                label = <Label> {label: "HI", draw_label:{color:#f}}
+                label = <Label> {text: "HI", draw_text:{color:#f}}
             }
             inner = <HookWidget> {}
         }
         <Splitter> {
             align: FromStart(300),
-            a: <Frame> {
+            a: <View> {
                 outline = <FileTree> {
                 }
             },
             b: <CachedScrollXY> {
                 dpi_factor: 1.5
                 draw_bg: {color: #4}
-                walk: {width: Fill, height: Fill}
-                layout: {flow: Down},
+                width: Fill, height: Fill
+                flow: Down
                 design = <HookWidget> {}
             },
         }
@@ -69,7 +64,7 @@ pub struct Designer {
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,
     #[rust] components: ComponentMap<LivePtr, (WidgetRef, WidgetRef)>,
-    #[deref] ui: Frame,
+    #[deref] ui: View,
 }
 
 impl LiveHook for Designer {
@@ -139,7 +134,7 @@ impl Designer {
                         WidgetRef::new_from_ptr(cx, container_ptr),
                     )
                 });
-                container.get_label(id!(label)).set_label(&format!("{}=<{}>", name, class));
+                container.widget(id!(label)).set_text(&format!("{}=<{}>", name, class));
                 // lets draw this thing in a neat little container box with a title bar
                 while let Some(_) = container.draw_widget(cx).hook_widget() {
                     widget.draw_widget_all(cx);
@@ -191,12 +186,12 @@ impl Widget for Designer {
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
-        let outline = self.ui.get_file_tree(id!(outline));
+        let outline = self.ui.file_tree(id!(outline));
         while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
             if let Some(mut outline) = outline.has_widget(&next).borrow_mut() {
                 self.draw_outline(cx, &mut *outline);
             }
-            else if next == self.ui.get_widget(id!(design)) {
+            else if next == self.ui.widget(id!(design)) {
                 self.draw_design(cx);
             }
         }
