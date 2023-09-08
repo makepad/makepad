@@ -20,8 +20,32 @@ live_design! {
     VideoBase = {{Video}} {}
 }
 
-// TODO: dynamically calculate this based on frame rate and size
-// const CHUNK_DURATION_US: u128 = 1_000_000 / 2;
+// TODO:
+// - Add support for other color conversions. Currently only YUV420 Semi-Planar is supported, (and only nv12)
+//      - adding color conversions is easy, we need to figure out how to get the codecs to give us the color format info.
+//      - currently the flags I've tried like MediaFormat.KEY_COLOR_FORMAT, are null on most codecs.
+
+// - Test frame rate to make sure it works right on different devices, current solution for ticks is somewhat a hack:
+//     - sporadically some texture updates take longer than desired (5 - 10 ms) which causes subsequent calls create the next timeout a delay.
+//       accumulated delays overtime make for slower playback.
+//     - the current fix is to check for irregularities and compoensate on the next timeout.
+//     - a better solution would be to have a loop on a separate thread in the platform's code, that sends timer events without having to schedule each one through events. 
+//       tried this on Java but was missing some polisihng, it was actually too fast.
+//     - a defentivie solution would be to fix the irregualarities, I believ they happen due to waiting for locks on the frame buffer and vec pools.
+//       this can be improved by double buffering. (separate swappable read and write buffers)
+
+// - Properly cleanup resources after playback is finished
+
+// - Optimizations:
+//      - lower memory usage by avoiding copying on frame chunk deserialization
+//      - dynamically calculate chunk size this based on frame rate and size
+//      - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
+//      - testing multiple videos on a ListView will probably show other issues
+
+// - Implement a pause/play
+
+// - Post-conf:
+//      - add audio playback
 
 #[derive(Live)]
 pub struct Video {
@@ -85,6 +109,8 @@ pub struct Video {
     vec_pool_y: SharedVecPool,
     #[rust]
     vec_pool_uv: SharedVecPool,
+    #[rust]
+    last_timeout: Option<Instant>,
 
     #[rust]
     id: LiveId,
@@ -102,7 +128,6 @@ impl VideoSet {}
 enum DecodingState {
     #[default]
     NotStarted,
-    _Idle,
     Decoding,
     Finished,
 }
@@ -123,14 +148,12 @@ pub enum VideoAction {
     None,
 }
 
-// TODO:
-// - add audio playback
-// - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
-// - implement a pause/play
-// - cleanup resources after playback is finished
-
 impl Widget for Video {
     fn redraw(&mut self, cx: &mut Cx) {
+        if self.uv_texture.is_none() || self.uv_texture.is_none() {
+            return;
+        }
+
         self.draw_bg
             .draw_vars
             .set_texture(0, self.y_texture.as_ref().unwrap());
@@ -184,7 +207,20 @@ impl Video {
         }
 
         if self.tick.is_event(event) {
-            self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
+            let now = Instant::now();
+            let elapsed_time = now.duration_since(self.last_timeout.unwrap()).as_millis();
+
+            let ideal_interval = ((1.0 / self.original_frame_rate as f64) * 1000.0) as u128;
+
+            let adjusted_interval = if elapsed_time > ideal_interval {
+                ideal_interval - (elapsed_time - ideal_interval)
+            } else {
+                ideal_interval                
+            };
+
+            self.tick = cx.start_timeout(adjusted_interval as f64);
+
+            self.last_timeout = Some(now);
 
             if self.decoding_state == DecodingState::Finished
                 || self.decoding_state == DecodingState::Decoding
@@ -223,15 +259,15 @@ impl Video {
         self.begin_buffering_thread(cx);
 
         self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
+        self.last_timeout = Some(Instant::now());
     }
 
     fn should_request_decoding(&self) -> bool {
         match self.decoding_state {
-            DecodingState::Decoding => false,
             DecodingState::Finished => {
                 self.frames_buffer.lock().unwrap().data.len() < FRAME_BUTTER_LOW_WATER_MARK
             }
-            _ => todo!(),
+            _ => false,
         }
     }
 

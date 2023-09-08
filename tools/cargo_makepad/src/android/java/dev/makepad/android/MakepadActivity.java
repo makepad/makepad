@@ -93,7 +93,7 @@ Makepad.Callback{
         decoderThreadHandler.start(); // TODO: only start this if its needed.
         mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
         mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
-        
+
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
 
