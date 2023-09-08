@@ -4,6 +4,7 @@ use {
     std::cell::RefCell,
     self::super::{
         web_media::CxWebMedia,
+        web_media::CxWebDecoding,
         from_wasm::*,
         to_wasm::*,
     },
@@ -469,7 +470,10 @@ impl Cx {
                         request_id_hi: request_id.hi(),
                         data
                     });
-                }
+                },
+                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
+                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
             }
         }
     }
@@ -614,7 +618,8 @@ pub struct CxOs {
     pub (crate) to_wasm_js: Vec<String>,
     pub (crate) from_wasm_js: Vec<String>,
     
-    pub (crate) media: CxWebMedia
+    pub (crate) media: CxWebMedia,
+    pub (crate) media: CxWebDecoding
 }
 
 impl CxOs {
