@@ -1,6 +1,7 @@
 pub mod android;
 pub mod android_keycodes;
 pub mod android_media;
+pub mod android_decoding;
 pub mod aaudio_sys;
 pub mod android_audio;
 pub mod android_midi;

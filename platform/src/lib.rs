@@ -22,7 +22,7 @@ mod draw_list;
 mod draw_vars;
 
 mod id_pool;
-mod event;
+pub mod event;
 mod area;
 mod window;
 mod pass;
@@ -38,6 +38,7 @@ mod component_map;
 pub mod audio_stream;
 
 mod media_api;
+mod decoding_api;
 
 #[macro_use]
 mod app_main;
@@ -119,6 +120,7 @@ pub use {
         media_api::{
             CxMediaApi
         },
+        decoding_api::CxDecodingApi,
         draw_list::{
             CxDrawItem,
             CxRectArea,
