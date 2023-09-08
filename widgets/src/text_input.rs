@@ -57,6 +57,7 @@ pub struct TextInput {
     #[live] select_pad_edges: f64,
     #[live] empty_message: String,
     #[live] numeric_only: bool,
+    #[live] secret: bool,
     #[live] on_focus_select_all: bool,
     #[live] pub read_only: bool,
     
@@ -591,10 +592,18 @@ impl TextInput {
         }
         else {
             self.draw_text.is_empty = 0.0;
-            self.draw_text.draw_walk(cx, Walk::size(
-                self.walk.width,
-                self.walk.height
-            ), self.label_align, &self.text);
+            if self.secret {
+                self.draw_text.draw_walk(cx, Walk::size(
+                    self.walk.width,
+                    self.walk.height
+                ), self.label_align, &"*".repeat(self.text.len()));
+            }
+            else {
+                self.draw_text.draw_walk(cx, Walk::size(
+                    self.walk.width,
+                    self.walk.height
+                ), self.label_align, &self.text);
+            }
         }
         
         let mut turtle = cx.turtle().padded_rect_used();
