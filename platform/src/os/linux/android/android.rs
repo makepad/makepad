@@ -6,6 +6,7 @@ use {
     std::time::Instant,
     self::super::{
         android_media::CxAndroidMedia,
+        android_decoding::CxAndroidDecoding,
         jni_sys::jobject,
         android_jni::{AndroidToJava},
         android_keycodes::android_to_makepad_key_code,
@@ -399,16 +400,17 @@ impl Cx {
     }
 
     pub fn from_java_on_video_stream(&mut self, video_id: u64, frame_group: Vec<u8>, to_java: AndroidToJava) {
-        let e = Event::VideoStream(
-        VideoStreamEvent  { 
-                video_id: LiveId(video_id),
-                frame_group,
+        if let Some(callback_mutex) = self.os.decoding.video_decoding_input_cb.get(&LiveId(video_id)) {
+            if let Ok(mut lock) = callback_mutex.lock() {
+                if let Some(ref mut callback) = *lock {
+                    (*callback)(frame_group);
+                }
             }
-        );
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
+        } else {
+            // TODO: handle error
+        }
     }
-
+    
     pub fn from_java_on_video_chunk_decoded(&mut self, video_id: u64, to_java: AndroidToJava) {
         let e = Event::VideoChunkDecoded(LiveId(video_id));
         self.call_event_handler(&e);
@@ -596,7 +598,8 @@ impl Default for CxOs {
             keyboard_visible: false,
             keyboard_trigger_position: DVec2::default(),
             keyboard_panning_offset: 0,
-            media: CxAndroidMedia::default()
+            media: CxAndroidMedia::default(),
+            decoding: CxAndroidDecoding::default(),
         }
     }
 }
@@ -612,6 +615,7 @@ pub struct CxOs {
     pub keyboard_panning_offset: i32,
 
     pub (crate) media: CxAndroidMedia,
+    pub (crate) decoding: CxAndroidDecoding,
 }
 
 impl CxOs {

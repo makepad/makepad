@@ -1,8 +1,20 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, makepad_platform::thread::*, widget::*,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    makepad_platform::{event::video_decoding::*, thread::*},
+    widget::*,
     VideoColorFormat,
 };
-use std::{thread, collections::VecDeque, time::Instant, sync::{Arc, Mutex}, sync::mpsc::channel};
+use std::{
+    collections::VecDeque,
+    sync::mpsc::channel,
+    sync::{Arc, Mutex},
+    thread,
+    time::Instant,
+};
+
+const MAX_FRAMES_TO_DECODE: usize = 15;
+const FRAME_BUTTER_LOW_WATER_MARK: usize = 10;
 
 live_design! {
     VideoBase = {{Video}} {}
@@ -56,7 +68,7 @@ pub struct Video {
     #[rust]
     frame_ts_interval: f64,
     #[rust]
-    last_update: MyInstant,
+    last_update: Option<Instant>,
     #[rust]
     tick: Timer,
     #[rust]
@@ -66,7 +78,7 @@ pub struct Video {
 
     // Decoding
     #[rust]
-    video_recv: ToUIReceiver<Vec<u8>>,
+    decoding_receiver: ToUIReceiver<Vec<u8>>,
     #[rust]
     decoding_state: DecodingState,
     #[rust]
@@ -93,14 +105,6 @@ enum DecodingState {
     _Idle,
     Decoding,
     Finished,
-}
-
-struct MyInstant(Instant);
-
-impl Default for MyInstant {
-    fn default() -> Self {
-        MyInstant(Instant::now())
-    }
 }
 
 impl LiveHook for Video {
@@ -166,7 +170,19 @@ impl Video {
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, VideoAction),
     ) {
-        // TODO: Check for video id
+        if let Event::VideoDecodingInitialized(event) = event {
+            if event.video_id == self.id {
+                self.handle_decoding_initialized(cx, event);
+            }
+        }
+
+        if let Event::VideoChunkDecoded(video_id) = event {
+            if *video_id == self.id {
+                self.decoding_state = DecodingState::Finished;
+                cx.fetch_next_video_frames(self.id, MAX_FRAMES_TO_DECODE);    
+            }
+        }
+
         if self.tick.is_event(event) {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
 
@@ -178,73 +194,67 @@ impl Video {
             }
 
             if self.should_request_decoding() {
-                cx.decode_next_video_chunk(self.id, 30);
+                cx.decode_next_video_chunk(self.id, MAX_FRAMES_TO_DECODE);
                 self.decoding_state = DecodingState::Decoding;
             }
         }
+    }
 
-        if let Event::VideoDecodingInitialized(event) = event {
-            self.video_width = event.video_width as usize;
-            self.video_height = event.video_height as usize;
-            self.original_frame_rate = event.frame_rate;
-            self.total_duration = event.duration;
-            self.color_format = event.color_format;
-            self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
+    fn handle_decoding_initialized(&mut self, cx: &mut Cx, event: &VideoDecodingInitializedEvent) {
+        self.video_width = event.video_width as usize;
+        self.video_height = event.video_height as usize;
+        self.original_frame_rate = event.frame_rate;
+        self.total_duration = event.duration;
+        self.color_format = event.color_format;
+        self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
 
-            makepad_error_log::log!(
-                "<<<<<<<<<<<<<<< Decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
-                self.video_width,
-                self.video_height,
-                self.original_frame_rate,
-                self.color_format,
-                self.frame_ts_interval
-            );
+        makepad_error_log::log!(
+            "<<<<<<<<<<<<<<< Decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
+            self.video_width,
+            self.video_height,
+            self.original_frame_rate,
+            self.color_format,
+            self.frame_ts_interval
+        );
 
-            cx.decode_next_video_chunk(self.id, 45);
-            self.decoding_state = DecodingState::Decoding;
+        cx.decode_next_video_chunk(self.id, MAX_FRAMES_TO_DECODE + MAX_FRAMES_TO_DECODE / 2);
+        self.decoding_state = DecodingState::Decoding;
 
-            self.begin_buffering_thread();
-            
-            self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
-        }
+        self.begin_buffering_thread(cx);
 
-        if let Event::VideoChunkDecoded(_id) = event {
-            // makepad_error_log::log!("<<<<<<<<<<<<<<< VideoChunkDecoded Event");
-            self.decoding_state = DecodingState::Finished;
-
-            cx.fetch_next_video_frames(self.id, 30);
-        }
-
-        if let Event::VideoStream(event) = event {
-            makepad_error_log::log!("<<<<<<<<<<<<<<< VideoStream Event");
-            let _ = self.video_recv.sender().send(event.frame_group.clone()); // unecessary cloning
-        }
+        self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
     }
 
     fn should_request_decoding(&self) -> bool {
         match self.decoding_state {
             DecodingState::Decoding => false,
-            DecodingState::Finished => self.frames_buffer.lock().unwrap().data.len() < 10,
+            DecodingState::Finished => {
+                self.frames_buffer.lock().unwrap().data.len() < FRAME_BUTTER_LOW_WATER_MARK
+            }
             _ => todo!(),
         }
     }
 
     fn process_tick(&mut self, cx: &mut Cx) {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_update.0).as_micros();
-        self.accumulated_time += elapsed;
-    
-        // block to limit the scope of the lock guard
-        let maybe_current_frame = {
-            self.frames_buffer.lock().unwrap().get()
+        match self.last_update {
+            Some(last_update_ts) => {
+                let elapsed = now.duration_since(last_update_ts).as_micros();
+                self.accumulated_time += elapsed;
+            }
+            None => {
+                self.accumulated_time = 0;
+            }
         };
-    
+        // block to limit the scope of the lock guard
+        let maybe_current_frame = { self.frames_buffer.lock().unwrap().get() };
+
         match maybe_current_frame {
             Some(current_frame) => {
                 if self.accumulated_time >= current_frame.timestamp_us {
                     self.update_textures(cx, current_frame.y_data, current_frame.uv_data);
-                    self.redraw(cx);    
-                    
+                    self.redraw(cx);
+
                     // if at latest frame, restart
                     if self.current_frame_ts >= self.total_duration {
                         if self.is_looping {
@@ -260,13 +270,13 @@ impl Video {
                     }
                 }
 
-                self.last_update = MyInstant(now);
+                self.last_update = Some(now);
             }
             None => {
                 makepad_error_log::log!("Empty Buffer");
             }
         }
-    }    
+    }
 
     fn update_textures(
         &mut self,
@@ -313,8 +323,14 @@ impl Video {
             uv_texture.swap_image_u32(cx, &mut *uv_data_locked);
         }
 
-        self.vec_pool_y.lock().unwrap().release(y_data.lock().unwrap().to_vec());
-        self.vec_pool_uv.lock().unwrap().release(uv_data.lock().unwrap().to_vec());
+        self.vec_pool_y
+            .lock()
+            .unwrap()
+            .release(y_data.lock().unwrap().to_vec());
+        self.vec_pool_uv
+            .lock()
+            .unwrap()
+            .release(uv_data.lock().unwrap().to_vec());
     }
 
     fn initialize_decoding(&self, cx: &mut Cx) {
@@ -328,17 +344,22 @@ impl Video {
         }
     }
 
-    fn begin_buffering_thread(&mut self) {
+    fn begin_buffering_thread(&mut self, cx: &mut Cx) {
+        let video_sender = self.decoding_receiver.sender();
+        cx.video_decoding_input(self.id, move |data| {
+            let _ = video_sender.send(data);
+        });
+
         let frames_buffer = Arc::clone(&self.frames_buffer);
         let vec_pool_y = Arc::clone(&self.vec_pool_y);
         let vec_pool_uv = Arc::clone(&self.vec_pool_uv);
-        
+
         let video_width = self.video_width.clone();
         let video_height = self.video_height.clone();
 
         let (_new_sender, new_receiver) = channel();
-        let old_receiver = std::mem::replace(&mut self.video_recv.receiver, new_receiver);
-    
+        let old_receiver = std::mem::replace(&mut self.decoding_receiver.receiver, new_receiver);
+
         thread::spawn(move || loop {
             let frame_group = old_receiver.recv().unwrap();
             deserialize_chunk(
@@ -452,8 +473,14 @@ fn deserialize_chunk(
 
         let pixel_data = &frame_group[frame_data_start..frame_data_end];
 
-        let mut y_data = vec_pool_y.lock().unwrap().acquire(video_width * video_height);
-        let mut uv_data = vec_pool_uv.lock().unwrap().acquire((video_width / 2) * (video_height / 2));
+        let mut y_data = vec_pool_y
+            .lock()
+            .unwrap()
+            .acquire(video_width * video_height);
+        let mut uv_data = vec_pool_uv
+            .lock()
+            .unwrap()
+            .acquire((video_width / 2) * (video_height / 2));
 
         split_nv12_data(
             pixel_data,

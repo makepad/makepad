@@ -89,9 +89,9 @@ Makepad.Callback{
         mHandler = new Handler(Looper.getMainLooper());
         mRunnables = new HashMap<Long, Runnable>();
 
-        HandlerThread handlerThread = new HandlerThread("VideoDecoderThread");
-        handlerThread.start(); // TODO: only start this if its needed.
-        mDecoderHandler = new Handler(handlerThread.getLooper());
+        HandlerThread decoderThreadHandler = new HandlerThread("VideoDecoderThread");
+        decoderThreadHandler.start(); // TODO: only start this if its needed.
+        mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
         mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
         
         String cache_path = this.getCacheDir().getAbsolutePath();
