@@ -21,7 +21,7 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
-            metal_xpc::store_xpc_service_texture,
+            
             cocoa_app::CocoaApp,
             cocoa_window::CocoaWindow,
         },
@@ -35,14 +35,15 @@ use {
             TextureDesc,
         },
     },
-    std::{
-        sync::{
-            Arc,
-            Condvar,
-            Mutex,
-        }
-    }
+    std::sync::{
+        Arc,
+        Condvar,
+        Mutex,
+    },
 };
+
+#[cfg(target_os = "macos")]
+use crate::metal_xpc::store_xpc_service_texture;
 
 impl Cx {
     
@@ -205,6 +206,7 @@ impl Cx {
                     let cxtexture = &mut self.textures[texture_id];
                     
                     if cxtexture.desc.format.is_shared() {
+                        #[cfg(target_os = "macos")]
                         cxtexture.os.update_shared_texture(
                             metal_cx,
                             &cxtexture.desc,
@@ -261,7 +263,13 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let draw_list_id = if let Some(draw_list_id) = self.passes[pass_id].main_draw_list_id{
+            draw_list_id
+        }
+        else{
+            error!("Draw pass has no draw list!");
+            return
+        };
         
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
@@ -449,11 +457,14 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, _stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
+                if stdin_frame.is_some(){
+                    Self::stdin_send_draw_complete();
+                }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
         ]};
@@ -929,7 +940,7 @@ impl CxOsTexture {
         ]};
     }
     
-    
+    #[cfg(target_os = "macos")]
     fn update_shared_texture(
         &mut self,
         metal_cx: &MetalCx,
@@ -1165,8 +1176,8 @@ pub fn get_default_metal_device() -> Option<ObjcId> {
 
 pub fn get_all_metal_devices() -> Vec<ObjcId> {
     #[cfg(target_os = "ios")]
-    {
-        MTLCreateSystemDefaultDevice().into_iter().collect()
+    unsafe {
+        vec![MTLCreateSystemDefaultDevice()]
     }
     #[cfg(not(target_os = "ios"))]
     unsafe {

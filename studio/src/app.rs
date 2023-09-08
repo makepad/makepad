@@ -1,31 +1,22 @@
-use {
-    crate::{
-        makepad_code_editor::code_editor::*,
-        makepad_platform::*,
-        makepad_draw::*,
-        makepad_widgets::*,
-        makepad_widgets::file_tree::*,
-        makepad_widgets::dock::*,
-        file_system::file_system::*,
-        run_view::*,
-        build_manager::{
-            build_manager::{
-                BuildManager,
-                BuildManagerAction
-            },
-        },
+use crate::{
+    makepad_code_editor::code_editor::*,
+    makepad_platform::*,
+    makepad_draw::*,
+    makepad_widgets::*,
+    makepad_widgets::file_tree::*,
+    makepad_widgets::dock::*,
+    file_system::file_system::*,
+    run_view::*,
+    build_manager::build_manager::{
+        BuildManager,
+        BuildManagerAction
     },
 };
 
 live_design!{
     import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
-    import makepad_widgets::file_tree::FileTree;
-    import makepad_widgets::button::Button;
-    import makepad_widgets::label::Label;
-    import makepad_widgets::dock::*;
-    import makepad_widgets::desktop_window::DesktopWindow;
+    import makepad_widgets::base::*;
+    import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
     
     import makepad_studio::run_view::RunView;
@@ -45,16 +36,16 @@ live_design!{
                 return sdf.result
             }
         }
-        walk: { margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0} }
-        layout: { padding: 0.0 }
-        label: ""
+         margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0 }
+         padding: 0.0 
+        text: ""
     }
     
     App = {{App}} {
         ui: <DesktopWindow> { 
-            caption_bar = {visible: true, caption_label = {label = {label: "Makepad Studio"}}},
+            caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
             dock = <Dock> {
-                walk: {height: Fill, width: Fill}
+                height: Fill, width: Fill
                 
                 root = Splitter {
                     axis: Horizontal,
@@ -80,7 +71,7 @@ live_design!{
                 open_files = Tabs {
                     tabs: [welcome, file1],
                     no_close: true,
-                    selected: 0
+                    selected: 1
                 }
                 
                 run_views = Tabs {
@@ -112,24 +103,22 @@ live_design!{
                     kind: RunView
                 }
                 CodeEditor = <CodeEditor> {}
-                Welcome = <Rect> {
+                Welcome = <RectView> {
                     draw_bg: {color: #052329}
-                    <Frame> {
-                        walk: { width: Fill, height: Fill}
-                        layout: {
-                            align: {
-                                x: 0.5,
-                                y: 0.5
-                            }
-                            flow: Down
+                    <View> {
+                         width: Fill, height: Fill
+                        align: {
+                            x: 0.5,
+                            y: 0.5
                         }
+                        flow: Down
 
                         <Logo> {}
 
                         <Label>{
-                            label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
-                            walk: {width: Fit, margin:{left:200}}
-                            draw_label: {
+                            text:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                            width: Fit, margin:{left:200}
+                            draw_text: {
                                 text_style: {
                                     font_size: 20.0,
                                     height_factor: 1.0,
@@ -177,10 +166,10 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let dock = self.ui.get_dock(id!(dock));
-        let file_tree = self.ui.get_file_tree(id!(file_tree));
-        let run_view = self.ui.get_run_view(id!(run_view));
-        let log_list = self.ui.get_list_view(id!(log_list));
+        let dock = self.ui.dock(id!(dock));
+        let file_tree = self.ui.file_tree(id!(file_tree));
+        let run_view = self.ui.run_view(id!(run_view));
+        let log_list = self.ui.list_view(id!(log_list));
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
@@ -198,7 +187,7 @@ impl AppMain for App {
                     run_view.draw(cx, &self.build_manager);
                 }
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
-                    self.build_manager.draw_log_list(cx, &mut *list_view);
+                    self.build_manager.draw_log(cx, &mut *list_view);
                 }
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
@@ -211,17 +200,33 @@ impl AppMain for App {
             return
         }
         
+        
         if let Event::KeyDown(KeyEvent {
-            key_code: KeyCode::Backtick,
-            modifiers: KeyModifiers {logo, ..},
+            key_code,
+            modifiers: KeyModifiers {logo,control, ..},
             ..
         }) = event {
-            if *logo{
-                self.build_manager.file_change(cx);
+            if *control || *logo{
+                if let KeyCode::Backtick = key_code{
+                     self.build_manager.file_change(cx);
+                }
+                else if let KeyCode::KeyK = key_code{
+                    self.build_manager.clear_log();
+                    log_list.redraw(cx);
+                }
             }
         }
           
-        self.file_system.handle_event(cx, event, &self.ui, &mut self.build_manager);
+        for action in self.file_system.handle_event(cx, event, &self.ui){
+            match action{
+                FileSystemAction::RecompileNeeded=>{
+                    self.build_manager.start_recompile_timer(cx);
+                    run_view.recompile_started(cx);
+                }
+                FileSystemAction::LiveReloadNeeded=>{
+                }
+            }
+        }
         
         if let Some(mut run_view) = run_view.borrow_mut() {
             run_view.handle_event(cx, event, &mut self.build_manager);
@@ -246,6 +251,7 @@ impl AppMain for App {
         for action in self.build_manager.handle_event(cx, event) {
             match action {
                 BuildManagerAction::RedrawLog => {
+                    // if the log_list is tailing, set the new len
                     log_list.redraw(cx);
                 }
                 BuildManagerAction::StdinToHost {cmd_id, msg} => if let Some(mut run_view) = run_view.borrow_mut() {
@@ -306,11 +312,11 @@ impl AppMain for App {
         }
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
-            let unix_path = self.file_system.file_node_path(file_id);
+            let file_path = self.file_system.file_node_path(file_id);
             let tab_name = self.file_system.file_node_name(file_id);
             // ok lets open the file
             let tab_id = LiveId::unique();
-            self.file_system.request_open_file(tab_id, unix_path);
+            self.file_system.request_open_file(tab_id, file_path);
             
             // lets add a file tab 'somewhere'
             dock.create_tab(cx, live_id!(open_files), tab_id, live_id!(CodeEditor), tab_name);

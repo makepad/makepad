@@ -4,15 +4,13 @@ use {
         io::prelude::*,
         mem,
         ptr,
-        ffi::{CStr},
+        ffi::CStr,
     },
     self::super::gl_sys,
     crate::{
         makepad_live_id::*,
         makepad_error_log::*,
-        makepad_shader_compiler::{
-            generate_glsl,
-        },
+        makepad_shader_compiler::generate_glsl,
         cx::Cx,
         texture::{TextureDesc, TextureFormat},
         makepad_math::{Mat4, DVec2, Vec4},

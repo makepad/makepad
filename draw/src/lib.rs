@@ -24,6 +24,7 @@ pub use crate::{
         Padding,
         Flow,
         Size,
+        TurtleAlignRange,
         DeferWalk
     },
     overlay::{

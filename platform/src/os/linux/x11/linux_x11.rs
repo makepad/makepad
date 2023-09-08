@@ -34,13 +34,18 @@ impl Cx {
         cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
         
         let opengl_cx = Rc::new(RefCell::new(None));
-        let opengl_windows = Rc::new(RefCell::new(Vec::new()));
+
         
+        let opengl_windows = Rc::new(RefCell::new(Vec::new()));
+        let is_stdin_loop = std::env::args().find(|v| v=="--stdin-loop").is_some();
         init_xlib_app_global(Box::new({
             let cx = cx.clone();
             let opengl_cx = opengl_cx.clone();
             move | xlib_app,
             events | {
+                if is_stdin_loop{
+                    return EventFlow::Wait
+                }
                 let mut cx = cx.borrow_mut();
                 let mut opengl_cx = opengl_cx.borrow_mut();
                 let mut opengl_windows = opengl_windows.borrow_mut();
@@ -49,6 +54,12 @@ impl Cx {
         }));
         
         *opengl_cx.borrow_mut() = Some(OpenglCx::new(get_xlib_app_global().display));
+        
+        if is_stdin_loop{
+            let mut cx = cx.borrow_mut();
+            let mut opengl_cx = opengl_cx.borrow_mut();
+            return cx.stdin_event_loop(opengl_cx.as_mut().unwrap());
+        }
         
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
@@ -198,6 +209,9 @@ impl Cx {
         }
         
     }
+
+    pub(crate) fn handle_networking_events(&mut self) {
+    }
     
     pub (crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>, opengl_cx: &mut OpenglCx) {
         opengl_cx.make_current();
@@ -302,16 +316,16 @@ impl Cx {
                 },
                 CxOsOp::UpdateMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{id:_, request:_} => {
+                CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
                 },
-                CxOsOp::WebSocketOpen{id:_, request:_}=>{
+                CxOsOp::WebSocketOpen{request_id:_, request:_}=>{
                     todo!()
                 }
-                CxOsOp::WebSocketSendBinary{id:_, data:_}=>{
+                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
                     todo!()
                 }
-                CxOsOp::WebSocketSendString{id:_, data:_}=>{
+                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
                     todo!()
                 }
             }

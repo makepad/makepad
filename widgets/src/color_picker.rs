@@ -72,7 +72,7 @@ live_design!{
     
     ColorPicker= {{ColorPicker}} {
         
-        state: {
+        animator: {
             hover = {
                 default: off
                 off = {
@@ -125,7 +125,7 @@ pub struct DrawColorWheel {
 pub struct ColorPicker {
     #[live] draw_wheel: DrawColorWheel,
     
-    #[state] state: LiveState,
+    #[animator] animator: Animator,
     
     #[rust] pub size: f64,
     #[rust] hue: f32,
@@ -195,17 +195,17 @@ impl ColorPicker {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
-        self.state_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_wheel.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, id!(hover.on));
+                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) => {
-                self.animate_state(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.pressed));
                 let rsize = (self.size * 0.28) / 2.0f64.sqrt();
                 let rel = fe.abs - fe.rect.pos;
                 let vx = rel.x - 0.5 * self.size;
@@ -224,10 +224,10 @@ impl ColorPicker {
             },
             Hit::FingerUp(fe) => {
                 if fe.is_over && fe.device.has_hovers() {
-                    self.animate_state(cx, id!(hover.on));
+                    self.animator_play(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(hover.off));
+                    self.animator_play(cx, id!(hover.off));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
                 dispatch_action(cx, ColorPickerAction::DoneChanging)

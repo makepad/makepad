@@ -10,7 +10,6 @@ use {
         makepad_widgets::file_tree::*,
         makepad_widgets::dock::*,
         file_system::FileClient,
-        build_manager::build_manager::BuildManager,
         makepad_file_protocol::{
             FileRequest,
             FileError,
@@ -18,8 +17,6 @@ use {
             FileClientAction,
             FileNodeData,
             FileTreeData,
-            unix_str::UnixString,
-            unix_path::UnixPathBuf,
         },
     },
 };
@@ -27,11 +24,11 @@ use {
 #[derive(Default)]
 pub struct FileSystem {
     pub file_client: FileClient,
-    pub root_path: UnixPathBuf,
+    pub root_path: String,
     pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
-    pub tab_id_to_path: HashMap<LiveId, UnixPathBuf>,
+    pub tab_id_to_path: HashMap<LiveId, String>,
     pub tab_id_to_session: HashMap<LiveId, Session>,
-    pub open_documents: HashMap<UnixPathBuf, Option<Rc<RefCell<Document>>>>
+    pub open_documents: HashMap<String, Option<Rc<RefCell<Document>>>>
 }
 
 #[derive(Debug)]
@@ -49,8 +46,13 @@ impl FileNode {
 
 #[derive(Debug)]
 pub struct FileEdge {
-    pub name: UnixString,
+    pub name: String,
     pub file_node_id: FileNodeId,
+}
+
+pub enum FileSystemAction{
+    RecompileNeeded,
+    LiveReloadNeeded
 }
 
 impl FileSystem {
@@ -71,19 +73,25 @@ impl FileSystem {
         }
         None
     }
+
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef)->Vec<FileSystemAction>{
+        let mut actions = Vec::new();
+        self.handle_event_with(cx, event, ui, &mut |_,action| actions.push(action));
+        actions
+    }
     
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef, build_manager:&mut BuildManager){
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, ui:&WidgetRef, dispatch_action: &mut dyn FnMut(&mut Cx, FileSystemAction)) {
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
                     FileResponse::LoadFileTree(response) => {
                         self.load_file_tree(response.unwrap());
-                        ui.get_file_tree(id!(file_tree)).redraw(cx);
+                        ui.file_tree(id!(file_tree)).redraw(cx);
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     FileResponse::OpenFile(result)=>match result{
                         Ok((unix_path, data))=>{
-                            let dock = ui.get_dock(id!(dock));
+                            let dock = ui.dock(id!(dock));
                             for (tab_id, path) in &self.tab_id_to_path{
                                 if unix_path == *path{
                                     dock.redraw_tab(cx, *tab_id);
@@ -101,12 +109,30 @@ impl FileSystem {
                     }
                     FileResponse::SaveFile(result)=>match result{
                         Ok((_path, old, new))=>{
-                            for i in 0..old.len().min(new.len()){
-                                if old.as_bytes()[i] != new.as_bytes()[i]{
-                                    if i > 10300{ // 
-                                        build_manager.start_recompile_timer(cx);
+                            // alright file has been saved
+                            // now we need to check if a live_design!{} changed or something outside it
+                            if old != new{
+                                let mut old_neg = Vec::new();
+                                let mut new_neg = Vec::new();
+                                match  LiveRegistry::tokenize_from_str_live_design(&old, Default::default(), Default::default(), Some(&mut old_neg)){
+                                    Err(e)=>{
+                                        log!("Cannot tokenize old file {}", e)
                                     }
-                                    break;
+                                    Ok(old_tokens)=> match LiveRegistry::tokenize_from_str_live_design(&new, Default::default(), Default::default(), Some(&mut new_neg)){
+                                        Err(e)=>{
+                                            log!("Cannot tokenize new file {}", e);
+                                        }
+                                        Ok(new_tokens)=>{
+                                            // we need the space 'outside' of these tokens
+                                            if old_neg != new_neg{
+                                                dispatch_action(cx, FileSystemAction::RecompileNeeded)
+                                            }
+                                            if old_tokens != new_tokens{
+                                                // design code changed, hotreload it
+                                                dispatch_action(cx, FileSystemAction::LiveReloadNeeded)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -123,7 +149,7 @@ impl FileSystem {
         }
     }
     
-    pub fn request_open_file(&mut self, tab_id:LiveId, path:UnixPathBuf){
+    pub fn request_open_file(&mut self, tab_id:LiveId, path:String){
         // ok lets see if we have a document
         // ifnot, we create a new one
         self.tab_id_to_path.insert(tab_id, path.clone());
@@ -167,18 +193,17 @@ impl FileSystem {
         self.file_nodes.get(&file_node_id).unwrap().name.clone()
     }
     
-    pub fn file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
-        let mut components = Vec::new();
+    pub fn file_node_path(&self, file_node_id: FileNodeId) -> String {
+        let mut path = self.root_path.clone();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
-            components.push(&edge.name);
+            path.insert_str(0, &edge.name);
             file_node = &self.file_nodes[edge.file_node_id];
+            if file_node.parent_edge.is_some(){
+                path.insert_str(0, "/");
+            }
         }
-        self.root_path.join(components.into_iter().rev().collect::<UnixPathBuf>())
-    }
-    
-    pub fn _file_path_join(&self, components: &[&str]) -> UnixPathBuf {
-        self.root_path.join(components.into_iter().rev().collect::<UnixPathBuf>())
+        path
     }
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
@@ -191,7 +216,7 @@ impl FileSystem {
             let file_node_id = file_node_id.unwrap_or(LiveId::unique().into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
-                | edge | edge.name.to_string_lossy().to_string(),
+                | edge | edge.name.clone(),
             );
             let node = FileNode {
                 parent_edge,
