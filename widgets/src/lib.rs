@@ -31,6 +31,8 @@ pub mod list_view;
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
+// Only available on Android at the moment
+// #[cfg(target_os="android")]
 pub mod video;
 pub mod rotated_image;
 pub mod slide_panel;
