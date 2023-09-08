@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use {
     std::{
         rc::Rc,
@@ -14,14 +13,11 @@ use {
         },
         os::{
             apple::apple_sys::*,
-            cocoa_delegate::*,
-            cocoa_event::{
-                CocoaEvent,
+            macos::{
+                macos_delegates::*,
+                macos_event::*,
+                macos_window::MacosWindow,
             },
-            av_capture::define_av_video_callback_delegate,
-            audio_unit::define_key_value_observing_delegate,
-            cocoa_window::CocoaWindow,
-            cocoa_app_nw::define_web_socket_delegate,
             apple_util::{
                 nsstring_to_string,
                 str_to_nsstring,
@@ -59,26 +55,26 @@ use {
 // So wherever we put this boundary, it will be unsafe
 
 // this value will be fetched from multiple threads (post signal uses it)
-pub static mut COCOA_CLASSES: *const CocoaClasses = 0 as *const _;
+pub static mut MACOS_CLASSES: *const MacosClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
-pub static mut COCOA_APP: *mut CocoaApp = 0 as *mut _;
+pub static mut MACOS_APP: *mut MacosApp = 0 as *mut _;
 
-pub fn init_cocoa_app_global(event_callback: Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>) {
+pub fn init_macos_app_global(event_callback: Box<dyn FnMut(&mut MacosApp, MacosEvent) -> EventFlow>) {
     unsafe {
-        COCOA_CLASSES = Box::into_raw(Box::new(CocoaClasses::new()));
-        COCOA_APP = Box::into_raw(Box::new(CocoaApp::new(event_callback)));
+        MACOS_CLASSES = Box::into_raw(Box::new(MacosClasses::new()));
+        MACOS_APP = Box::into_raw(Box::new(MacosApp::new(event_callback)));
     }
 }
 
-pub fn get_cocoa_app_global() -> &'static mut CocoaApp {
+pub fn get_macos_app_global() -> &'static mut MacosApp {
     unsafe {
-        &mut *(COCOA_APP)
+        &mut *(MACOS_APP)
     }
 }
 
-pub fn get_cocoa_class_global() -> &'static CocoaClasses {
+pub fn get_macos_class_global() -> &'static MacosClasses {
     unsafe {
-        &*(COCOA_CLASSES)
+        &*(MACOS_CLASSES)
     }
 }
 
@@ -89,51 +85,36 @@ pub struct CocoaTimer {
     repeats: bool
 }
 
-pub struct CocoaClasses {
+pub struct MacosClasses {
     pub window: *const Class,
     pub window_delegate: *const Class,
-    //pub post_delegate: *const Class,
-    pub timer_delegate: *const Class,
     pub menu_delegate: *const Class,
     pub app_delegate: *const Class,
     pub menu_target: *const Class,
     pub view: *const Class,
-    pub key_value_observing_delegate: *const Class,
-    pub video_callback_delegate: *const Class,
-    pub web_socket_delegate: *const Class,
-    pub const_attributes_for_marked_text: ObjcId,
-    pub const_empty_string: RcObjcId,
+    pub timer_delegate: *const Class,
 }
 
-impl CocoaClasses {
+impl MacosClasses {
     pub fn new() -> Self {
-        let const_attributes = vec![
+        /*let const_attributes = vec![
             RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSMarkedClauseSegment")).unwrap()).forget(),
             RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSGlyphInfo")).unwrap()).forget(),
-        ];
+        ];*/
         Self {
-            window: define_cocoa_window_class(),
-            window_delegate: define_cocoa_window_delegate(),
+            timer_delegate: define_macos_timer_delegate(),
+            window: define_macos_window_class(),
+            window_delegate: define_macos_window_delegate(),
             //post_delegate: define_cocoa_post_delegate(),
-            timer_delegate: define_cocoa_timer_delegate(),
-            web_socket_delegate: define_web_socket_delegate(),
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
             menu_target: define_menu_target_class(),
-            video_callback_delegate: define_av_video_callback_delegate(),
             view: define_cocoa_view_class(),
-            key_value_observing_delegate: define_key_value_observing_delegate(),
-            const_attributes_for_marked_text: unsafe {msg_send![
-                class!(NSArray),
-                arrayWithObjects: const_attributes.as_ptr()
-                count: const_attributes.len()
-            ]},
-            const_empty_string: RcObjcId::from_unowned(NonNull::new(str_to_nsstring("")).unwrap()),
         }
     }
 }
 
-pub struct CocoaApp {
+pub struct MacosApp {
     menu_delegate_instance: ObjcId,
     //app_delegate_instance: ObjcId,
     pub time_start: Instant,
@@ -145,7 +126,7 @@ pub struct CocoaApp {
     #[allow(unused)]
     pasteboard: ObjcId,
     startup_focus_hack_ran: bool,
-    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow >>,
+    event_callback: Option<Box<dyn FnMut(&mut MacosApp, MacosEvent) -> EventFlow >>,
     event_flow: EventFlow,
     
     pub cursors: HashMap<MouseCursor, ObjcId>,
@@ -153,22 +134,22 @@ pub struct CocoaApp {
     //current_ns_event: Option<ObjcId>,
 }
 
-impl CocoaApp {
-    pub fn new(event_callback: Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>) -> CocoaApp {
+impl MacosApp {
+    pub fn new(event_callback: Box<dyn FnMut(&mut MacosApp, MacosEvent) -> EventFlow>) -> MacosApp {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            let app_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().app_delegate, new];
+            let app_delegate_instance: ObjcId = msg_send![get_macos_class_global().app_delegate, new];
             
             let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
             
             // Construct the bits that are shared between windows
-            CocoaApp {
+            MacosApp {
                 startup_focus_hack_ran: false,
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
-                timer_delegate_instance: msg_send![get_cocoa_class_global().timer_delegate, new],
-                menu_delegate_instance: msg_send![get_cocoa_class_global().menu_delegate, new],
+                timer_delegate_instance: msg_send![get_macos_class_global().timer_delegate, new],
+                menu_delegate_instance: msg_send![get_macos_class_global().menu_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
@@ -271,7 +252,7 @@ impl CocoaApp {
             }
         }
         unsafe {
-            make_menu(nil, self.menu_delegate_instance, get_cocoa_class_global().menu_target, menu, command_settings);
+            make_menu(nil, self.menu_delegate_instance, get_macos_class_global().menu_target, menu, command_settings);
         }
     }
     /*
@@ -371,7 +352,7 @@ impl CocoaApp {
                     //let key_char = get_event_char(ns_event);
                     let is_repeat: bool = msg_send![ns_event, isARepeat];
                     self.do_callback(
-                        CocoaEvent::KeyUp(KeyEvent {
+                        MacosEvent::KeyUp(KeyEvent {
                             key_code: key_code,
                             //key_char: key_char,
                             is_repeat: is_repeat,
@@ -396,7 +377,7 @@ impl CocoaApp {
                             let nsstring: ObjcId = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
                             self.do_callback(
-                                CocoaEvent::TextInput(TextInputEvent {
+                                MacosEvent::TextInput(TextInputEvent {
                                     input: string,
                                     was_paste: true,
                                     replace_last: false
@@ -406,7 +387,7 @@ impl CocoaApp {
                         KeyCode::KeyC => if modifiers.logo || modifiers.control {
                             let response = Rc::new(RefCell::new(None));
                             self.do_callback(
-                                CocoaEvent::TextCopy(TextClipboardEvent {
+                                MacosEvent::TextCopy(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
@@ -421,7 +402,7 @@ impl CocoaApp {
                         KeyCode::KeyX => if modifiers.logo || modifiers.control {
                             let response = Rc::new(RefCell::new(None));
                             self.do_callback(
-                                CocoaEvent::TextCut(TextClipboardEvent {
+                                MacosEvent::TextCut(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
@@ -437,7 +418,7 @@ impl CocoaApp {
                     }
                     
                     self.do_callback(
-                        CocoaEvent::KeyDown(KeyEvent {
+                        MacosEvent::KeyDown(KeyEvent {
                             key_code: key_code,
                             is_repeat: is_repeat,
                             modifiers: modifiers,
@@ -464,7 +445,7 @@ impl CocoaApp {
                 let last_key_mod = self.last_key_mod.clone();
                 self.last_key_mod = modifiers.clone();
                 let mut events = Vec::new();
-                fn add_event(time: f64, old: bool, new: bool, modifiers: KeyModifiers, events: &mut Vec<CocoaEvent>, key_code: KeyCode) {
+                fn add_event(time: f64, old: bool, new: bool, modifiers: KeyModifiers, events: &mut Vec<MacosEvent>, key_code: KeyCode) {
                     if old != new {
                         let event = KeyEvent {
                             key_code: key_code,
@@ -474,10 +455,10 @@ impl CocoaApp {
                             time: time
                         };
                         if new {
-                            events.push(CocoaEvent::KeyDown(event));
+                            events.push(MacosEvent::KeyDown(event));
                         }
                         else {
-                            events.push(CocoaEvent::KeyUp(event));
+                            events.push(MacosEvent::KeyUp(event));
                         }
                     }
                 }
@@ -504,7 +485,7 @@ impl CocoaApp {
                     return
                 }
                 let ptr: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
-                let cocoa_window = &mut *(ptr as *mut CocoaWindow);
+                let cocoa_window = &mut *(ptr as *mut MacosWindow);
                 let dx: f64 = msg_send![ns_event, scrollingDeltaX];
                 let dy: f64 = msg_send![ns_event, scrollingDeltaY];
                 let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
@@ -553,7 +534,7 @@ impl CocoaApp {
                         }
                         
                         if ns_event == nil || event_wait {
-                            self.do_callback(CocoaEvent::Paint);
+                            self.do_callback(MacosEvent::Paint);
                         }
                         //self.current_ns_event = None;
                         
@@ -564,7 +545,7 @@ impl CocoaApp {
         }
     }
     
-    pub fn do_callback(&mut self, event: CocoaEvent) {
+    pub fn do_callback(&mut self, event: MacosEvent) {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, event);
             if let EventFlow::Exit = self.event_flow {
@@ -582,15 +563,15 @@ impl CocoaApp {
     /*
     pub fn post_signal(signal: Signal) {
         unsafe {
-            let cocoa_app = get_cocoa_app_global();
+            let cocoa_app = get_macos_app_global();
             if let Ok(signals) = cocoa_app.signals.lock(){
                 let mut signals = signals.borrow_mut();
                 // if empty, we do shit. otherwise we add
                 if signals.is_empty(){
                     signals.insert(signal);
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-                    //let cocoa_app = get_cocoa_app_global();
-                    let post_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().post_delegate, new];
+                    //let cocoa_app = get_macos_app_global();
+                    let post_delegate_instance: ObjcId = msg_send![get_macos_class_global().post_delegate, new];
                     //(*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
                     let nstimer: ObjcId = msg_send![
                         class!(NSTimer),
@@ -671,7 +652,7 @@ impl CocoaApp {
                 if !self.timers[i].repeats {
                     self.timers.remove(i);
                 }
-                self.do_callback(CocoaEvent::Timer(TimerEvent {timer_id: timer_id}));
+                self.do_callback(MacosEvent::Timer(TimerEvent {timer_id: timer_id}));
                 // break the eventloop if its in blocked mode
                 unsafe {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -704,22 +685,22 @@ impl CocoaApp {
         }else{panic!()};
         
         self.do_callback(vec![
-            CocoaEvent::Signal(SignalEvent {
+            MacosEvent::Signal(SignalEvent {
                 signals,
             })
         ]);
-        self.do_callback(vec![CocoaEvent::Paint]);
+        self.do_callback(vec![MacosEvent::Paint]);
     }*/
     
     pub fn send_command_event(&mut self, command: MenuCommand) {
         self.do_callback(
-            CocoaEvent::MenuCommand(command)
+            MacosEvent::MenuCommand(command)
         );
-        self.do_callback(CocoaEvent::Paint);
+        self.do_callback(MacosEvent::Paint);
     }
     
     pub fn send_paint_event(&mut self) {
-        self.do_callback(CocoaEvent::Paint);
+        self.do_callback(MacosEvent::Paint);
     }
     
     #[cfg(target_os = "macos")]
@@ -735,7 +716,7 @@ impl CocoaApp {
                 return
             }
             let cocoa_window: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
-            let cocoa_window = &mut *(cocoa_window as *mut CocoaWindow);
+            let cocoa_window = &mut *(cocoa_window as *mut MacosWindow);
             cocoa_window.start_dragging(ns_event, items);
         };
     }

@@ -1,9 +1,5 @@
 #[macro_use]
 pub mod apple_util;
-pub mod cocoa_delegate;
-pub mod cocoa_app;
-pub mod cocoa_app_nw;
-pub mod cocoa_window;
 pub mod apple_sys;
 pub mod metal;
 
@@ -13,11 +9,11 @@ pub mod macos;
 #[cfg(target_os = "ios")]
 pub mod ios;
 
-pub mod cocoa_event;
-
 #[cfg(target_os = "macos")]
 pub mod metal_xpc;
 
+pub mod ns_url_session;
+pub mod apple_classes;
 pub mod audio_unit;
 pub mod core_midi;
 pub mod apple_media;
