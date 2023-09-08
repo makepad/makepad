@@ -1,6 +1,5 @@
 use {
     crate::{
-        window::WindowId,
         menu::MenuCommand,
         event::{
             MouseDownEvent,
@@ -8,13 +7,8 @@ use {
             MouseMoveEvent,
             ScrollEvent,
             WindowGeomChangeEvent,
-            WindowDragQueryEvent,
-            WindowCloseRequestedEvent,
-            WindowClosedEvent,
             TextInputEvent,
             KeyEvent,
-            DragEvent,
-            DropEvent,
             TextClipboardEvent,
             TimerEvent,
         },
@@ -22,13 +16,10 @@ use {
 };
 
 #[derive(Debug, Clone)]
-pub enum CocoaEvent {
+pub enum IosEvent {
     AppGotFocus,
     AppLostFocus,
-    WindowResizeLoopStart(WindowId),
-    WindowResizeLoopStop(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
-    WindowClosed(WindowClosedEvent),
     Paint,
     
     MouseDown(MouseDownEvent),
@@ -36,12 +27,7 @@ pub enum CocoaEvent {
     MouseMove(MouseMoveEvent),
     Scroll(ScrollEvent),
     
-    WindowDragQuery(WindowDragQueryEvent),
-    WindowCloseRequested(WindowCloseRequestedEvent),
     TextInput(TextInputEvent),
-    Drag(DragEvent),
-    Drop(DropEvent),
-    DragEnd,
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextCopy(TextClipboardEvent),
