@@ -21,6 +21,7 @@ pub mod metal_xpc;
 pub mod audio_unit;
 pub mod core_midi;
 pub mod apple_media;
+pub mod apple_decoding;
 pub mod av_capture;
 pub(crate) use self::metal::*;
 #[cfg(any(target_os = "macos"))]

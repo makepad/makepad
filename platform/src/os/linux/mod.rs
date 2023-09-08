@@ -13,6 +13,8 @@ pub mod alsa_sys;
 #[cfg(not(target_os="android"))]
 pub mod linux_media;
 #[cfg(not(target_os="android"))]
+pub mod linux_decoding;
+#[cfg(not(target_os="android"))]
 pub mod alsa_audio;
 #[cfg(not(target_os="android"))]
 pub mod alsa_midi;
