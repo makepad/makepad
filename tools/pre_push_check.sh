@@ -10,6 +10,8 @@
 #rustup target add aarch64-linux-android &>/dev/null
 
 #rustup target add x86_64-pc-windows-gnu --toolchain nightly &>/dev/null
+
+#rustup target add x86_64-pc-windows-gnu --toolchain nightly &>/dev/null
 #rustup target add x86_64-pc-windows-msvc --toolchain nightly &>/dev/null
 #rustup target add wasm32-unknown-unknown --toolchain nightly &>/dev/null
 #rustup target add x86_64-unknown-linux-gnu --toolchain nightly &>/dev/null

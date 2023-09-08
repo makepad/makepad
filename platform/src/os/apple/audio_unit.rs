@@ -8,7 +8,7 @@ use {
         audio::*,
         midi::*,
         os::apple::apple_sys::*,
-        os::apple::cocoa_app::*,
+        os::apple::apple_classes::*,
         os::apple::apple_util::*,
         makepad_objc_sys::objc_block,
         makepad_objc_sys::objc_block_invoke,
@@ -35,8 +35,8 @@ impl KeyValueObserver {
     pub fn new(target: ObjcId, name: ObjcId, callback: Box<dyn Fn()>) -> Self {
         unsafe {
             let double_box = Box::new(callback);
-            //let cocoa_app = get_cocoa_app_global();
-            let observer = RcObjcId::from_owned(msg_send![get_cocoa_class_global().key_value_observing_delegate, alloc]);
+            //let cocoa_app = get_macos_app_global();
+            let observer = RcObjcId::from_owned(msg_send![get_apple_class_global().key_value_observing_delegate, alloc]);
             
             (*observer.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
             
@@ -1144,15 +1144,15 @@ impl AudioUnit {
         
         let () = unsafe {msg_send![self.au_audio_unit, requestViewControllerWithCompletionHandler: &view_controller_complete]};
     }
-    
+    /*
     pub fn open_ui(&self) {
         if let Some(view_controller) = self.view_controller.lock().unwrap().as_ref() {
             let audio_view: ObjcId = unsafe {msg_send![*view_controller, view]};
-            let cocoa_app = get_cocoa_app_global();
+            let cocoa_app = get_macos_app_global();
             let win_view = cocoa_app.cocoa_windows[0].1;
             let () = unsafe {msg_send![win_view, addSubview: audio_view]};
         }
-    }
+    }*/
     
     pub fn send_mouse_down(&self) {
         if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
@@ -1180,10 +1180,10 @@ impl AudioUnit {
             }
         }
     }
-    
+    /*
     pub fn ocr_ui(&self) {
         unsafe {
-            let cocoa_app = get_cocoa_app_global();
+            let cocoa_app = get_macos_app_global();
             let window = cocoa_app.cocoa_windows[0].0;
             let win_num: u32 = msg_send![window, windowNumber];
             let win_opt = kCGWindowListOptionIncludingWindow;
@@ -1223,7 +1223,7 @@ impl AudioUnit {
                 error!("performRequests failed")
             }
         };
-    }
+    }*/
     
 }
 
