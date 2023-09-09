@@ -86,7 +86,7 @@ impl MacosWindow {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
             // set the backpointeers
-            (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
+            (*self.window_delegate).set_ivar("macos_window_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
             
             let left_top = if let Some(position) = position {
@@ -489,7 +489,7 @@ impl MacosWindow {
 
 pub fn get_cocoa_window(this: &Object) -> &mut MacosWindow {
     unsafe {
-        let ptr: *mut c_void = *this.get_ivar("cocoa_window_ptr");
+        let ptr: *mut c_void = *this.get_ivar("macos_window_ptr");
         &mut *(ptr as *mut MacosWindow)
     }
 }

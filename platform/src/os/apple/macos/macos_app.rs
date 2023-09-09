@@ -239,7 +239,7 @@ impl MacosApp {
                         panic!("cannot lock cmd_map");
                     };*/
                     
-                    //(*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
+                    //(*target).set_ivar("macos_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
                     (*target).set_ivar("command_usize", command.0.0);
                 },
                 Menu::Line => {
@@ -484,7 +484,7 @@ impl MacosApp {
                 if window_delegate == nil {
                     return
                 }
-                let ptr: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
+                let ptr: *mut c_void = *(*window_delegate).get_ivar("macos_window_ptr");
                 let cocoa_window = &mut *(ptr as *mut MacosWindow);
                 let dx: f64 = msg_send![ns_event, scrollingDeltaX];
                 let dy: f64 = msg_send![ns_event, scrollingDeltaY];
@@ -572,7 +572,7 @@ impl MacosApp {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
                     //let cocoa_app = get_macos_app_global();
                     let post_delegate_instance: ObjcId = msg_send![get_macos_class_global().post_delegate, new];
-                    //(*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
+                    //(*post_delegate_instance).set_ivar("macos_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
                     let nstimer: ObjcId = msg_send![
                         class!(NSTimer),
                         timerWithTimeInterval: 0.
@@ -715,7 +715,7 @@ impl MacosApp {
                 crate::error!("start_dragging: Cocoa window nil on event");
                 return
             }
-            let cocoa_window: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
+            let cocoa_window: *mut c_void = *(*window_delegate).get_ivar("macos_window_ptr");
             let cocoa_window = &mut *(cocoa_window as *mut MacosWindow);
             cocoa_window.start_dragging(ns_event, items);
         };

@@ -69,8 +69,7 @@ pub fn define_macos_timer_delegate() -> *const Class {
         decl.add_method(sel!(receivedTimer:), received_timer as extern fn(&Object, Sel, ObjcId));
         decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern fn(&Object, Sel, ObjcId));
     }
-    // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+
     
     return decl.register();
 }
@@ -79,8 +78,8 @@ pub fn define_macos_timer_delegate() -> *const Class {
 pub fn define_app_delegate() -> *const Class {
     
     let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
-    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    let decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
+
     return decl.register();
 }
 
@@ -106,7 +105,6 @@ pub fn define_menu_target_class() -> *const Class {
     unsafe {
         decl.add_method(sel!(menuAction:), menu_action as extern fn(&Object, Sel, ObjcId));
     }
-    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_ivar::<usize>("command_usize");
     return decl.register();
 }
@@ -123,13 +121,12 @@ pub fn define_menu_delegate() -> *const Class {
     unsafe {
         decl.add_method(sel!(menuWillOpen:), menu_will_open as extern fn(&Object, Sel, ObjcId));
     }
-    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_protocol(&Protocol::get("NSMenuDelegate").unwrap());
     return decl.register();
 }
 /*
 struct CocoaPostInit {
-    cocoa_app_ptr: *mut MacosApp,
+    macos_app_ptr: *mut MacosApp,
     signal_id: u64,
 }*/
 /*
@@ -157,7 +154,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
         decl.add_method(sel!(receivedPost:), received_post as extern fn(&Object, Sel, ObjcId));
     }
     // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    decl.add_ivar::<*mut c_void>("macos_app_ptr");
     decl.add_ivar::<usize>("signal_id");
     //decl.add_ivar::<usize>("status");
     
@@ -303,7 +300,7 @@ pub fn define_macos_window_delegate() -> *const Class {
         
     }
     // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
+    decl.add_ivar::<*mut c_void>("macos_window_ptr");
     
     return decl.register();
 }
@@ -339,7 +336,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         unsafe {
             let this: ObjcId = msg_send![this, init];
             if this != nil {
-                (*this).set_ivar("cocoa_window_ptr", cx);
+                (*this).set_ivar("macos_window_ptr", cx);
                 let marked_text = <ObjcId as NSMutableAttributedString>::init(
                     NSMutableAttributedString::alloc(nil),
                 );
@@ -851,7 +848,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             decl.add_method(sel!(draggingEnded:), dragging_ended as extern fn(&Object, Sel, ObjcId));
         }
     }
-    decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
+    decl.add_ivar::<*mut c_void>("macos_window_ptr");
     decl.add_ivar::<ObjcId>("markedText");
     decl.add_protocol(&Protocol::get("NSTextInputClient").unwrap());
     decl.add_protocol(&Protocol::get("CALayerDelegate").unwrap());
