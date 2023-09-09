@@ -509,7 +509,6 @@ impl AudioUnitAccess {
             let manager: ObjcId = msg_send![class!(AVAudioUnitComponentManager), sharedAudioUnitComponentManager];
             let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
             let count: usize = msg_send![components, count];
-            log!("COUNT {}", count);
             let mut out = Vec::new();
             for i in 0..count {
                 let component: ObjcId = msg_send![components, objectAtIndex: i];

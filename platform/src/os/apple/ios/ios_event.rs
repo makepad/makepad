@@ -11,6 +11,7 @@ use {
             KeyEvent,
             TextClipboardEvent,
             TimerEvent,
+            TouchUpdateEvent,
         },
     }
 };
@@ -26,6 +27,8 @@ pub enum IosEvent {
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
+    TouchUpdate(TouchUpdateEvent),
+    
     Scroll(ScrollEvent),
     
     TextInput(TextInputEvent),
