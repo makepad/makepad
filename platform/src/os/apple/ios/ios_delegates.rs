@@ -109,58 +109,6 @@ pub fn define_mtk_view_dlg() -> *const Class {
 
     extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
         get_ios_app_global().draw_in_rect();
-        
-        
-        /*
-        let payload = get_window_payload(this);
-        if payload.event_handler.is_none() {
-            let f = payload.f.take().unwrap();
-
-            if payload.gfx_api == AppleGfxApi::OpenGl {
-                crate::native::gl::load_gl_funcs(|proc| {
-                    let name = std::ffi::CString::new(proc).unwrap();
-
-                    unsafe { get_proc_address(name.as_ptr() as _) }
-                });
-            }
-
-            payload.event_handler = Some(f());
-        }
-
-        let main_screen: ObjcId = unsafe { msg_send![class!(UIScreen), mainScreen] };
-        let screen_rect: NSRect = unsafe { msg_send![main_screen, bounds] };
-        let high_dpi = native_display().lock().unwrap().high_dpi;
-
-        let (screen_width, screen_height) = if high_dpi {
-            (
-                screen_rect.size.width as i32 * 2,
-                screen_rect.size.height as i32 * 2,
-            )
-        } else {
-            (
-                screen_rect.size.width as i32,
-                screen_rect.size.height as i32,
-            )
-        };
-
-        if native_display().lock().unwrap().screen_width != screen_width
-            || native_display().lock().unwrap().screen_height != screen_height
-        {
-            {
-                let mut d = native_display().lock().unwrap();
-                d.screen_width = screen_width;
-                d.screen_height = screen_height;
-            }
-            if let Some(ref mut event_handler) = payload.event_handler {
-                event_handler.resize_event(screen_width as _, screen_height as _);
-            }
-        }
-
-        if let Some(ref mut event_handler) = payload.event_handler {
-            event_handler.update();
-            event_handler.draw();
-        }
-        */
     }
     unsafe {
         decl.add_method(
