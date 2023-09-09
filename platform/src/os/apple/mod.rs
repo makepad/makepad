@@ -19,9 +19,9 @@ pub mod core_midi;
 pub mod apple_media;
 pub mod av_capture;
 pub(crate) use self::metal::*;
-#[cfg(any(target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub(crate) use self::macos::*;
-#[cfg(any(target_os = "ios"))]
+#[cfg(target_os = "ios")]
 pub(crate) use self::ios::*;
 pub(crate) use self::core_midi::{OsMidiInput, OsMidiOutput};
 
