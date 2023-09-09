@@ -61,7 +61,7 @@ pub trait Widget: LiveApply {
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw;
-    fn walk(&self) -> Walk {Walk::default()}
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
     fn redraw(&mut self, _cx: &mut Cx);
     
     fn is_visible(&self) -> bool {
@@ -69,7 +69,8 @@ pub trait Widget: LiveApply {
     }
     
     fn draw_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
-        self.draw_walk_widget(cx, self.walk())
+        let walk = self.walk(cx);
+        self.draw_walk_widget(cx, walk)
     }
     
     fn draw_widget_all(&mut self, cx: &mut Cx2d) {
@@ -475,9 +476,9 @@ impl WidgetRef {
         WidgetDraw::done()
     }
     
-    pub fn walk(&self) -> Walk {
+    pub fn walk(&self, cx:&mut Cx) -> Walk {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.walk()
+            return inner.walk(cx)
         }
         Walk::default()
     }
@@ -567,21 +568,23 @@ impl WidgetRef {
             None
         }
     }
+    
+    pub fn apply_over(&self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+    }
 
-    pub fn apply_over_and_redraw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+    pub fn apply_over_and_redraw(&self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
         self.redraw(cx);
     }
-}
-
-impl LiveHook for WidgetRef {}
-impl LiveApply for WidgetRef {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    
+    fn apply(&self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let mut inner = self.0.borrow_mut();
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
             if let Some(component) = &mut *inner {
                 if component.type_id() != live_type {
                     *inner = None; // type changed, drop old component
+                    log!("TYPECHANGE");
                 }
                 else {
                     return component.apply(cx, from, index, nodes);
@@ -589,6 +592,9 @@ impl LiveApply for WidgetRef {
             }
             if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<WidgetRegistry>().new(cx, live_type) {
+                    if cx.debug.marker() == 1{
+                        panic!()
+                    }
                 *inner = Some(component);
                 if let Some(component) = &mut *inner {
                     return component.apply(cx, from, index, nodes);
@@ -603,6 +609,13 @@ impl LiveApply for WidgetRef {
         }
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
         nodes.skip_node(index)
+    }
+}
+
+impl LiveHook for WidgetRef {}
+impl LiveApply for WidgetRef {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        <WidgetRef>::apply(self, cx, from, index, nodes)
     }
 }
 
@@ -628,6 +641,12 @@ pub struct WidgetActionItem {
     pub container_uid: WidgetUid,
     pub item_uid: WidgetUid,
     pub action: Box<dyn WidgetAction>
+}
+
+impl Debug for WidgetActionItem {
+    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
+        write!(f, "WidgetActionItem{{wiget_uid: {:?}, container_uid: {:?}, item_uid:{:?}}}", self.widget_uid, self.container_uid, self.item_uid)
+    }
 }
 
 pub type WidgetActions = Vec<WidgetActionItem>;
@@ -701,7 +720,7 @@ impl<T: Clone> Default for DrawStateWrap<T> {
 }
 
 impl<T: Clone> DrawStateWrap<T> {
-    pub fn begin(&mut self, cx: &Cx2d, init: T) -> bool {
+    pub fn begin(&mut self, cx: &mut Cx2d, init: T) -> bool {
         if self.redraw_id != cx.redraw_id() {
             self.redraw_id = cx.redraw_id();
             self.state = Some(init);
@@ -712,7 +731,7 @@ impl<T: Clone> DrawStateWrap<T> {
         }
     }
     
-    pub fn begin_with<F, S>(&mut self, cx: &Cx2d, v: &S, init: F) -> bool where F: FnOnce(&Cx2d, &S) -> T {
+    pub fn begin_with<F, S>(&mut self, cx: &mut Cx2d, v: &S, init: F) -> bool where F: FnOnce(&mut Cx2d, &S) -> T {
         if self.redraw_id != cx.redraw_id() {
             self.redraw_id = cx.redraw_id();
             self.state = Some(init(cx, v));

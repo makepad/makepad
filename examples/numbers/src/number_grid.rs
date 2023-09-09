@@ -147,7 +147,7 @@ impl Widget for NumberGrid {
         });
     }
     
-    fn walk(&self) -> Walk {self.walk}
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx)

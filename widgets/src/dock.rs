@@ -1,11 +1,9 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        widget::*,
-        makepad_draw::*,
-        splitter::{SplitterAction, Splitter, SplitterAlign},
-        tab_bar::{TabBarAction, TabBar},
-    },
+use crate::{
+    makepad_derive_widget::*,
+    widget::*,
+    makepad_draw::*,
+    splitter::{SplitterAction, Splitter, SplitterAlign},
+    tab_bar::{TabBarAction, TabBar},
 };
 
 live_design!{
@@ -214,7 +212,7 @@ impl LiveHook for Dock {
             }
         }
         for (item_id, kind) in items {
-            self.get_item(cx, item_id, kind);
+            self.item(cx, item_id, kind);
         }
     }
     
@@ -339,9 +337,7 @@ impl Dock {
     }
     
     
-    
-    
-    pub fn get_item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, DockItemId {id: entry_id, kind: template}, | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
@@ -355,6 +351,10 @@ impl Dock {
     }
     
     pub fn items(&mut self) -> &ComponentMap<DockItemId, WidgetRef> {
+        &self.items
+    }
+    
+    pub fn visible_items(&mut self) -> &ComponentMap<DockItemId, WidgetRef> {
         &self.items
     }
     
@@ -616,7 +616,7 @@ impl Dock {
                 no_close: false,
                 kind
             });
-            self.get_item(cx, item, kind);
+            self.item(cx, item, kind);
             self.select_tab(cx, item);
             self.area.redraw(cx);
         }
@@ -633,7 +633,7 @@ impl Dock {
                     no_close: false,
                     kind
                 });
-                self.get_item(cx, new_item, kind);
+                self.item(cx, new_item, kind);
                 self.select_tab(cx, new_item);
             }
         }
@@ -649,7 +649,7 @@ impl Dock {
                 kind
             });
             self.select_tab(cx, item);
-            self.get_item(cx, item, kind);
+            self.item(cx, item, kind);
         }
     }
     
@@ -767,7 +767,7 @@ impl Widget for Dock {
         }
     }
     
-    fn walk(&self) -> Walk {self.walk}
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
@@ -929,7 +929,7 @@ impl DockRef {
         None
     }
     
-    
+    // user wants to drag, set dh accordingly
     pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent, dr: DragResponse) {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(pos) = dock.find_drop_position(cx, dh.abs) {

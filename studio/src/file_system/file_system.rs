@@ -10,7 +10,6 @@ use {
         makepad_widgets::file_tree::*,
         makepad_widgets::dock::*,
         file_system::FileClient,
-        build_manager::build_manager::BuildManager,
         makepad_file_protocol::{
             FileRequest,
             FileError,
@@ -51,6 +50,11 @@ pub struct FileEdge {
     pub file_node_id: FileNodeId,
 }
 
+pub enum FileSystemAction{
+    RecompileNeeded,
+    LiveReloadNeeded
+}
+
 impl FileSystem {
     pub fn init(&mut self, cx:&mut Cx){
         self.file_client.init(cx);
@@ -69,8 +73,14 @@ impl FileSystem {
         }
         None
     }
+
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef)->Vec<FileSystemAction>{
+        let mut actions = Vec::new();
+        self.handle_event_with(cx, event, ui, &mut |_,action| actions.push(action));
+        actions
+    }
     
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef, build_manager:&mut BuildManager){
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, ui:&WidgetRef, dispatch_action: &mut dyn FnMut(&mut Cx, FileSystemAction)) {
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
@@ -101,13 +111,28 @@ impl FileSystem {
                         Ok((_path, old, new))=>{
                             // alright file has been saved
                             // now we need to check if a live_design!{} changed or something outside it
-                            
-                            for i in 0..old.len().min(new.len()){
-                                if old.as_bytes()[i] != new.as_bytes()[i]{
-                                    if i > 10300{ // 
-                                        build_manager.start_recompile_timer(cx);
+                            if old != new{
+                                let mut old_neg = Vec::new();
+                                let mut new_neg = Vec::new();
+                                match  LiveRegistry::tokenize_from_str_live_design(&old, Default::default(), Default::default(), Some(&mut old_neg)){
+                                    Err(e)=>{
+                                        log!("Cannot tokenize old file {}", e)
                                     }
-                                    break;
+                                    Ok(old_tokens)=> match LiveRegistry::tokenize_from_str_live_design(&new, Default::default(), Default::default(), Some(&mut new_neg)){
+                                        Err(e)=>{
+                                            log!("Cannot tokenize new file {}", e);
+                                        }
+                                        Ok(new_tokens)=>{
+                                            // we need the space 'outside' of these tokens
+                                            if old_neg != new_neg{
+                                                dispatch_action(cx, FileSystemAction::RecompileNeeded)
+                                            }
+                                            if old_tokens != new_tokens{
+                                                // design code changed, hotreload it
+                                                dispatch_action(cx, FileSystemAction::LiveReloadNeeded)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -1,7 +1,7 @@
 // missing deps so our windows-rs stripper doesnt have to traverse types
 use { 
-    crate::{
-        windows_crate::{
+    crate::{ 
+        windows::{  
             core::HRESULT,
             core::PCWSTR, 
             core::PCSTR, 
@@ -85,7 +85,7 @@ use {
                 IMFMediaEventGenerator,
                 MF_ATTRIBUTES_MATCH_TYPE,
                 MF_SOURCE_READER_CONSTANTS,
-                IMFStreamDescriptor,
+                IMFStreamDescriptor, 
                 IMFMediaTypeHandler  
             },
             Win32::Graphics::Direct3D::{ 
@@ -151,6 +151,7 @@ use {
                 D3D11_MAP,
                 D3D11_MAPPED_SUBRESOURCE,
                 D3D11_BOX,
+                D3D11_CPU_ACCESS_FLAG,
                 
                 D3D11_RENDER_TARGET_VIEW_DESC_0,
                 D3D11_QUERY,
@@ -235,6 +236,9 @@ use {
                 IDXGISwapChain,
             },
             Win32::Foundation::{
+                POINTL,
+                WAIT_EVENT,
+                HMODULE,
                 VARIANT_BOOL, 
                 VARIANT_FALSE, 
                 VARIANT_TRUE, 
@@ -244,7 +248,7 @@ use {
                 FILETIME,
                 LUID,
                 POINT,
-                HINSTANCE,
+                HINSTANCE, 
                 FARPROC,
                 DECIMAL,
                 DECIMAL_0,
@@ -253,8 +257,15 @@ use {
                 DECIMAL_1_0,
             },
             Win32::Graphics::Gdi::{
-                HDC,
+                HDC,  
+                HRGN,
+                HPEN,
+                HPALETTE,
+                HFONT,
+                HBITMAP, 
+                HGDIOBJ,
                 HBRUSH,
+                HENHMETAFILE,
                 MONITOR_FROM_FLAGS,
                 GET_DEVICE_CAPS_INDEX,
             },
@@ -285,7 +296,33 @@ use {
             Win32::Security::{
                 SECURITY_ATTRIBUTES
             },
-            Win32::System::Com::{
+            Win32::System::Variant::{
+                VARIANT,
+                VARENUM,
+                VARIANT_0,
+                VARIANT_0_0,
+                VARIANT_0_0_0,
+                VARIANT_0_0_0_0,
+            },
+            Win32::System::Com::{  
+                IAdviseSink,
+                IEnumSTATDATA, 
+                STATDATA, 
+                IPersist, 
+                IPersistStream, 
+                BIND_OPTS,
+                IRunningObjectTable,
+                IEnumString, 
+                ROT_FLAGS,
+                IMoniker, 
+                IBindCtx,
+                IEnumMoniker,
+                DVTARGETDEVICE,
+                FORMATETC,
+                IEnumFORMATETC,
+                STGMEDIUM,
+                STGMEDIUM_0,
+                IDataObject,
                 COINIT,
                 IMPLTYPEFLAGS,
                 ITypeComp,
@@ -315,7 +352,6 @@ use {
                 TLIBATTR,
                 DISPATCH_FLAGS,
                 DISPPARAMS,
-                VARIANT,
                 EXCEPINFO,
                 STREAM_SEEK,
                 STGC,
@@ -327,29 +363,27 @@ use {
                 TYPEDESC_0,
                 ELEMDESC_0,
                 SYSKIND,
-                VARIANT_0,
                 LPEXCEPFINO_DEFERRED_FILLIN,
                 IEnumSTATSTG,
-                VARENUM,
                 IDLFLAGS,
-                VARIANT_0_0,
-                VARIANT_0_0_0,
-                VARIANT_0_0_0_0,
                 SAFEARRAY,
                 BLOB,
                 CY,
                 ADVANCED_FEATURE_FLAGS,
                 SAFEARRAYBOUND,
-                CY_0,
-                
+                CY_0, 
             },
-            Win32::System::Ole::{ 
+            Win32::System::Ole::{  
                 CLIPBOARD_FORMAT,
+                DROPEFFECT,
                 IRecordInfo,
                 PARAMDESCEX,
                 PARAMFLAGS,
                 ARRAYDESC,
                 PARAMDESC,
+            },
+            Win32::System::SystemServices::{
+                MODIFIERKEYS_FLAGS
             },
             Win32::System::Com::StructuredStorage::{
                 IEnumSTATSTG,

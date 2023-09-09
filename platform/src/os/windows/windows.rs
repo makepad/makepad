@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{RefCell},
+        cell::RefCell,
     },
     crate::{
         makepad_live_id::*,
@@ -18,7 +18,7 @@ use {
             },
             cx_native::EventFlow,
         },
-        pass::{CxPassParent},
+        pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
     }
 };
@@ -222,10 +222,10 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 }
             }
         }

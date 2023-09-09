@@ -1,5 +1,5 @@
 use makepad_widgets::*; 
- 
+
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
@@ -73,9 +73,6 @@ live_design!{
             instance hover: 0.0
             instance pressed: 0.0
             text_style: {
-                font: {
-                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
-                }
                 font_size: 11.0
             }
             fn get_color(self) -> vec4 {
@@ -203,7 +200,7 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    text: "@whatup · 13h"
+                    text: "@Hello world· 13h"
                 }
                 text = <Label> {
                     width: Fill, height: Fit
@@ -303,10 +300,6 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        for i in 0..15{
-            log!("Line {}",i); 
-            //std::thread::sleep(std::time::Duration::from_millis(10))
-        }
         crate::makepad_widgets::live_design(cx);
     }
 }
@@ -330,7 +323,7 @@ impl AppMain for App {
                         };
                         let item = list.item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
-                            1 => format!("Hello 123  {} Requires recompile", item_id),
+                            1 => format!("The {} Requires recompile", item_id),
                             2 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
                             3 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
@@ -346,15 +339,11 @@ impl AppMain for App {
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
-        
+
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
-            // check for actions inside the list item
             if item.button(id!(likes)).clicked(&actions) {
-                log!("Live {}", item_id);
+                log!("Test {}", item_id);
             }
-        }
-        
-        if self.ui.button(id!(button1)).clicked(&actions) {
         }
     }
 }
