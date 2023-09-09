@@ -164,7 +164,7 @@ impl Widget for Video {
         self.draw_bg.redraw(cx);
     }
 
-    fn walk(&self) -> Walk {
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {
         self.walk
     }
 
