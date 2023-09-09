@@ -4,6 +4,7 @@ pub mod implement_com;
 pub mod win32_app;
 pub mod win32_window;
 pub mod win32_event;
+pub mod win32_droptarget;
 pub mod wasapi;
 pub mod windows_media;
 pub mod windows_decoding;

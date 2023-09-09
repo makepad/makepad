@@ -5,13 +5,11 @@ use {
     crate::{
         implement_com,
         makepad_live_id::*,
-        os::windows::win32_app::{FALSE},
+        os::windows::win32_app::FALSE,
         audio::*,
         thread::Signal,
-        windows_crate::{
-            core::{
-                PCWSTR,
-            },
+        windows::{
+            core::PCWSTR,
             Win32::Foundation::{
                 WAIT_OBJECT_0,
                 HANDLE,
@@ -23,14 +21,12 @@ use {
                 CoCreateInstance,
                 CLSCTX_ALL,
                 //STGM_READ,
+            },
+            Win32::System::Variant::{
                 VT_LPWSTR
             },
-            Win32::UI::Shell::PropertiesSystem::{
-                PROPERTYKEY
-            },
-            Win32::Media::KernelStreaming::{
-                WAVE_FORMAT_EXTENSIBLE,
-            },
+            Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
+            Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
             Win32::Media::Multimedia::{
                 KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
                 //WAVE_FORMAT_IEEE_FLOAT
@@ -345,10 +341,9 @@ struct WasapiBase {
 impl WasapiBaseRef {
     pub fn signal_termination(&mut self) {
         self.is_terminated = true;
-        unsafe {SetEvent(self.event)};
+        unsafe {SetEvent(self.event).unwrap()};
     }
 }
-
 
 impl WasapiBase {
     pub fn get_ref(&self) -> WasapiBaseRef {
@@ -382,7 +377,7 @@ impl WasapiBase {
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 def_period,
                 def_period,
-                &wave_format as *const _ as *const crate::windows_crate::Win32::Media::Audio::WAVEFORMATEX,
+                &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
                 None
             ).is_err(){
                 return Err(())
@@ -538,21 +533,21 @@ implement_com!{
 }
 
 impl IMMNotificationClient_Impl for WasapiChangeListener {
-    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows::core::Result<()> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows_crate::core::PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows::core::PCWSTR) -> crate::windows::core::Result<()> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows_crate::core::Result<()> {
+    fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows::core::Result<()> {
         Ok(())
     }
     

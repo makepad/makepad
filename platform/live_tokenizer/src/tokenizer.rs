@@ -622,7 +622,7 @@ impl<'a> Cursor<'a> {
         Cursor {chars, scratch, index: 0 }
     }
     
-    fn index(&self) -> usize {
+    pub fn index(&self) -> usize {
         self.index
     }
     

@@ -11,6 +11,7 @@ pub struct DebugInner {
     pub rects: Vec<(Rect, Vec4)>,
     pub points: Vec<(DVec2, Vec4)>,
     pub labels: Vec<(DVec2, Vec4, String)>,
+    pub marker: u64,
 }
 
 #[derive(Clone, Default)]
@@ -20,6 +21,16 @@ impl Debug {
     const R: Vec4 = Vec4 {x: 1.0, y: 0.0, z: 0.0, w: 1.0};
     const G: Vec4 = Vec4 {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
     const B: Vec4 = Vec4 {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
+    
+    pub fn marker(&self)->u64{
+        let inner = self.0.borrow();
+        inner.marker
+    }
+    
+    pub fn set_marker(&mut self, v:u64){
+        let mut inner = self.0.borrow_mut();
+        inner.marker = v
+    }
     
     pub fn point(&self, color: Vec4, p: DVec2) {
         let mut inner = self.0.borrow_mut();

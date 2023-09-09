@@ -712,7 +712,7 @@ live_design!{
                 xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
             }
         }
-        
+        cursor: Default
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
             instance border_width: 1.5

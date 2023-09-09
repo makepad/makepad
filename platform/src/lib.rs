@@ -50,7 +50,8 @@ pub use makepad_wasm_bridge;
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
-pub use makepad_windows as windows_crate;
+pub use ::makepad_windows as windows;
+
 pub use makepad_futures;
  
 pub use {
@@ -103,9 +104,7 @@ pub use {
         LiveNodeSliceApi,
         LiveNodeVecApi,
     },
-    component_map::{
-        ComponentMap
-    },
+    component_map::ComponentMap,
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,
@@ -114,13 +113,9 @@ pub use {
     },
     crate::{
         os::*,
-        cx_api::{
-            CxOsApi,
-        },
-        media_api::{
-            CxMediaApi
-        },
         decoding_api::CxDecodingApi,
+        cx_api::CxOsApi,
+        media_api::CxMediaApi,
         draw_list::{
             CxDrawItem,
             CxRectArea,
@@ -139,9 +134,7 @@ pub use {
             RectArea,
             InstanceArea
         },
-        menu::{
-            MenuCommand,
-        },
+        menu::MenuCommand,
         thread::Signal,
         event::{
             HttpRequest,
@@ -248,10 +241,7 @@ pub use {
             GeometryRef,
             Geometry,
         },
-        gpu_info::{
-            GpuPerformance
-        },
-        
+        gpu_info::GpuPerformance,       
     },
 };
 

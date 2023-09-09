@@ -11,36 +11,43 @@ use crate::{
 live_design!{
     import makepad_draw::shader::std::*;
     
-    DrawApp = {{DrawApp}} {
-        texture tex: texture2d
-        fn pixel(self) -> vec4 {
-            //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
-            let fb = sample2d_rt(self.tex, self.pos)
-            if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
-                return #4
-            }
-            return fb;
-        }
-    }
-    
-    
     RunView = {{RunView}} {
-        frame_delta: 0.008
+        frame_delta: 0.008,
+        draw_app:{
+            texture tex: texture2d
+            instance recompiling: 0.0
+            fn pixel(self) -> vec4 {
+                //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
+                let fb = sample2d_rt(self.tex, self.pos)
+                if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
+                    return #4
+                }
+                return mix(fb, #4, self.recompiling*0.4);
+            }
+        }
+        animator: {
+            recompiling = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {draw_app: {recompiling: 0.0}}
+                }
+                on = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {draw_app: {recompiling: 1.0}}
+                }
+            }
+        }
     }
 }
 
-#[derive(Live, LiveHook)]
-#[repr(C)]
-pub struct DrawApp {
-    #[deref] draw_super: DrawQuad,
-}
 
 #[derive(Live)]
 pub struct RunView {
     #[walk] walk: Walk,
     #[rust] draw_state: DrawStateWrap<Walk>,
-    #[live] draw_bg: DrawApp,
     #[animator] animator: Animator,
+    #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
     #[rust] last_size: (usize, usize),
     #[rust] tick: Timer,
@@ -63,6 +70,7 @@ impl LiveHook for RunView {
 impl RunView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, manager: &mut BuildManager) {
+
         self.animator_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
@@ -72,10 +80,10 @@ impl RunView {
             #[cfg(target_os = "windows")]
             for client in &manager.clients {
                 for process in client.processes.values() {
-                    let guid = cx.get_dx11_shared_texture_guid(process.texture);
-                    manager.send_host_to_stdin(None, HostToStdin::Dx11TextureGuid {
-                        guid
-                    })
+                    let handle = cx.get_shared_handle(&process.texture);
+
+                    let marshalled_handle = handle.0 as u64;  // hack: unsure if HANDLE is supported in microserde yet, so convert to u64
+                    manager.send_host_to_stdin(None, HostToStdin::Dx11SharedHandle(marshalled_handle));
                 }
             }
             
@@ -86,7 +94,19 @@ impl RunView {
             })
         }
         // lets send mouse events
-        let rect = self.draw_bg.area().get_rect(cx);
+        match event.hits(cx, self.draw_app.area()){
+            Hit::FingerDown(_)=>{
+                cx.set_key_focus(self.draw_app.area());
+            }
+            Hit::KeyDown(e)=>{
+                manager.send_host_to_stdin(None, HostToStdin::KeyDown(e));
+            }
+            Hit::KeyUp(e)=>{
+                manager.send_host_to_stdin(None, HostToStdin::KeyUp(e));
+            }
+            _=>()
+        }
+        let rect = self.draw_app.area().get_rect(cx);
         match event {
             Event::MouseDown(e) => {
                 let rel = e.abs - rect.pos;
@@ -135,18 +155,19 @@ impl RunView {
                 cx.set_cursor(cursor)
             }
             StdinToHost::ReadyToStart => {
+                self.animator_play(cx, id!(recompiling.off));
                 // cause a resize event to fire
                 self.last_size = Default::default();
                 self.redraw(cx);
             }
             StdinToHost::DrawComplete => {
-                self.draw_bg.redraw(cx);
+                self.redraw(cx);
             }
         }
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.area().redraw(cx);
+        self.draw_app.redraw(cx);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, manager: &BuildManager) {
@@ -163,12 +184,13 @@ impl RunView {
                 let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
                 if new_size != self.last_size {
                     self.last_size = new_size;
+
                     process.texture.set_desc(cx, TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),
                     });
-                    
+
                     manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
                         width: rect.size.x,
                         height: rect.size.y,
@@ -176,22 +198,22 @@ impl RunView {
                     }));
                 }
                 
-                self.draw_bg.set_texture(0, &process.texture);
+                self.draw_app.set_texture(0, &process.texture);
                 
                 break
             }
         }
-        self.draw_bg.draw_abs(cx, rect);
+        self.draw_app.draw_abs(cx, rect);
     }
 }
 
 impl Widget for RunView {
-    fn walk(&self) -> Walk {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx)
+        self.draw_app.redraw(cx)
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
@@ -205,4 +227,14 @@ impl Widget for RunView {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct RunViewRef(WidgetRef);
+
+impl RunViewRef{
+    
+    pub fn recompile_started(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.animator_play(cx, id!(recompiling.on));
+        }
+    }
+    
+}
 

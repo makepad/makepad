@@ -2,7 +2,7 @@ use {
     std::rc::Rc,
     std::cell::{RefCell},
     std::ffi::CString,
-    std::os::raw::{c_char, c_void},
+    std::os::raw::{c_void},
     std::time::Instant,
     self::super::{
         android_media::CxAndroidMedia,
@@ -57,7 +57,7 @@ const ANDROID_META_ALT_MASK: i32 = 50;
 
 #[link(name = "EGL")]
 extern "C" {
-    fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
+    fn eglGetProcAddress(procname: *const u8) -> *mut c_void;
 }
 
 impl Cx {

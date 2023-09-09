@@ -1,19 +1,15 @@
-use {
-    crate::{
-        makepad_code_editor::code_editor::*,
-        makepad_platform::*,
-        makepad_draw::*,
-        makepad_widgets::*,
-        makepad_widgets::file_tree::*,
-        makepad_widgets::dock::*,
-        file_system::file_system::*,
-        run_view::*,
-        build_manager::{
-            build_manager::{
-                BuildManager,
-                BuildManagerAction
-            },
-        },
+use crate::{
+    makepad_code_editor::code_editor::*,
+    makepad_platform::*,
+    makepad_draw::*,
+    makepad_widgets::*,
+    makepad_widgets::file_tree::*,
+    makepad_widgets::dock::*,
+    file_system::file_system::*,
+    run_view::*,
+    build_manager::build_manager::{
+        BuildManager,
+        BuildManagerAction
     },
 };
 
@@ -75,7 +71,7 @@ live_design!{
                 open_files = Tabs {
                     tabs: [welcome, file1],
                     no_close: true,
-                    selected: 0
+                    selected: 1
                 }
                 
                 run_views = Tabs {
@@ -176,6 +172,7 @@ impl AppMain for App {
         let log_list = self.ui.list_view(id!(log_list));
         
         if let Event::Draw(event) = event {
+            //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 
@@ -191,7 +188,7 @@ impl AppMain for App {
                     run_view.draw(cx, &self.build_manager);
                 }
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
-                    self.build_manager.draw_log_list(cx, &mut *list_view);
+                    self.build_manager.draw_log(cx, &mut *list_view);
                 }
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
@@ -201,20 +198,39 @@ impl AppMain for App {
                     }
                 }
             }
+            //profile_end!(dt);
             return
         }
         
+        
         if let Event::KeyDown(KeyEvent {
-            key_code: KeyCode::Backtick,
-            modifiers: KeyModifiers {logo, ..},
+            key_code,
+            modifiers: KeyModifiers {logo,control, ..},
             ..
         }) = event {
-            if *logo{
-                self.build_manager.file_change(cx);
+            if *control || *logo{
+                if let KeyCode::Backtick = key_code{
+                     self.build_manager.file_change(cx);
+                }
+                else if let KeyCode::KeyK = key_code{
+                    self.build_manager.clear_log();
+                    log_list.redraw(cx);
+                }
             }
         }
           
-        self.file_system.handle_event(cx, event, &self.ui, &mut self.build_manager);
+        for action in self.file_system.handle_event(cx, event, &self.ui){
+            match action{
+                FileSystemAction::RecompileNeeded=>{
+                    self.build_manager.start_recompile_timer(cx);
+                    run_view.recompile_started(cx);
+                }
+                FileSystemAction::LiveReloadNeeded=>{
+                    self.build_manager.clear_log();
+                    log_list.redraw(cx);
+                }
+            }
+        }
         
         if let Some(mut run_view) = run_view.borrow_mut() {
             run_view.handle_event(cx, event, &mut self.build_manager);
@@ -258,6 +274,7 @@ impl AppMain for App {
         }
         
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
+            log!("should_tab_start_drag: dock.tab_start_drag()");
             dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
                 path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
                 internal_id: Some(tab_id)
@@ -265,6 +282,7 @@ impl AppMain for App {
         }
         
         if let Some(drag) = dock.should_accept_drag(&actions) {
+            log!("should_accept_drag: dock.accept_drag()");
             if drag.items.len() == 1 {
                 if drag.modifiers.logo {
                     dock.accept_drag(cx, drag, DragResponse::Copy);
@@ -276,6 +294,7 @@ impl AppMain for App {
         }
         
         if let Some(drop) = dock.has_drop(&actions) {
+            log!("has_drop: drop_clone(), drop_move() or drop_create()");
             if let DragItem::FilePath {path, internal_id} = &drop.items[0] {
                 if let Some(internal_id) = internal_id { // from inside the dock
                     if drop.modifiers.logo {
@@ -304,7 +323,6 @@ impl AppMain for App {
             let tab_name = self.file_system.file_node_name(file_id);
             // ok lets open the file
             let tab_id = LiveId::unique();
-            log!("{}", file_path);
             self.file_system.request_open_file(tab_id, file_path);
             
             // lets add a file tab 'somewhere'

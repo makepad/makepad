@@ -472,7 +472,7 @@ impl Widget for FileTree {
         });
     }
     
-    fn walk(&self) -> Walk {self.walk}
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ()) {

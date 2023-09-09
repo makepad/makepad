@@ -212,7 +212,7 @@ impl RawInput {
                 };
                 if key_down && !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
                     let uc = self.modifiers.shift;
-                    let inp = key_code.to_char();
+                    let inp = key_code.to_char(uc);
                     if let Some(inp) = inp {
                         evts.push(DirectEvent::TextInput(TextInputEvent {
                             input: format!("{}", inp),
