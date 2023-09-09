@@ -62,7 +62,7 @@ pub struct View { // draw info per UI element
     
     #[live(true)] visible: bool,
     
-    #[live(false)] grab_key_focus: bool,
+    #[live(true)] grab_key_focus: bool,
     
     #[live(false)] block_signal_event: bool,
     #[live] cursor: Option<MouseCursor>,
@@ -147,7 +147,9 @@ impl LiveHook for View {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     self.draw_order.push(id);
-                    return self.children.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
+                    return self.children.get_or_insert(cx, id, | cx | {
+                        WidgetRef::new(cx)
+                    })
                         .apply(cx, from, index, nodes);
                 }
                 else {
@@ -505,7 +507,7 @@ impl Widget for View {
         self.visible
     }
     
-    fn walk(&self) -> Walk {
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {
         self.walk
     }
     
@@ -675,7 +677,7 @@ impl View {
                 let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id) {
                     if child.is_visible() {
-                        let walk = child.walk();
+                        let walk = child.walk(cx);
                         if resume {
                             child.draw_walk_widget(cx, walk) ?;
                         }

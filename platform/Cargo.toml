@@ -40,8 +40,8 @@ path = "../libs/futures_legacy"
 version = "0.3"
 
 [target.'cfg(windows)'.dependencies.makepad-windows]
-#version = "0.44"
 path = "../libs/windows"
+version = "0.51.1"
 features = [
     "Win32_Foundation", 
     "Win32_UI_WindowsAndMessaging",
@@ -72,7 +72,9 @@ features = [
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_Media_MediaFoundation",
-    "Devices_Enumeration",
+    "Win32_System_Variant",
+    "Win32_System_SystemServices",
+    "Devices_Enumeration", 
     "Devices_Midi",
     "Foundation_Collections",
     "Storage",

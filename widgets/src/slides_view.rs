@@ -45,8 +45,8 @@ impl Widget for SlidesView {
         });
     }
     
-    fn walk(&self) -> Walk {
-        self.frame.walk()
+    fn walk(&mut self, cx:&mut Cx) -> Walk {
+        self.frame.walk(cx)
     }
     
     fn redraw(&mut self, cx: &mut Cx) {

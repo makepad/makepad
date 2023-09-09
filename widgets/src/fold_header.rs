@@ -72,7 +72,7 @@ impl Widget for FoldHeader {
         self.body.redraw(cx);
     }
     
-    fn walk(&self) -> Walk {self.walk}
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
 
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.header.find_widgets(path, cached, results);

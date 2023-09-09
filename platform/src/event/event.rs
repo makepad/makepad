@@ -50,7 +50,7 @@ pub enum Event {
     MouseMove(MouseMoveEvent),
     MouseUp(MouseUpEvent),
     TouchUpdate(TouchUpdateEvent),
-    Scroll(ScrollEvent),
+    Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
     
     Timer(TimerEvent),
     
@@ -69,22 +69,11 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
     
-    WebSocketClose(LiveId),
-    WebSocketOpen(LiveId),
-    WebSocketError(WebSocketErrorEvent),
-    WebSocketMessage(WebSocketMessageEvent),
-    
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
     NetworkResponses(Vec<NetworkResponseEvent>),
-    /*
-    HttpResponse(HttpResponseEvent),
-    HttpRequestError(HttpRequestErrorEvent),
-    HttpResponseProgress(HttpProgressEvent),
-    HttpUploadProgress(HttpProgressEvent),
 
-    */
     VideoStream(VideoStreamEvent),
     VideoDecodingInitialized(VideoDecodingInitializedEvent),
     VideoChunkDecoded(LiveId),

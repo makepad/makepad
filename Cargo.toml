@@ -13,7 +13,7 @@ workspace.members = [
     "studio",
     "tools/video_mixer",
     "tools/cargo_makepad",
-#    "tools/windows_strip",
+    "tools/windows_strip",
     "tools/auto_version",
     "tools/web_server", 
     "tools/file_router", 

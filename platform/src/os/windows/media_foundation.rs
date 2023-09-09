@@ -4,17 +4,15 @@ use {
         makepad_live_id::*,
         thread::Signal,
         video::*,
-        os::{
-            windows::win32_app::{TRUE},
-        },
-        windows_crate::{
+        os::windows::win32_app::TRUE,
+        windows::{
             core::{
+                AsImpl,
                 //Interface,
                 PWSTR,
                 GUID,
                 HRESULT,
                 PCWSTR,
-                AsImpl
             },
             Win32::System::Com::{
                 CLSCTX_ALL,
@@ -51,9 +49,7 @@ use {
                 MFVideoFormat_NV12,
                 MFVideoFormat_MJPG,
             },
-            Win32::UI::Shell::PropertiesSystem::{
-                PROPERTYKEY
-            },
+            Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
             Win32::Media::Audio::{
                 MMDeviceEnumerator,
                 IMMNotificationClient_Impl,
@@ -82,7 +78,7 @@ impl MfInput {
     fn activate(&mut self, video_format: VideoFormat, callback: Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >) {
         if self.active_format.is_some() {panic!()};
         self.active_format = Some(video_format.format_id);
-        let cb = self.reader_callback.as_impl();
+        let cb = unsafe{self.reader_callback.as_impl()};
         *cb.config.lock().unwrap() = Some(SourceReaderConfig{
             video_format,
             callback
@@ -116,7 +112,7 @@ impl MediaFoundationAccess {
         unsafe {
             //CoInitialize(None);
             CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
-            let change_listener: IMMNotificationClient = MediaFoundationChangeListener {change_signal:change_signal.clone()}.into();
+            let change_listener: IMMNotificationClient = MediaFoundationChangeListener { change_signal: change_signal.clone() }.into();
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
             
@@ -303,8 +299,8 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
         _dwstreamindex: u32,
         _dwstreamflags: u32,
         _lltimestamp: i64,
-        psample: &Option<IMFSample>
-    ) -> crate::windows_crate::core::Result<()> {
+        psample: Option<&IMFSample>
+    ) -> crate::windows::core::Result<()> {
         unsafe{
             if let Some(sample) = psample{
                 if let Ok(buffer) = sample.GetBufferByIndex(0){
@@ -357,15 +353,15 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
         Ok(())
     }
     
-    fn OnFlush(&self, _dwstreamindex: u32) -> crate::windows_crate::core::Result<()> {
+    fn OnFlush(&self, _dwstreamindex: u32) -> crate::windows::core::Result<()> {
         Ok(())
     }
     
     fn OnEvent(
         &self,
         _dwstreamindex: u32,
-        _pevent: &Option<IMFMediaEvent>
-    ) -> crate::windows_crate::core::Result<()> {
+        _pevent: Option<&IMFMediaEvent>
+    ) -> crate::windows::core::Result<()> {
         Ok(())
     }
 }
@@ -386,20 +382,20 @@ implement_com!{
 }
 
 impl IMMNotificationClient_Impl for MediaFoundationChangeListener {
-    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows::core::Result<()> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows_crate::core::PCWSTR) -> crate::windows_crate::core::Result<()> {
+    fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows::core::PCWSTR) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows_crate::core::Result<()> {
+    fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows::core::Result<()> {
         Ok(())
     }
     

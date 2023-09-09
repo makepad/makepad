@@ -4,7 +4,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_error_log::*,
-        makepad_live_tokenizer::{/*Delim, TokenPos, TokenRange, TokenWithLen,*/ FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
+        makepad_live_tokenizer::{TokenWithLen, Delim, FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
         live_error::{LiveError, LiveErrorSpan, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
@@ -389,18 +389,19 @@ impl LiveRegistry {
         let mut state = State::default();
         let mut scratch = String::new();
         let mut tokens = Vec::new();
-        let mut pos = start_pos;
+        let mut line_count = start_pos.line;
         for line_str in source.lines() {
             line_chars.clear();
             line_chars.extend(line_str.chars());
             let mut cursor = Cursor::new(&line_chars, &mut scratch);
+            let mut last_index = 0usize;
             loop {
                 let (next_state, full_token) = state.next(&mut cursor);
                 if let Some(full_token) = full_token {
                     let span = TextSpan {
                         file_id,
-                        start: pos,
-                        end: TextPos {column: pos.column + full_token.len as u32, line: pos.line}
+                        start: TextPos {column: last_index  as u32, line: line_count},
+                        end: TextPos {column: last_index as u32 + full_token.len  as u32, line: line_count}
                     };
                     match full_token.token {
                         FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
@@ -415,374 +416,133 @@ impl LiveRegistry {
                             tokens.push(TokenWithSpan {span, token: live_token})
                         },
                     }
-                    pos.column += full_token.len as u32;
                 }
                 else {
                     break;
                 }
                 state = next_state;
+                last_index = cursor.index();
             }
-            pos.line += 1;
-            pos.column = 0;
+            line_count += 1;
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
     }
-    /*
-    pub fn tokenize_from_str_live_design(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<Vec<TokenWithSpan>, LiveError> {
+    
+    pub fn tokenize_from_str_live_design(source: &str, start_pos: TextPos, file_id: LiveFileId, mut negative:Option<&mut Vec<TokenWithLen>>) -> Result<Vec<TokenWithSpan>, LiveError> {
         let mut line_chars = Vec::new();
         let mut state = State::default();
         let mut scratch = String::new();
         let mut tokens = Vec::new();
-        let mut pos = start_pos;
-        let mut bool in_live_design = false;
-        for line_str in source.lines() {
+        let mut line_count = start_pos.line;
+        enum Parse{
+            Before,
+            After,
+            Bang,
+            Brace,
+            Body(usize),
+        }
+        let mut parse = Parse::Before;
+        
+        'outer: for line_str in source.lines() {
             line_chars.clear();
             line_chars.extend(line_str.chars());
             let mut cursor = Cursor::new(&line_chars, &mut scratch);
+            let mut last_index = 0usize;
             loop {
                 let (next_state, full_token) = state.next(&mut cursor);
                 if let Some(full_token) = full_token {
-                    if let FullToken::Ident(live_id!(live_design)) = &full_token.token{
-                        in_live_design = true;
+                    match parse{
+                        Parse::Before=>{
+                            if let FullToken::Ident(live_id!(live_design)) = &full_token.token{
+                                parse = Parse::Bang;
+                            }
+                            else if let Some(negative) = &mut negative{
+                                negative.push(full_token);
+                            }
+                        }
+                        Parse::Bang=> if let FullToken::Punct(live_id!(!)) = &full_token.token{
+                            parse = Parse::Brace;
+                        }
+                        else{
+                            parse = Parse::Before;
+                        }
+                        Parse::Brace=> if let FullToken::Open(Delim::Brace) = &full_token.token{
+                            parse = Parse::Body(0);
+                        }
+                        else{
+                            parse = Parse::Before;
+                        }
+                        Parse::Body(depth)=>{
+                             if let FullToken::Open(Delim::Brace) = &full_token.token{
+                                 parse = Parse::Body(depth + 1)
+                            }
+                            if let FullToken::Close(Delim::Brace) = &full_token.token{
+                                if depth == 0{
+                                    last_index = cursor.index();
+                                    parse = Parse::After;
+                                    continue;
+                                }
+                                parse = Parse::Body(depth - 1);
+                            }
+                            let span = TextSpan {
+                                file_id,
+                                start: TextPos {column: last_index  as u32, line: line_count},
+                                end: TextPos {column: last_index as u32 + full_token.len  as u32, line: line_count}
+                            };
+                            if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
+                                tokens.push(TokenWithSpan {span, token: live_token})
+                            }
+                        }
+                        Parse::After=>{
+                            if let Some(negative) = &mut negative{
+                                negative.push(full_token);
+                            }
+                            else{
+                                break 'outer;
+                            }
+                        }
                     }
-                    
-                    
-                    let span = TextSpan {
-                        file_id,
-                        start: pos,
-                        end: TextPos {column: pos.column + full_token.len as u32, line: pos.line}
-                    };
-                    match full_token.token {
-                        FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
-                            return Err(LiveError {
-                                origin: live_error_origin!(),
-                                span: span.into(),
-                                message: "Error tokenizing".to_string()
-                            })
-                        },
-                        _ => if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
-                            // lets build up the span info
-                            tokens.push(TokenWithSpan {span, token: live_token})
-                        },
-                    }
-                    pos.column += full_token.len as u32;
                 }
                 else {
                     break;
                 }
                 state = next_state;
+                last_index = cursor.index();
             }
-            pos.line += 1;
-            pos.column = 0;
+            line_count += 1;
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
-    }*/
-    
-    /*
-    // called by the live editor to update a live file
-    pub fn live_edit_file<'a, CB>(
-        &mut self,
-        file_name: &str,
-        range: TokenRange,
-        mut get_line: CB
-    ) -> Result<Option<LiveEditEvent>, LiveError>
-    where CB: FnMut(usize) -> (&'a [char], &'a [TokenWithLen])
-    {
-        let file_id = *self.file_ids.get(file_name).unwrap();
-        let mut live_index = 0;
-        let live_file = &mut self.live_files[file_id.to_index()];
-        let original = &mut live_file.original;
-        
-        let mut live_tokens = &mut original.tokens;
-        let mut new_tokens = Vec::new();
-        
-        let mut mutated_tokens = Vec::new();
-        
-        let mut parse_changed = false;
-        
-        for line in range.start.line..range.end.line {
-            let (_, full_tokens) = get_line(line);
-            // OK SO now we diff as we go
-            let mut column = 0usize;
-            for (token_index, full_token) in full_tokens.iter().enumerate() {
-                
-                if range.is_in_range(TokenPos {line, index: token_index}) {
-                    // ok so. now we filter the token
-                    let span = TextSpan {
-                        file_id,
-                        start: TextPos {column: column as u32, line: line as u32},
-                        end: TextPos {column: (column + full_token.len) as u32, line: line as u32}
-                    };
-                    
-                    match &full_token.token {
-                        FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
-                            return Err(LiveError {
-                                origin: live_error_origin!(),
-                                span: span.into(),
-                                message: "Error tokenizing".to_string()
-                            })
-                        },
-                        FullToken::String(s) => {
-                            let new_string = LiveToken::String(s.clone());
-                            if live_index >= live_tokens.len() { // just append
-                                if !parse_changed {
-                                    new_tokens = live_tokens.clone();
-                                    live_tokens = &mut new_tokens;
-                                    parse_changed = true;
-                                }
-                                live_tokens.push(TokenWithSpan {span, token: new_string});
-                            }
-                            else if let LiveToken::String (_) = &live_tokens[live_index].token {
-                                todo!();
-                            }
-                            else { // cant replace a sttring type with something else without a reparse
-                                if !parse_changed {
-                                    new_tokens = live_tokens.clone();
-                                    live_tokens = &mut new_tokens;
-                                    parse_changed = true;
-                                }
-                                live_tokens[live_index] = TokenWithSpan {span, token: new_string};
-                            }
-                            live_index += 1;
-                        },
-                        _ => if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
-                            if live_index >= live_tokens.len() { // just append
-                                if !parse_changed {
-                                    new_tokens = live_tokens.clone();
-                                    live_tokens = &mut new_tokens;
-                                    parse_changed = true;
-                                }
-                                live_tokens.push(TokenWithSpan {span, token: live_token})
-                            }
-                            else {
-                                if live_tokens[live_index].is_parse_equal(&live_token) { // token value changed
-                                    if live_tokens[live_index].token != live_token {
-                                        live_tokens[live_index].token = live_token;
-                                        mutated_tokens.push(LiveTokenId::new(file_id, live_index));
-                                    }
-                                }
-                                else { // token value changed in a way that changes parsing
-                                    // lets special case the {{id}} situation
-                                    if live_index > 2
-                                        && live_tokens[live_index - 2].is_open_delim(Delim::Brace)
-                                        && live_tokens[live_index - 1].is_open_delim(Delim::Brace)
-                                        && live_tokens[live_index].is_ident()
-                                        && live_token.is_ident() {
-                                    }
-                                    else {
-                                        if !parse_changed {
-                                            new_tokens = live_tokens.clone();
-                                            live_tokens = &mut new_tokens;
-                                            parse_changed = true;
-                                        }
-                                        live_tokens[live_index].token = live_token;
-                                    }
-                                }
-                                // always update the spans
-                                live_tokens[live_index].span = span;
-                            }
-                            live_index += 1;
-                        },
-                    }
-                }
-                column += full_token.len;
-            }
-        }
-        if live_index < live_tokens.len() - 1 { // the tokenlist shortened
-            if !parse_changed {
-                new_tokens = live_tokens.clone();
-                live_tokens = &mut new_tokens;
-                parse_changed = true;
-            }
-        }
-        
-        live_tokens.truncate(live_index);
-        live_tokens.push(TokenWithSpan {token: LiveToken::Eof, span: TextSpan {file_id, start: TextPos::default(), end: TextPos::default()}});
-        
-        if parse_changed {
-            // we have to be able to delay this to onkeyup
-            let mut parser = LiveParser::new(&new_tokens, &live_file.live_type_infos, file_id);
-            match parser.parse_live_document() {
-                Err(msg) => return Err(msg), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
-                Ok(mut ld) => { // only swap it out when it parses
-                    ld.tokens = new_tokens;
-                    live_file.next_original = Some(ld);
-                }
-            };
-            
-            return Ok(Some(LiveEditEvent::ReparseDocument));
-        } else if !mutated_tokens.is_empty() { // its a hotpatch
-            // means if we had a next_original its now cancelled
-            live_file.next_original = None;
-           
-            let (apply, live_ptrs) = self.update_documents_from_mutated_tokens(&mutated_tokens);
-            
-            return Ok(Some(LiveEditEvent::Mutation {tokens: mutated_tokens, apply, live_ptrs}))
-        }
-        
-        Ok(None)
-    }*/
+    }
     
     pub fn process_file_changes(&mut self, changes: Vec<LiveFileChange>, errors:&mut Vec<LiveError >){
         for change in changes {
             let file_id = self.file_name_to_file_id(&change.file_name).unwrap();
             let live_file = self.file_id_to_file_mut(file_id);
             
-            match Self::tokenize_from_str(&change.content, TextPos::default(), file_id) {
+            match Self::tokenize_from_str_live_design(&change.content, TextPos::default(), file_id, None) {
                 Err(msg) => errors.push(msg), //panic!("Lex error {}", msg),
                 Ok(new_tokens) => {
-                    // ok we now have to find a token pair
-                    #[derive(Debug)]
-                    enum State{
-                        FindStart,
-                        FindEnd(usize, usize),
-                        Done(usize, usize),
-                        Error
-                    }
-                    let mut state = State::FindStart;
-                    for i in 0..new_tokens.len(){
-                        if let State::FindStart = state{
-                            if let LiveToken::Ident(live_id!(live_design)) = new_tokens[i].token{
-                                state = State::FindEnd(i, 0)
-                            }
+                    let mut parser = LiveParser::new(&new_tokens, &live_file.live_type_infos, file_id);
+                    match parser.parse_live_document() {
+                        Err(msg) => {
+                            errors.push(msg);
+                        },
+                        Ok(mut ld) => { // only swap it out when it parses
+                            ld.tokens = new_tokens;
+                            live_file.original = ld;
+                            live_file.reexpand = true;
+                            live_file.generation.next_gen();
                         }
-                        else if let State::FindEnd(start, depth) = &mut state{
-                            if new_tokens[i].token.is_open(){
-                                *depth += 1;
-                            }
-                            else if new_tokens[i].token.is_close(){
-                                if *depth== 0{
-                                    state = State::Error;
-                                    break;
-                                }
-                                *depth -=1;
-                                if *depth== 0{
-                                    // we have found the closing brace
-                                    state = State::Done(*start, i);
-                                    break
-                                }
-                            }
-                        }
-                    }
-                    // we have our live_design!{} thing
-                    if let State::Done(start, end) = state{
-                        let mut parser = LiveParser::new(&new_tokens[(start+3)..(end)], &live_file.live_type_infos, file_id);
-                        match parser.parse_live_document() {
-                            Err(msg) => {
-                                errors.push(msg);
-                            },
-                            Ok(mut ld) => { // only swap it out when it parses
-                                ld.tokens = new_tokens[(start+3)..(end)].to_vec();
-                                live_file.original = ld;
-                                live_file.reexpand = true;
-                                live_file.generation.next_gen();
-                            }
-                        };
-                    }
+                    };
                 }
             };
         }
         // try to re-expand
         self.expand_all_documents(errors);
     }
-    /*
-    pub fn process_next_originals_and_expand(&mut self) -> Result<(), Vec<LiveError >> {
-        
-        for live_file in &mut self.live_files {
-            if live_file.next_original.is_some() {
-                live_file.original = live_file.next_original.take().unwrap();
-                live_file.reexpand = true;
-                live_file.generation.next_gen();
-            }
-        }
-        
-        let mut errors = Vec::new();
-        self.expand_all_documents(&mut errors);
-        
-        if !errors.is_empty() {
-            Err(errors)
-        } else {
-            Ok(())
-        }
-    }*/
-    /*
-    fn update_documents_from_mutated_tokens(
-        &mut self,
-        mutated_tokens: &[LiveTokenId]
-    ) -> (Vec<LiveNode>, Vec<LivePtr>) {
-        //let mutated_tokens = self.mutated_tokens.take().unwrap();
-        let mut diff = Vec::new();
-        let mut live_ptrs = Vec::new();
-        diff.open_object(LiveId(0));
-        for token_id in mutated_tokens {
-            let token_index = token_id.token_index();
-            let file_id = token_id.file_id().unwrap();
-            // ok this becomes the patch-map for shader constants
-            
-            //let live_file = &self.live_files[file_id.to_index()];
-            //let original = &live_file.original;
-            let mut live_tokens = Vec::new();
-            std::mem::swap(&mut live_tokens, &mut self.live_files[file_id.to_index()].original.tokens);
-            
-            let is_prop_assign = token_index > 2
-                && live_tokens[token_index - 2].is_ident()
-                && live_tokens[token_index - 1].is_punct_id(live_id!(:));
-            
-            if is_prop_assign || live_tokens[token_index].is_value_type() {
-                let token_id = LiveTokenId::new(file_id, token_index - 2);
-                
-                // ok lets scan for this one.
-                let mut file_dep_iter = FileDepIter::new(file_id);
-                let mut path = Vec::new();
-                while let Some(file_id) = file_dep_iter.pop_todo() {
-                    let is_main = self.main_module == Some(file_id);
-                    
-                    let mut expanded_nodes = Vec::new();
-                    std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
-                    
-                    let mut reader = LiveNodeMutReader::new(0, &mut expanded_nodes);
-                    path.clear();
-                    reader.walk();
-                    while !reader.is_eot() {
-                        if reader.is_open() {
-                            path.push(reader.prop())
-                        }
-                        else if reader.is_close() {
-                            path.pop();
-                        }
-                        // ok this is a direct patch
-                        else if is_prop_assign && reader.origin.token_id() == Some(token_id) {
-                            let live_ptr = LivePtr {file_id, index: reader.index() as u32, generation: self.live_files[file_id.to_index()].generation};
-                            if !reader.update_from_live_token(&live_tokens[token_index].token) {
-                                error!("update_from_live_token returns false investigate! {:?}", reader.node());
-                            }
-                            live_ptrs.push(live_ptr);
-                            if is_main {
-                                // ok so. lets write by path here
-                                path.push(reader.prop());
-                                diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
-                                path.pop();
-                            }
-                        } else if reader.is_token_id_inside_dsl(token_id) && is_main {
-                            // ok so. lets write by path here
-                            path.push(reader.prop());
-                            diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
-                            path.pop();
-                        }
-                        reader.walk();
-                    }
-                    std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
-                    file_dep_iter.scan_next(&self.live_files);
-                }
-            }
-            std::mem::swap(&mut live_tokens, &mut self.live_files[file_id.to_index()].original.tokens);
-        }
-        diff.close();
-        (diff, live_ptrs)
-    }*/
-    
+
     pub fn register_live_file(
         &mut self,
         file_name: &str,

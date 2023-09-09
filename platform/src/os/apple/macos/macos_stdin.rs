@@ -1,10 +1,10 @@
 use {
     std::{
         sync::{Arc, Mutex},
-        cell::{RefCell},
+        cell::RefCell,
         io,
         io::prelude::*,
-        io::{BufReader},
+        io::BufReader,
     },
     crate::{
         makepad_live_id::*,
@@ -27,12 +27,16 @@ use {
             cx_stdin::{HostToStdin, StdinToHost},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
-        cx_api::{CxOsOp},
-        cx::{Cx},
+        cx_api::CxOsOp,
+        cx::Cx,
     }
 };
 
 impl Cx {
+    
+    pub (crate) fn stdin_send_draw_complete(){
+        let _ = io::stdout().write_all(StdinToHost::DrawComplete.to_json().as_bytes());
+    }
     
     pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx) {
         let mut passes_todo = Vec::new();
@@ -42,7 +46,6 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
-                    let _ = io::stdout().write_all(StdinToHost::DrawComplete.to_json().as_bytes());
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -80,6 +83,12 @@ impl Cx {
                         HostToStdin::ReloadFile {file: _, contents: _} => {
                             // alright lets reload this file in our DSL system
                             
+                        }
+                        HostToStdin::KeyDown(e) => {
+                            self.call_event_handler(&Event::KeyDown(e));
+                        }
+                        HostToStdin::KeyUp(e) => {
+                            self.call_event_handler(&Event::KeyUp(e));
                         }
                         HostToStdin::MouseDown(e) => {
                             self.fingers.process_tap_count(

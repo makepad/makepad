@@ -3,6 +3,7 @@
 use {
     std::cell::{Cell},
     crate::{
+        makepad_micro_serde::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
             LivePropType,
@@ -31,7 +32,7 @@ use {
 // Mouse events
 
 
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,

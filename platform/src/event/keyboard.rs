@@ -2,6 +2,7 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
+        makepad_micro_serde::*,
         event::{
             finger::KeyModifiers,
         },
@@ -94,7 +95,7 @@ impl CxKeyboard {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct KeyEvent {
     pub key_code: KeyCode,
     pub is_repeat: bool,
@@ -126,7 +127,7 @@ impl Default for KeyCode {
 
 
 // lowest common denominator keymap between desktop and web
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub enum KeyCode {
     Escape,
     
