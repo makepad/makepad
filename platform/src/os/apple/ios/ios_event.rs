@@ -17,6 +17,7 @@ use {
 
 #[derive(Debug, Clone)]
 pub enum IosEvent {
+    Init,
     AppGotFocus,
     AppLostFocus,
     WindowGeomChange(WindowGeomChangeEvent),

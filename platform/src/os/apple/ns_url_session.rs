@@ -2,7 +2,6 @@
 use {
     std::{
         ptr,
-        os::raw::{c_void},
         sync::mpsc::Sender,
         sync::Arc,
     },
@@ -47,7 +46,7 @@ pub fn define_web_socket_delegate() -> *const Class {
         decl.add_method(sel!(webSocketTask: didCloseWithCode: reason:), did_close_with_code as extern fn(&Object, Sel, ObjcId, usize, ObjcId));
     }
     // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    decl.add_ivar::<*mut c_void>("macos_app_ptr");
     
     return decl.register();
 }

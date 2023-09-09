@@ -12,6 +12,7 @@ use {
     }
 };
 
+
 pub const fn four_char_as_u32(s: &str) -> u32 {
     let b = s.as_bytes();
     ((b[0] as u32) << 24)
