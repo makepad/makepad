@@ -122,6 +122,7 @@ pub struct RunningAudioUnit {
 impl AudioUnitAccess {
     pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
         Self::observe_route_changes(change_signal.clone());
+        
         Arc::new(Mutex::new(Self{
             failed_devices: Default::default(),
             change_signal,
@@ -477,10 +478,18 @@ impl AudioUnitAccess {
                     AudioUnitSubType::Undefined,
                 )
             }
+            #[cfg(target_os = "macos")]
             AudioUnitQuery::Output => {
                 AudioComponentDescription::new_all_manufacturers(
                     AudioUnitType::IO,
                     AudioUnitSubType::HalOutput,
+                )
+            }
+            #[cfg(target_os = "ios")]
+            AudioUnitQuery::Output => {
+                AudioComponentDescription::new_all_manufacturers(
+                    AudioUnitType::IO,
+                    AudioUnitSubType::RemoteIO,
                 )
             }
             AudioUnitQuery::Input => {
@@ -566,9 +575,12 @@ impl AudioUnitAccess {
                         let () = msg_send![au_audio_unit, setOutputEnabled: true];
                         let () = msg_send![au_audio_unit, setInputEnabled: false];
                         
-                        let mut err: ObjcId = nil;
-                        let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
-                        OSError::from_nserror(err) ?;
+                        #[cfg(target_os = "macos")]
+                        {
+                            let mut err: ObjcId = nil;
+                            let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
+                            OSError::from_nserror(err) ?;
+                        }
                         
                         // lets hardcode the format to 44100 float
                         let mut err: ObjcId = nil;
