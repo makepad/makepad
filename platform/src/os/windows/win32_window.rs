@@ -8,11 +8,12 @@ use {
     },
     
     crate::{
-        windows_crate::{
+        windows::{
             core::PCWSTR,
             Win32::Foundation::{
                 HWND,
                 HANDLE,
+                HGLOBAL,
                 WPARAM,
                 LPARAM,
                 LRESULT,
@@ -25,12 +26,8 @@ use {
                 GlobalUnlock,
                 GLOBAL_ALLOC_FLAGS,
             },
-            Win32::System::Ole::{
-                CF_UNICODETEXT
-            },
-            Win32::System::WindowsProgramming::{
-                GMEM_DDESHARE
-            },
+            Win32::System::Ole::CF_UNICODETEXT,
+            Win32::System::WindowsProgramming::GMEM_DDESHARE,
             Win32::System::DataExchange::{
                 OpenClipboard,
                 EmptyClipboard,
@@ -97,6 +94,7 @@ use {
                 WM_EXITSIZEMOVE,
                 WM_SIZE,
                 WM_DPICHANGED,
+                WM_DROPFILES,
                 WM_DESTROY,
                 HTTOPLEFT,
                 HTBOTTOMLEFT,
@@ -235,10 +233,10 @@ use {
         event::*,
         area::Area,
         os::windows::win32_app::encode_wide,
-        os::windows::win32_app::{TRUE, FALSE},
+        os::windows::win32_app::FALSE,
         os::windows::win32_event::*,
         os::windows::win32_app::get_win32_app_global,
-        window::{WindowId},
+        window::WindowId,
         cx::*,
         cursor::MouseCursor,
     },
@@ -318,6 +316,8 @@ impl Win32Window {
             self.hwnd = Some(hwnd);
             
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const _ as isize);
+
+            //RegisterDragDrop(hwnd, self as *const IDropTarget);
             
             self.set_outer_size(size);
             
@@ -364,7 +364,7 @@ impl Win32Window {
                 let xcoord = (lparam.0 & 0xffff) as u16 as i16 as i32;
                 let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
                 const EDGE: i32 = 8;
-                GetWindowRect(hwnd, &mut rect);
+                GetWindowRect(hwnd, &mut rect).unwrap();
                 if xcoord < rect.left + EDGE {
                     if ycoord < rect.top + EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
@@ -439,7 +439,7 @@ impl Win32Window {
                         hwndTrack: hwnd,
                         dwHoverTime: 0
                     };
-                    TrackMouseEvent(&mut tme);
+                    TrackMouseEvent(&mut tme).unwrap();
                 }
                 window.send_mouse_move(
                     window.get_mouse_pos_from_lparam(lparam),
@@ -469,21 +469,21 @@ impl Win32Window {
                 let modifiers = Self::get_key_modifiers();
                 let key_code = Self::virtual_key_to_key_code(wparam);
                 if modifiers.alt && key_code == KeyCode::F4 {
-                    PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                    PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
                 }
                 if modifiers.control || modifiers.logo {
                     match key_code {
                         KeyCode::KeyV => { // paste
-                            if OpenClipboard(None) == TRUE {
+                            if let Ok(()) = OpenClipboard(None) {
                                 let mut data: Vec<u16> = Vec::new();
                                 let h_clipboard_data = GetClipboardData(CF_UNICODETEXT.0 as u32).unwrap();
-                                let h_clipboard_ptr = GlobalLock(h_clipboard_data.0) as *mut u16;
-                                let clipboard_size = GlobalSize(h_clipboard_data.0);
+                                let h_clipboard_ptr = GlobalLock(std::mem::transmute::<_,HGLOBAL>(h_clipboard_data)) as *mut u16;
+                                let clipboard_size = GlobalSize(std::mem::transmute::<_,HGLOBAL>(h_clipboard_data));
                                 if clipboard_size > 2 {
                                     data.resize((clipboard_size >> 1) - 1, 0);
                                     std::ptr::copy_nonoverlapping(h_clipboard_ptr, data.as_mut_ptr(), data.len());
-                                    GlobalUnlock(h_clipboard_data.0);
-                                    CloseClipboard();
+                                    GlobalUnlock(std::mem::transmute::<_,HGLOBAL>(h_clipboard_data)).unwrap();
+                                    CloseClipboard().unwrap();
                                     if let Ok(utf8) = String::from_utf16(&data) {
                                         window.do_callback(
                                             Win32Event::TextInput(TextInputEvent {
@@ -495,8 +495,8 @@ impl Win32Window {
                                     }
                                 }
                                 else {
-                                    GlobalUnlock(h_clipboard_data.0);
-                                    CloseClipboard();
+                                    GlobalUnlock(std::mem::transmute::<_,HGLOBAL>(h_clipboard_data)).unwrap();
+                                    CloseClipboard().unwrap();
                                 }
                             }
                         }
@@ -592,7 +592,7 @@ impl Win32Window {
                     accept_close: accept_close.clone()
                 }));
                 if accept_close.get() {
-                    DestroyWindow(hwnd);
+                    DestroyWindow(hwnd).unwrap();
                 }
             },
             WM_DESTROY => { // window actively destroyed
@@ -602,6 +602,10 @@ impl Win32Window {
                     })
                 );
             },
+            WM_DROPFILES => { // one or more files are being dropped onto the window
+                crate::log!("WM_DROPFILES {:?}",wparam);
+            },
+
             _ => {
                 return DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -616,20 +620,20 @@ impl Win32Window {
     unsafe fn copy_to_clipboard(text: &String) {
         // plug it into the windows clipboard
         // make utf16 dta
-        if OpenClipboard(None) == TRUE {
-            EmptyClipboard();
+        if let Ok(()) = OpenClipboard(None) {
+            EmptyClipboard().unwrap();
 
             let data: Vec<u16> = OsStr::new(text).encode_wide().chain(Some(0).into_iter()).collect();
 
-            let h_clipboard_data = GlobalAlloc(GLOBAL_ALLOC_FLAGS(GMEM_DDESHARE), 2 * data.len());
+            let h_clipboard_data = GlobalAlloc(GLOBAL_ALLOC_FLAGS(GMEM_DDESHARE), 2 * data.len()).expect("GlobalAlloc for clipboard failed");
 
             let h_clipboard_ptr = GlobalLock(h_clipboard_data) as *mut u16;
 
             std::ptr::copy_nonoverlapping(data.as_ptr(), h_clipboard_ptr, data.len());
 
-            GlobalUnlock(h_clipboard_data);
-            SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(h_clipboard_data)).unwrap();
-            CloseClipboard();
+            GlobalUnlock(h_clipboard_data).unwrap();
+            SetClipboardData(CF_UNICODETEXT.0 as u32, std::mem::transmute::<_,HANDLE>(h_clipboard_data)).unwrap();
+            CloseClipboard().unwrap();
         }
     }
     
@@ -661,20 +665,20 @@ impl Win32Window {
     pub fn restore(&self) {
         unsafe {
             ShowWindow(self.hwnd.unwrap(), SW_RESTORE);
-            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0));
+            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
     
     pub fn maximize(&self) {
         unsafe {
             ShowWindow(self.hwnd.unwrap(), SW_MAXIMIZE);
-            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0));
+            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
     
     pub fn close_window(&self) {
         unsafe {
-            DestroyWindow(self.hwnd.unwrap());
+            DestroyWindow(self.hwnd.unwrap()).unwrap();
         }
     }
     
@@ -701,7 +705,7 @@ impl Win32Window {
                     0,
                     0,
                     SWP_NOMOVE | SWP_NOSIZE
-                );
+                ).unwrap();
             }
             else {
                 SetWindowPos(
@@ -712,7 +716,7 @@ impl Win32Window {
                     0,
                     0,
                     SWP_NOMOVE | SWP_NOSIZE
-                );
+                ).unwrap();
             }
         }
     }
@@ -745,8 +749,8 @@ impl Win32Window {
             let wp: mem::MaybeUninit<WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
             let mut wp = wp.assume_init();
             wp.length = mem::size_of::<WINDOWPLACEMENT>() as u32;
-            GetWindowPlacement(self.hwnd.unwrap(), &mut wp);
-            if wp.showCmd == SW_MAXIMIZE {
+            GetWindowPlacement(self.hwnd.unwrap(), &mut wp).unwrap();
+            if wp.showCmd == SW_MAXIMIZE.0 as u32 {
                 return true
             }
             return false
@@ -764,7 +768,7 @@ impl Win32Window {
     pub fn get_position(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut rect);
+            GetWindowRect(self.hwnd.unwrap(), &mut rect).unwrap();
             DVec2 {x: rect.left as f64, y: rect.top as f64}
         }
     }
@@ -772,7 +776,7 @@ impl Win32Window {
     pub fn get_inner_size(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetClientRect(self.hwnd.unwrap(), &mut rect);
+            GetClientRect(self.hwnd.unwrap(), &mut rect).unwrap();
             let dpi = self.get_dpi_factor();
             DVec2 {x: (rect.right - rect.left) as f64 / dpi, y: (rect.bottom - rect.top)as f64 / dpi}
         }
@@ -781,7 +785,7 @@ impl Win32Window {
     pub fn get_outer_size(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut rect);
+            GetWindowRect(self.hwnd.unwrap(), &mut rect).unwrap();
             DVec2 {x: (rect.right - rect.left) as f64, y: (rect.bottom - rect.top)as f64}
         }
     }
@@ -789,7 +793,7 @@ impl Win32Window {
     pub fn set_position(&mut self, pos: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect);
+            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
                 self.hwnd.unwrap(),
@@ -798,14 +802,14 @@ impl Win32Window {
                 window_rect.right - window_rect.left,
                 window_rect.bottom - window_rect.top,
                 FALSE
-            );
+            ).unwrap();
         }
     }
     
     pub fn set_outer_size(&self, size: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect);
+            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
                 self.hwnd.unwrap(),
@@ -814,16 +818,16 @@ impl Win32Window {
                 (size.x * dpi) as i32,
                 (size.y * dpi) as i32,
                 FALSE
-            );
+            ).unwrap();
         }
     }
     
     pub fn set_inner_size(&self, size: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect);
+            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
             let mut client_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetClientRect(self.hwnd.unwrap(), &mut client_rect);
+            GetClientRect(self.hwnd.unwrap(), &mut client_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
                 self.hwnd.unwrap(),
@@ -834,7 +838,7 @@ impl Win32Window {
                 (size.y * dpi) as i32
                     + ((window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top)),
                 FALSE
-            );
+            ).unwrap();
         }
     }
     
@@ -892,7 +896,7 @@ impl Win32Window {
             self.mouse_buttons_down -= 1;
         }
         else {
-            unsafe {ReleaseCapture();}
+            unsafe { ReleaseCapture().unwrap(); }
             self.mouse_buttons_down = 0;
         }
         self.do_callback(Win32Event::MouseUp(MouseUpEvent {

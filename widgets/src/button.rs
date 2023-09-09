@@ -52,7 +52,7 @@ impl Widget for Button{
         });
     }
 
-    fn walk(&self)->Walk{
+    fn walk(&mut self, _cx:&mut Cx)->Walk{
         self.walk
     }
     
@@ -121,16 +121,10 @@ impl Button {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
+#[derive(Clone, Debug, PartialEq, WidgetRef)]
 pub struct ButtonRef(WidgetRef); 
 
 impl ButtonRef {
-    pub fn set_text(&self, text:&str){
-        if let Some(mut inner) = self.borrow_mut(){
-            let s = inner.text.as_mut_empty();
-            s.push_str(text);
-        }
-    }
     
     pub fn clicked(&self, actions:&WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
@@ -152,7 +146,7 @@ impl ButtonRef {
 
 }
 
-#[derive(Clone, WidgetSet)]
+#[derive(Clone, Debug, WidgetSet)]
 pub struct ButtonSet(WidgetSet);
 impl ButtonSet{
     pub fn clicked(&self, actions: &WidgetActions)->bool{

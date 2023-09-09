@@ -1,7 +1,7 @@
 use {
     makepad_objc_sys::{
         msg_send,
-        runtime::{YES, NO},
+        runtime::{YES},
         sel,
         class,
         sel_impl,
@@ -21,27 +21,20 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
-            
-            cocoa_app::CocoaApp,
-            cocoa_window::CocoaWindow,
         },
         draw_list::DrawListId,
-        event::WindowGeom,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth, PassId},
-        window::WindowId,
         texture::{
             TextureFormat,
             TextureDesc,
         },
     },
-    std::{
-        sync::{
-            Arc,
-            Condvar,
-            Mutex,
-        }
-    }
+    std::sync::{
+        Arc,
+        Condvar,
+        Mutex,
+    },
 };
 
 #[cfg(target_os = "macos")]
@@ -275,7 +268,12 @@ impl Cx {
         
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
-        let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+        let render_pass_descriptor: ObjcId = if let DrawPassMode::MTKView(view) = mode {
+            unsafe{msg_send![view, currentRenderPassDescriptor]}
+        }
+        else{
+            unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]}
+        };
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         
@@ -298,7 +296,22 @@ impl Cx {
         
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
-        if let Some(drawable) = mode.is_drawable() {
+        if let DrawPassMode::MTKView(_) = mode{
+            let color_attachments:ObjcId = unsafe{msg_send![render_pass_descriptor, colorAttachments]};
+            let color_attachment:ObjcId = unsafe{msg_send![color_attachments, objectAtIndexedSubscript: 0]};
+            
+            let color = self.passes[pass_id].clear_color;
+            unsafe {
+                let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
+                let () = msg_send![color_attachment, setClearColor: MTLClearColor {
+                    red: color.x as f64,
+                    green: color.y as f64,
+                    blue: color.z as f64,
+                    alpha: color.w as f64
+                }];
+            }
+        } 
+        else if let Some(drawable) = mode.is_drawable() {
             
             let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
@@ -440,6 +453,12 @@ impl Cx {
         let () = unsafe {msg_send![encoder, endEncoding]};
         
         match mode {
+            DrawPassMode::MTKView(view)=>{
+                let drawable:ObjcId = unsafe {msg_send![view, currentDrawable]};
+                let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
+                
+                self.commit_command_buffer(None, command_buffer, gpu_read_guards);
+            }
             DrawPassMode::Texture => {
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
@@ -459,16 +478,20 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, _stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
+                if stdin_frame.is_some(){
+                    #[cfg(target_os = "macos")]
+                    Self::stdin_send_draw_complete();
+                }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
-    }
+    } 
     
     
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
@@ -506,6 +529,7 @@ impl Cx {
 
 pub enum DrawPassMode {
     Texture,
+    MTKView(ObjcId),
     StdinMain,
     Drawable(ObjcId),
     Resizing(ObjcId)
@@ -515,100 +539,16 @@ impl DrawPassMode {
     fn is_drawable(&self) -> Option<ObjcId> {
         match self {
             Self::Drawable(obj) | Self::Resizing(obj) => Some(*obj),
-            Self::StdinMain | Self::Texture => None
+            Self::StdinMain | Self::Texture | Self::MTKView(_) => None
         }
     }
 }
 
 pub struct MetalCx {
-    device: ObjcId,
+    pub device: ObjcId,
     command_queue: ObjcId
 }
 
-
-#[derive(Clone)]
-pub struct MetalWindow {
-    pub window_id: WindowId,
-    pub window_geom: WindowGeom,
-    cal_size: DVec2,
-    pub ca_layer: ObjcId,
-    pub cocoa_window: Box<CocoaWindow>,
-    pub is_resizing: bool
-}
-
-impl MetalWindow {
-    pub (crate) fn new(
-        window_id: WindowId,
-        metal_cx: &MetalCx,
-        cocoa_app: &mut CocoaApp,
-        inner_size: DVec2,
-        position: Option<DVec2>,
-        title: &str
-    ) -> MetalWindow {
-        
-        let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
-        
-        let mut cocoa_window = Box::new(CocoaWindow::new(cocoa_app, window_id));
-        
-        cocoa_window.init(title, inner_size, position);
-        unsafe {
-            let () = msg_send![ca_layer, setDevice: metal_cx.device];
-            let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
-            let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
-            let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
-            let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
-            let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
-            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
-            let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
-            let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
-            
-            let view = cocoa_window.view;
-            let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
-            let () = msg_send![view, setWantsLayer: YES];
-            let () = msg_send![view, setLayerContentsPlacement: 11];
-            let () = msg_send![view, setLayer: ca_layer];
-        }
-        
-        MetalWindow {
-            is_resizing: false,
-            window_id,
-            cal_size: DVec2::default(),
-            ca_layer,
-            window_geom: cocoa_window.get_window_geom(),
-            cocoa_window
-        }
-    }
-    
-    pub (crate) fn start_resize(&mut self) {
-        self.is_resizing = true;
-        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
-    }
-    
-    pub (crate) fn stop_resize(&mut self) {
-        self.is_resizing = false;
-        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
-    }
-    
-    pub (crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
-        let cal_size = DVec2 {
-            x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
-            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
-        };
-        if self.cal_size != cal_size {
-            self.cal_size = cal_size;
-            unsafe {
-                let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x, height: cal_size.y}];
-                let () = msg_send![self.ca_layer, setContentsScale: self.window_geom.dpi_factor];
-            }
-            true
-        }
-        else {
-            false
-        }
-    }
-    
-}
 
 #[derive(Clone, Default)]
 pub struct CxOsView {
@@ -881,7 +821,7 @@ impl CxOsTexture {
                 let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];
                 let _: () = msg_send![descriptor.as_id(), setHeight: height as u64];
                 let _: () = msg_send![descriptor.as_id(), setDepth: 1u64];
-                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Managed];
+                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared];
                 let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead];
                 match desc.format {
                     TextureFormat::ImageBGRA | TextureFormat::Default => {

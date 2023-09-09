@@ -73,6 +73,21 @@ extern {
     pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
 
+#[cfg(target_os = "ios")]
+#[link(name = "UIKit", kind = "framework")]
+extern "C" {
+    pub static UIKeyboardDidShowNotification: ObjcId;
+    pub static UIKeyboardWillHideNotification: ObjcId;
+    pub static UIKeyboardDidChangeFrameNotification: ObjcId;
+    pub fn UIApplicationMain(
+        argc: i32,
+        argv: *mut *mut i8,
+        principal_class_name: ObjcId,
+        delegate_class_name: ObjcId,
+    );
+}
+
+
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub fn dispatch_queue_create(label: *const u8, attr: ObjcId,) -> ObjcId;
