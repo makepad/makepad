@@ -245,18 +245,17 @@ impl AudioUnitAccess {
             
         };
         for (index, device_id) in new {
-            // lets create an audio input
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Output)[0];
             let audio_outputs = self.audio_outputs.clone();
             let audio_output_cb = self.audio_output_cb[index].clone();
             let failed_devices = self.failed_devices.clone();
             let change_signal = self.change_signal.clone();
             self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
-                let mut audio_inputs = audio_outputs.lock().unwrap();
+                let mut audio_outputs = audio_outputs.lock().unwrap();
                 match result {
                     Ok(audio_unit) => {
                         
-                        let running = audio_inputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
+                        let running = audio_outputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
                         let audio_output_cb = audio_output_cb.clone();
                         audio_unit.set_output_provider(move | time, output | {
                             if let Some(audio_output_cb) = &mut *audio_output_cb.lock().unwrap() {
@@ -271,7 +270,7 @@ impl AudioUnitAccess {
                     Err(err) => {
                         failed_devices.lock().unwrap().insert(device_id);
                         change_signal.set();
-                        audio_inputs.retain( | v | v.device_id != device_id);
+                        audio_outputs.retain( | v | v.device_id != device_id);
                         error!("spawn_audio_output Error {:?}", err)
                     }
                 }
@@ -501,6 +500,7 @@ impl AudioUnitAccess {
             let manager: ObjcId = msg_send![class!(AVAudioUnitComponentManager), sharedAudioUnitComponentManager];
             let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
             let count: usize = msg_send![components, count];
+            log!("COUNT {}", count);
             let mut out = Vec::new();
             for i in 0..count {
                 let component: ObjcId = msg_send![components, objectAtIndex: i];
