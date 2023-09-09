@@ -1,5 +1,6 @@
 use {
     std::{
+        cell::Cell,
         time::Instant,
     },
     crate::{
@@ -13,7 +14,12 @@ use {
             },
             cx_native::EventFlow,
         },
+        area::Area,
         event::{
+            KeyModifiers,
+            TouchUpdateEvent,
+            TouchState,
+            TouchPoint,
             WindowGeomChangeEvent,
             WindowGeom,
             TimerEvent,
@@ -74,6 +80,7 @@ pub struct IosApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<IosTimer>,
+    touches: Vec<TouchPoint>,
     pub last_window_geom: WindowGeom,
     metal_device: ObjcId,
     first_draw: bool,
@@ -88,6 +95,7 @@ impl IosApp {
             
             // Construct the bits that are shared between windows
             IosApp {
+                touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
                 metal_device,
                 first_draw: true,
@@ -170,6 +178,36 @@ impl IosApp {
         }
         self.first_draw = false;
         self.do_callback(IosEvent::Paint);
+    }
+    
+    pub fn update_touch(&mut self, uid: u64, abs:DVec2, state:TouchState){
+        if let Some(touch) = self.touches.iter_mut().find(|v| v.uid == uid){
+            touch.state = state;
+            touch.abs = abs;
+        }
+        else{
+            self.touches.push(TouchPoint{
+                state,
+                abs,
+                uid,
+                rotation_angle:0.0,
+                force:0.0,
+                radius:dvec2(0.0,0.0),
+                handled: Cell::new(Area::Empty),
+                sweep_lock: Cell::new(Area::Empty)
+            })
+        }
+    }
+    
+    pub fn send_touch_update(&mut self){
+        self.do_callback(IosEvent::TouchUpdate(TouchUpdateEvent{
+            time: self.time_now(),
+            window_id: CxWindowPool::id_zero(),
+            modifiers: KeyModifiers::default(),
+            touches: self.touches.clone()
+        }));
+        // remove the stopped touches
+        self.touches.retain(|v| if let TouchState::Stop = v.state{false}else{true});
     }
     
     pub fn time_now(&self) -> f64 {
