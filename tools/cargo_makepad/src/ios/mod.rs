@@ -40,6 +40,9 @@ pub fn handle_ios(mut  args: &[String]) -> Result<(), String> {
     let mut targets = vec![IosTarget::aarch64_sim];
     let mut package_name = None;
     let mut app_label = None;
+    let mut app_id = None;
+    let mut team_id = None;
+    let mut device = None;
      for i in 0..args.len() {
         let v = &args[i];
         if let Some(opt) = v.strip_prefix("--package-name=") {
@@ -48,8 +51,17 @@ pub fn handle_ios(mut  args: &[String]) -> Result<(), String> {
         else if let Some(opt) = v.strip_prefix("--app-label=") {
             app_label = Some(opt.to_string());
         }
+        else if let Some(opt) = v.strip_prefix("--app-id=") {
+            app_id = Some(opt.to_string());
+        }
         else if let Some(opt) = v.strip_prefix("--abi=") {
             targets = IosTarget::from_str(opt)?;
+        }
+        else if let Some(team) = v.strip_prefix("--team=") {
+            team_id = Some(team);
+        }
+        else if let Some(dev) = v.strip_prefix("--device=") {
+            device = Some(dev);
         }
         else {
             args = &args[i..];
@@ -57,12 +69,28 @@ pub fn handle_ios(mut  args: &[String]) -> Result<(), String> {
         }
     }
     
+    
     match args[0].as_ref() {
         "toolchain-install"=>{
             sdk::rustup_toolchain_install(&targets)
         }
         "build" =>{
             compile::build(package_name, app_label, &args[1..], &targets)?;
+            Ok(())
+        }
+        "run_real" =>{
+            targets = vec![IosTarget::aarch64];
+            if let Some(team_id) = team_id{
+                if let Some(device) = device{
+                    compile::run_real(package_name, app_label, app_id, &args[1..], &targets, team_id, device)?;
+                }
+                else{
+                    return Err(format!("real running requires --device=<deviceid>"))
+                }
+            }
+            else{
+                return Err(format!("real running requires --team=<teamid>"))
+            }
             Ok(())
         }
         "run" =>{
