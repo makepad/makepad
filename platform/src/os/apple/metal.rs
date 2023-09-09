@@ -268,7 +268,12 @@ impl Cx {
         
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
-        let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+        let render_pass_descriptor: ObjcId = if let DrawPassMode::MTKView(view) = mode {
+            unsafe{msg_send![view, currentRenderPassDescriptor]}
+        }
+        else{
+            unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]}
+        };
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         
@@ -291,7 +296,22 @@ impl Cx {
         
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
-        if let Some(drawable) = mode.is_drawable() {
+        if let DrawPassMode::MTKView(_) = mode{
+            let color_attachments:ObjcId = unsafe{msg_send![render_pass_descriptor, colorAttachments]};
+            let color_attachment:ObjcId = unsafe{msg_send![color_attachments, objectAtIndexedSubscript: 0]};
+            
+            let color = self.passes[pass_id].clear_color;
+            unsafe {
+                let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
+                let () = msg_send![color_attachment, setClearColor: MTLClearColor {
+                    red: color.x as f64,
+                    green: color.y as f64,
+                    blue: color.z as f64,
+                    alpha: color.w as f64
+                }];
+            }
+        } 
+        else if let Some(drawable) = mode.is_drawable() {
             
             let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
@@ -433,6 +453,12 @@ impl Cx {
         let () = unsafe {msg_send![encoder, endEncoding]};
         
         match mode {
+            DrawPassMode::MTKView(view)=>{
+                let drawable:ObjcId = unsafe {msg_send![view, currentDrawable]};
+                let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
+                
+                self.commit_command_buffer(None, command_buffer, gpu_read_guards);
+            }
             DrawPassMode::Texture => {
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
@@ -503,6 +529,7 @@ impl Cx {
 
 pub enum DrawPassMode {
     Texture,
+    MTKView(ObjcId),
     StdinMain,
     Drawable(ObjcId),
     Resizing(ObjcId)
@@ -512,7 +539,7 @@ impl DrawPassMode {
     fn is_drawable(&self) -> Option<ObjcId> {
         match self {
             Self::Drawable(obj) | Self::Resizing(obj) => Some(*obj),
-            Self::StdinMain | Self::Texture => None
+            Self::StdinMain | Self::Texture | Self::MTKView(_) => None
         }
     }
 }
@@ -794,7 +821,7 @@ impl CxOsTexture {
                 let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];
                 let _: () = msg_send![descriptor.as_id(), setHeight: height as u64];
                 let _: () = msg_send![descriptor.as_id(), setDepth: 1u64];
-                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Managed];
+                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared];
                 let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead];
                 match desc.format {
                     TextureFormat::ImageBGRA | TextureFormat::Default => {
