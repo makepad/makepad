@@ -9,7 +9,10 @@ use {
         os::{
             cx_native::EventFlow,
             apple::{
-                ios_event::IosEvent,
+                ios::{
+                    ios_event::IosEvent,
+                    ios_app::{IosApp, init_ios_app_global,get_ios_app_global}
+                },
                 ns_url_session::{make_http_request, web_socket_open},
             },
             apple_media::CxAppleMedia,
@@ -33,19 +36,18 @@ impl Cx {
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
-        let _metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
+        let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
         crate::log!("Hello world ! We booted up!");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));
-        /*
-        init_macos_app_global(Box::new({
+        let device = metal_cx.borrow().device;
+        init_ios_app_global(device, Box::new({
             let cx = cx.clone();
-            move | cocoa_app,
+            move | ios_app,
             event | {
                 let mut cx_ref = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
-                let mut metal_windows = metal_windows.borrow_mut();
-                let event_flow = cx_ref.cocoa_event_callback(cocoa_app, event, &mut metal_cx, &mut metal_windows);
+                let event_flow = cx_ref.ios_event_callback(ios_app, event, &mut metal_cx);
                 let executor = cx_ref.executor.take().unwrap();
                 drop(cx_ref);
                 executor.run_until_stalled();
@@ -57,36 +59,20 @@ impl Cx {
         // lets set our signal poll timer
         
         // final bit of initflow
-        get_macos_app_global().start_timer(0, 0.008, true);
-        cx.borrow_mut().call_event_handler(&Event::Construct);
-        cx.borrow_mut().redraw_all();
-        get_macos_app_global().event_loop();*/
+        
+        get_ios_app_global().event_loop();
     }
     
-    pub (crate) fn handle_repaint(&mut self, metal_cx: &mut MetalCx) {
+    pub (crate) fn handle_repaint(&mut self, ios_app:&mut IosApp, metal_cx: &mut MetalCx) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
-                    /*if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        //let dpi_factor = metal_window.window_geom.dpi_factor;
-                        metal_window.resize_core_animation_layer(&metal_cx);
-                        let drawable: ObjcId = unsafe {msg_send![metal_window.ca_layer, nextDrawable]};
-                        if drawable == nil {
-                            return
-                        }
-                        if metal_window.is_resizing {
-                            self.draw_pass(*pass_id, metal_cx, DrawPassMode::Resizing(drawable));
-                        }
-                        else {
-                            self.draw_pass(*pass_id, metal_cx, DrawPassMode::Drawable(drawable));
-                        }
-                    }*/
+                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::MTKView(ios_app.mtk_view.unwrap()));
                 }
                 CxPassParent::Pass(_) => {
-                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
@@ -108,20 +94,17 @@ impl Cx {
     
     fn ios_event_callback(
         &mut self,
+        ios_app: &mut IosApp,
         event: IosEvent,
         metal_cx: &mut MetalCx,
     ) -> EventFlow {
         
-        self.handle_platform_ops(metal_cx);
+        self.handle_platform_ops(ios_app, metal_cx);
          
         // send a mouse up when dragging starts
         
         let mut paint_dirty = false;
         match &event {
-            IosEvent::MouseDown(_) |
-            IosEvent::MouseMove(_) |
-            IosEvent::MouseUp(_) |
-            IosEvent::Scroll(_) |
             IosEvent::KeyDown(_) |
             IosEvent::KeyUp(_) |
             IosEvent::TextInput(_) => {
@@ -155,8 +138,12 @@ impl Cx {
         
         //self.process_desktop_pre_event(&mut event);
         match event {
+            IosEvent::Init=>{
+                get_ios_app_global().start_timer(0, 0.008, true);
+                self.call_event_handler(&Event::Construct);
+                self.redraw_all();
+            }
             IosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
-                
                 paint_dirty = true;
                 self.call_event_handler(&Event::AppGotFocus);
             }
@@ -164,15 +151,13 @@ impl Cx {
                 self.call_event_handler(&Event::AppLostFocus);
             }
             
-
             IosEvent::WindowGeomChange(re) => { // do this here because mac
                 
                 self.call_event_handler(&Event::WindowGeomChange(re));
             }
-           
             IosEvent::Paint => {
-                /*if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(cocoa_app.time_now());
+                if self.new_next_frames.len() != 0 {
+                    self.call_next_frame_event(ios_app.time_now());
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
@@ -180,7 +165,7 @@ impl Cx {
                 }
                 // ok here we send out to all our childprocesses
                 
-                self.handle_repaint(metal_windows, metal_cx);*/
+                self.handle_repaint(ios_app, metal_cx);
                 
             }
             IosEvent::MouseDown(e) => {
@@ -238,22 +223,13 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self,  _metal_cx: &MetalCx){
+    fn handle_platform_ops(&mut self, ios_app:&mut IosApp, _metal_cx: &MetalCx){
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::CreateWindow(_window_id) => {
-                    /*let window = &mut self.windows[window_id];
-                    let metal_window = MetalWindow::new(
-                        window_id,
-                        &metal_cx,
-                        cocoa_app,
-                        window.create_inner_size.unwrap_or(dvec2(800., 600.)),
-                        window.create_position,
-                        &window.create_title
-                    );
-                    window.window_geom = metal_window.window_geom.clone();
-                    metal_windows.push(metal_window);
-                    window.is_created = true;*/
+                CxOsOp::CreateWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = ios_app.last_window_geom.clone();
+                    window.is_created = true;
                 },
                 CxOsOp::CloseWindow(_window_id) => {
                 },
