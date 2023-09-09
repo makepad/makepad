@@ -1,6 +1,8 @@
 use {
     crate::{
+        makepad_math::*,
         makepad_objc_sys::runtime::{ObjcId},
+        event::TouchState,
         os::{
             apple::apple_sys::*,
             apple::ios_app::get_ios_app_global,
@@ -40,51 +42,41 @@ pub fn define_mtk_view() -> *const Class {
     extern fn yes(_: &Object, _: Sel) -> BOOL {
         YES
     }
-    /*fn on_touch(_this: &Object, _event: ObjcId, mut _callback: impl FnMut(u64, f32, f32)) {
-       /* unsafe {
+    
+    fn on_touch(this: &Object, event: ObjcId, state:TouchState) {
+       unsafe {
             let enumerator: ObjcId = msg_send![event, allTouches];
             let size: u64 = msg_send![enumerator, count];
             let enumerator: ObjcId = msg_send![enumerator, objectEnumerator];
 
             for touch_id in 0..size {
                 let ios_touch: ObjcId = msg_send![enumerator, nextObject];
-                let mut ios_pos: NSPoint = msg_send![ios_touch, locationInView: this];
-
-                ios_pos.x *= 2.;
-                ios_pos.y *= 2.;
-
-                callback(touch_id, ios_pos.x as _, ios_pos.y as _);
+                let uid_obj: ObjcId = msg_send![ios_touch, estimationUpdateIndex];
+                let uid:u64 = if uid_obj != nil{
+                    msg_send![uid_obj, intValue]
+                }
+                else{ 
+                    touch_id as u64
+                };
+                let p: NSPoint = msg_send![ios_touch, locationInView: this];
+                get_ios_app_global().update_touch(uid, dvec2(p.x,p.y), state);
             }
-        }*/
-    }*/
-    extern "C" fn touches_began(_this: &Object, _: Sel, _: ObjcId, _event: ObjcId) {
-        /*let payload = get_window_payload(this);
-
-        if let Some(ref mut event_handler) = payload.event_handler {
-            on_touch(this, event, |id, x, y| {
-                event_handler.touch_event(TouchPhase::Started, id, x as _, y as _);
-            });
-        }*/
+        }
+    }
+    
+    extern "C" fn touches_began(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
+        on_touch(this, event, TouchState::Start);
+        get_ios_app_global().send_touch_update();
     }
 
-    extern "C" fn touches_moved(_this: &Object, _: Sel, _: ObjcId, _event: ObjcId) {
-        /*let payload = get_window_payload(this);
-
-        if let Some(ref mut event_handler) = payload.event_handler {
-            on_touch(this, event, |id, x, y| {
-                event_handler.touch_event(TouchPhase::Moved, id, x as _, y as _);
-            });
-        }*/
+    extern "C" fn touches_moved(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
+        on_touch(this, event, TouchState::Move);
+        get_ios_app_global().send_touch_update();
     }
   
-    extern "C" fn touches_ended(_this: &Object, _: Sel, _: ObjcId, _event: ObjcId) {
-        /*let payload = get_window_payload(this);
-
-        if let Some(ref mut event_handler) = payload.event_handler {
-            on_touch(this, event, |id, x, y| {
-                event_handler.touch_event(TouchPhase::Ended, id, x as _, y as _);
-            });
-        }*/
+    extern "C" fn touches_ended(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
+        on_touch(this, event, TouchState::Stop);
+        get_ios_app_global().send_touch_update();
     }
 
     extern "C" fn touches_canceled(_: &Object, _: Sel, _: ObjcId, _: ObjcId) {}
@@ -116,8 +108,8 @@ pub fn define_mtk_view_dlg() -> *const Class {
     let mut decl = ClassDecl::new("MakepadViewDlg", class!(NSObject)).unwrap();
 
     extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
-        let ca = get_ios_app_global();
-        ca.draw_in_rect();
+        get_ios_app_global().draw_in_rect();
+        
         
         /*
         let payload = get_window_payload(this);
@@ -184,13 +176,11 @@ pub fn define_mtk_view_dlg() -> *const Class {
 pub fn define_ios_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
-        let ca = get_ios_app_global();
-        ca.send_timer_received(nstimer);
+        get_ios_app_global().send_timer_received(nstimer);
     }
     
     extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        let ca = get_ios_app_global();
-        ca.send_paint_event();
+        get_ios_app_global().send_paint_event();
     }
     
     let superclass = class!(NSObject);

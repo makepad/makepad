@@ -170,6 +170,13 @@ impl Cx {
                 self.handle_repaint(ios_app, metal_cx);
                 
             }
+            IosEvent::TouchUpdate(e)=>{
+                self.fingers.process_touch_update_start(e.time, &e.touches);
+                let e = Event::TouchUpdate(e);
+                self.call_event_handler(&e);
+                let e = if let Event::TouchUpdate(e) = e{e}else{panic!()};
+                self.fingers.process_touch_update_end(&e.touches);
+            }
             IosEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
                     e.abs,
