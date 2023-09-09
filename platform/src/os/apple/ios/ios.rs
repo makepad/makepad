@@ -15,6 +15,7 @@ use {
                 },
                 ns_url_session::{make_http_request, web_socket_open},
             },
+            apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
             metal::{MetalCx, DrawPassMode},
         },
@@ -41,6 +42,7 @@ impl Cx {
         crate::log!("Hello world ! We booted up!");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));
         let device = metal_cx.borrow().device;
+        init_apple_classes_global();
         init_ios_app_global(device, Box::new({
             let cx = cx.clone();
             move | ios_app,
