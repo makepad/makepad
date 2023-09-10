@@ -18,8 +18,15 @@ enum DragState {
     NormalDrag {last_abs: f64, delta: f64}
 }
 
+#[derive(Clone,Copy)]
+struct ScrollSample{
+    abs: f64,
+    time: f64,
+}
+
 enum ScrollState {
     Stopped,
+    Drag{samples:Vec<ScrollSample>},
     Flick {delta: f64, next_frame: NextFrame},
     Pulldown {next_frame: NextFrame},
 }
@@ -55,7 +62,7 @@ pub struct ListView {
     #[rust] range_start: u64,
     #[rust(u64::MAX)] range_end: u64,
     #[rust(0u64)] view_window: u64,
-    #[live(0.1)] flick_scroll_minimum: f64,
+    #[live(0.2)] flick_scroll_minimum: f64,
     #[live(0.98)] flick_scroll_decay: f64,
     #[live(0.2)] swipe_drag_duration: f64,
     #[live(100.0)] max_pull_down: f64,
@@ -76,7 +83,7 @@ pub struct ListView {
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
-    #[rust(DragState::None)] drag_state: DragState,
+    //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
 
@@ -195,13 +202,8 @@ impl ListView {
                 
                 // in this case we manage the 'pull down' situation when we are at the top
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
-                    let min = if let DragState::None = self.drag_state {
-                        if let ScrollState::Stopped = self.scroll_state {
-                            0.0
-                        }
-                        else {
-                            self.max_pull_down
-                        }
+                    let min = if let ScrollState::Stopped = self.scroll_state {
+                        0.0
                     }
                     else {
                         self.max_pull_down
@@ -554,7 +556,7 @@ impl Widget for ListView {
                     }
                 }
             }
-            ScrollState::Stopped => ()
+            _=>()
         }
         let vi = self.vec_index;
         let is_scroll = if let Event::Scroll(_) = event {true} else {false};
@@ -570,25 +572,7 @@ impl Widget for ListView {
                     dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 },
-                Hit::FingerDown(e) => {
-                    if self.grab_key_focus {
-                        cx.set_key_focus(self.area);
-                    }
-                    // ok so fingerdown eh.
-                    if self.tail_range {
-                        self.tail_range = false;
-                    }
-                    if self.drag_scrolling{
-                        if let ScrollState::Pulldown {..} = &self.scroll_state {
-                            self.scroll_state = ScrollState::Stopped;
-                        };
-                        self.drag_state = DragState::SwipeDrag {
-                            last_abs: e.abs.index(vi),
-                            delta: 0.0,
-                            initial_time: e.time
-                        };
-                    }
-                }
+                
                 Hit::KeyDown(ke) => match ke.key_code {
                     KeyCode::Home => {
                         self.first_id = 0;
@@ -647,57 +631,66 @@ impl Widget for ListView {
                     },
                     _ => ()
                 }
+                Hit::FingerDown(e) => {
+                    if self.grab_key_focus {
+                        cx.set_key_focus(self.area);
+                    }
+                    // ok so fingerdown eh.
+                    if self.tail_range {
+                        self.tail_range = false;
+                    }
+                    if self.drag_scrolling{
+                        self.scroll_state = ScrollState::Drag {
+                            samples: vec![ScrollSample{abs:e.abs.index(vi),time:e.time}]
+                        };
+                    }
+                }
                 Hit::FingerMove(e) => {
                     cx.set_cursor(MouseCursor::Default);
-                    if self.drag_scrolling{
-                        // ok we kinda have to set the scroll pos to our abs position
-                        match &mut self.drag_state {
-                            DragState::SwipeDrag {last_abs, delta, initial_time} => {
-                                let new_delta = e.abs.index(vi) - *last_abs;
-                                if e.time - *initial_time < self.swipe_drag_duration {
-                                    *delta = new_delta;
-                                    *last_abs = e.abs.index(vi);
-                                }
-                                else {
-                                    // After a short span of time, the flick motion is considered a normal drag
-                                    self.scroll_state = ScrollState::Stopped;
-                                    self.drag_state = DragState::NormalDrag {
-                                        last_abs: e.abs.index(vi),
-                                        delta: new_delta
-                                    };
-                                }
-                                self.delta_top_scroll(cx, new_delta, false);
-                                self.detect_tail_in_draw = true;
-                                dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
-                                self.area.redraw(cx);
-                            },
-                            DragState::NormalDrag {last_abs, delta} => {
-                                let new_delta = e.abs.index(vi) - *last_abs;
-                                *delta = new_delta;
-                                *last_abs = e.abs.index(vi);
-                                self.delta_top_scroll(cx, new_delta, false);
-                                self.detect_tail_in_draw = true;
-                                dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
-                                self.area.redraw(cx);
-                            },
-                            DragState::None => {}
+                    match &mut self.scroll_state {
+                        ScrollState::Drag {samples}=>{
+                            let new_abs = e.abs.index(vi);
+                            let old_sample = *samples.last().unwrap();
+                            samples.push(ScrollSample{abs:new_abs, time:e.time});
+                            if samples.len()>4{
+                                samples.remove(0);
+                            }
+                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false);
+                            self.area.redraw(cx);
                         }
+                        _=>()
                     }
                 }
                 Hit::FingerUp(_) => {
-                    if self.drag_scrolling{
-                        if let DragState::SwipeDrag {delta, ..} = &mut self.drag_state {
-                            if delta.abs()>self.flick_scroll_minimum {
+                    match &mut self.scroll_state {
+                        ScrollState::Drag {samples}=>{
+                            // alright so we need to see if in the last couple of samples
+                            // we have a certain distance per time
+                            let mut last = None;
+                            let mut scaled_delta = 0.0;
+                            for sample in samples.iter().rev(){
+                                if last.is_none(){
+                                    last = Some(sample);
+                                }
+                                else{
+                                    scaled_delta += (last.unwrap().abs - sample.abs)/ (last.unwrap().time - sample.time)
+                                }
+                            }
+                            scaled_delta *= 0.005;
+                            if self.first_id == self.range_start && self.first_scroll > 0.0 {
+                                self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
+                            }
+                            else if scaled_delta.abs() > self.flick_scroll_minimum{
                                 self.scroll_state = ScrollState::Flick {
-                                    delta: *delta,
+                                    delta: scaled_delta,
                                     next_frame: cx.new_next_frame()
                                 };
                             }
+                            else{
+                                self.scroll_state = ScrollState::Stopped;
+                            }
                         }
-                        if self.first_id == self.range_start && self.first_scroll > 0.0 {
-                            self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
-                        }
-                        self.drag_state = DragState::None;
+                        _=>()
                     }
                     // ok so. lets check our gap from 'drag'
                     // here we kinda have to take our last delta and animate it
