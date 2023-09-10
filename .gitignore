@@ -24,3 +24,5 @@ key.ron
 /local
 
 /tools/cargo_makepad/android_*
+/tools/cargo_makepad/ios-deploy/_Frameworks/
+/tools/cargo_makepad/ios-deploy/build/
