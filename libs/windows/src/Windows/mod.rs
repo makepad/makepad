@@ -1534,6 +1534,40 @@ impl IPropertyStore_Vtbl {
 }
 
 }
+pub unsafe fn DragQueryFileW<P0>(hdrop: P0, ifile: u32, lpszfile: ::core::option::Option<&mut [u16]>) -> u32
+where
+    P0: ::windows_core::IntoParam<HDROP>,
+{
+    ::windows_targets::link!("shell32.dll" "system" fn DragQueryFileW(hdrop : HDROP, ifile : u32, lpszfile : ::windows_core::PWSTR, cch : u32) -> u32);
+    DragQueryFileW(hdrop.into_param().abi(), ifile, ::core::mem::transmute(lpszfile.as_deref().map_or(::core::ptr::null(), |slice| slice.as_ptr())), lpszfile.as_deref().map_or(0, |slice| slice.len() as _))
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HDROP(pub isize);
+impl HDROP {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == -1 || self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HDROP {}
+impl ::core::clone::Clone for HDROP {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HDROP {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for HDROP {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HDROP").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for HDROP {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 }
 }
 pub mod Graphics{
@@ -1599,6 +1633,14 @@ where
 pub const MONITOR_DEFAULTTONEAREST: MONITOR_FROM_FLAGS = MONITOR_FROM_FLAGS(2u32);
 
 pub const LOGPIXELSX: GET_DEVICE_CAPS_INDEX = GET_DEVICE_CAPS_INDEX(88u32);
+
+pub unsafe fn ScreenToClient<P0>(hwnd: P0, lppoint: *mut super::super::Foundation::POINT) -> super::super::Foundation::BOOL
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HWND>,
+{
+    ::windows_targets::link!("user32.dll" "system" fn ScreenToClient(hwnd : super::super::Foundation:: HWND, lppoint : *mut super::super::Foundation:: POINT) -> super::super::Foundation:: BOOL);
+    ScreenToClient(hwnd.into_param().abi(), lppoint)
+}
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HDC(pub isize);
 impl HDC {
@@ -12506,6 +12548,36 @@ impl ::windows_core::TypeKind for RECT {
     type TypeKind = ::windows_core::CopyType;
 }
 
+#[repr(C)]pub struct POINT {
+    pub x: i32,
+    pub y: i32,
+}
+impl ::core::marker::Copy for POINT {}
+impl ::core::cmp::Eq for POINT {}
+impl ::core::cmp::PartialEq for POINT {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+impl ::core::clone::Clone for POINT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for POINT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for POINT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("POINT").field("x", &self.x).field("y", &self.y).finish()
+    }
+}
+impl ::windows_core::TypeKind for POINT {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HINSTANCE(pub isize);
 impl HINSTANCE {
     pub fn is_invalid(&self) -> bool {
@@ -12806,36 +12878,6 @@ impl ::core::fmt::Debug for LUID {
     }
 }
 impl ::windows_core::TypeKind for LUID {
-    type TypeKind = ::windows_core::CopyType;
-}
-
-#[repr(C)]pub struct POINT {
-    pub x: i32,
-    pub y: i32,
-}
-impl ::core::marker::Copy for POINT {}
-impl ::core::cmp::Eq for POINT {}
-impl ::core::cmp::PartialEq for POINT {
-    fn eq(&self, other: &Self) -> bool {
-        self.x == other.x && self.y == other.y
-    }
-}
-impl ::core::clone::Clone for POINT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for POINT {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-impl ::core::fmt::Debug for POINT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("POINT").field("x", &self.x).field("y", &self.y).finish()
-    }
-}
-impl ::windows_core::TypeKind for POINT {
     type TypeKind = ::windows_core::CopyType;
 }
 
@@ -13669,6 +13711,15 @@ pub const DROPEFFECT_MOVE: DROPEFFECT = DROPEFFECT(2u32);
 pub const DROPEFFECT_LINK: DROPEFFECT = DROPEFFECT(4u32);
 
 pub const DROPEFFECT_SCROLL: DROPEFFECT = DROPEFFECT(2147483648u32);
+
+pub const CF_TEXT: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(1u16);
+
+pub const CF_HDROP: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(15u16);
+
+pub unsafe fn ReleaseStgMedium(param0: *mut super::Com::STGMEDIUM) {
+    ::windows_targets::link!("ole32.dll" "system" fn ReleaseStgMedium(param0 : *mut super::Com:: STGMEDIUM) -> ());
+    ReleaseStgMedium(param0)
+}
 
 }
 pub mod Memory{
@@ -19142,6 +19193,79 @@ impl ::windows_core::TypeKind for STGMOVE {
 }
 
 }
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DVASPECT(pub u32);
+impl ::core::marker::Copy for DVASPECT {}
+impl ::core::clone::Clone for DVASPECT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DVASPECT {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for DVASPECT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DVASPECT").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for DVASPECT {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+pub const DVASPECT_ICON: DVASPECT = DVASPECT(4u32);
+
+pub const DVASPECT_CONTENT: DVASPECT = DVASPECT(1u32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct TYMED(pub i32);
+impl ::core::marker::Copy for TYMED {}
+impl ::core::clone::Clone for TYMED {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TYMED {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for TYMED {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("TYMED").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for TYMED {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+pub const TYMED_FILE: TYMED = TYMED(2i32);
+
+pub const TYMED_HGLOBAL: TYMED = TYMED(1i32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DATADIR(pub i32);
+impl ::core::marker::Copy for DATADIR {}
+impl ::core::clone::Clone for DATADIR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DATADIR {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for DATADIR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DATADIR").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for DATADIR {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+pub const DATADIR_GET: DATADIR = DATADIR(1i32);
+
 }
 pub mod Variant{
 pub const VT_LPWSTR: VARENUM = VARENUM(31u16);

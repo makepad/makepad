@@ -964,8 +964,6 @@ impl CxOsTexture {
             // get shared handle of this resource
             let handle = unsafe { dxgi_resource.GetSharedHandle().unwrap() };
 
-            println!("host: new shared handle to be sent: {:?}",handle);
-
             self.width = width;
             self.height = height;
             self.texture = texture;
@@ -979,10 +977,7 @@ impl CxOsTexture {
         handle: HANDLE,
     ) {
         let mut texture: Option<ID3D11Texture2D> = None;
-        log!("client: got texture handle {:?} from host",handle);
         if let Ok(()) = unsafe { d3d11_cx.device.OpenSharedResource(handle,&mut texture) } {
-
-            log!("newly generated 2D texture for handle {:?}: {:?}",handle,texture);
 
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
@@ -993,9 +988,6 @@ impl CxOsTexture {
             self.texture = texture;
             self.render_target_view = render_target_view;
             self.shader_resource_view = shader_resource_view;
-        }
-        else {
-            log!("unable to use handle {:?}, flushing...",handle);
         }
     }
 }

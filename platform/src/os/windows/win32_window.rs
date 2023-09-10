@@ -13,239 +13,251 @@ use {
     
     crate::{
         log,
+        event::DragItem,
         windows::{
             core::PCWSTR,
-            Win32::Foundation::{
-                HWND,
-                HANDLE,
-                HGLOBAL,
-                WPARAM,
-                LPARAM,
-                LRESULT,
-                RECT,
+            Win32::{
+                Foundation::{
+                    HWND,
+                    HANDLE,
+                    HGLOBAL,
+                    WPARAM,
+                    LPARAM,
+                    LRESULT,
+                    RECT,
+                    POINT,
+                },
+                System::{
+                    Memory::{
+                        GlobalLock,
+                        GlobalAlloc,
+                        GlobalSize,
+                        GlobalUnlock,
+                        GLOBAL_ALLOC_FLAGS,
+                    },
+                    Ole::{
+                        CF_UNICODETEXT,
+                        RegisterDragDrop,
+                        IDropTarget,
+                    },
+                    WindowsProgramming::GMEM_DDESHARE,
+                    DataExchange::{
+                        OpenClipboard,
+                        EmptyClipboard,
+                        GetClipboardData,
+                        SetClipboardData,
+                        CloseClipboard,
+                    },
+                    LibraryLoader::GetModuleHandleW,
+                },
+                UI::{
+                    WindowsAndMessaging::{
+                        CreateWindowExW,
+                        SetWindowLongPtrW,
+                        GetWindowLongPtrW,
+                        DefWindowProcW,
+                        ShowWindow,
+                        PostMessageW,
+                        GetWindowRect,
+                        DestroyWindow,
+                        SetWindowPos,
+                        GetWindowPlacement,
+                        WINDOWPLACEMENT,
+                        GetClientRect,
+                        MoveWindow,
+                        GWL_EXSTYLE,
+                        HWND_TOPMOST,
+                        HWND_NOTOPMOST,
+                        WS_SIZEBOX,
+                        WS_MAXIMIZEBOX,
+                        WS_MINIMIZEBOX,
+                        WS_POPUP,
+                        WS_CLIPSIBLINGS,
+                        WS_CLIPCHILDREN,
+                        WS_SYSMENU,
+                        WS_EX_WINDOWEDGE,
+                        WS_EX_APPWINDOW,
+                        WS_EX_ACCEPTFILES,
+                        WS_EX_TOPMOST,
+                        CW_USEDEFAULT,
+                        GWLP_USERDATA,
+                        SW_SHOW,
+                        SW_RESTORE,
+                        SW_MAXIMIZE,
+                        SW_MINIMIZE,
+                        SWP_NOMOVE,
+                        SWP_NOSIZE,
+                        WM_ACTIVATE,
+                        WM_NCCALCSIZE,
+                        WM_NCHITTEST,
+                        WA_ACTIVE,
+                        WM_ERASEBKGND,
+                        WM_MOUSEMOVE,
+                        WM_MOUSEWHEEL,
+                        WM_LBUTTONDOWN,
+                        WM_LBUTTONUP,
+                        WM_RBUTTONDOWN,
+                        WM_RBUTTONUP,
+                        WM_MBUTTONDOWN,
+                        WM_MBUTTONUP,
+                        WM_KEYDOWN,
+                        WM_SYSKEYDOWN,
+                        WM_CLOSE,
+                        WM_KEYUP,
+                        WM_SYSKEYUP,
+                        WM_CHAR,
+                        WM_ENTERSIZEMOVE,
+                        WM_EXITSIZEMOVE,
+                        WM_SIZE,
+                        WM_DPICHANGED,
+                        WM_DROPFILES,
+                        WM_DESTROY,
+                        HTTOPLEFT,
+                        HTBOTTOMLEFT,
+                        HTLEFT,
+                        HTTOPRIGHT,
+                        HTBOTTOMRIGHT,
+                        HTRIGHT,
+                        HTTOP,
+                        HTBOTTOM,
+                        HTCLIENT,
+                        HTCAPTION,
+                        HTSYSMENU
+                    },
+                    Controls::{
+                        MARGINS,
+                        WM_MOUSELEAVE
+                    },
+                    Input::KeyboardAndMouse::{
+                        VIRTUAL_KEY,
+                        ReleaseCapture,
+                        SetCapture,
+                        TrackMouseEvent,
+                        GetKeyState,
+                        TRACKMOUSEEVENT,
+                        TME_LEAVE,
+                        VK_CONTROL,
+                        VK_SHIFT,
+                        VK_MENU,
+                        VK_LWIN,
+                        VK_RWIN,
+                        VK_ESCAPE,
+                        VK_OEM_3,
+                        VK_0,
+                        VK_1,
+                        VK_2,
+                        VK_3,
+                        VK_4,
+                        VK_5,
+                        VK_6,
+                        VK_7,
+                        VK_8,
+                        VK_9,
+                        VK_OEM_MINUS,
+                        VK_OEM_PLUS,
+                        VK_BACK,
+                        VK_TAB,
+                        VK_Q,
+                        VK_W,
+                        VK_E,
+                        VK_R,
+                        VK_T,
+                        VK_Y,
+                        VK_U,
+                        VK_I,
+                        VK_O,
+                        VK_P,
+                        VK_OEM_4,
+                        VK_OEM_6,
+                        VK_RETURN,
+                        VK_A,
+                        VK_S,
+                        VK_D,
+                        VK_F,
+                        VK_G,
+                        VK_H,
+                        VK_J,
+                        VK_K,
+                        VK_L,
+                        VK_OEM_1,
+                        VK_OEM_7,
+                        VK_OEM_5,
+                        VK_Z,
+                        VK_X,
+                        VK_C,
+                        VK_V,
+                        VK_B,
+                        VK_N,
+                        VK_M,
+                        VK_OEM_COMMA,
+                        VK_OEM_PERIOD,
+                        VK_OEM_2,
+                        VK_LCONTROL,
+                        VK_RCONTROL,
+                        VK_LMENU,
+                        VK_RMENU,
+                        VK_LSHIFT,
+                        VK_RSHIFT,
+                        VK_SPACE,
+                        VK_CAPITAL,
+                        VK_F1,
+                        VK_F2,
+                        VK_F3,
+                        VK_F4,
+                        VK_F5,
+                        VK_F6,
+                        VK_F7,
+                        VK_F8,
+                        VK_F9,
+                        VK_F10,
+                        VK_F11,
+                        VK_F12,
+                        VK_SNAPSHOT,
+                        VK_SCROLL,
+                        VK_PAUSE,
+                        VK_INSERT,
+                        VK_DELETE,
+                        VK_HOME,
+                        VK_END,
+                        VK_PRIOR,
+                        VK_NEXT,
+                        VK_NUMPAD0,
+                        VK_NUMPAD1,
+                        VK_NUMPAD2,
+                        VK_NUMPAD3,
+                        VK_NUMPAD4,
+                        VK_NUMPAD5,
+                        VK_NUMPAD6,
+                        VK_NUMPAD7,
+                        VK_NUMPAD8,
+                        VK_NUMPAD9,
+                        VK_SUBTRACT,
+                        VK_ADD,
+                        VK_DECIMAL,
+                        VK_MULTIPLY,
+                        VK_DIVIDE,
+                        VK_NUMLOCK,
+                        VK_UP,
+                        VK_DOWN,
+                        VK_LEFT,
+                        VK_RIGHT,
+                    },
+                },
+                Graphics::{
+                    Dwm::DwmExtendFrameIntoClientArea,
+                    Gdi::ScreenToClient,
+                },
             },
-            Win32::System::Memory::{
-                GlobalLock,
-                GlobalAlloc,
-                GlobalSize,
-                GlobalUnlock,
-                GLOBAL_ALLOC_FLAGS,
-            },
-            Win32::System::Ole::{
-                CF_UNICODETEXT,
-                RegisterDragDrop,
-                IDropTarget,
-            },
-            Win32::System::Com::IDataObject,
-            Win32::System::WindowsProgramming::GMEM_DDESHARE,
-            Win32::System::DataExchange::{
-                OpenClipboard,
-                EmptyClipboard,
-                GetClipboardData,
-                SetClipboardData,
-                CloseClipboard,
-            },
-            Win32::UI::WindowsAndMessaging::{
-                CreateWindowExW,
-                SetWindowLongPtrW,
-                GetWindowLongPtrW,
-                DefWindowProcW,
-                ShowWindow,
-                PostMessageW,
-                GetWindowRect,
-                DestroyWindow,
-                SetWindowPos,
-                GetWindowPlacement,
-                WINDOWPLACEMENT,
-                GetClientRect,
-                MoveWindow,
-                GWL_EXSTYLE,
-                HWND_TOPMOST,
-                HWND_NOTOPMOST,
-                WS_SIZEBOX,
-                WS_MAXIMIZEBOX,
-                WS_MINIMIZEBOX,
-                WS_POPUP,
-                WS_CLIPSIBLINGS,
-                WS_CLIPCHILDREN,
-                WS_SYSMENU,
-                WS_EX_WINDOWEDGE,
-                WS_EX_APPWINDOW,
-                WS_EX_ACCEPTFILES,
-                WS_EX_TOPMOST,
-                CW_USEDEFAULT,
-                GWLP_USERDATA,
-                SW_SHOW,
-                SW_RESTORE,
-                SW_MAXIMIZE,
-                SW_MINIMIZE,
-                SWP_NOMOVE,
-                SWP_NOSIZE,
-                WM_ACTIVATE,
-                WM_NCCALCSIZE,
-                WM_NCHITTEST,
-                WA_ACTIVE,
-                WM_ERASEBKGND,
-                WM_MOUSEMOVE,
-                WM_MOUSEWHEEL,
-                WM_LBUTTONDOWN,
-                WM_LBUTTONUP,
-                WM_RBUTTONDOWN,
-                WM_RBUTTONUP,
-                WM_MBUTTONDOWN,
-                WM_MBUTTONUP,
-                WM_KEYDOWN,
-                WM_SYSKEYDOWN,
-                WM_CLOSE,
-                WM_KEYUP,
-                WM_SYSKEYUP,
-                WM_CHAR,
-                WM_ENTERSIZEMOVE,
-                WM_EXITSIZEMOVE,
-                WM_SIZE,
-                WM_DPICHANGED,
-                WM_DROPFILES,
-                WM_DESTROY,
-                HTTOPLEFT,
-                HTBOTTOMLEFT,
-                HTLEFT,
-                HTTOPRIGHT,
-                HTBOTTOMRIGHT,
-                HTRIGHT,
-                HTTOP,
-                HTBOTTOM,
-                HTCLIENT,
-                HTCAPTION,
-                HTSYSMENU
-            },
-            Win32::UI::Controls::{
-                MARGINS,
-                WM_MOUSELEAVE
-            },
-            Win32::UI::Input::KeyboardAndMouse::{
-                VIRTUAL_KEY,
-                ReleaseCapture,
-                SetCapture,
-                TrackMouseEvent,
-                GetKeyState,
-                TRACKMOUSEEVENT,
-                TME_LEAVE,
-                VK_CONTROL,
-                VK_SHIFT,
-                VK_MENU,
-                VK_LWIN,
-                VK_RWIN,
-                VK_ESCAPE,
-                VK_OEM_3,
-                VK_0,
-                VK_1,
-                VK_2,
-                VK_3,
-                VK_4,
-                VK_5,
-                VK_6,
-                VK_7,
-                VK_8,
-                VK_9,
-                VK_OEM_MINUS,
-                VK_OEM_PLUS,
-                VK_BACK,
-                VK_TAB,
-                VK_Q,
-                VK_W,
-                VK_E,
-                VK_R,
-                VK_T,
-                VK_Y,
-                VK_U,
-                VK_I,
-                VK_O,
-                VK_P,
-                VK_OEM_4,
-                VK_OEM_6,
-                VK_RETURN,
-                VK_A,
-                VK_S,
-                VK_D,
-                VK_F,
-                VK_G,
-                VK_H,
-                VK_J,
-                VK_K,
-                VK_L,
-                VK_OEM_1,
-                VK_OEM_7,
-                VK_OEM_5,
-                VK_Z,
-                VK_X,
-                VK_C,
-                VK_V,
-                VK_B,
-                VK_N,
-                VK_M,
-                VK_OEM_COMMA,
-                VK_OEM_PERIOD,
-                VK_OEM_2,
-                VK_LCONTROL,
-                VK_RCONTROL,
-                VK_LMENU,
-                VK_RMENU,
-                VK_LSHIFT,
-                VK_RSHIFT,
-                VK_SPACE,
-                VK_CAPITAL,
-                VK_F1,
-                VK_F2,
-                VK_F3,
-                VK_F4,
-                VK_F5,
-                VK_F6,
-                VK_F7,
-                VK_F8,
-                VK_F9,
-                VK_F10,
-                VK_F11,
-                VK_F12,
-                VK_SNAPSHOT,
-                VK_SCROLL,
-                VK_PAUSE,
-                VK_INSERT,
-                VK_DELETE,
-                VK_HOME,
-                VK_END,
-                VK_PRIOR,
-                VK_NEXT,
-                VK_NUMPAD0,
-                VK_NUMPAD1,
-                VK_NUMPAD2,
-                VK_NUMPAD3,
-                VK_NUMPAD4,
-                VK_NUMPAD5,
-                VK_NUMPAD6,
-                VK_NUMPAD7,
-                VK_NUMPAD8,
-                VK_NUMPAD9,
-                VK_SUBTRACT,
-                VK_ADD,
-                VK_DECIMAL,
-                VK_MULTIPLY,
-                VK_DIVIDE,
-                VK_NUMLOCK,
-                VK_UP,
-                VK_DOWN,
-                VK_LEFT,
-                VK_RIGHT,
-            },
-            Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea,
-            Win32::System::LibraryLoader::GetModuleHandleW,
         },
         event::*,
         area::Area,
         os::windows::{
-            win32_app::encode_wide,
-            win32_app::FALSE,
+            win32_app::{
+                encode_wide,
+                FALSE,
+                get_win32_app_global,
+            },
             win32_event::*,
-            win32_app::get_win32_app_global,
             win32_droptarget::*,
         },
         window::WindowId,
@@ -268,7 +280,7 @@ pub struct Win32Window {
     pub hwnd: HWND,
     pub track_mouse_event: bool,
 
-    pub data_object: Arc<Cell<Option<IDataObject>>>,
+    pub drag_item: Arc<RefCell<Option<DragItem>>>,
 }
 
 impl Win32Window {
@@ -314,11 +326,11 @@ impl Win32Window {
             None,
         ) };
 
-        // create data object placeholder for drag&drop
-        let data_object: Arc<Cell<Option<IDataObject>>> = Arc::new(Cell::new(None));
+        // create data item placeholder for drag&drop
+        let drag_item: Arc<RefCell<Option<DragItem>>> = Arc::new(RefCell::new(None));
 
         // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
-        let drop_target: IDropTarget = DropTarget { data_object: Arc::clone(&data_object),hwnd, }.into();
+        let drop_target: IDropTarget = DropTarget { drag_item: Arc::clone(&drag_item),hwnd, }.into();
         unsafe { RegisterDragDrop(hwnd, &drop_target).unwrap() };
 
         Win32Window {
@@ -332,7 +344,7 @@ impl Win32Window {
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
-            data_object,
+            drag_item,
         }
     }
 
@@ -633,23 +645,25 @@ impl Win32Window {
             WM_DROPTARGET_DRAGENTER => {
 
                 // decode message
-                let x = (lparam.0 & 0xFFFF) as i16 as f64;
-                let y = (lparam.0 >> 16) as f64;
+                let mut point = POINT {
+                    x: (lparam.0 & 0xFFFF) as i16 as i32,
+                    y: (lparam.0 >> 16) as i32,
+                };
+                unsafe { ScreenToClient(window.hwnd,&mut point) };
                 let dtf = wparam.0 as u32;
                 let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
                 else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
                 else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
                 else { DragResponse::None };
 
-                // leave the IDataObject alone and only take it when dropped
-
-                log!("WM_DROPTARGET_DRAGENTER {},{} 0x{:04X} {:?} IDataObject: {:p}",x,y,dtf,response,&window.data_object);
+                let drag_item = window.drag_item.borrow().clone();
+                log!("starting drag at ({},{}), dtf: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,dtf,response,drag_item);
             },
 
             // inform that the user left the window, dragging an object
             WM_DROPTARGET_DRAGLEAVE => {
 
-                log!("WM_DROPTARGET_DRAGLEAVE");
+                //log!("WM_DROPTARGET_DRAGLEAVE");
 
                 window.do_callback(Win32Event::DragEnd);
 
@@ -660,16 +674,19 @@ impl Win32Window {
             WM_DROPTARGET_DRAGOVER => {
 
                 // decode message
-                let x = (lparam.0 & 0xFFFF) as i16 as f64;
-                let y = (lparam.0 >> 16) as f64;
+                let mut point = POINT {
+                    x: (lparam.0 & 0xFFFF) as i16 as i32,
+                    y: (lparam.0 >> 16) as i32,
+                };
+                unsafe { ScreenToClient(window.hwnd,&mut point) };
                 let dtf = wparam.0 as u32;
-                let mut response = DragResponse::None;
                 let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
                 else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
                 else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
                 else { DragResponse::None };
 
-                log!("WM_DROPTARGET_DRAGOVER {},{} 0x{:04X} {:?}",x,y,dtf,response);
+                let drag_item = window.drag_item.borrow().clone();
+                //log!("WM_DROPTARGET_DRAGOVER {},{} 0x{:04X} {:?} drag_item: {:?}",x,y,dtf,response,drag_item);
 
                 // send to makepad
                 window.do_callback(
@@ -682,8 +699,14 @@ impl Win32Window {
                                 logo: false,
                             },
                             handled: Cell::new(false),
-                            abs: DVec2 { x,y, },
-                            items: Rc::new(Vec::new()),
+                            abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                            items: Rc::new(
+                                if let Some(drag_item) = drag_item {
+                                    vec![drag_item]
+                                } else {
+                                    Vec::new()
+                                }
+                            ),
                             response: Rc::new(Cell::new(response)),
                         }
                     )
@@ -694,24 +717,26 @@ impl Win32Window {
             WM_DROPTARGET_DROP => {
 
                 // decode message
-                let x = (lparam.0 & 0xFFFF) as i16 as f64;
-                let y = (lparam.0 >> 16) as f64;
+                let mut point = POINT {
+                    x: (lparam.0 & 0xFFFF) as i16 as i32,
+                    y: (lparam.0 >> 16) as i32,
+                };
+                unsafe { ScreenToClient(window.hwnd,&mut point) };
                 let dtf = wparam.0 as u32;
-                let mut response = DragResponse::None;
                 let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
                 else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
                 else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
                 else { DragResponse::None };
 
-                // take the data object here
-                let data_object = window.data_object.take();
+                // take the drag item here
+                let drag_item = window.drag_item.take();
                 
                 // automatic dropping of data_object at the end of this block
                 // should also call COM Release on the inner IDataObject
 
                 // this might need to be verified
 
-                log!("WM_DROPTARGET_DROP {},{} 0x{:04X} {:?} IDataObject: {:p}",x,y,dtf,response,&data_object);
+                log!("dropping at ({},{}), dtf: {:04X}, repsonse: {:?}, drag_item: {:?}",point.x,point.y,dtf,response,drag_item);
 
                 window.do_callback(
                     Win32Event::Drop(
@@ -723,8 +748,14 @@ impl Win32Window {
                                 logo: false,
                             },
                             handled: Cell::new(false),
-                            abs: DVec2 { x,y, },
-                            items: Rc::new(Vec::new()),  // TODO: data_object should go in here
+                            abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                            items: Rc::new(
+                                if let Some(drag_item) = drag_item {
+                                    vec![drag_item]
+                                } else {
+                                    Vec::new()
+                                }
+                            ),
                         }
                     )
                 );
