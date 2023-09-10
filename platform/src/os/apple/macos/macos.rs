@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{RefCell},
+        cell::RefCell,
     },
     makepad_objc_sys::{
         msg_send,
@@ -14,10 +14,8 @@ use {
         os::{
             cx_native::EventFlow,
             apple::apple_sys::*,
-            cocoa_event::{CocoaEvent},
-            metal_xpc::{
-                start_xpc_service,
-            },
+            cocoa_event::CocoaEvent,
+            metal_xpc::start_xpc_service,
             cocoa_app::{
                 CocoaApp,
                 get_cocoa_app_global,
@@ -26,7 +24,7 @@ use {
             apple_media::CxAppleMedia,
             metal::{MetalCx, MetalWindow, DrawPassMode},
         },
-        pass::{CxPassParent},
+        pass::CxPassParent,
         thread::Signal,
         event::{
             MouseUpEvent,
