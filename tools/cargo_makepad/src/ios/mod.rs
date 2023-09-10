@@ -39,7 +39,7 @@ pub fn handle_ios(args: &[String]) -> Result<(), String> {
             #[cfg(target_arch = "x86_64")]
             let toolchain = IosTarget::x86_64_sim;
             #[cfg(target_arch = "aarch64")]
-            let toolchain = IosTarget::aarch64_sim;
+            let toolchain = IosTarget::aarch64_sim; 
             compile::run_sim(&args[1], &args[2..], toolchain)?;
             Ok(())
         }
