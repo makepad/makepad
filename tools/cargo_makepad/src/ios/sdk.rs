@@ -24,7 +24,7 @@ pub fn rustup_toolchain_install(ios_targets:&[IosTarget]) -> Result<(), String> 
     shell_env_cap(&[],&ios_deploy_dir, "xcodebuild", &[
         "-quiet",
         "-target",
-        "ios-deploy",
+        "ios-deploy",  
     ]) ?;
     
     println!("[Finished] iOS Rust toolchains installed");
