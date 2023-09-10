@@ -154,7 +154,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn walk(&self) -> Walk {
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {
         self.walk
     }
 

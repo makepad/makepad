@@ -37,6 +37,7 @@ live_design!{
     import crate::tab_close_button::TabCloseButtonBase;
     import crate::text_input::TextInputBase;
     import crate::scroll_shadow::DrawScrollShadowBase;
+    import crate::page_flip::PageFlipBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
@@ -515,9 +516,11 @@ live_design!{
         }
     }
     MultiWindow = <MultiWindowBase>{}
+    PageFlip = <PageFlipBase>{}
 
     // todo fix this by allowing reexporting imports
     // for now this works too
+    PageFlipBase = <PageFlipBase>{}
     ViewBase = <ViewBase>{}
     ButtonBase = <ButtonBase>{}
     CheckBoxBase = <CheckBoxBase>{}

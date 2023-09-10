@@ -48,7 +48,42 @@ impl PlistValues{
         }
 }
 
-pub fn build(_package_name: Option<String>, _app_label: Option<String>, args: &[String], ios_targets:&[IosTarget]) -> Result<(PathBuf, PlistValues), String> {
+pub struct Scent{
+    app_id: String,
+    team_id: String,
+}
+
+impl Scent{
+    fn to_scent_file(&self)->String{
+        format!(r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+                <dict>
+                    <key>application-identifier</key>
+                    <string>{0}</string>
+                    <key>com.apple.developer.team-identifier</key>
+                    <string>{1}</string>
+                    <key>get-task-allow</key>
+                    <true/>
+                    <key>keychain-access-groups</key>
+                    <array>
+                        <string>{0}</string>
+                    </array>
+                </dict>
+            </plist>
+        "#, self.app_id, self.team_id)
+    }
+}
+
+pub struct IosBuildResult{
+    app_dir: PathBuf,
+    plist: PlistValues,
+    dst_bin: PathBuf
+}
+
+
+pub fn build(_package_name: Option<String>, _app_label: Option<String>, args: &[String], ios_targets:&[IosTarget]) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     //let underscore_build_crate = build_crate.replace('-', "_");
 
@@ -95,19 +130,23 @@ pub fn build(_package_name: Option<String>, _app_label: Option<String>, args: &[
     
     cp(&src_bin, &dst_bin, false) ?;
     
-    Ok((app_dir, plist))
+    Ok(IosBuildResult{
+        app_dir, 
+        plist,
+        dst_bin
+    })
 }
 
 pub fn run(package_name: Option<String>, app_label: Option<String>, args: &[String], ios_targets:&[IosTarget]) -> Result<(), String> {
 
-    let (app_dir, plist) = build(package_name, app_label, args, ios_targets)?;
+    let result = build(package_name, app_label, args, ios_targets)?;
 
     let cwd = std::env::current_dir().unwrap();
     shell_env(&[], &cwd ,"xcrun", &[
         "simctl",
         "install",
         "booted",
-        &app_dir.into_os_string().into_string().unwrap()
+        &result.app_dir.into_os_string().into_string().unwrap()
     ]) ?;
 
     shell_env(&[], &cwd ,"xcrun", &[
@@ -115,11 +154,73 @@ pub fn run(package_name: Option<String>, app_label: Option<String>, args: &[Stri
         "launch",
         "--console",
         "booted",
-        &plist.identifier,
+        &result.plist.identifier,
     ]) ?; 
     // lets run it on the simulator
     //xcrun simctl install booted target/x86_64-apple-ios/debug/examples/bundle/ios/ios-beta.app
     //xcrun simctl launch --console booted com.cacao.ios-test
+    
+    Ok(())
+}
+
+pub fn run_real(package_name: Option<String>, app_label: Option<String>, app_id: Option<String>,args: &[String], ios_targets:&[IosTarget], team_id:&str, device:&str) -> Result<(), String> {
+    let build_crate = get_build_crate_from_args(args)?;
+    let result = build(package_name, app_label, args, ios_targets)?;
+    let cwd = std::env::current_dir().unwrap();
+    // ok lets parse these things out
+    let long_hex_id = shell_env_cap(&[], &cwd ,"security", &[
+        "find-identity",
+        "-v",
+        "-p",
+        "codesigning"])?;
+        
+    let long_hex_id = if let Some(long_hex_id) = long_hex_id.strip_prefix("  1) ") {
+        &long_hex_id[0..40]
+    }
+    else{
+       return Err(format!("Error parsing the security result #{}#", long_hex_id)) 
+    };
+
+    let scent = Scent{
+        app_id: app_id.unwrap_or(format!("{}.dev.makepad", team_id)),
+        team_id: team_id.to_string()
+    };
+    
+    let scent_file = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.plist", ios_targets[0].toolchain()));
+    write_text(&scent_file, &scent.to_scent_file())?;
+
+    let src_provision = cwd.join("embedded.mobileprovision");
+    let dst_provision = result.app_dir.join("embedded.mobileprovision");
+    
+    cp(&src_provision, &dst_provision, false) ?;
+    
+    shell_env(&[], &cwd ,"codesign", &[
+        "--force",
+        "--timestamp=none",
+        "--sign",
+        long_hex_id,
+        &result.dst_bin.into_os_string().into_string().unwrap()
+    ]) ?; 
+    
+    let app_dir = result.app_dir.into_os_string().into_string().unwrap();
+    
+    shell_env(&[], &cwd ,"codesign", &[
+        "--force",
+        "--timestamp=none",
+        "--sign",
+        long_hex_id,
+        "--entitlements",
+        &scent_file.into_os_string().into_string().unwrap(),
+        "--generate-entitlement-der",
+        &app_dir
+    ]) ?; 
+    
+    shell_env(&[], &cwd ,"./ios-deploy", &[
+        "-i",
+        device,
+        "-b",
+        &app_dir
+    ]) ?; 
     
     Ok(())
 }

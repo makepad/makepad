@@ -1,5 +1,5 @@
 use makepad_widgets::*; 
- 
+
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
@@ -200,7 +200,7 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    text: "@This is realtime · 13h"
+                    text: "@Hello world· 13h"
                 }
                 text = <Label> {
                     width: Fill, height: Fit
@@ -300,10 +300,6 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        for i in 0..30{
-            log!("Work! {}",i); 
-          //std::thread::sleep(std::time::Duration::from_millis(10))
-        }
         crate::makepad_widgets::live_design(cx);
     }
 }
@@ -346,7 +342,7 @@ impl AppMain for App {
 
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
-                log!("Live! {}", item_id);
+                log!("Test {}", item_id);
             }
         }
     }

@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use {
     std::{
         rc::Rc,
@@ -16,10 +15,12 @@ use {
             apple::apple_util::{
                 str_to_nsstring,
             },
-            cocoa_event::{
-                CocoaEvent,
-            },
-            cocoa_app::{CocoaApp, get_cocoa_class_global, get_cocoa_app_global},
+            macos::{
+                macos_event::{
+                    MacosEvent,
+                },
+                macos_app::{MacosApp, get_macos_class_global, get_macos_app_global},
+            }
         },
         area::Area,
         event::{
@@ -41,7 +42,7 @@ use {
 };
 
 #[derive(Clone)]
-pub struct CocoaWindow {
+pub struct MacosWindow {
     pub(crate) window_id: WindowId,
     pub(crate) view: ObjcId,
     pub(crate) window: ObjcId,
@@ -53,19 +54,19 @@ pub struct CocoaWindow {
     last_window_geom: Option<WindowGeom>,
 }
 
-impl CocoaWindow {
+impl MacosWindow {
     
-    pub fn new(cocoa_app: &mut CocoaApp, window_id: WindowId) -> CocoaWindow {
+    pub fn new(cocoa_app: &mut MacosApp, window_id: WindowId) -> MacosWindow {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
-            let window: ObjcId = msg_send![get_cocoa_class_global().window, alloc];
-            let window_delegate: ObjcId = msg_send![get_cocoa_class_global().window_delegate, new];
-            let view: ObjcId = msg_send![get_cocoa_class_global().view, alloc];
+            let window: ObjcId = msg_send![get_macos_class_global().window, alloc];
+            let window_delegate: ObjcId = msg_send![get_macos_class_global().window_delegate, new];
+            let view: ObjcId = msg_send![get_macos_class_global().view, alloc];
             
             let () = msg_send![pool, drain];
             cocoa_app.cocoa_windows.push((window, view));
-            CocoaWindow {
+            MacosWindow {
                 is_fullscreen: false,
                 live_resize_timer: nil,
                 window_delegate: window_delegate,
@@ -85,7 +86,7 @@ impl CocoaWindow {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
             // set the backpointeers
-            (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
+            (*self.window_delegate).set_ivar("macos_window_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
             
             let left_top = if let Some(position) = position {
@@ -167,7 +168,7 @@ impl CocoaWindow {
         }
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-            let cocoa_app = get_cocoa_app_global();
+            let cocoa_app = get_macos_app_global();
             self.live_resize_timer = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.01666666
@@ -183,7 +184,7 @@ impl CocoaWindow {
         }
         
         self.do_callback(
-            CocoaEvent::WindowResizeLoopStart(self.window_id)
+            MacosEvent::WindowResizeLoopStart(self.window_id)
         );
     }
     
@@ -195,13 +196,13 @@ impl CocoaWindow {
             }
         }
         self.do_callback(
-            CocoaEvent::WindowResizeLoopStop(self.window_id)
+            MacosEvent::WindowResizeLoopStop(self.window_id)
         );
     }
     
     pub fn close_window(&mut self) {
         unsafe {
-            //get_cocoa_app_global();
+            //get_macos_app_global();
             let () = msg_send![self.window, close];
         }
     }
@@ -225,7 +226,7 @@ impl CocoaWindow {
     }
     
     pub fn time_now(&self) -> f64 {
-         get_cocoa_app_global().time_now()
+         get_macos_app_global().time_now()
     }
     
     pub fn get_window_geom(&self) -> WindowGeom {
@@ -241,8 +242,8 @@ impl CocoaWindow {
         }
     }
     
-    pub fn do_callback(&mut self, event: CocoaEvent) {
-        get_cocoa_app_global().do_callback(event);
+    pub fn do_callback(&mut self, event: MacosEvent) {
+        get_macos_app_global().do_callback(event);
     }
     
     pub fn set_position(&mut self, pos: DVec2) {
@@ -303,29 +304,29 @@ impl CocoaWindow {
         };
         self.last_window_geom = Some(new_geom.clone());
         self.do_callback(
-            CocoaEvent::WindowGeomChange(WindowGeomChangeEvent {
+            MacosEvent::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: self.window_id,
                 old_geom: old_geom,
                 new_geom: new_geom
             }),
         );
-        self.do_callback(CocoaEvent::Paint);
+        self.do_callback(MacosEvent::Paint);
         // we should schedule a timer for +16ms another Paint
         
     }
     
     pub fn send_got_focus_event(&mut self) {
-        self.do_callback(CocoaEvent::AppGotFocus);
+        self.do_callback(MacosEvent::AppGotFocus);
     }
     
     pub fn send_lost_focus_event(&mut self) {
-        self.do_callback(CocoaEvent::AppLostFocus);
+        self.do_callback(MacosEvent::AppLostFocus);
     }
     
     pub fn mouse_down_can_drag_window(&mut self) -> bool {
         let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
         self.do_callback(
-            CocoaEvent::WindowDragQuery(WindowDragQueryEvent {
+            MacosEvent::WindowDragQuery(WindowDragQueryEvent {
                 window_id: self.window_id,
                 abs: self.last_mouse_pos,
                 response: response.clone()
@@ -343,7 +344,7 @@ impl CocoaWindow {
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
         let () = unsafe {msg_send![self.window, makeFirstResponder: self.view]};
-        self.do_callback(CocoaEvent::MouseDown(MouseDownEvent {
+        self.do_callback(MacosEvent::MouseDown(MouseDownEvent {
             button,
             modifiers,
             window_id: self.window_id,
@@ -354,7 +355,7 @@ impl CocoaWindow {
     }
     
     pub fn send_mouse_up(&mut self, button: usize, modifiers: KeyModifiers) {
-        self.do_callback(CocoaEvent::MouseUp(MouseUpEvent {
+        self.do_callback(MacosEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,
             window_id: self.window_id,
@@ -366,9 +367,9 @@ impl CocoaWindow {
     pub fn send_mouse_move(&mut self, _event: ObjcId, pos: DVec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         
-        get_cocoa_app_global().startup_focus_hack();
+        get_macos_app_global().startup_focus_hack();
         
-        self.do_callback(CocoaEvent::MouseMove(MouseMoveEvent {
+        self.do_callback(MacosEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
             modifiers: modifiers,
@@ -376,12 +377,12 @@ impl CocoaWindow {
             handled: Cell::new(Area::Empty),
         }));
         
-        //get_cocoa_app_global().ns_event = ptr::null_mut();
+        //get_macos_app_global().ns_event = ptr::null_mut();
     }
     
     pub fn send_scroll(&mut self, scroll:DVec2, modifiers: KeyModifiers, is_mouse:bool){
         self.do_callback(
-            CocoaEvent::Scroll(ScrollEvent {
+            MacosEvent::Scroll(ScrollEvent {
                 window_id: self.window_id,
                 scroll,
                 abs: self.last_mouse_pos,
@@ -396,7 +397,7 @@ impl CocoaWindow {
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
         let accept_close = Rc::new(Cell::new(true));
-        self.do_callback(CocoaEvent::WindowCloseRequested(WindowCloseRequestedEvent {
+        self.do_callback(MacosEvent::WindowCloseRequested(WindowCloseRequestedEvent {
             window_id: self.window_id,
             accept_close: accept_close.clone()
         }));
@@ -407,13 +408,13 @@ impl CocoaWindow {
     }
     
     pub fn send_window_closed_event(&mut self) {
-        self.do_callback(CocoaEvent::WindowClosed(WindowClosedEvent {
+        self.do_callback(MacosEvent::WindowClosed(WindowClosedEvent {
             window_id: self.window_id
         }))
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
-        self.do_callback(CocoaEvent::TextInput(TextInputEvent {
+        self.do_callback(MacosEvent::TextInput(TextInputEvent {
             input: input,
             was_paste: false,
             replace_last: replace_last
@@ -423,7 +424,7 @@ impl CocoaWindow {
     #[cfg(target_os = "macos")]
     pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DragItem>) {
         let mut dragged_files = Vec::new();
-        for item in items{
+        for item in items{ 
             match item{
                 DragItem::FilePath{path, internal_id}=>{
                     let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
@@ -486,10 +487,10 @@ impl CocoaWindow {
     }
 }
 
-pub fn get_cocoa_window(this: &Object) -> &mut CocoaWindow {
+pub fn get_cocoa_window(this: &Object) -> &mut MacosWindow {
     unsafe {
-        let ptr: *mut c_void = *this.get_ivar("cocoa_window_ptr");
-        &mut *(ptr as *mut CocoaWindow)
+        let ptr: *mut c_void = *this.get_ivar("macos_window_ptr");
+        &mut *(ptr as *mut MacosWindow)
     }
 }
 

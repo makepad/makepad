@@ -104,7 +104,9 @@ impl LiveHook for Font {
 
 impl CxFontsAtlas {
     pub fn get_font_by_path(&mut self, cx: &Cx, path: &str) -> usize {
-         
+        if path.len() == 0{
+            return 0
+        }
         if let Some(item) = self.path_to_font_id.get(path) {
             return *item;
         }
