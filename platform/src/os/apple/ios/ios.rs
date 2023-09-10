@@ -2,11 +2,16 @@ use {
     std::{
         rc::Rc,
         cell::{RefCell},
+        io::prelude::*,
+        fs::File,
     },
 
     crate::{
         makepad_live_id::*,
+        makepad_objc_sys::runtime::{ObjcId},
         os::{
+            apple::apple_sys::*,
+            apple::apple_util::nsstring_to_string,
             cx_native::EventFlow,
             apple::{
                 ios::{
@@ -91,6 +96,30 @@ impl Cx {
         }
         if out.len()>0{
             self.call_event_handler(&Event::NetworkResponses(out))
+        }
+    }
+    
+    pub (crate) fn ios_load_dependencies(&mut self){
+        
+        let bundle_path = unsafe{
+            let main:ObjcId = msg_send![class!(NSBundle), mainBundle];
+            let path:ObjcId = msg_send![main, resourcePath];
+            nsstring_to_string(path)
+        };
+        
+        for (path,dep) in &mut self.dependencies{
+            if let Ok(mut file_handle) = File::open(format!("{}/{}",bundle_path,path)) {
+                let mut buffer = Vec::<u8>::new();
+                if file_handle.read_to_end(&mut buffer).is_ok() {
+                    dep.data = Some(Ok(Rc::new(buffer)));
+                }
+                else{
+                    dep.data = Some(Err("read_to_end failed".to_string()));
+                }
+            }
+            else{
+                dep.data = Some(Err("File open failed".to_string()));
+            }
         }
     }
     
@@ -299,10 +328,16 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         self.live_expand();
         self.start_live_file_watcher();
         self.live_scan_dependencies();
+        //#[cfg(target_feature="sim")]
+        #[cfg(ios_sim)]
         self.native_load_dependencies();
+        
+        #[cfg(not(ios_sim))]
+        self.ios_load_dependencies();
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
