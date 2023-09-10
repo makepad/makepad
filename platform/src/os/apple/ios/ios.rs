@@ -99,6 +99,7 @@ impl Cx {
         }
     }
     
+    #[allow(dead_code)]
     pub (crate) fn ios_load_dependencies(&mut self){
         
         let bundle_path = unsafe{
@@ -328,7 +329,11 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
-        self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
+        
+        #[cfg(not(ios_sim))]{
+            self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
+        }
+        
         self.live_expand();
         self.start_live_file_watcher();
         self.live_scan_dependencies();

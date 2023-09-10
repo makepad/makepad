@@ -10,14 +10,6 @@ live_design!{
     ListViewBase = {{ListView}} {}
 }
 
-enum DragState {
-    None,
-    // Swipe gesture recorded by a very short amount of time, determining the flick scroll direction and speed
-    SwipeDrag {last_abs: f64, delta: f64, initial_time: f64},
-    // If it is a longer tap, it is considered a normal drag
-    NormalDrag {last_abs: f64, delta: f64}
-}
-
 #[derive(Clone,Copy)]
 struct ScrollSample{
     abs: f64,
@@ -40,14 +32,6 @@ enum ListDrawState {
     End {viewport: Rect}
 }
 
-impl ScrollState{
-    fn is_drag(&self)->bool{
-        match self{
-            ScrollState::Drag{..}=>true,
-            _=>false
-        }
-    }
-}
 
 #[derive(Clone, WidgetAction)]
 pub enum ListViewAction {
@@ -573,7 +557,7 @@ impl Widget for ListView {
         if self.scroll_bar.is_area_captured(cx){
             self.scroll_state = ScrollState::Stopped;
         }
-        if !self.scroll_bar.is_area_captured(cx) || is_scroll{
+        if !self.scroll_bar.is_area_captured(cx) || is_scroll{ 
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
                     if self.tail_range {
