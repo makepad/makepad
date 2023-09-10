@@ -110,10 +110,18 @@ pub fn define_mtk_view_dlg() -> *const Class {
     extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
         get_ios_app_global().draw_in_rect();
     }
+    
+    extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _:ObjcId) {
+        get_ios_app_global().draw_in_rect();
+    }
     unsafe {
         decl.add_method(
             sel!(drawInMTKView:),
             draw_in_rect as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(mtkView: drawableSizeWillChange:),
+            draw_size_will_change as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 
