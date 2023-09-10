@@ -611,6 +611,7 @@ impl Dock {
     
     fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String) {
         // lets add a tab
+        log!("dock.drop_create: abs: ({},{}), item: {}, kind: {},name: {}",abs.x,abs.y,item,kind,name);
         if self.handle_drop(cx, abs, item, false) {
             self.dock_items.insert(item, DockItem::Tab {
                 name,
@@ -731,7 +732,6 @@ impl Widget for Dock {
         // alright lets manage the drag areas
         match event.drag_hits(cx, self.area) {
             DragHit::Drag(f) => {
-                log!("drag_hits Drag({:?}) on area {:?}",f,self.area);
                 self.drop_state = None;
                 self.drop_target_draw_list.redraw(cx);
                 match f.state {
@@ -742,7 +742,6 @@ impl Widget for Dock {
                 }
             }
             DragHit::Drop(f) => {
-                log!("drag_hits Drop({:?}) on area {:?}",f,self.area);
                 self.drop_state = None;
                 self.drop_target_draw_list.redraw(cx);
                 dispatch_action(cx, DockAction::Drop(f.clone()).into_action(uid))
