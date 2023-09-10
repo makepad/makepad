@@ -76,7 +76,8 @@ use {
             Win32::System::Performance::{
                 QueryPerformanceCounter,
                 QueryPerformanceFrequency,
-            }
+            },
+            Win32::System::Ole::OleInitialize,
         },
         event::TimerEvent,
         cursor::MouseCursor,
@@ -150,6 +151,9 @@ impl Win32App {
         unsafe {
             RegisterClassExW(&class);
             IsGUIThread(TRUE);
+
+            // initialize COM using OleInitialize to allow Drag&Drop and other shell features
+            OleInitialize(None).unwrap();
         }
         
         let mut time_start = 0i64;
