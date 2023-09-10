@@ -1,0 +1,46 @@
+{
+  "name": "ios-deploy",
+  "version": "1.12.2",
+  "os": [
+    "darwin"
+  ],
+  "description": "launch iOS apps iOS devices from the command line (Xcode 7)",
+  "main": "ios-deploy",
+  "bin": "./build/Release/ios-deploy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ios-control/ios-deploy"
+  },
+  "devDependencies": {
+    "eslint": "~4.19.1",
+    "eslint-config-semistandard": "^12.0.1",
+    "eslint-config-standard": "^11.0.0",
+    "eslint-plugin-import": "^2.12.0",
+    "eslint-plugin-node": "^6.0.1",
+    "eslint-plugin-promise": "^3.8.0",
+    "eslint-plugin-standard": "^3.1.0"
+  },
+  "scripts": {
+    "preinstall": "./src/scripts/check_reqs.js && xcodebuild",
+    "build-test": "npm run pycompile && xcodebuild test -scheme ios-deploy-tests",
+    "eslint": "eslint src/scripts/*.js",
+    "test": "npm run eslint && npm run build-test",
+    "pycompile": "python -m py_compile src/scripts/*.py",
+    "postversion": "echo \\\"$npm_package_version\\\" > src/ios-deploy/version.h"
+  },
+  "files": [
+    "demo",
+    "src",
+    "ios-deploy.xcodeproj/project.pbxproj",
+    "ios-deploy.xcodeproj/xcshareddata"
+  ],
+  "keywords": [
+    "ios-deploy",
+    "deploy to iOS device"
+  ],
+  "bugs": {
+    "url": "https://github.com/phonegap/ios-deploy/issues"
+  },
+  "author": "Greg Hughes",
+  "license": "GPLv3"
+}
