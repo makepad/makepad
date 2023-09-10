@@ -10,6 +10,8 @@
 #rustup target add aarch64-linux-android &>/dev/null
 
 #rustup target add x86_64-pc-windows-gnu --toolchain nightly &>/dev/null
+
+#rustup target add x86_64-pc-windows-gnu --toolchain nightly &>/dev/null
 #rustup target add x86_64-pc-windows-msvc --toolchain nightly &>/dev/null
 #rustup target add wasm32-unknown-unknown --toolchain nightly &>/dev/null
 #rustup target add x86_64-unknown-linux-gnu --toolchain nightly &>/dev/null
@@ -24,6 +26,9 @@ MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --me
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-numbers --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-simple --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-chatgpt --release --message-format=json
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-news-feed --release --message-format=json
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-sdxl --release --message-format=json
+MAKEPAD=lines cargo +nightly check -q -p makepad-studio --release --message-format=json
 
 echo "Checking Windows GNU stable"
 cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu --message-format=json

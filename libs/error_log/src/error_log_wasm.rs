@@ -1,38 +1,19 @@
 use std::panic;
-
-#[macro_export]
-macro_rules!log {
-    ( $ ( $ t: tt) *) => {
-        $crate::makepad_error_log::console_log_impl(&format!("{}:{}\n   {}", file!(), line!(), format!( $ ( $ t) *)))
-    }
-}
-
-#[macro_export]
-macro_rules!error {
-    ( $ ( $ t: tt) *) => {
-        $crate::makepad_error_log::console_error_impl(&format!("{}:{}\n    {}", file!(), line!(), format!( $ ( $ t) *)))
-    }
-}
+pub use crate::LogType;
 
 extern "C" {
     pub fn js_console_log(chars: u32, len: u32);
-}
-
-pub fn console_log_impl(val: &str) {
-    unsafe {
-        let chars = val.chars().collect::<Vec<char >> ();
-        js_console_log(chars.as_ptr() as u32, chars.len() as u32);
-    }
-}
-
-extern "C" {
     pub fn js_console_error(chars: u32, len: u32);
 }
 
-pub fn console_error_impl(val: &str) {
-    unsafe {
-        let chars = val.chars().collect::<Vec<char >> ();
-        js_console_error(chars.as_ptr() as u32, chars.len() as u32);
+pub fn log_with_type(file:&str, line_start:u32, column_start:u32, _line_end:u32, _column_end:u32, message:&str, ty:LogType){
+    let msg = format!("{}:{}:{} - {}", file, line_start, column_start, message);
+    let chars = msg.chars().collect::<Vec<char >> ();
+    if let LogType::Error = ty{
+        unsafe{js_console_error(chars.as_ptr() as u32, chars.len() as u32)};        
+    }
+    else{
+        unsafe{js_console_log(chars.as_ptr() as u32, chars.len() as u32)};        
     }
 }
 
