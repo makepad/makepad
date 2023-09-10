@@ -506,24 +506,7 @@ pub fn javac(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), St
     Ok(())
 }
 
-fn extract_dependency_info(line: &str) -> Option<(String, String)> {
-    let dependency_output_start = line.find(|c: char| c.is_alphanumeric())?;
-    let dependency_output = &line[dependency_output_start..];
 
-    let mut tokens = dependency_output.split(' ');
-    if let Some(name) = tokens.next() {
-        for token in tokens.collect::<Vec<&str>>() {
-            if token == "(*)" || token == "(proc-macro)" {
-                continue;
-            }
-            if token.starts_with('(') {
-                let path = token[1..token.len() - 1].to_owned();
-                return Some((name.to_string(), path))
-            }
-        }
-    }
-    None
-}
 
 fn to_snakecase(label: &str) -> String {
     let mut snakecase = String::new();
