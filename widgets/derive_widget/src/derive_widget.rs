@@ -135,7 +135,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("       self.0.borrow_mut()");
             tb.add("   }");
             tb.add("}");
-            
+            /*
             tb.add("impl LiveHook for ").ident(&ref_name).add("{}");
             tb.add("impl LiveApply for ").ident(&ref_name).add("{");
             tb.add("    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
@@ -153,7 +153,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn live_type_info(cx: &mut Cx) -> LiveTypeInfo {");
             tb.add("        ").ident(clean_name).add("::live_type_info(cx)");
             tb.add("    }");
-            tb.add("}");
+            tb.add("}");*/
 
             //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
@@ -219,7 +219,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("        &mut self.0");
             tb.add("    }");
             tb.add("}");
-            
+            /*
             tb.add("impl LiveHook for ").ident(&set_name).add("{}");
             tb.add("impl LiveApply for ").ident(&set_name).add("{");
             tb.add("    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
@@ -228,7 +228,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("        nodes.skip_node(index)");
             tb.add("    }");
-            tb.add("}");
+            tb.add("}");*/
 
             let set_ext = format!("{}SetWidgetSetExt", clean_name);
             let ref_ext = format!("{}SetWidgetRefExt", clean_name);
