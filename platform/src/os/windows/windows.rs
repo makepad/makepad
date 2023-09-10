@@ -4,6 +4,7 @@ use {
         cell::RefCell,
     },
     crate::{
+        log,
         makepad_live_id::*,
         cx::*,
         event::*,

@@ -511,9 +511,11 @@ pub struct D3d11Window {
 
 impl D3d11Window {
     pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: DVec2, position: Option<DVec2>, title: &str) -> D3d11Window {
-        let mut win32_window = Box::new(Win32Window::new(window_id));
-        
-        win32_window.init(title, inner_size, position);
+
+        // create window, and then initialize it; this is needed because
+        // GWLP_USERDATA needs to reference a stable and existing window
+        let mut win32_window = Box::new(Win32Window::new(window_id, title, position));
+        win32_window.init(inner_size);
         
         let wg = win32_window.get_window_geom();
         
@@ -534,7 +536,7 @@ impl D3d11Window {
         unsafe {
             let swap_chain = d3d11_cx.factory.CreateSwapChainForHwnd(
                 &d3d11_cx.device,
-                win32_window.hwnd.unwrap(),
+                win32_window.hwnd,
                 &sc_desc,
                 None,
                 None,
