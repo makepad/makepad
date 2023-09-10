@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 use {
     std::sync::Arc,
-    std::cell::Cell,
+    std::cell::RefCell,
     crate::{
+        live_id::*,
+        log,
         implement_com,
+        event::DragItem,
         windows::Win32::{
             System::{
                 Ole::{
@@ -13,9 +16,24 @@ use {
                     DROPEFFECT_LINK,
                     DROPEFFECT_SCROLL,
                     IDropTarget,
-                    IDropTarget_Impl
+                    IDropTarget_Impl,
+                    CF_TEXT,
+                    CF_HDROP,
+                    ReleaseStgMedium,
                 },
-                Com::IDataObject,
+                Com::{
+                    IDataObject,
+                    FORMATETC,
+                    STGMEDIUM,
+                    DVASPECT,  // this needs to be added for windows-strip to include the necessary things
+                    DVASPECT_ICON,
+                    DVASPECT_CONTENT,
+                    TYMED,  // this needs to be added for windows-strip to include the necessary things
+                    TYMED_FILE,
+                    TYMED_HGLOBAL,
+                    DATADIR,  // this needs to be added for windows-strip to include the necessary things
+                    DATADIR_GET,
+                },
                 SystemServices::{
                     MODIFIERKEYS_FLAGS,
                     MK_CONTROL,
@@ -29,10 +47,17 @@ use {
                 WPARAM,
                 LPARAM,
                 HWND,
+                HGLOBAL,
             },
-            UI::WindowsAndMessaging::{
-                WM_USER,
-                PostMessageW,
+            UI::{
+                WindowsAndMessaging::{
+                    WM_USER,
+                    PostMessageW,
+                },
+                Shell::{
+                    DragQueryFileW,
+                    HDROP,
+                },
             },
             Foundation::POINTL,
         },
@@ -66,7 +91,7 @@ pub const DTF_SCROLL: u32 = 0x0800;
 
 #[derive(Clone)]
 pub struct DropTarget {
-    pub data_object: Arc<Cell<Option<IDataObject>>>,
+    pub drag_item: Arc<RefCell<Option<DragItem>>>,
     pub hwnd: HWND,  // which window to send the messages to
 }
 
@@ -119,6 +144,53 @@ fn modifier_keys_and_dropeffect_to_wparam(key_state: MODIFIERKEYS_FLAGS,effect: 
     WPARAM(dtf as usize)
 }
 
+fn idataobject_to_dragitem(data_object: &IDataObject) -> Option<DragItem> {
+
+    /*
+    let enum_format_etc = unsafe { data_object.EnumFormatEtc(DATADIR_GET.0 as u32).unwrap() };
+    log!("available FORMATETCs:");
+    let mut format_etc: [FORMATETC; 256] = [FORMATETC::default(); 256];
+    let mut element_count: u32 = 0;
+    unsafe { enum_format_etc.Next(&mut format_etc,Some(&mut element_count)).unwrap() };
+    for i in 0..element_count as usize {
+        log!("- cfFormat: {},dwAspect: {},lindex: {},tymed: {}",format_etc[i].cfFormat,format_etc[i].dwAspect,format_etc[i].lindex,format_etc[i].tymed);
+    }
+    */
+
+    let format_etc = FORMATETC {
+        cfFormat: CF_HDROP.0,  // file drag/drop uses HDROP
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    };
+    let medium = unsafe { data_object.GetData(&format_etc).unwrap() };
+
+    let mut buffer = [0u16; 1024];
+    let hdrop = unsafe { std::mem::transmute::<HGLOBAL,HDROP>(medium.u.hGlobal) };  // Dear Microsoft, please help the poor developers that try to use your traits...
+    let count = unsafe { DragQueryFileW(hdrop,0,Some(&mut buffer)) };
+    let opt_drag_item = if count >= 1 {
+
+        // buffer contains null-terminated WSTR, so manually find the end
+        let mut zero_pos = 0usize;
+        for i in 0..buffer.len() {
+            if buffer[i] == 0 {
+                zero_pos = i;
+                break;
+            }
+        }
+
+        // and turn only that part into a string
+        let filename = String::from_utf16(&buffer[0..zero_pos]).unwrap();
+        Some(DragItem::FilePath { path: filename,internal_id: None, })
+    }
+    else {
+        None
+    };
+    unsafe { ReleaseStgMedium(&medium as *const STGMEDIUM as *mut STGMEDIUM) };
+    opt_drag_item
+}
+
 // separate COM-able object that captures the drag/drop messages and sends them back to the window
 #[allow(non_snake_case)]
 impl IDropTarget_Impl for DropTarget {
@@ -126,7 +198,7 @@ impl IDropTarget_Impl for DropTarget {
     fn DragEnter(&self,_p_data_obj: Option<&IDataObject>,_grf_key_state:MODIFIERKEYS_FLAGS,_pt: &POINTL,_pdweffect: *mut DROPEFFECT) -> crate::windows::core::Result<()> {
 
         if let Some(data_object) = _p_data_obj {
-            self.data_object.set(Some(data_object.clone()));
+            self.drag_item.replace(idataobject_to_dragitem(data_object));
         }
         else {
             return Ok(());
@@ -173,13 +245,6 @@ impl IDropTarget_Impl for DropTarget {
     }
 
     fn Drop(&self,_p_data_obj: Option<&IDataObject>, _grf_key_state: MODIFIERKEYS_FLAGS, _pt: &POINTL,_pdweffect: *mut DROPEFFECT) -> crate::windows::core::Result<()> {
-
-        if let Some(data_object) = _p_data_obj {
-            self.data_object.set(Some(data_object.clone()));
-        }
-        else {
-            return Ok(());
-        }
 
         unsafe {
             PostMessageW(
