@@ -77,7 +77,7 @@ impl Widget for Splitter {
         }
     }
     
-    fn walk(&self) -> Walk {
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {
         self.walk
     }
     

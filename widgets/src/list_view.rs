@@ -34,7 +34,7 @@ enum ListDrawState {
 }
 
 #[derive(Clone, WidgetAction)]
-pub enum InfiniteListAction {
+pub enum ListViewAction {
     Scroll,
     None
 }
@@ -509,7 +509,7 @@ impl Widget for ListView {
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
             self.first_id = scroll_to;
             self.first_scroll = 0.0;
-            dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
+            dispatch_action(cx, WidgetActionItem::new(ListViewAction::Scroll.into(), uid));
             self.area.redraw(cx);
         }
         
@@ -528,7 +528,7 @@ impl Widget for ListView {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, true);
-                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                        dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
                         self.area.redraw(cx);
                     } else {
                         self.scroll_state = ScrollState::Stopped;
@@ -545,7 +545,7 @@ impl Widget for ListView {
                         }
                         else {
                             *next_frame = cx.new_next_frame();
-                            dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                            dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
                         }
                         self.area.redraw(cx);
                     }
@@ -567,7 +567,7 @@ impl Widget for ListView {
                     self.detect_tail_in_draw = true;
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
-                    dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                    dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 },
                 Hit::FingerDown(e) => {
@@ -668,7 +668,7 @@ impl Widget for ListView {
                                 }
                                 self.delta_top_scroll(cx, new_delta, false);
                                 self.detect_tail_in_draw = true;
-                                dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                                dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
                                 self.area.redraw(cx);
                             },
                             DragState::NormalDrag {last_abs, delta} => {
@@ -677,7 +677,7 @@ impl Widget for ListView {
                                 *last_abs = e.abs.index(vi);
                                 self.delta_top_scroll(cx, new_delta, false);
                                 self.detect_tail_in_draw = true;
-                                dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                                dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
                                 self.area.redraw(cx);
                             },
                             DragState::None => {}
@@ -711,7 +711,7 @@ impl Widget for ListView {
         }
     }
     
-    fn walk(&self) -> Walk {self.walk}
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ListDrawState::Begin) {

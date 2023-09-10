@@ -8,7 +8,7 @@ use {
         audio::*,
         midi::*,
         os::apple::apple_sys::*,
-        os::apple::cocoa_app::*,
+        os::apple::apple_classes::*,
         os::apple::apple_util::*,
         makepad_objc_sys::objc_block,
         makepad_objc_sys::objc_block_invoke,
@@ -35,8 +35,8 @@ impl KeyValueObserver {
     pub fn new(target: ObjcId, name: ObjcId, callback: Box<dyn Fn()>) -> Self {
         unsafe {
             let double_box = Box::new(callback);
-            //let cocoa_app = get_cocoa_app_global();
-            let observer = RcObjcId::from_owned(msg_send![get_cocoa_class_global().key_value_observing_delegate, alloc]);
+            //let cocoa_app = get_macos_app_global();
+            let observer = RcObjcId::from_owned(msg_send![get_apple_class_global().key_value_observing_delegate, alloc]);
             
             (*observer.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
             
@@ -122,6 +122,7 @@ pub struct RunningAudioUnit {
 impl AudioUnitAccess {
     pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
         Self::observe_route_changes(change_signal.clone());
+        
         Arc::new(Mutex::new(Self{
             failed_devices: Default::default(),
             change_signal,
@@ -245,18 +246,17 @@ impl AudioUnitAccess {
             
         };
         for (index, device_id) in new {
-            // lets create an audio input
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Output)[0];
             let audio_outputs = self.audio_outputs.clone();
             let audio_output_cb = self.audio_output_cb[index].clone();
             let failed_devices = self.failed_devices.clone();
             let change_signal = self.change_signal.clone();
             self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
-                let mut audio_inputs = audio_outputs.lock().unwrap();
+                let mut audio_outputs = audio_outputs.lock().unwrap();
                 match result {
                     Ok(audio_unit) => {
                         
-                        let running = audio_inputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
+                        let running = audio_outputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
                         let audio_output_cb = audio_output_cb.clone();
                         audio_unit.set_output_provider(move | time, output | {
                             if let Some(audio_output_cb) = &mut *audio_output_cb.lock().unwrap() {
@@ -271,7 +271,7 @@ impl AudioUnitAccess {
                     Err(err) => {
                         failed_devices.lock().unwrap().insert(device_id);
                         change_signal.set();
-                        audio_inputs.retain( | v | v.device_id != device_id);
+                        audio_outputs.retain( | v | v.device_id != device_id);
                         error!("spawn_audio_output Error {:?}", err)
                     }
                 }
@@ -478,10 +478,18 @@ impl AudioUnitAccess {
                     AudioUnitSubType::Undefined,
                 )
             }
+            #[cfg(target_os = "macos")]
             AudioUnitQuery::Output => {
                 AudioComponentDescription::new_all_manufacturers(
                     AudioUnitType::IO,
                     AudioUnitSubType::HalOutput,
+                )
+            }
+            #[cfg(target_os = "ios")]
+            AudioUnitQuery::Output => {
+                AudioComponentDescription::new_all_manufacturers(
+                    AudioUnitType::IO,
+                    AudioUnitSubType::RemoteIO,
                 )
             }
             AudioUnitQuery::Input => {
@@ -566,9 +574,12 @@ impl AudioUnitAccess {
                         let () = msg_send![au_audio_unit, setOutputEnabled: true];
                         let () = msg_send![au_audio_unit, setInputEnabled: false];
                         
-                        let mut err: ObjcId = nil;
-                        let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
-                        OSError::from_nserror(err) ?;
+                        #[cfg(target_os = "macos")]
+                        {
+                            let mut err: ObjcId = nil;
+                            let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
+                            OSError::from_nserror(err) ?;
+                        }
                         
                         // lets hardcode the format to 44100 float
                         let mut err: ObjcId = nil;
@@ -1146,11 +1157,11 @@ impl AudioUnit {
     }
     
     pub fn open_ui(&self) {
-        if let Some(view_controller) = self.view_controller.lock().unwrap().as_ref() {
-            let audio_view: ObjcId = unsafe {msg_send![*view_controller, view]};
-            let cocoa_app = get_cocoa_app_global();
+        if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
+            /*let audio_view: ObjcId = unsafe {msg_send![*view_controller, view]};
+            let cocoa_app = get_macos_app_global();
             let win_view = cocoa_app.cocoa_windows[0].1;
-            let () = unsafe {msg_send![win_view, addSubview: audio_view]};
+            let () = unsafe {msg_send![win_view, addSubview: audio_view]};*/
         }
     }
     
@@ -1180,10 +1191,10 @@ impl AudioUnit {
             }
         }
     }
-    
+    /*
     pub fn ocr_ui(&self) {
         unsafe {
-            let cocoa_app = get_cocoa_app_global();
+            let cocoa_app = get_macos_app_global();
             let window = cocoa_app.cocoa_windows[0].0;
             let win_num: u32 = msg_send![window, windowNumber];
             let win_opt = kCGWindowListOptionIncludingWindow;
@@ -1223,7 +1234,7 @@ impl AudioUnit {
                 error!("performRequests failed")
             }
         };
-    }
+    }*/
     
 }
 

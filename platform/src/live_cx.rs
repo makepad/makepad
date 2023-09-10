@@ -155,7 +155,21 @@ impl Cx {
             };
             #[cfg(not(lines))]
             line_nr_error_once();
-            error!("Apply error: {} {:?}", live_registry.live_error_to_live_file_error(err), nodes[index].value);
+            if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                let err = live_registry.live_error_to_live_file_error(err);
+                crate::makepad_error_log::log_with_type(
+                    &err.file,
+                    err.span.start.line+1,
+                    err.span.start.column+2,
+                    err.span.end.line+1,
+                    err.span.end.column+2,
+                    &err.message,
+                    LogType::Error
+                );
+            }
+            else {
+                error!("Apply error: {} {:?}", live_registry.live_error_to_live_file_error(err), nodes[index].value);
+            }
         }
         else {
             error!("Apply without file, at index {} {} origin: {}", index, message, origin);
@@ -213,6 +227,20 @@ impl Cx {
             let mut errs = Vec::new();
             live_registry.process_file_changes(all_changes, &mut errs);
             for err in errs {
+                // alright we need to output the correct error
+                if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                    let err = live_registry.live_error_to_live_file_error(err);
+                    crate::makepad_error_log::log_with_type(
+                        &err.file,
+                        err.span.start.line+1,
+                        err.span.start.column+2,
+                        err.span.end.line+1,
+                        err.span.end.column+2,
+                        &err.message,
+                        LogType::Error
+                    );
+                    continue
+                }
                 error!("check_live_file_watcher: Error expanding live file {}", err);
             }
             self.draw_shaders.reset_for_live_reload();
@@ -233,6 +261,19 @@ impl Cx {
         }*/
         live_registry.expand_all_documents(&mut errs);
         for err in errs {
+            if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                let err = live_registry.live_error_to_live_file_error(err);
+                crate::makepad_error_log::log_with_type(
+                    &err.file,
+                    err.span.start.line+1,
+                    err.span.start.column+2,
+                    err.span.end.line+1,
+                    err.span.end.column+2,
+                    &err.message,
+                    LogType::Error
+                );
+                continue
+            }
             error!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
     }
@@ -268,7 +309,20 @@ impl Cx {
         if let Err(err) = result {
             #[cfg(not(lines))]
             line_nr_error_once();
-            error!("Error parsing live file {}", err);
+            if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                crate::makepad_error_log::log_with_type(
+                    &err.file,
+                    err.span.start.line+1,
+                    err.span.start.column+1,
+                    err.span.end.line+1,
+                    err.span.end.column+1,
+                    &err.message,
+                    LogType::Error
+                );
+            }
+            else{
+                error!("Error parsing live file {}", err);
+            }
         }
     }
     /*
