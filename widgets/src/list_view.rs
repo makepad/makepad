@@ -63,6 +63,7 @@ pub struct ListView {
     #[rust(u64::MAX)] range_end: u64,
     #[rust(0u64)] view_window: u64,
     #[live(0.2)] flick_scroll_minimum: f64,
+    #[live(0.005)] flick_scroll_scaling: f64,
     #[live(0.98)] flick_scroll_decay: f64,
     #[live(0.2)] swipe_drag_duration: f64,
     #[live(100.0)] max_pull_down: f64,
@@ -676,7 +677,7 @@ impl Widget for ListView {
                                     scaled_delta += (last.unwrap().abs - sample.abs)/ (last.unwrap().time - sample.time)
                                 }
                             }
-                            scaled_delta *= 0.005;
+                            scaled_delta *= self.flick_scroll_scaling;
                             if self.first_id == self.range_start && self.first_scroll > 0.0 {
                                 self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
                             }
