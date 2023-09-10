@@ -6,6 +6,25 @@ use std::{
     process::{Command, Stdio}
 };
 
+pub fn extract_dependency_info(line: &str) -> Option<(String, String)> {
+    let dependency_output_start = line.find(|c: char| c.is_alphanumeric())?;
+    let dependency_output = &line[dependency_output_start..];
+
+    let mut tokens = dependency_output.split(' ');
+    if let Some(name) = tokens.next() {
+        for token in tokens.collect::<Vec<&str>>() {
+            if token == "(*)" || token == "(proc-macro)" {
+                continue;
+            }
+            if token.starts_with('(') {
+                let path = token[1..token.len() - 1].to_owned();
+                return Some((name.to_string(), path))
+            }
+        }
+    }
+    None
+}
+
 pub fn get_crate_dir(build_crate: &str) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
     if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid", "-p", build_crate]) {

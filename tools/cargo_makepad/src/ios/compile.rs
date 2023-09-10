@@ -1,6 +1,7 @@
 use crate::shell::*;
 use crate::ios::{IosTarget};
-use std::path::{PathBuf};
+use std::path::{PathBuf, Path};
+use std::collections::HashSet;
 
 pub struct PlistValues{
     identifier: String,
@@ -29,6 +30,8 @@ impl PlistValues{
               <string>{4}</string>
               <key>CFBundleShortVersionString</key>
               <string>{4}</string>
+              <key>UILaunchStoryboardName</key>
+              <string></string>
             </dict>
             </plist>"#,
             self.identifier,
@@ -183,6 +186,55 @@ fn parse_provision(path:PathBuf, app_id:&str)->Option<ProvisionData>{
     None
 }
 
+
+fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap();
+    let mut assets_to_add: Vec<String> = Vec::new();
+
+    let build_crate_dir = get_crate_dir(build_crate) ?;
+    
+    let local_resources_path = build_crate_dir.join("resources");
+    
+    if local_resources_path.is_dir() {
+        let underscore_build_crate = build_crate.replace('-', "_");
+        let dst_dir = app_dir.join(format!("makepad/{underscore_build_crate}/resources"));
+        mkdir(&dst_dir) ?;
+        cp_all(&local_resources_path, &dst_dir, false) ?;
+
+        let assets = ls(&dst_dir) ?;
+        for path in &assets {
+            let path = path.display();
+            assets_to_add.push(format!("makepad/{underscore_build_crate}/resources/{path}"));
+        }
+    }
+
+    let mut dependencies = HashSet::new();
+    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate]) {
+        for line in cargo_tree_output.lines().skip(1) {
+            if let Some((name, path)) = extract_dependency_info(line) {
+                let resources_path = Path::new(&path).join("resources");
+                if resources_path.is_dir() {
+                    dependencies.insert((name.replace('-',"_"), resources_path));
+                }
+            }
+        }
+    }
+
+    for (name, resources_path) in dependencies.iter() {
+        let dst_dir = app_dir.join(format!("makepad/{name}/resources"));
+        mkdir(&dst_dir) ?;
+        cp_all(resources_path, &dst_dir, false) ?;
+
+        let assets = ls(&dst_dir) ?;
+        for path in &assets {
+            let path = path.display();
+            assets_to_add.push(format!("makepad/{name}/resources/{path}"));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
     let build_crate = get_build_crate_from_args(args)?;
     let result = build(app_id, args, ios_target)?;
@@ -231,8 +283,11 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     write_text(&scent_file, &scent.to_scent_file())?;
 
     let dst_provision = result.app_dir.join("embedded.mobileprovision");
-    //println!("Found provisioning profile team:{} device:{}",provision.team, provision.device);
+    let app_dir = result.app_dir.into_os_string().into_string().unwrap();
+
     cp(&provision.path, &dst_provision, false) ?;
+    
+    copy_resources(Path::new(&app_dir), build_crate)?;
     
     shell_env(&[], &cwd ,"codesign", &[
         "--force",
@@ -241,8 +296,6 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         long_hex_id,
         &result.dst_bin.into_os_string().into_string().unwrap()
     ]) ?; 
-    
-    let app_dir = result.app_dir.into_os_string().into_string().unwrap();
     
     shell_env(&[], &cwd ,"codesign", &[
         "--force",

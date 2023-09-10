@@ -1,6 +1,7 @@
 use std::env;
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let target = env::var("TARGET").unwrap();
     
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     if let Ok(configs) = env::var("MAKEPAD"){
@@ -35,6 +36,9 @@ fn main() {
             println!("cargo:rerun-if-changed=src/os/apple/metal_xpc.m");
         }
         "ios"=>{
+            if target == "aarch64-apple-ios-sim"{
+                println!("cargo:rustc-cfg=ios_sim"); 
+            }
             println!("cargo:rustc-link-lib=framework=MetalKit");
         }
         _=>()
