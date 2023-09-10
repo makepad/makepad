@@ -1,6 +1,10 @@
 use {
     std::{
-        cell::{RefCell, Cell},
+        cell::{
+            RefCell,
+            Cell,
+        },
+        sync::Arc,
         rc::Rc,
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
@@ -8,6 +12,7 @@ use {
     },
     
     crate::{
+        log,
         windows::{
             core::PCWSTR,
             Win32::Foundation::{
@@ -26,7 +31,12 @@ use {
                 GlobalUnlock,
                 GLOBAL_ALLOC_FLAGS,
             },
-            Win32::System::Ole::CF_UNICODETEXT,
+            Win32::System::Ole::{
+                CF_UNICODETEXT,
+                RegisterDragDrop,
+                IDropTarget,
+            },
+            Win32::System::Com::IDataObject,
             Win32::System::WindowsProgramming::GMEM_DDESHARE,
             Win32::System::DataExchange::{
                 OpenClipboard,
@@ -229,20 +239,22 @@ use {
             Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea,
             Win32::System::LibraryLoader::GetModuleHandleW,
         },
-        
         event::*,
         area::Area,
-        os::windows::win32_app::encode_wide,
-        os::windows::win32_app::FALSE,
-        os::windows::win32_event::*,
-        os::windows::win32_app::get_win32_app_global,
+        os::windows::{
+            win32_app::encode_wide,
+            win32_app::FALSE,
+            win32_event::*,
+            win32_app::get_win32_app_global,
+            win32_droptarget::*,
+        },
         window::WindowId,
         cx::*,
         cursor::MouseCursor,
     },
 };
 
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct Win32Window {
     pub window_id: WindowId,
     pub last_window_geom: WindowGeom,
@@ -253,28 +265,19 @@ pub struct Win32Window {
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: DVec2,
     pub ignore_wmsize: usize,
-    pub hwnd: Option<HWND>,
-    pub track_mouse_event: bool
+    pub hwnd: HWND,
+    pub track_mouse_event: bool,
+
+    pub data_object: Arc<Cell<Option<IDataObject>>>,
 }
 
 impl Win32Window {
     
-    pub fn new(window_id: WindowId) -> Win32Window {
-        Win32Window {
-            window_id,
-            mouse_buttons_down: 0,
-            last_window_geom: WindowGeom::default(),
-            last_key_mod: KeyModifiers::default(),
-            ime_spot: DVec2::default(),
-            current_cursor: MouseCursor::Default,
-            last_mouse_pos: DVec2::default(),
-            ignore_wmsize: 0,
-            hwnd: None,
-            track_mouse_event: false
-        }
-    }
-    
-    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>) {
+    // 2-stage initialization (new and init) to connect GWLP_USERDATA 
+
+    // create window structure and register drag/drop
+    pub fn new(window_id: WindowId,title: &str, position: Option<DVec2>) -> Win32Window {
+
         let title = encode_wide(title);
         
         let style = WS_SIZEBOX
@@ -289,41 +292,59 @@ impl Win32Window {
             | WS_EX_APPWINDOW
             | WS_EX_ACCEPTFILES;
         
-        unsafe {
-            
-            let (x, y) = if let Some(position) = position {
-                (position.x as i32, position.y as i32)
-            }
-            else {
-                (CW_USEDEFAULT, CW_USEDEFAULT)
-            };
-            
-            let hwnd = CreateWindowExW(
-                style_ex,
-                PCWSTR(get_win32_app_global().window_class_name.as_ptr()),
-                PCWSTR(title.as_ptr()),
-                style,
-                x,
-                y,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                None,
-                None,
-                GetModuleHandleW(None).unwrap(),
-                None,
-            );
-            
-            self.hwnd = Some(hwnd);
-            
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const _ as isize);
-
-            //RegisterDragDrop(hwnd, self as *const IDropTarget);
-            
-            self.set_outer_size(size);
-            
-            get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
-            get_win32_app_global().all_windows.push(hwnd);
+        let (x, y) = if let Some(position) = position {
+            (position.x as i32, position.y as i32)
         }
+        else {
+            (CW_USEDEFAULT, CW_USEDEFAULT)
+        };
+
+        let hwnd = unsafe { CreateWindowExW(
+            style_ex,
+            PCWSTR(get_win32_app_global().window_class_name.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            style,
+            x,
+            y,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            None,
+            None,
+            GetModuleHandleW(None).unwrap(),
+            None,
+        ) };
+
+        // create data object placeholder for drag&drop
+        let data_object: Arc<Cell<Option<IDataObject>>> = Arc::new(Cell::new(None));
+
+        // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
+        let drop_target: IDropTarget = DropTarget { data_object: Arc::clone(&data_object),hwnd, }.into();
+        unsafe { RegisterDragDrop(hwnd, &drop_target).unwrap() };
+
+        Win32Window {
+            window_id,
+            mouse_buttons_down: 0,
+            last_window_geom: WindowGeom::default(),
+            last_key_mod: KeyModifiers::default(),
+            ime_spot: DVec2::default(),
+            current_cursor: MouseCursor::Default,
+            last_mouse_pos: DVec2::default(),
+            ignore_wmsize: 0,
+            hwnd,
+            track_mouse_event: false,
+            data_object,
+        }
+    }
+
+    // initialize GWLP_USERDATA and registration of global stuff, and set outer size
+    pub fn init(&mut self,size: DVec2) {
+
+        unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, self as *const _ as isize) };
+
+        get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd);
+        get_win32_app_global().all_windows.push(self.hwnd);
+
+        self.set_outer_size(size);
     }
     
     pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
@@ -602,8 +623,111 @@ impl Win32Window {
                     })
                 );
             },
+
             WM_DROPFILES => { // one or more files are being dropped onto the window
-                crate::log!("WM_DROPFILES {:?}",wparam);
+                
+                log!("WM_DROPFILES {:?}",wparam);
+            },
+
+            // inform that the user enters the window, dragging an object
+            WM_DROPTARGET_DRAGENTER => {
+
+                // decode message
+                let x = (lparam.0 & 0xFFFF) as i16 as f64;
+                let y = (lparam.0 >> 16) as f64;
+                let dtf = wparam.0 as u32;
+                let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
+                else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
+                else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
+                else { DragResponse::None };
+
+                // leave the IDataObject alone and only take it when dropped
+
+                log!("WM_DROPTARGET_DRAGENTER {},{} 0x{:04X} {:?} IDataObject: {:p}",x,y,dtf,response,&window.data_object);
+            },
+
+            // inform that the user left the window, dragging an object
+            WM_DROPTARGET_DRAGLEAVE => {
+
+                log!("WM_DROPTARGET_DRAGLEAVE");
+
+                window.do_callback(Win32Event::DragEnd);
+
+                // TODO: also call mouse up
+            },
+
+            // inform that the user is dragging an object over the window
+            WM_DROPTARGET_DRAGOVER => {
+
+                // decode message
+                let x = (lparam.0 & 0xFFFF) as i16 as f64;
+                let y = (lparam.0 >> 16) as f64;
+                let dtf = wparam.0 as u32;
+                let mut response = DragResponse::None;
+                let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
+                else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
+                else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
+                else { DragResponse::None };
+
+                log!("WM_DROPTARGET_DRAGOVER {},{} 0x{:04X} {:?}",x,y,dtf,response);
+
+                // send to makepad
+                window.do_callback(
+                    Win32Event::Drag(
+                        DragEvent {
+                            modifiers: KeyModifiers {
+                                shift: (dtf & DTF_SHIFT) != 0,
+                                control: (dtf & DTF_CONTROL) != 0,
+                                alt: (dtf & DTF_ALT) != 0,
+                                logo: false,
+                            },
+                            handled: Cell::new(false),
+                            abs: DVec2 { x,y, },
+                            items: Rc::new(Vec::new()),
+                            response: Rc::new(Cell::new(response)),
+                        }
+                    )
+                );
+            },
+
+            // inform that the user drops an object on the window somewhere
+            WM_DROPTARGET_DROP => {
+
+                // decode message
+                let x = (lparam.0 & 0xFFFF) as i16 as f64;
+                let y = (lparam.0 >> 16) as f64;
+                let dtf = wparam.0 as u32;
+                let mut response = DragResponse::None;
+                let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
+                else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
+                else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
+                else { DragResponse::None };
+
+                // take the data object here
+                let data_object = window.data_object.take();
+                
+                // automatic dropping of data_object at the end of this block
+                // should also call COM Release on the inner IDataObject
+
+                // this might need to be verified
+
+                log!("WM_DROPTARGET_DROP {},{} 0x{:04X} {:?} IDataObject: {:p}",x,y,dtf,response,&data_object);
+
+                window.do_callback(
+                    Win32Event::Drop(
+                        DropEvent {
+                            modifiers: KeyModifiers {
+                                shift: (dtf & DTF_SHIFT) != 0,
+                                control: (dtf & DTF_CONTROL) != 0,
+                                alt: (dtf & DTF_ALT) != 0,
+                                logo: false,
+                            },
+                            handled: Cell::new(false),
+                            abs: DVec2 { x,y, },
+                            items: Rc::new(Vec::new()),  // TODO: data_object should go in here
+                        }
+                    )
+                );
             },
 
             _ => {
@@ -664,33 +788,33 @@ impl Win32Window {
     
     pub fn restore(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_RESTORE);
-            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
+            ShowWindow(self.hwnd, SW_RESTORE);
+            PostMessageW(self.hwnd, WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
     
     pub fn maximize(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_MAXIMIZE);
-            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
+            ShowWindow(self.hwnd, SW_MAXIMIZE);
+            PostMessageW(self.hwnd, WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
     
     pub fn close_window(&self) {
         unsafe {
-            DestroyWindow(self.hwnd.unwrap()).unwrap();
+            DestroyWindow(self.hwnd).unwrap();
         }
     }
     
     pub fn show(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_SHOW);
+            ShowWindow(self.hwnd, SW_SHOW);
         }
     }
     
     pub fn minimize(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_MINIMIZE);
+            ShowWindow(self.hwnd, SW_MINIMIZE);
         }
     }
     
@@ -698,7 +822,7 @@ impl Win32Window {
         unsafe {
             if topmost {
                 SetWindowPos(
-                    self.hwnd.unwrap(),
+                    self.hwnd,
                     HWND_TOPMOST,
                     0,
                     0,
@@ -709,7 +833,7 @@ impl Win32Window {
             }
             else {
                 SetWindowPos(
-                    self.hwnd.unwrap(),
+                    self.hwnd,
                     HWND_NOTOPMOST,
                     0,
                     0,
@@ -723,7 +847,7 @@ impl Win32Window {
     
     pub fn get_is_topmost(&self) -> bool {
         unsafe {
-            let ex_style = GetWindowLongPtrW(self.hwnd.unwrap(), GWL_EXSTYLE);
+            let ex_style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
             if ex_style as u32 & WS_EX_TOPMOST.0 != 0 {
                 return true
             }
@@ -749,7 +873,7 @@ impl Win32Window {
             let wp: mem::MaybeUninit<WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
             let mut wp = wp.assume_init();
             wp.length = mem::size_of::<WINDOWPLACEMENT>() as u32;
-            GetWindowPlacement(self.hwnd.unwrap(), &mut wp).unwrap();
+            GetWindowPlacement(self.hwnd, &mut wp).unwrap();
             if wp.showCmd == SW_MAXIMIZE.0 as u32 {
                 return true
             }
@@ -768,7 +892,7 @@ impl Win32Window {
     pub fn get_position(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut rect).unwrap();
+            GetWindowRect(self.hwnd, &mut rect).unwrap();
             DVec2 {x: rect.left as f64, y: rect.top as f64}
         }
     }
@@ -776,7 +900,7 @@ impl Win32Window {
     pub fn get_inner_size(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetClientRect(self.hwnd.unwrap(), &mut rect).unwrap();
+            GetClientRect(self.hwnd, &mut rect).unwrap();
             let dpi = self.get_dpi_factor();
             DVec2 {x: (rect.right - rect.left) as f64 / dpi, y: (rect.bottom - rect.top)as f64 / dpi}
         }
@@ -785,7 +909,7 @@ impl Win32Window {
     pub fn get_outer_size(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut rect).unwrap();
+            GetWindowRect(self.hwnd, &mut rect).unwrap();
             DVec2 {x: (rect.right - rect.left) as f64, y: (rect.bottom - rect.top)as f64}
         }
     }
@@ -793,10 +917,10 @@ impl Win32Window {
     pub fn set_position(&mut self, pos: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
-                self.hwnd.unwrap(),
+                self.hwnd,
                 (pos.x * dpi) as i32,
                 (pos.y * dpi) as i32,
                 window_rect.right - window_rect.left,
@@ -809,10 +933,10 @@ impl Win32Window {
     pub fn set_outer_size(&self, size: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
-                self.hwnd.unwrap(),
+                self.hwnd,
                 window_rect.left,
                 window_rect.top,
                 (size.x * dpi) as i32,
@@ -825,12 +949,12 @@ impl Win32Window {
     pub fn set_inner_size(&self, size: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
             let mut client_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetClientRect(self.hwnd.unwrap(), &mut client_rect).unwrap();
+            GetClientRect(self.hwnd, &mut client_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
-                self.hwnd.unwrap(),
+                self.hwnd,
                 window_rect.left,
                 window_rect.top,
                 (size.x * dpi) as i32
@@ -843,7 +967,7 @@ impl Win32Window {
     }
     
     pub fn get_dpi_factor(&self) -> f64 {
-        get_win32_app_global().dpi_functions.hwnd_dpi_factor(self.hwnd.unwrap()) as f64
+        get_win32_app_global().dpi_functions.hwnd_dpi_factor(self.hwnd) as f64
     }
     
     pub fn do_callback(&mut self, event: Win32Event) {
@@ -878,7 +1002,7 @@ impl Win32Window {
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
         if self.mouse_buttons_down == 0 {
-            unsafe {SetCapture(self.hwnd.unwrap());}
+            unsafe {SetCapture(self.hwnd);}
         }
         self.mouse_buttons_down += 1;
         self.do_callback(Win32Event::MouseDown(MouseDownEvent {
