@@ -8,7 +8,6 @@ pub struct PlistValues{
     name: String,
     executable: String,
     version: String,
-    development_region: String,
 }
 
 impl PlistValues{
@@ -30,12 +29,6 @@ impl PlistValues{
               <string>{4}</string>
               <key>CFBundleShortVersionString</key>
               <string>{4}</string>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>{5}</string>
-              <key>UILaunchStoryboardName</key>
-              <string></string>
-              <key>LSRequiresIPhoneOS</key>
-              <true/>
             </dict>
             </plist>"#,
             self.identifier,
@@ -43,7 +36,6 @@ impl PlistValues{
             self.name,
             self.executable,
             self.version,
-            self.development_region,
         )
         }
 }
@@ -83,49 +75,45 @@ pub struct IosBuildResult{
 }
 
 
-pub fn build(_package_name: Option<String>, _app_label: Option<String>, args: &[String], ios_targets:&[IosTarget]) -> Result<IosBuildResult, String> {
+pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
-    //let underscore_build_crate = build_crate.replace('-', "_");
-
+    
     let cwd = std::env::current_dir().unwrap();
-    for target in ios_targets{
-        let target_opt = format!("--target={}", target.toolchain());
-        
-        let base_args = &[
-            "run",
-            "nightly",
-            "cargo",
-            "build",
-            "--release",
-            &target_opt
-        ];
-        
-        let mut args_out = Vec::new();
-        args_out.extend_from_slice(base_args);
-        for arg in args {
-            args_out.push(arg);
-        }
-        
-        shell_env(&[("MAKEPAD", "lines"),],&cwd,"rustup",&args_out) ?;
+    let target_opt = format!("--target={}", ios_target.toolchain());
+    
+    let base_args = &[
+        "run",
+        "nightly",
+        "cargo",
+        "build",
+        "--release",
+        &target_opt
+    ];
+    
+    let mut args_out = Vec::new();
+    args_out.extend_from_slice(base_args);
+    for arg in args {
+        args_out.push(arg);
     }
+    
+    shell_env(&[("MAKEPAD", "lines"),],&cwd,"rustup",&args_out) ?;
     
     // alright lets make the .app file with manifest
     let plist = PlistValues{
-        identifier: format!("dev.makepad.{}", build_crate),
-        display_name: build_crate.to_string(),
-        name: build_crate.to_string(),
+        identifier: app_id.to_string(),//format!("dev.makepad.{}", build_crate),
+        display_name: app_id.split(".").last().unwrap().to_string(),//build_crate.to_string(),
+        name: app_id.split(".").last().unwrap().to_string(),//build_crate.to_string(),
         executable: build_crate.to_string(),
-        version: "0.4.0-beta2".to_string(),
-        development_region: "en_US".to_string(),
+        version: "1".to_string(),
     };    
     
-    let app_dir = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.app", ios_targets[0].toolchain()));
+    let app_dir = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.app", ios_target.toolchain()));
     mkdir(&app_dir) ?;
     
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file())?;
 
-    let src_bin = cwd.join(format!("target/{}/release/{build_crate}", ios_targets[0].toolchain()));
+    let src_bin = cwd.join(format!("target/{}/release/{build_crate}", ios_target.toolchain()));
     let dst_bin = app_dir.join(build_crate.to_string());
     
     cp(&src_bin, &dst_bin, false) ?;
@@ -137,9 +125,9 @@ pub fn build(_package_name: Option<String>, _app_label: Option<String>, args: &[
     })
 }
 
-pub fn run(package_name: Option<String>, app_label: Option<String>, args: &[String], ios_targets:&[IosTarget]) -> Result<(), String> {
+pub fn run_sim(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
 
-    let result = build(package_name, app_label, args, ios_targets)?;
+    let result = build(app_id, args, ios_target)?;
 
     let cwd = std::env::current_dir().unwrap();
     shell_env(&[], &cwd ,"xcrun", &[
@@ -156,16 +144,48 @@ pub fn run(package_name: Option<String>, app_label: Option<String>, args: &[Stri
         "booted",
         &result.plist.identifier,
     ]) ?; 
-    // lets run it on the simulator
-    //xcrun simctl install booted target/x86_64-apple-ios/debug/examples/bundle/ios/ios-beta.app
-    //xcrun simctl launch --console booted com.cacao.ios-test
     
     Ok(())
 }
 
-pub fn run_real(package_name: Option<String>, app_label: Option<String>, app_id: Option<String>,args: &[String], ios_targets:&[IosTarget], team_id:&str, device:&str) -> Result<(), String> {
+struct ProvisionData{
+    team: String,
+    device: String,
+    path: PathBuf,
+}
+
+fn parse_provision(path:PathBuf, app_id:&str)->Option<ProvisionData>{
+    // lets find app_id in the file
+    let bytes = std::fs::read(&path).unwrap();
+    let app_id_bytes = app_id.as_bytes();
+    for i in 0..(bytes.len() - app_id_bytes.len() + 1){
+        if bytes[i..(i+app_id_bytes.len())] == *app_id_bytes{
+            let team_prefix = "<key>ApplicationIdentifierPrefix</key>\n\t<array>\n\t<string>".as_bytes();
+            for i in 0..(bytes.len() - team_prefix.len() + 1){
+                if bytes[i..(i+team_prefix.len())] == *team_prefix{
+                    let team = std::str::from_utf8(&bytes[i+team_prefix.len()..i+team_prefix.len()+10]).unwrap().to_string();
+                    let device_prefix = "<key>ProvisionedDevices</key>\n\t<array>\n\t\t<string>".as_bytes();
+                    for i in 0..(bytes.len() - device_prefix.len() + 1){
+                        if bytes[i..(i+device_prefix.len())] == *device_prefix{
+                            let device = std::str::from_utf8(&bytes[i+device_prefix.len()..i+device_prefix.len()+25]).unwrap().to_string();
+                            return Some(ProvisionData{
+                                team,
+                                device,
+                                path,
+                            })
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    None
+}
+
+pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
     let build_crate = get_build_crate_from_args(args)?;
-    let result = build(package_name, app_label, args, ios_targets)?;
+    let result = build(app_id, args, ios_target)?;
     let cwd = std::env::current_dir().unwrap();
     // ok lets parse these things out
     let long_hex_id = shell_env_cap(&[], &cwd ,"security", &[
@@ -180,19 +200,39 @@ pub fn run_real(package_name: Option<String>, app_label: Option<String>, app_id:
     else{
        return Err(format!("Error parsing the security result #{}#", long_hex_id)) 
     };
-
+    
+    //
+    let home = std::env::var("HOME").unwrap();
+    let profiles = std::fs::read_dir(format!("{}/Library/MobileDevice/Provisioning Profiles/", home)).unwrap();
+    let mut provision = None;
+    for profile in profiles {
+        // lets read it
+        let profile_path = profile.unwrap().path();
+        if let Some(prov) = parse_provision(profile_path, app_id){
+            provision = Some(prov);
+            break;
+        }
+    }
+    
+    if provision.is_none(){
+        return Err(format!("Could not find a matching mobile provision profile for name {}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again.", app_id))
+    } 
+    let provision = provision.unwrap();
+    
+    // ok lets find the mobile provision for this application
+    // we can also find the team ids from there to build the scent
+    // and the device id as well
     let scent = Scent{
-        app_id: app_id.unwrap_or(format!("{}.dev.makepad", team_id)),
-        team_id: team_id.to_string()
+        app_id: format!("{}.{}", provision.team, app_id),
+        team_id: provision.team.to_string()
     };
     
-    let scent_file = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.plist", ios_targets[0].toolchain()));
+    let scent_file = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.scent", ios_target.toolchain()));
     write_text(&scent_file, &scent.to_scent_file())?;
 
-    let src_provision = cwd.join("embedded.mobileprovision");
     let dst_provision = result.app_dir.join("embedded.mobileprovision");
-    
-    cp(&src_provision, &dst_provision, false) ?;
+    //println!("Found provisioning profile team:{} device:{}",provision.team, provision.device);
+    cp(&provision.path, &dst_provision, false) ?;
     
     shell_env(&[], &cwd ,"codesign", &[
         "--force",
@@ -215,9 +255,13 @@ pub fn run_real(package_name: Option<String>, app_label: Option<String>, app_id:
         &app_dir
     ]) ?; 
     
-    shell_env(&[], &cwd ,"./ios-deploy", &[
+    let cwd = std::env::current_dir().unwrap();
+    let ios_deploy = cwd.join(format!("{}/ios-deploy/build/Release/", env!("CARGO_MANIFEST_DIR")));
+    
+    shell_env(&[], &ios_deploy ,"./ios-deploy", &[
         "-i",
-        device,
+        &provision.device,
+        "-I",
         "-b",
         &app_dir
     ]) ?; 
