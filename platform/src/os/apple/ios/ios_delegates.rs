@@ -79,7 +79,10 @@ pub fn define_mtk_view() -> *const Class {
         get_ios_app_global().send_touch_update();
     }
 
-    extern "C" fn touches_canceled(_: &Object, _: Sel, _: ObjcId, _: ObjcId) {}
+    extern "C" fn touches_canceled(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
+        on_touch(this, event, TouchState::Stop);
+        get_ios_app_global().send_touch_update();
+    }
 
     unsafe {
         decl.add_method(sel!(isOpaque), yes as extern "C" fn(&Object, Sel) -> BOOL);
