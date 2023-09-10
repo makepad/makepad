@@ -260,7 +260,7 @@ impl AppMain for App {
                 _ => ()
             }
         }
-        
+
         let actions = self.ui.handle_widget_event(cx, event);
         
         // dock drag drop and tabs

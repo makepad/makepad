@@ -501,6 +501,7 @@ impl Dock {
     }
     
     fn handle_drop(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, is_move: bool) -> bool {
+        log!("handle_drop");
         if let Some(pos) = self.find_drop_position(cx, abs) {
             // ok now what
             // we have a pos
@@ -730,6 +731,7 @@ impl Widget for Dock {
         // alright lets manage the drag areas
         match event.drag_hits(cx, self.area) {
             DragHit::Drag(f) => {
+                log!("drag_hits Drag({:?}) on area {:?}",f,self.area);
                 self.drop_state = None;
                 self.drop_target_draw_list.redraw(cx);
                 match f.state {
@@ -740,6 +742,7 @@ impl Widget for Dock {
                 }
             }
             DragHit::Drop(f) => {
+                log!("drag_hits Drop({:?}) on area {:?}",f,self.area);
                 self.drop_state = None;
                 self.drop_target_draw_list.redraw(cx);
                 dispatch_action(cx, DockAction::Drop(f.clone()).into_action(uid))
@@ -987,4 +990,3 @@ impl DockRef {
 
 #[derive(Clone, WidgetSet)]
 pub struct DockSet(WidgetSet);
-
