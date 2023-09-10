@@ -753,13 +753,14 @@ impl MetalBuffer {
             //println!("Buffer write {} buf {} data {:?}", command_buffer as *const _ as u64, inner.buffer.as_id() as *const _ as u64, data);
             
             std::ptr::copy(data.as_ptr() as *const u8, contents, len);
+            /*
             let _: () = msg_send![
                 inner.buffer.as_id(),
                 didModifyRange: NSRange {
                     location: 0,
                     length: len as u64
                 }
-            ];
+            ];*/
         }
     }
 }

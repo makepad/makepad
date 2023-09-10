@@ -27,9 +27,11 @@ fn show_help(err: &str){
     println!();
     println!("iOS Commands:");
     println!();
-    println!("    ios toolchain-install                       Install the toolchain needed for wasm32 with rustup");
-    println!("    ios build <cargo args>                      Build an ios project");
-    println!("    ios [options] run <cargo args>              runs the ios project on the simulator");
+    println!("    ios toolchain-install                       Install the toolchain needed for ios with rustup");
+    println!("    ios run-sim-intel orgname.appid <cargo args>runs the ios project on the intel simulator");
+    println!("    ios run-sim orgname.appid <cargo args>      runs the ios project on the aarch64 simulator");
+    println!("    ios run-real orgname.appid <cargo args>     runs the ios project on an aarch64 device");
+    println!("                                                first create a dummy app in xcode with the orgname.appid identifier and deploy to device once");
     println!();    
     println!("Android commands:");
     println!();
