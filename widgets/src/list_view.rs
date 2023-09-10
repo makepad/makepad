@@ -40,6 +40,15 @@ enum ListDrawState {
     End {viewport: Rect}
 }
 
+impl ScrollState{
+    fn is_drag(&self)->bool{
+        match self{
+            ScrollState::Drag{..}=>true,
+            _=>false
+        }
+    }
+}
+
 #[derive(Clone, WidgetAction)]
 pub enum ListViewAction {
     Scroll,
@@ -561,7 +570,10 @@ impl Widget for ListView {
         }
         let vi = self.vec_index;
         let is_scroll = if let Event::Scroll(_) = event {true} else {false};
-        if !self.scroll_bar.is_area_captured(cx) || is_scroll {
+        if self.scroll_bar.is_area_captured(cx){
+            self.scroll_state = ScrollState::Stopped;
+        }
+        if !self.scroll_bar.is_area_captured(cx) || is_scroll{
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
                     if self.tail_range {
