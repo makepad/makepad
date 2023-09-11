@@ -19,18 +19,18 @@ impl Tokenizer {
     pub fn apply_change(&mut self, change: &Change) {
         match &change.kind {
             ChangeKind::Insert(point, text) => {
-                self.state[point.line] = None;
-                let line_count = text.extent().line_count;
+                self.state[point.line_index] = None;
+                let line_count = text.length().line_count;
                 if line_count > 0 {
-                    let line = point.line + 1;
+                    let line = point.line_index + 1;
                     self.state.splice(line..line, (0..line_count).map(|_| None));
                 }
             }
-            ChangeKind::Delete(range) => {
-                self.state[range.start().line] = None;
-                let line_count = range.extent().line_count;
+            ChangeKind::Delete(start, length) => {
+                self.state[start.line_index] = None;
+                let line_count = length.line_count;
                 if line_count > 0 {
-                    let start_line = range.start().line + 1;
+                    let start_line = start.line_index + 1;
                     let end_line = start_line + line_count;
                     self.state.drain(start_line..end_line);
                 }
