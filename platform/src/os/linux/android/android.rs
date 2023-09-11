@@ -225,28 +225,24 @@ impl Cx {
             
             self.handle_platform_ops();
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
-                // redraw?
-                //to_java.schedule_redraw();
+                if self.new_next_frames.len() != 0 {
+                    self.call_next_frame_event(self.os.time_now());
+                }
+                if self.need_redrawing() {
+                    self.call_draw_event();
+                    self.opengl_compile_shaders();
+                }
+                
+                if self.os.first_after_resize {
+                    self.os.first_after_resize = false;
+                    self.redraw_all();
+                }
+                
+                self.handle_repaint();
             }
             else {
                 std::thread::sleep(std::time::Duration::from_millis(8));
-                continue
             }
-            
-            if self.new_next_frames.len() != 0 {
-                self.call_next_frame_event(self.os.time_now());
-            }
-            if self.need_redrawing() {
-                self.call_draw_event();
-                self.opengl_compile_shaders();
-            }
-            
-            if self.os.first_after_resize {
-                self.os.first_after_resize = false;
-                self.redraw_all();
-            }
-            
-            self.handle_repaint();
         }
     }
     
