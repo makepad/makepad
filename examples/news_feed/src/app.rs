@@ -387,8 +387,6 @@ impl AppMain for App {
         
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
-                Cx2d::reset_fonts_atlas(cx);
-                Cx2d::reset_icon_atlas(cx);
                 log!("Test {}", item_id);
             }
         }
