@@ -26,6 +26,7 @@ use {
         },
         pass::{CxPassParent},
         thread::Signal,
+        window::CxWindowPool,
         event::{
             Event,
             NetworkResponseChannel
@@ -184,10 +185,13 @@ impl Cx {
             }
             
             IosEvent::WindowGeomChange(re) => { // do this here because mac
-                
+                let window_id = CxWindowPool::id_zero();
+                let window = &mut self.windows[window_id];
+                window.window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
+                self.redraw_all();
             }
-            IosEvent::Paint => {
+            IosEvent::Paint => { 
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(ios_app.time_now());
                 }
