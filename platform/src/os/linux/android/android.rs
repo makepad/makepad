@@ -110,14 +110,6 @@ impl Cx {
                         }
                         self.redraw_all();
                         self.os.first_after_resize = true;
-                        
-                        /*
-                        {
-                            let mut d = crate::native_display().lock().unwrap();
-                            d.screen_width = width as _;
-                            d.screen_height = height as _;
-                        }*/
-                        // self.event_handler.resize_event(width as _, height as _);
                     }
                     FromJavaMessage::Touch(mut touches)=>{  
                         let time = self.os.time_now();
@@ -223,6 +215,11 @@ impl Cx {
                 }
             }
             
+            if Signal::check_and_clear_ui_signal() {
+                self.handle_media_signals();
+                self.call_event_handler(&Event::Signal);
+            }
+            
             self.handle_platform_ops();
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
                 // redraw?
@@ -233,8 +230,6 @@ impl Cx {
                 continue
             }
             
-            crate::profile_end!(self.os.last_time);
-            self.os.last_time = crate::profile_start();
             if self.new_next_frames.len() != 0 {
                 self.call_next_frame_event(self.os.time_now());
             }
@@ -391,7 +386,7 @@ impl Cx {
     
     pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
-            if let Some(data) = unsafe{to_java_load_asset(path.as_ptr())} {
+            if let Some(data) = unsafe{to_java_load_asset(path)} {
                 dep.data = Some(Ok(Rc::new(data)))
             }
             else {
@@ -435,59 +430,7 @@ impl Cx {
         self.after_every_event(&to_java);
     }*/
     
-    /// Called when the MakepadSurface needs to be redrawn.
-    /*
-    pub fn from_java_on_draw(&mut self, to_java: AndroidToJava) {
-        crate::profile_end!(self.os.last_time);
-        self.os.last_time = crate::profile_start();
-        if self.new_next_frames.len() != 0 {
-            self.call_next_frame_event(self.os.time_now());
-        }
-        if self.need_redrawing() {
-            self.call_draw_event();
-            
-            //android_app.egl.make_current();
-            self.opengl_compile_shaders();
-        }
-        
-        if self.os.first_after_resize {
-            self.os.first_after_resize = false;
-            self.redraw_all();
-        }
-        
-        self.handle_repaint(&to_java);
-        self.after_every_event(&to_java);
-        
-    }*/
-    
-    /// Called when a touch event happened on the MakepadSurface.
-    /*
-    pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
-        let time = self.os.time_now();
-        let window = &mut self.windows[CxWindowPool::id_zero()];
-        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-        for touch in &mut touches {
-            // When the software keyboard shifted the UI in the vertical axis,
-            //we need to make the math here to keep touch events positions synchronized.
-            if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
-            
-            touch.abs /= dpi_factor;
-        }
-        self.fingers.process_touch_update_start(time, &touches);
-        let e = Event::TouchUpdate(
-            TouchUpdateEvent {
-                time,
-                window_id: CxWindowPool::id_zero(),
-                touches,
-                modifiers: Default::default()
-            }
-        );
-        self.call_event_handler(&e);
-        let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
-        self.fingers.process_touch_update_end(&e.touches);
-        self.after_every_event(&to_java);
-    }
-    */
+
     /// Called when a touch event happened on the software keyword
     /*
     pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {

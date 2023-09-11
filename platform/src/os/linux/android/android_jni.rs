@@ -1,5 +1,6 @@
 use {
     crate::makepad_math::*,
+    std::ffi::CString,
     std::{cell::RefCell, cell::Cell, sync::mpsc},
     self::super::{
         ndk_sys,
@@ -317,7 +318,7 @@ pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: boo
     ndk_utils::call_void_method!(env, ACTIVITY, "setFullScreen", "(Z)V", fullscreen as i32);
 }
 
-pub(crate) unsafe fn to_java_load_asset(filepath: *const ::std::os::raw::c_char)->Option<Vec<u8>> {
+pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
     let env = attach_jni_env();
 
     let get_method_id = (**env).GetMethodID.unwrap();
@@ -332,7 +333,8 @@ pub(crate) unsafe fn to_java_load_asset(filepath: *const ::std::os::raw::c_char)
     );
     let asset_manager = (call_object_method)(env, ACTIVITY, mid);
     let mgr = ndk_sys::AAssetManager_fromJava(env, asset_manager);
-    let asset = ndk_sys::AAssetManager_open(mgr, filepath, ndk_sys::AASSET_MODE_BUFFER as _);
+    let file_path = CString::new(filepath).unwrap();
+    let asset = ndk_sys::AAssetManager_open(mgr, file_path.as_ptr(), ndk_sys::AASSET_MODE_BUFFER as _);
     if asset.is_null() {
         return None;
     }
