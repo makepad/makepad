@@ -328,7 +328,7 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
-    fn init_cx_os(&mut self) {
+    fn init_cx_os(&mut self) { 
         
         #[cfg(not(ios_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
