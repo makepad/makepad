@@ -4,8 +4,9 @@ use {
         selection::Affinity,
         state::{Block, Session},
         str::StrExt,
+        text::Point,
         token::TokenKind,
-        Line, Point, Selection, Token,
+        Line, Selection, Token,
     },
     makepad_widgets::*,
     std::{mem, slice::Iter},
@@ -78,7 +79,7 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-    
+
         width: Fill,
         height: Fill,
         margin: 0,
@@ -154,7 +155,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
 
@@ -175,18 +176,17 @@ impl CodeEditor {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
-        
+
         self.viewport_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
-        
-        let pad_left_top = dvec2(10.,10.);
-        
+
+        let pad_left_top = dvec2(10., 10.);
+
         self.viewport_rect.pos += pad_left_top;
         self.viewport_rect.size -= pad_left_top;
-        
-        
+
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
-        
+
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         session.handle_changes();
@@ -209,9 +209,14 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) -> Vec<CodeEditorAction> {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        session: &mut Session,
+    ) -> Vec<CodeEditorAction> {
         let mut a = Vec::new();
-        self.handle_event_with(cx, event, session, &mut | _, v | a.push(v));
+        self.handle_event_with(cx, event, session, &mut |_, v| a.push(v));
         a
     }
 
@@ -220,7 +225,7 @@ impl CodeEditor {
         cx: &mut Cx,
         event: &Event,
         session: &mut Session,
-        dispatch_action: &mut dyn  FnMut(&mut Cx, CodeEditorAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
@@ -275,7 +280,7 @@ impl CodeEditor {
                 session.move_down(!shift);
                 cx.redraw_all();
             }
-            Hit::TextInput(TextInputEvent { ref input, .. }) if input.len()>0 => {
+            Hit::TextInput(TextInputEvent { ref input, .. }) if input.len() > 0 => {
                 session.insert(input.into());
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
