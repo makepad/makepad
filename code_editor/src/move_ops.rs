@@ -1,144 +1,150 @@
-use crate::{selection::Affinity, str::StrExt, text::Position, Session};
+use crate::{
+    selection::{Affinity, Cursor},
+    str::StrExt,
+    text::Position,
+    Session,
+};
 
-pub fn move_left(lines: &[String], point: Position) -> Position {
-    if !is_at_start_of_line(point) {
-        return move_to_prev_grapheme(lines, point);
+pub fn move_left(lines: &[String], cursor: Cursor) -> Cursor {
+    if !is_at_start_of_line(cursor) {
+        return move_to_prev_grapheme(lines, cursor);
     }
-    if !is_at_first_line(point) {
-        return move_to_end_of_prev_line(lines, point);
+    if !is_at_first_line(cursor) {
+        return move_to_end_of_prev_line(lines, cursor);
     }
-    point
+    cursor
 }
 
-pub fn move_right(lines: &[String], point: Position) -> Position {
-    if !is_at_end_of_line(lines, point) {
-        return move_to_next_grapheme(lines, point);
+pub fn move_right(lines: &[String], cursor: Cursor) -> Cursor {
+    if !is_at_end_of_line(lines, cursor) {
+        return move_to_next_grapheme(lines, cursor);
     }
-    if !is_at_last_line(lines, point) {
-        return move_to_start_of_next_line(point);
+    if !is_at_last_line(lines, cursor) {
+        return move_to_start_of_next_line(cursor);
     }
-    point
+    cursor
 }
 
-pub fn move_up(
-    session: &Session,
-    point: Position,
-    affinity: Affinity,
-    preferred_column: Option<usize>,
-) -> (Position, Affinity, Option<usize>) {
-    if !is_at_first_row_of_line(session, point, affinity) {
-        return move_to_prev_row_of_line(session, point, affinity, preferred_column);
+pub fn move_up(session: &Session, cursor: Cursor) -> Cursor {
+    if !is_at_first_row_of_line(session, cursor) {
+        return move_to_prev_row_of_line(session, cursor);
     }
-    if !is_at_first_line(point) {
-        return move_to_last_row_of_prev_line(session, point, affinity, preferred_column);
+    if !is_at_first_line(cursor) {
+        return move_to_last_row_of_prev_line(session, cursor);
     }
-    (point, affinity, preferred_column)
+    cursor
 }
 
-pub fn move_down(
-    session: &Session,
-    point: Position,
-    affinity: Affinity,
-    preferred_column: Option<usize>,
-) -> (Position, Affinity, Option<usize>) {
-    if !is_at_last_row_of_line(session, point, affinity) {
-        return move_to_next_row_of_line(session, point, affinity, preferred_column);
+pub fn move_down(session: &Session, cursor: Cursor) -> Cursor {
+    if !is_at_last_row_of_line(session, cursor) {
+        return move_to_next_row_of_line(session, cursor);
     }
-    if !is_at_last_line(session.document().borrow().text().as_lines(), point) {
-        return move_to_first_row_of_next_line(session, point, affinity, preferred_column);
+    if !is_at_last_line(session.document().borrow().text().as_lines(), cursor) {
+        return move_to_first_row_of_next_line(session, cursor);
     }
-    (point, affinity, preferred_column)
+    cursor
 }
 
-fn is_at_first_line(point: Position) -> bool {
-    point.line_index == 0
+fn is_at_first_line(cursor: Cursor) -> bool {
+    cursor.position.line_index == 0
 }
 
-fn is_at_last_line(lines: &[String], point: Position) -> bool {
-    point.line_index == lines.len()
+fn is_at_last_line(lines: &[String], cursor: Cursor) -> bool {
+    cursor.position.line_index == lines.len()
 }
 
-fn is_at_start_of_line(point: Position) -> bool {
-    point.byte_index == 0
+fn is_at_start_of_line(cursor: Cursor) -> bool {
+    cursor.position.byte_index == 0
 }
 
-fn is_at_end_of_line(lines: &[String], point: Position) -> bool {
-    point.byte_index == lines[point.line_index].len()
+fn is_at_end_of_line(lines: &[String], cursor: Cursor) -> bool {
+    cursor.position.byte_index == lines[cursor.position.line_index].len()
 }
 
-fn is_at_first_row_of_line(session: &Session, point: Position, affinity: Affinity) -> bool {
-    session.line(point.line_index, |line| {
+fn is_at_first_row_of_line(session: &Session, cursor: Cursor) -> bool {
+    session.line(cursor.position.line_index, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
-            point.byte_index,
-            affinity,
+            cursor.position.byte_index,
+            cursor.affinity,
             session.settings().tab_column_count,
         );
         row == 0
     })
 }
 
-fn is_at_last_row_of_line(session: &Session, point: Position, affinity: Affinity) -> bool {
-    session.line(point.line_index, |line| {
+fn is_at_last_row_of_line(session: &Session, cursor: Cursor) -> bool {
+    session.line(cursor.position.line_index, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
-            point.byte_index,
-            affinity,
+            cursor.position.byte_index,
+            cursor.affinity,
             session.settings().tab_column_count,
         );
         row == line.row_count() - 1
     })
 }
 
-fn move_to_prev_grapheme(lines: &[String], point: Position) -> Position {
-    Position {
-        line_index: point.line_index,
-        byte_index: lines[point.line_index][..point.byte_index]
-            .grapheme_indices()
-            .next_back()
-            .map(|(index, _)| index)
-            .unwrap(),
+fn move_to_prev_grapheme(lines: &[String], cursor: Cursor) -> Cursor {
+    Cursor {
+        position: Position {
+            line_index: cursor.position.line_index,
+            byte_index: lines[cursor.position.line_index][..cursor.position.byte_index]
+                .grapheme_indices()
+                .next_back()
+                .map(|(index, _)| index)
+                .unwrap(),
+        },
+        affinity: Affinity::Before,
+        preferred_column: None,
     }
 }
 
-fn move_to_next_grapheme(lines: &[String], point: Position) -> Position {
-    let line = &lines[point.line_index];
-    Position {
-        line_index: point.line_index,
-        byte_index: line[point.byte_index..]
-            .grapheme_indices()
-            .nth(1)
-            .map(|(index, _)| point.byte_index + index)
-            .unwrap_or(line.len()),
+fn move_to_next_grapheme(lines: &[String], cursor: Cursor) -> Cursor {
+    let line = &lines[cursor.position.line_index];
+    Cursor {
+        position: Position {
+            line_index: cursor.position.line_index,
+            byte_index: line[cursor.position.byte_index..]
+                .grapheme_indices()
+                .nth(1)
+                .map(|(index, _)| cursor.position.byte_index + index)
+                .unwrap_or(line.len()),
+        },
+        affinity: Affinity::After,
+        preferred_column: None,
     }
 }
 
-fn move_to_end_of_prev_line(lines: &[String], point: Position) -> Position {
-    let prev_line = point.line_index - 1;
-    Position {
-        line_index: prev_line,
-        byte_index: lines[prev_line].len(),
+fn move_to_end_of_prev_line(lines: &[String], cursor: Cursor) -> Cursor {
+    let prev_line = cursor.position.line_index - 1;
+    Cursor {
+        position: Position {
+            line_index: prev_line,
+            byte_index: lines[prev_line].len(),
+        },
+        affinity: Affinity::Before,
+        preferred_column: None,
     }
 }
 
-fn move_to_start_of_next_line(point: Position) -> Position {
-    Position {
-        line_index: point.line_index + 1,
-        byte_index: 0,
+fn move_to_start_of_next_line(cursor: Cursor) -> Cursor {
+    Cursor {
+        position: Position {
+            line_index: cursor.position.line_index + 1,
+            byte_index: 0,
+        },
+        affinity: Affinity::After,
+        preferred_column: None,
     }
 }
 
-fn move_to_prev_row_of_line(
-    session: &Session,
-    point: Position,
-    affinity: Affinity,
-    preferred_column: Option<usize>,
-) -> (Position, Affinity, Option<usize>) {
-    session.line(point.line_index, |line| {
+fn move_to_prev_row_of_line(session: &Session, cursor: Cursor) -> Cursor {
+    session.line(cursor.position.line_index, |line| {
         let (row, mut column) = line.byte_and_affinity_to_row_and_column(
-            point.byte_index,
-            affinity,
+            cursor.position.byte_index,
+            cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column {
             column = preferred_column;
         }
         let (byte, affinity) = line.row_and_column_to_byte_and_affinity(
@@ -146,30 +152,25 @@ fn move_to_prev_row_of_line(
             column,
             session.settings().tab_column_count,
         );
-        (
-            Position {
-                line_index: point.line_index,
+        Cursor {
+            position: Position {
+                line_index: cursor.position.line_index,
                 byte_index: byte,
             },
             affinity,
-            Some(column),
-        )
+            preferred_column: Some(column),
+        }
     })
 }
 
-fn move_to_next_row_of_line(
-    session: &Session,
-    point: Position,
-    affinity: Affinity,
-    preferred_column: Option<usize>,
-) -> (Position, Affinity, Option<usize>) {
-    session.line(point.line_index, |line| {
+fn move_to_next_row_of_line(session: &Session, cursor: Cursor) -> Cursor {
+    session.line(cursor.position.line_index, |line| {
         let (row, mut column) = line.byte_and_affinity_to_row_and_column(
-            point.byte_index,
-            affinity,
+            cursor.position.byte_index,
+            cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column {
             column = preferred_column;
         }
         let (byte, affinity) = line.row_and_column_to_byte_and_affinity(
@@ -177,79 +178,69 @@ fn move_to_next_row_of_line(
             column,
             session.settings().tab_column_count,
         );
-        (
-            Position {
-                line_index: point.line_index,
+        Cursor {
+            position: Position {
+                line_index: cursor.position.line_index,
                 byte_index: byte,
             },
             affinity,
-            Some(column),
-        )
+            preferred_column: Some(column),
+        }
     })
 }
 
-fn move_to_last_row_of_prev_line(
-    session: &Session,
-    point: Position,
-    affinity: Affinity,
-    preferred_column: Option<usize>,
-) -> (Position, Affinity, Option<usize>) {
-    session.line(point.line_index, |line| {
+fn move_to_last_row_of_prev_line(session: &Session, cursor: Cursor) -> Cursor {
+    session.line(cursor.position.line_index, |line| {
         let (_, mut column) = line.byte_and_affinity_to_row_and_column(
-            point.byte_index,
-            affinity,
+            cursor.position.byte_index,
+            cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column {
             column = preferred_column;
         }
-        session.line(point.line_index - 1, |prev_line| {
+        session.line(cursor.position.line_index - 1, |prev_line| {
             let (byte, affinity) = prev_line.row_and_column_to_byte_and_affinity(
                 prev_line.row_count() - 1,
                 column,
                 session.settings().tab_column_count,
             );
-            (
-                Position {
-                    line_index: point.line_index - 1,
+            Cursor {
+                position: Position {
+                    line_index: cursor.position.line_index - 1,
                     byte_index: byte,
                 },
                 affinity,
-                Some(column),
-            )
+                preferred_column: Some(column),
+            }
         })
     })
 }
 
-fn move_to_first_row_of_next_line(
-    session: &Session,
-    point: Position,
-    affinity: Affinity,
-    preferred_column: Option<usize>,
-) -> (Position, Affinity, Option<usize>) {
-    session.line(point.line_index, |line| {
+fn move_to_first_row_of_next_line(session: &Session, cursor: Cursor) -> Cursor {
+    session.line(cursor.position.line_index, |line| {
         let (_, mut column) = line.byte_and_affinity_to_row_and_column(
-            point.byte_index,
-            affinity,
+            cursor.position.byte_index,
+            cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column {
             column = preferred_column;
         }
-        session.line(point.line_index + 1, |next_line| {
+        session.line(cursor.position.line_index + 1, |next_line| {
             let (byte, affinity) = next_line.row_and_column_to_byte_and_affinity(
                 0,
                 column,
                 session.settings().tab_column_count,
             );
-            (
-                Position {
-                    line_index: point.line_index + 1,
+            Cursor {
+                position: Position {
+                    line_index: cursor.position.line_index + 1,
                     byte_index: byte,
                 },
                 affinity,
-                Some(column),
-            )
+                preferred_column: Some(column),
+            }
         })
     })
 }

@@ -1,14 +1,14 @@
 use crate::{
+    selection::SelectionSet,
     state::SessionId,
     text::{Change, Drift, Text},
-    Selection,
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct History {
     current_edit: Option<(SessionId, EditKind)>,
-    undos: Vec<(Vec<Selection>, Vec<(Change, Drift)>)>,
-    redos: Vec<(Vec<Selection>, Vec<(Change, Drift)>)>,
+    undos: Vec<(SelectionSet, Vec<(Change, Drift)>)>,
+    redos: Vec<(SelectionSet, Vec<(Change, Drift)>)>,
 }
 
 impl History {
@@ -24,7 +24,7 @@ impl History {
         &mut self,
         origin_id: SessionId,
         kind: EditKind,
-        selections: &[Selection],
+        selections: &SelectionSet,
         inverted_changes: Vec<(Change, Drift)>,
     ) {
         if self
@@ -36,12 +36,12 @@ impl History {
             self.undos.last_mut().unwrap().1.extend(inverted_changes);
         } else {
             self.current_edit = Some((origin_id, kind));
-            self.undos.push((selections.to_vec(), inverted_changes));
+            self.undos.push((selections.clone(), inverted_changes));
         }
         self.redos.clear();
     }
 
-    pub fn undo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<(Change, Drift)>)> {
+    pub fn undo(&mut self, text: &mut Text) -> Option<(SelectionSet, Vec<(Change, Drift)>)> {
         if let Some((selections, mut inverted_changes)) = self.undos.pop() {
             self.current_edit = None;
             let mut changes = Vec::new();
@@ -59,7 +59,7 @@ impl History {
         }
     }
 
-    pub fn redo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<(Change, Drift)>)> {
+    pub fn redo(&mut self, text: &mut Text) -> Option<(SelectionSet, Vec<(Change, Drift)>)> {
         if let Some((selections, changes)) = self.redos.pop() {
             self.current_edit = None;
             let mut inverted_changes = Vec::new();
@@ -96,6 +96,6 @@ impl EditKind {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EditGroup {
-    pub selections: Vec<Selection>,
+    pub selections: SelectionSet,
     pub changes: Vec<(Change, Drift)>,
 }
