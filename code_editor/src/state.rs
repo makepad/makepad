@@ -8,7 +8,7 @@ use {
         move_ops,
         selection::Affinity,
         str::StrExt,
-        text::{Change, ChangeKind, Drift, Length, Position, Text},
+        text::{Change, Drift, Length, Position, Text},
         token::TokenKind,
         widgets::BlockWidget,
         wrap,
@@ -48,7 +48,7 @@ pub struct Session {
     unfolding_lines: HashSet<usize>,
     selections: Vec<Selection>,
     pending_selection_index: Option<usize>,
-    change_receiver: Receiver<(Option<Vec<Selection>>, Vec<Change>)>,
+    change_receiver: Receiver<(Option<Vec<Selection>>, Vec<(Change, Drift)>)>,
 }
 
 impl Session {
@@ -684,10 +684,10 @@ impl Session {
         self.document.borrow_mut().force_new_edit_group();
     }
 
-    fn apply_changes(&mut self, selections: Option<Vec<Selection>>, changes: &[Change]) {
-        for change in changes {
-            match &change.kind {
-                ChangeKind::Insert(point, text) => {
+    fn apply_changes(&mut self, selections: Option<Vec<Selection>>, changes: &[(Change, Drift)]) {
+        for (change, _) in changes {
+            match change {
+                Change::Insert(point, text) => {
                     self.column_count[point.line_index] = None;
                     self.wrap_data[point.line_index] = None;
                     let line_count = text.length().line_count;
@@ -703,7 +703,7 @@ impl Session {
                             .splice(line..line, (0..line_count).map(|_| None));
                     }
                 }
-                ChangeKind::Delete(start, length) => {
+                Change::Delete(start, length) => {
                     self.column_count[start.line_index] = None;
                     self.wrap_data[start.line_index] = None;
                     let line_count = length.line_count;
@@ -728,9 +728,9 @@ impl Session {
         if let Some(selections) = selections {
             self.selections = selections;
         } else {
-            for change in changes {
+            for &(ref change, drift) in changes {
                 for selection in &mut self.selections {
-                    *selection = selection.apply_change(&change);
+                    *selection = selection.apply_change(&change, drift);
                 }
             }
         }
@@ -822,7 +822,7 @@ pub struct Document {
     block_inlays: Vec<(usize, BlockInlay)>,
     history: History,
     tokenizer: Tokenizer,
-    change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<Change>)>>,
+    change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<(Change, Drift)>)>>,
 }
 
 impl Document {
@@ -878,14 +878,11 @@ impl Document {
         {
             point += range.start() - prev_range_end;
             if !range.is_empty() {
-                let change = Change {
-                    drift: Drift::Before,
-                    kind: ChangeKind::Delete(point, range.extent()),
-                };
+                let change = Change::Delete(point, range.extent());
                 let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
-                changes.push(change);
-                inverted_changes.push(inverted_change);
+                changes.push((change, Drift::Before));
+                inverted_changes.push((inverted_change, Drift::Before));
             }
             let (delete_extent_before, delete_after, insert_text_before, insert_text_after) = f(
                 &self.text.as_lines()[point.line_index],
@@ -900,17 +897,14 @@ impl Document {
                     point.byte_index =
                         self.text.as_lines()[point.line_index].len() - delete_extent_before.byte_count;
                 }
-                let change = Change {
-                    drift: Drift::Before,
-                    kind: ChangeKind::Delete(
-                        point,
-                        delete_extent_before,
-                    ),
-                };
+                let change = Change::Delete(
+                    point,
+                    delete_extent_before,
+                );
                 let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
-                changes.push(change);
-                inverted_changes.push(inverted_change);
+                changes.push((change, Drift::Before));
+                inverted_changes.push((inverted_change, Drift::Before));
             }
             if delete_after {
                 let delete_extent_after = if let Some(grapheme) = self.text.as_lines()[point.line_index]
@@ -931,17 +925,14 @@ impl Document {
                     None
                 };
                 if let Some(delete_extent_after) = delete_extent_after {
-                    let change = Change {
-                        drift: Drift::Before,
-                        kind: ChangeKind::Delete(
-                            point,
-                            delete_extent_after,
-                        ),
-                    };
+                    let change = Change::Delete(
+                        point,
+                        delete_extent_after,
+                    );
                     let inverted_change = change.clone().invert(&self.text);
                     self.text.apply_change(change.clone());
-                    changes.push(change);
-                    inverted_changes.push(inverted_change);
+                    changes.push((change, Drift::Before));
+                    inverted_changes.push((inverted_change, Drift::Before));
                 }
             }
             if let Some(insert_text_before) = insert_text_before {
@@ -959,15 +950,12 @@ impl Document {
                     );
                 }
                 let extent = insert_text_before.length();
-                let change = Change {
-                    drift: Drift::Before,
-                    kind: ChangeKind::Insert(point, insert_text_before),
-                };
+                let change = Change::Insert(point, insert_text_before);
                 point += extent;
                 let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
-                changes.push(change);
-                inverted_changes.push(inverted_change);
+                changes.push((change, Drift::Before));
+                inverted_changes.push((inverted_change, Drift::Before));
             }
             if let Some(insert_text_after) = insert_text_after {
                 let line_count = insert_text_after.as_lines().len();
@@ -984,15 +972,12 @@ impl Document {
                     );
                 }
                 let extent = insert_text_after.length();
-                let change = Change {
-                    drift: Drift::After,
-                    kind: ChangeKind::Insert(point, insert_text_after),
-                };
+                let change = Change::Insert(point, insert_text_after);
                 point += extent;
                 let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
-                changes.push(change);
-                inverted_changes.push(inverted_change);
+                changes.push((change, Drift::After));
+                inverted_changes.push((inverted_change, Drift::After));
             }
             prev_range_end = range.end();
         }
@@ -1015,8 +1000,8 @@ impl Document {
         use_soft_tabs: bool,
         tab_column_count: usize,
         indent_column_count: usize,
-        changes: &mut Vec<Change>,
-        inverted_changes: &mut Vec<Change>,
+        changes: &mut Vec<(Change, Drift)>,
+        inverted_changes: &mut Vec<(Change, Drift)>,
     ) {
         fn next_line_indentation_column_count(
             line: &str,
@@ -1130,36 +1115,30 @@ impl Document {
     fn edit_lines_internal(
         &mut self,
         line: usize,
-        changes: &mut Vec<Change>,
-        inverted_changes: &mut Vec<Change>,
+        changes: &mut Vec<(Change, Drift)>,
+        inverted_changes: &mut Vec<(Change, Drift)>,
         mut f: impl FnMut(&str) -> (usize, usize, String),
     ) {
         let (byte, delete_byte_count, insert_text) = f(&self.text.as_lines()[line]);
         if delete_byte_count > 0 {
-            let change = Change {
-                drift: Drift::Before,
-                kind: ChangeKind::Delete(
-                    Position { line_index: line, byte_index: byte },
-                    Length {
-                        line_count: 0,
-                        byte_count: delete_byte_count,
-                    },
-                ),
-            };
+            let change = Change::Delete(
+                Position { line_index: line, byte_index: byte },
+                Length {
+                    line_count: 0,
+                    byte_count: delete_byte_count,
+                },
+            );
             let inverted_change = change.clone().invert(&self.text);
             self.text.apply_change(change.clone());
-            changes.push(change);
-            inverted_changes.push(inverted_change);
+            changes.push((change, Drift::Before));
+            inverted_changes.push((inverted_change, Drift::Before));
         }
         if !insert_text.is_empty() {
-            let change = Change {
-                drift: Drift::Before,
-                kind: ChangeKind::Insert(Position { line_index: line, byte_index: byte }, insert_text.into()),
-            };
+            let change = Change::Insert(Position { line_index: line, byte_index: byte }, insert_text.into());
             let inverted_change = change.clone().invert(&self.text);
             self.text.apply_change(change.clone());
-            changes.push(change);
-            inverted_changes.push(inverted_change);
+            changes.push((change, Drift::Before));
+            inverted_changes.push((inverted_change, Drift::Before));
         }
     }
 
@@ -1189,11 +1168,11 @@ impl Document {
         &mut self,
         origin_id: SessionId,
         selections: Option<Vec<Selection>>,
-        changes: &[Change],
+        changes: &[(Change, Drift)],
     ) {
-        for change in changes {
+        for &(ref change, drift) in changes {
             self.apply_change_to_tokens(change);
-            self.apply_change_to_inline_inlays(change);
+            self.apply_change_to_inline_inlays(change, drift);
             self.tokenizer.apply_change(change);
         }
         self.tokenizer.update(&self.text, &mut self.tokens);
@@ -1209,10 +1188,7 @@ impl Document {
                         changes
                             .iter()
                             .cloned()
-                            .map(|change| Change {
-                                drift: Drift::Before,
-                                ..change
-                            })
+                            .map(|(change, _)| (change, Drift::Before))
                             .collect(),
                     ))
                     .unwrap();
@@ -1221,8 +1197,8 @@ impl Document {
     }
 
     fn apply_change_to_tokens(&mut self, change: &Change) {
-        match change.kind {
-            ChangeKind::Insert(point, ref text) => {
+        match *change {
+            Change::Insert(point, ref text) => {
                 let mut byte = 0;
                 let mut index = self.tokens[point.line_index]
                     .iter()
@@ -1268,7 +1244,7 @@ impl Document {
                     self.tokens.splice(point.line_index..point.line_index + 1, tokens);
                 }
             }
-            ChangeKind::Delete(start, length) => {
+            Change::Delete(start, length) => {
                 let end = start + length;
                 let mut byte = 0;
                 let mut start_token = self.tokens[start.line_index]
@@ -1339,14 +1315,14 @@ impl Document {
         }
     }
 
-    fn apply_change_to_inline_inlays(&mut self, change: &Change) {
-        match change.kind {
-            ChangeKind::Insert(point, ref text) => {
+    fn apply_change_to_inline_inlays(&mut self, change: &Change, drift: Drift) {
+        match *change {
+            Change::Insert(point, ref text) => {
                 let index = self.inline_inlays[point.line_index]
                     .iter()
                     .position(|(byte, _)| match byte.cmp(&point.byte_index) {
                         cmp::Ordering::Less => false,
-                        cmp::Ordering::Equal => match change.drift {
+                        cmp::Ordering::Equal => match drift {
                             Drift::Before => true,
                             Drift::After => false,
                         },
@@ -1377,7 +1353,7 @@ impl Document {
                         .splice(point.line_index..point.line_index + 1, inline_inlays);
                 }
             }
-            ChangeKind::Delete(start, length) => {
+            Change::Delete(start, length) => {
                 let end = start + length;
                 let start_inlay = self.inline_inlays[start.line_index]
                     .iter()
