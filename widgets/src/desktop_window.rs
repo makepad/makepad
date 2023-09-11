@@ -184,7 +184,7 @@ impl DesktopWindow {
             }
         }
         
-        if let Event::Resume = event {
+        if let Event::ClearAtlasses = event {
             Cx2d::reset_fonts_atlas(cx);
             Cx2d::reset_icon_atlas(cx);
         }
