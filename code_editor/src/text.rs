@@ -1,6 +1,9 @@
-use {
-    crate::{change, Change, Extent, Point, Range},
-    std::{fmt, io, io::BufRead, iter},
+use std::{
+    cmp::Ordering,
+    fmt, io,
+    io::BufRead,
+    iter,
+    ops::{Add, AddAssign, Sub, SubAssign},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -92,10 +95,8 @@ impl Text {
 
     pub fn apply_change(&mut self, change: Change) {
         match change.kind {
-            change::ChangeKind::Insert(point, additional_text) => {
-                self.insert(point, additional_text)
-            }
-            change::ChangeKind::Delete(range) => self.delete(range),
+            ChangeKind::Insert(point, additional_text) => self.insert(point, additional_text),
+            ChangeKind::Delete(range) => self.delete(range),
         }
     }
 
@@ -140,4 +141,208 @@ impl From<String> for Text {
     fn from(string: String) -> Self {
         string.as_str().into()
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Point {
+    pub line: usize,
+    pub byte: usize,
+}
+
+impl Point {
+    pub fn zero() -> Self {
+        Self::default()
+    }
+
+    pub fn apply_change(self, change: &Change) -> Self {
+        match change.kind {
+            ChangeKind::Insert(point, ref text) => match self.cmp(&point) {
+                Ordering::Less => self,
+                Ordering::Equal => match change.drift {
+                    Drift::Before => self + text.extent(),
+                    Drift::After => self,
+                },
+                Ordering::Greater => point + text.extent() + (self - point),
+            },
+            ChangeKind::Delete(range) => {
+                if self < range.start() {
+                    self
+                } else {
+                    range.start() + (self - range.end().min(self))
+                }
+            }
+        }
+    }
+}
+
+impl Add<Extent> for Point {
+    type Output = Self;
+
+    fn add(self, extent: Extent) -> Self::Output {
+        if extent.line_count == 0 {
+            Self {
+                line: self.line,
+                byte: self.byte + extent.byte_count,
+            }
+        } else {
+            Self {
+                line: self.line + extent.line_count,
+                byte: extent.byte_count,
+            }
+        }
+    }
+}
+
+impl AddAssign<Extent> for Point {
+    fn add_assign(&mut self, extent: Extent) {
+        *self = *self + extent;
+    }
+}
+
+impl Sub for Point {
+    type Output = Extent;
+
+    fn sub(self, other: Self) -> Self::Output {
+        if self.line == other.line {
+            Extent {
+                line_count: 0,
+                byte_count: self.byte - other.byte,
+            }
+        } else {
+            Extent {
+                line_count: self.line - other.line,
+                byte_count: self.byte,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Extent {
+    pub line_count: usize,
+    pub byte_count: usize,
+}
+
+impl Extent {
+    pub fn zero() -> Extent {
+        Self::default()
+    }
+}
+
+impl Add for Extent {
+    type Output = Extent;
+
+    fn add(self, other: Self) -> Self::Output {
+        if other.line_count == 0 {
+            Self {
+                line_count: self.line_count,
+                byte_count: self.byte_count + other.byte_count,
+            }
+        } else {
+            Self {
+                line_count: self.line_count + other.line_count,
+                byte_count: other.byte_count,
+            }
+        }
+    }
+}
+
+impl AddAssign for Extent {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl Sub for Extent {
+    type Output = Extent;
+
+    fn sub(self, other: Self) -> Self::Output {
+        if self.line_count == other.line_count {
+            Self {
+                line_count: 0,
+                byte_count: self.byte_count - other.byte_count,
+            }
+        } else {
+            Self {
+                line_count: self.line_count - other.line_count,
+                byte_count: self.byte_count,
+            }
+        }
+    }
+}
+
+impl SubAssign for Extent {
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Range {
+    start: Point,
+    end: Point,
+}
+
+impl Range {
+    pub fn new(start: Point, end: Point) -> Option<Self> {
+        if start > end {
+            return None;
+        }
+        Some(Self { start, end })
+    }
+
+    pub fn from_start_and_extent(start: Point, extent: Extent) -> Self {
+        Self {
+            start,
+            end: start + extent,
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+
+    pub fn start(self) -> Point {
+        self.start
+    }
+
+    pub fn end(self) -> Point {
+        self.end
+    }
+
+    pub fn extent(self) -> Extent {
+        self.end - self.start
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Change {
+    pub drift: Drift,
+    pub kind: ChangeKind,
+}
+
+impl Change {
+    pub fn invert(self, text: &Text) -> Self {
+        Self {
+            drift: self.drift,
+            kind: match self.kind {
+                ChangeKind::Insert(point, text) => {
+                    ChangeKind::Delete(Range::from_start_and_extent(point, text.extent()))
+                }
+                ChangeKind::Delete(range) => ChangeKind::Insert(range.start(), text.slice(range)),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Drift {
+    Before,
+    After,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ChangeKind {
+    Insert(Point, Text),
+    Delete(Range),
 }
