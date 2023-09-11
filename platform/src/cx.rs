@@ -249,7 +249,7 @@ impl Cx {
             
             command_settings: HashMap::new(),
             
-            os: CxOs {..Default::default()},
+            os: CxOs::default(),
             
             event_handler: Some(event_handler),
             
