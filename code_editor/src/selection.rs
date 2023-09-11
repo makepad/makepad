@@ -1,5 +1,5 @@
 use {
-    crate::text::{Change, Length, Position, Range},
+    crate::text::{Change, Drift, Length, Position, Range},
     std::ops,
 };
 
@@ -111,10 +111,10 @@ impl Selection {
         }
     }
 
-    pub fn apply_change(self, change: &Change) -> Selection {
+    pub fn apply_change(self, change: &Change, drift: Drift) -> Selection {
         Self {
-            anchor: self.anchor.apply_change(change),
-            cursor: self.cursor.apply_change(change),
+            anchor: self.anchor.apply_change(change, drift),
+            cursor: self.cursor.apply_change(change, drift),
             ..self
         }
     }

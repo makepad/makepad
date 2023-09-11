@@ -96,9 +96,9 @@ impl Text {
     }
 
     pub fn apply_change(&mut self, change: Change) {
-        match change.kind {
-            ChangeKind::Insert(position, text) => self.insert(position, text),
-            ChangeKind::Delete(start, length) => self.delete(start, length),
+        match change {
+            Change::Insert(position, text) => self.insert(position, text),
+            Change::Delete(start, length) => self.delete(start, length),
         }
     }
 
@@ -156,17 +156,17 @@ impl Position {
         Self::default()
     }
 
-    pub fn apply_change(self, change: &Change) -> Self {
-        match change.kind {
-            ChangeKind::Insert(point, ref text) => match self.cmp(&point) {
+    pub fn apply_change(self, change: &Change, drift: Drift) -> Self {
+        match *change {
+            Change::Insert(point, ref text) => match self.cmp(&point) {
                 Ordering::Less => self,
-                Ordering::Equal => match change.drift {
+                Ordering::Equal => match drift {
                     Drift::Before => point + text.length() + (self - point),
                     Drift::After => self,
                 },
                 Ordering::Greater => point + text.length() + (self - point),
             },
-            ChangeKind::Delete(start, length) => {
+            Change::Delete(start, length) => {
                 let end = start + length;
                 if self < start {
                     self
@@ -319,31 +319,21 @@ impl Range {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Change {
-    pub drift: Drift,
-    pub kind: ChangeKind,
-}
-
-impl Change {
-    pub fn invert(self, text: &Text) -> Self {
-        Self {
-            drift: self.drift,
-            kind: match self.kind {
-                ChangeKind::Insert(point, text) => {
-                    ChangeKind::Delete(point, text.length())
-                }
-                ChangeKind::Delete(start, length) => ChangeKind::Insert(start, text.slice(start, length)),
-            },
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum ChangeKind {
+pub enum Change {
     Insert(Position, Text),
     Delete(Position, Length),
 }
 
+impl Change {
+    pub fn invert(self, text: &Text) -> Self {
+        match self {
+            Self::Insert(position, text) => {
+                Change::Delete(position, text.length())
+            }
+            Self::Delete(start, length) => Change::Insert(start, text.slice(start, length)),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Drift {
