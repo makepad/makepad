@@ -17,7 +17,8 @@ public class MakepadNative {
     public native static void surfaceOnSurfaceDestroyed(Surface surface);
     public static native void surfaceOnTouch(MotionEvent event);
     public native static void surfaceOnSurfaceChanged(Surface surface, int width, int height);
-    public native static void surfaceOnKeyDown(int keycode);
+    public native static void surfaceOnKeyDown(int keycode, int meta_state);
     public native static void surfaceOnKeyUp(int keycode);
     public native static void surfaceOnCharacter(int character);
+    public native static void surfaceOnResizeTextIME(int keyboard_height);
 }
