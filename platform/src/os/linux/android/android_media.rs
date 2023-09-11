@@ -30,7 +30,7 @@ pub struct CxAndroidMedia {
 }
 
 impl Cx {
-    pub (crate) fn _handle_media_signals(&mut self/*, to_java: &AndroidToJava*/) {
+    pub (crate) fn handle_media_signals(&mut self/*, to_java: &AndroidToJava*/) {
         if self.os.media.android_audio_change.check_and_clear() {
             let descs = self.os.media.android_audio().lock().unwrap().get_updated_descs();
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent {
