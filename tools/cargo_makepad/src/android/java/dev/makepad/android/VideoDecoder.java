@@ -88,6 +88,13 @@ public class VideoDecoder {
 
             mCodec.configure(format, null, null, 0);
             mCodec.start();
+
+            MediaFormat outputFormat = mCodec.getOutputFormat();
+            int colorFormat = outputFormat.containsKey(MediaFormat.KEY_COLOR_FORMAT) 
+                ? outputFormat.getInteger(MediaFormat.KEY_COLOR_FORMAT) 
+                : -1;
+
+            String colorFormatString = getColorFormatString(colorFormat);
             
             Log.e("Makepad", "Using Codec: " + mCodec.getName());
 
@@ -97,12 +104,6 @@ public class VideoDecoder {
 
             mVideoWidth = format.getInteger(MediaFormat.KEY_WIDTH);
             mVideoHeight = format.getInteger(MediaFormat.KEY_HEIGHT);
-
-            int colorFormat = format.containsKey(MediaFormat.KEY_COLOR_FORMAT) 
-                ? format.getInteger(MediaFormat.KEY_COLOR_FORMAT) 
-                : -1;
-
-            String colorFormatString = getColorFormatString(colorFormat);
 
             Activity activity = mActivityReference.get();
             if (activity != null) {
@@ -122,10 +123,18 @@ public class VideoDecoder {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private String getColorFormatString(int colorFormat) {
         switch (colorFormat) {
             case MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible:
+                mIsFlexibleFormat = true;
                 return "YUV420PlanarFlexible";
+            case MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar:
+                mIsPlanar = true;
+                return "YUV420Planar";
+            case MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar:
+                mIsPlanar = false;
+                return "YUV420SemiPlanar";
             default:
                 Log.e("Makepad", "colorFormat unknown: " + colorFormat);
                 return "Unknown";
@@ -183,21 +192,26 @@ public class VideoDecoder {
                         ByteBuffer outputBuffer = mCodec.getOutputBuffer(outputBufferIndex);
 
                         Image outputImage = mCodec.getOutputImage(outputBufferIndex);
-                        Image.Plane yPlane = outputImage.getPlanes()[0];
-                        int yStride = yPlane.getRowStride();
-                        Image.Plane uvPlane = outputImage.getPlanes()[1];
-                        int uvStride = uvPlane.getRowStride();
+                        int yStride =  outputImage.getPlanes()[0].getRowStride();
+                        int uStride, vStride;
+                        if (mIsPlanar) {
+                            uStride = outputImage.getPlanes()[1].getRowStride();
+                            vStride = outputImage.getPlanes()[2].getRowStride();
+                        } else {
+                            uStride = vStride = outputImage.getPlanes()[1].getRowStride();
+                        }
 
-                        // Construct the ByteBuffer for the frame + metadata
-                        // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
-                        int metadataSize = 8 + 4 + 4 + 4;
+                        // Construct the ByteBuffer for the frame and metadata
+                        // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | Frame data length (4B) | Pixel Data |
+                        int metadataSize = 24;
                         int totalSize = metadataSize + mInfo.size;
 
                         ByteBuffer frameBuffer = acquireBuffer(totalSize);
                         frameBuffer.clear();
                         frameBuffer.putLong(mInfo.presentationTimeUs);
                         frameBuffer.putInt(yStride);
-                        frameBuffer.putInt(uvStride);
+                        frameBuffer.putInt(uStride);
+                        frameBuffer.putInt(vStride);
                         frameBuffer.putInt(mInfo.size);
 
                         int oldLimit = outputBuffer.limit();
@@ -294,9 +308,10 @@ public class VideoDecoder {
     private int mFrameRate;
     private boolean mInputEos = false;
     private boolean mOutputEos = false;
-    private boolean mIsFlexibleFormat = false;
     private int mVideoWidth;
     private int mVideoHeight;
+    private boolean mIsFlexibleFormat = false;
+    private boolean mIsPlanar = false;
     
     // input
     private int mChunkSize;
