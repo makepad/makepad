@@ -1,7 +1,7 @@
 use crate::{
+    selection::SelectionSet,
     state::SessionId,
     text::{Change, Drift, Text},
-    selection::SelectionSet,
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
