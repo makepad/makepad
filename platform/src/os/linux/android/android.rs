@@ -1,19 +1,24 @@
+#[allow(unused)]
 use {
     std::rc::Rc,
     std::cell::{RefCell},
     std::ffi::CString,
     std::os::raw::{c_void},
     std::time::Instant,
+    std::sync::mpsc,
     self::super::{
         android_media::CxAndroidMedia,
         jni_sys::jobject,
-        android_jni::{AndroidToJava},
+        android_jni,
         android_keycodes::android_to_makepad_key_code,
+        super::egl_sys::{self, LibEgl},
+        android_jni::*,
+        ndk_sys,
     },
     self::super::super::{
         gl_sys,
         //libc_sys,
-    },
+    }, 
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
@@ -45,19 +50,175 @@ use {
 };
 
 // Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
-const ANDROID_META_CTRL_MASK: i32 = 28672;
+const _ANDROID_META_CTRL_MASK: i32 = 28672;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_SHIFT_MASK
-const ANDROID_META_SHIFT_MASK: i32 = 193;
+const _ANDROID_META_SHIFT_MASK: i32 = 193;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
-const ANDROID_META_ALT_MASK: i32 = 50;
-
-#[link(name = "EGL")]
-extern "C" {
-    fn eglGetProcAddress(procname: *const u8) -> *mut c_void;
-}
+const _ANDROID_META_ALT_MASK: i32 = 50;
 
 impl Cx {
+    pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
+        
+        self.android_load_dependencies();
+        //self.os.dpi_factor = params.density;
+        //self.os_type = OsType::Android(params);
+        self.gpu_info.performance = GpuPerformance::Tier1;
+        self.call_event_handler(&Event::Construct);
+        
+        while !self.os.quit{
+            while let Ok(msg) = from_java_rx.try_recv() {
+                match msg {
+                    FromJavaMessage::SurfaceCreated {window} => unsafe {
+                        self.os.display.as_mut().unwrap().update_surface(window);
+                    },
+                    FromJavaMessage::SurfaceDestroyed => unsafe {
+                        self.os.display.as_mut().unwrap().destroy_surface();
+                    },
+                    FromJavaMessage::SurfaceChanged {
+                        window,
+                        width:_,
+                        height:_,
+                    } => {
+                        unsafe {
+                            self.os.display.as_mut().unwrap().update_surface(window);
+                        }
+                        /*
+                        {
+                            let mut d = crate::native_display().lock().unwrap();
+                            d.screen_width = width as _;
+                            d.screen_height = height as _;
+                        }*/
+                        // self.event_handler.resize_event(width as _, height as _);
+                    }
+                    FromJavaMessage::Touch {
+                        phase:_,
+                        touch_id:_,
+                        x:_,
+                        y:_,
+                    } => {
+                        //self.event_handler.touch_event(phase, touch_id, x, y);
+                    }
+                    FromJavaMessage::Character {character:_} => {
+                        //if let Some(character) = char::from_u32(character) {
+                        //    self.event_handler
+                        //        .char_event(character, Default::default(), false);
+                        //}
+                    }
+                    FromJavaMessage::KeyDown {keycode:_} => {
+                        /*match keycode {
+                            KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = true,
+                            KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = true,
+                            KeyCode::LeftAlt | KeyCode::RightAlt => self.keymods.alt = true,
+                            KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = true,
+                            _ => {}
+                        }
+                        self.event_handler
+                            .key_down_event(keycode, self.keymods, false);*/
+                    }
+                    FromJavaMessage::KeyUp {keycode:_} => {
+                        /*match keycode {
+                            KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = false,
+                            KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = false,
+                            KeyCode::LeftAlt | KeyCode::RightAlt => self.keymods.alt = false,
+                            KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
+                            _ => {}
+                        }
+                        self.event_handler.key_up_event(keycode, self.keymods);*/
+                    }
+                    FromJavaMessage::Pause => {
+                       // self.event_handler.window_minimized_event(),
+                    }
+                    FromJavaMessage::Resume => {
+                        if self.os.fullscreen {
+                            unsafe {
+                                let env = attach_jni_env();
+                                android_jni::to_java_set_full_screen(env, true);
+                            }
+                        }
+                        
+                        //self.event_handler.window_restored_event()
+                    }
+                    FromJavaMessage::Destroy => {
+                        self.os.quit = true;
+                    }
+                }
+            }
+        }
+    }
     
+    pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
+        let (from_java_tx, from_java_rx) = mpsc::channel();
+        
+        unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
+        
+        // lets start a thread
+        std::thread::spawn(move || {
+            
+            let mut cx = startup();
+            
+            let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
+            
+            let (window, _screen_width, _screen_height) = 'a: loop {
+                match from_java_rx.try_recv() {
+                    Ok(FromJavaMessage::SurfaceChanged {
+                        window,
+                        width,
+                        height,
+                    }) => {
+                        break 'a (window, width as f32, height as f32);
+                    }
+                    _ => {}
+                }
+            };
+            
+            let (egl_context, egl_config, egl_display) = unsafe{egl_sys::create_egl_context(
+                &mut libegl,
+                std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
+                false,
+            ).expect("Cant create EGL context")};
+            
+            unsafe {gl_sys::load_with( | s | {   
+                let s = CString::new(s).unwrap();
+                libegl.eglGetProcAddress.unwrap()(s.as_ptr())
+            })};            
+            
+            let surface = unsafe{(libegl.eglCreateWindowSurface.unwrap())(
+                egl_display,
+                egl_config,
+                window as _,
+                std::ptr::null_mut(),
+            )};
+            
+            if unsafe{(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
+                panic!();
+            }
+            cx.os.display = Some(CxAndroidDisplay{
+                libegl,
+                egl_display,
+                egl_config,
+                egl_context,
+                surface,
+                window
+            });
+            cx.main_loop(from_java_rx);
+            
+            let display = cx.os.display.take().unwrap();
+            
+            unsafe{
+                (display.libegl.eglMakeCurrent.unwrap())(
+                    display.egl_display,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                (display.libegl.eglDestroySurface.unwrap())(display.egl_display, display.surface);
+                (display.libegl.eglDestroyContext.unwrap())(display.egl_display, display.egl_context);
+                (display.libegl.eglTerminate.unwrap())(display.egl_display);
+            }
+        });
+    }
+    
+    /*
     /// Called when EGL is initialized.
     pub fn from_java_on_init(&mut self, params: AndroidParams, to_java: AndroidToJava) {
         // lets load dependencies here.
@@ -67,12 +228,12 @@ impl Cx {
         self.os_type = OsType::Android(params);
         self.gpu_info.performance = GpuPerformance::Tier1;
         self.call_event_handler(&Event::Construct);
-    } 
+    }
     
-    pub fn from_java_on_pause(&mut self,  _to_java: AndroidToJava) {
+    pub fn from_java_on_pause(&mut self, _to_java: AndroidToJava) {
         self.call_event_handler(&Event::Pause);
     }
-     
+    
     pub fn from_java_on_resume(&mut self, _to_java: AndroidToJava) {
         self.call_event_handler(&Event::Resume);
         let window_id = CxWindowPool::id_zero();
@@ -81,49 +242,45 @@ impl Cx {
         }
         self.redraw_all();
         self.reinitialise_media();
-    }
-
-    pub fn from_java_on_new_gl(&mut self,  to_java: AndroidToJava) {
+    }*/
+    /*
+    pub fn from_java_on_new_gl(&mut self, to_java: AndroidToJava) {
         // init GL
-        self.redraw_all(); 
-        unsafe {gl_sys::load_with( | s | {   
-            let s = CString::new(s).unwrap();
-            eglGetProcAddress(s.as_ptr()) 
-        })};
+        self.redraw_all();
         
-        to_java.schedule_timeout(0, 0); 
-        to_java.schedule_redraw(); 
+        to_java.schedule_timeout(0, 0);
+        to_java.schedule_redraw();
         self.after_every_event(&to_java);
-    }    
- 
-    pub fn from_java_on_free_gl(&mut self,  _to_java: AndroidToJava) {
+    }
+    
+    pub fn from_java_on_free_gl(&mut self, _to_java: AndroidToJava) {
         // lets destroy all of our gl resources
-        for texture in &mut self.textures.0.pool{
+        for texture in &mut self.textures.0.pool {
             texture.os.free_resources();
         }
         // delete all geometry buffers
-        for geometry in &mut self.geometries.0.pool{
+        for geometry in &mut self.geometries.0.pool {
             geometry.os.free_resources();
         }
-
-        for pass in &mut self.passes.0.pool{
+        
+        for pass in &mut self.passes.0.pool {
             pass.os.free_resources();
         }
         // ok now we walk the views and remove all vaos and indexbuffers
-        for draw_list in &mut self.draw_lists.0.pool{
-            for item in &mut draw_list.draw_items.buffer{
+        for draw_list in &mut self.draw_lists.0.pool {
+            for item in &mut draw_list.draw_items.buffer {
                 item.os.free_resources();
             }
         }
         
-        for shader in &mut self.draw_shaders.os_shaders{
+        for shader in &mut self.draw_shaders.os_shaders {
             shader.free_resources();
         }
-    }
+    }*/
     
-    pub fn android_load_dependencies(&mut self, to_java: &AndroidToJava) {
+    pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
-            if let Some(data) = to_java.read_asset(path) {
+            if let Some(data) = unsafe{to_java_load_asset(path.as_ptr())} {
                 dep.data = Some(Ok(Rc::new(data)))
             }
             else {
@@ -135,6 +292,7 @@ impl Cx {
     }
     
     /// Called when the MakepadSurface is resized.
+    /*
     pub fn from_java_on_resize(&mut self, width: i32, height: i32, to_java: AndroidToJava) {
         self.os.display_size = dvec2(width as f64, height as f64);
         let window_id = CxWindowPool::id_zero();
@@ -164,10 +322,13 @@ impl Cx {
         self.redraw_all();
         self.os.first_after_resize = true;
         self.after_every_event(&to_java);
-    }
+    }*/
     
     /// Called when the MakepadSurface needs to be redrawn.
+    /*
     pub fn from_java_on_draw(&mut self, to_java: AndroidToJava) {
+        crate::profile_end!(self.os.last_time);
+        self.os.last_time = crate::profile_start();
         if self.new_next_frames.len() != 0 {
             self.call_next_frame_event(self.os.time_now());
         }
@@ -185,9 +346,11 @@ impl Cx {
         
         self.handle_repaint(&to_java);
         self.after_every_event(&to_java);
-    }
+        
+    }*/
     
     /// Called when a touch event happened on the MakepadSurface.
+    /*
     pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
         let window = &mut self.windows[CxWindowPool::id_zero()];
@@ -195,8 +358,8 @@ impl Cx {
         for touch in &mut touches {
             // When the software keyboard shifted the UI in the vertical axis,
             //we need to make the math here to keep touch events positions synchronized.
-            if self.os.keyboard_visible { touch.abs.y += self.os.keyboard_panning_offset as f64 };
-
+            if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
+            
             touch.abs /= dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
@@ -213,11 +376,12 @@ impl Cx {
         self.fingers.process_touch_update_end(&e.touches);
         self.after_every_event(&to_java);
     }
-
+    */
     /// Called when a touch event happened on the software keyword
+    /*
     pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
         let e: Event;
-
+        
         match characters {
             Some(input) => {
                 e = Event::TextInput(
@@ -249,14 +413,14 @@ impl Cx {
                         );
                         self.call_event_handler(&e);
                     } else if is_shortcut {
-                        if key_code == KeyCode::KeyC {  
+                        if key_code == KeyCode::KeyC {
                             let response = Rc::new(RefCell::new(None));
                             e = Event::TextCopy(TextClipboardEvent {
                                 response: response.clone()
                             });
                             self.call_event_handler(&e);
                             let response = response.borrow();
-                            if let Some(response) = response.as_ref(){
+                            if let Some(response) = response.as_ref() {
                                 to_java.copy_to_clipboard(response);
                             }
                         } else if key_code == KeyCode::KeyX {
@@ -266,10 +430,10 @@ impl Cx {
                             });
                             self.call_event_handler(&e);
                             let response = response.borrow();
-                            if let Some(response) = response.as_ref(){
+                            if let Some(response) = response.as_ref() {
                                 to_java.copy_to_clipboard(response);
                             }
-                        } else if key_code == KeyCode::KeyV {  
+                        } else if key_code == KeyCode::KeyV {
                             to_java.paste_from_clipboard();
                         }
                     } else {
@@ -287,10 +451,12 @@ impl Cx {
                 }
             }
         }
-    }
+    }*/
     
     /// Called when a timeout expired.
-    pub fn from_java_on_timeout(&mut self, timer_id: i64, to_java: AndroidToJava) {
+    /*
+    pub fn from_java_on_timeout(&mut self, timer_id: i64) {
+        //let dt = crate::profile_start();
         if timer_id == 0 {
             if Signal::check_and_clear_ui_signal() {
                 self.handle_media_signals(&to_java);
@@ -302,9 +468,10 @@ impl Cx {
             self.call_event_handler(&Event::Timer(TimerEvent {timer_id: timer_id as u64}))
         }
         self.after_every_event(&to_java);
+        //crate::profile_end!(dt);
     }
     
-    fn after_every_event(&mut self, to_java: &AndroidToJava) {
+    fn after_every_event(&mut self) {
         self.handle_platform_ops(&to_java);
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             to_java.schedule_redraw();
@@ -314,20 +481,24 @@ impl Cx {
     pub fn from_java_on_midi_device_opened(&mut self, name: String, midi_device: jobject, to_java: AndroidToJava) {
         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
     }
-
-    pub fn from_java_on_hide_text_ime(&mut self, to_java: AndroidToJava) {
+    
+    pub fn from_java_on_hide_text_ime(&mut self) {
+        let dt = crate::profile_start();
         self.text_ime_was_dismissed();
         self.redraw_all();
         self.after_every_event(&to_java);
+        crate::profile_end!(dt);
     }
-
-    pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32, to_java: AndroidToJava) {
+    
+    pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32) {
+        let dt = crate::profile_start();
         self.os.keyboard_visible = true;
         self.panning_adjust_for_text_ime(ime_height);
         self.redraw_all();
         self.after_every_event(&to_java);
+        crate::profile_end!(dt);
     }
-
+    
     pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
         if let Some(text) = content {
             let e = Event::TextInput(
@@ -341,7 +512,7 @@ impl Cx {
             self.after_every_event(&to_java);
         }
     }
-
+    
     pub fn from_java_on_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
         let e = Event::TextCut(
             TextClipboardEvent {
@@ -351,10 +522,10 @@ impl Cx {
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
-
+    
     pub fn from_java_on_http_response(&mut self, request_id: u64, metadata_id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
         let e = Event::NetworkResponses(vec![
-            NetworkResponseEvent{
+            NetworkResponseEvent {
                 request_id: LiveId(request_id),
                 response: NetworkResponse::HttpResponse(HttpResponse::new(
                     LiveId(metadata_id),
@@ -367,30 +538,29 @@ impl Cx {
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
-
+    
     pub fn from_java_on_http_request_error(&mut self, request_id: u64, _metadata_id: u64, error: String, to_java: AndroidToJava) {
         let e = Event::NetworkResponses(vec![
-            NetworkResponseEvent{
+            NetworkResponseEvent {
                 request_id: LiveId(request_id),
                 response: NetworkResponse::HttpRequestError(error)
             }
         ]);
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
-    }
-
+    }*/
+    
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
-        to_java: &AndroidToJava,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-
+        
         self.setup_render_pass(pass_id);
         
-        // keep repainting in a loop 
+        // keep repainting in a loop
         self.passes[pass_id].paint_dirty = false;
-        let panning_offset = if self.os.keyboard_visible { self.os.keyboard_panning_offset } else { 0 };
+        let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
         
         unsafe {
             gl_sys::Viewport(0, panning_offset, self.os.display_size.x as i32, self.os.display_size.y as i32);
@@ -413,13 +583,13 @@ impl Cx {
         if !self.passes[pass_id].dont_clear {
             unsafe {
                 //gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                gl_sys::ClearDepthf(clear_depth as f32); 
+                gl_sys::ClearDepthf(clear_depth as f32);
                 gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
         }
         Self::set_default_depth_and_blend_mode();
-         
+        
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
@@ -430,13 +600,13 @@ impl Cx {
             zbias_step,
         );
         
-        to_java.swap_buffers();
+        //to_java.swap_buffers();
         //unsafe {
         //direct_app.drm.swap_buffers_and_wait(&direct_app.egl);
         //}
     }
     
-    pub (crate) fn handle_repaint(&mut self, to_java: &AndroidToJava) {
+    pub (crate) fn _handle_repaint(&mut self) {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -445,7 +615,7 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
-                    self.draw_pass_to_fullscreen(*pass_id, to_java);
+                    self.draw_pass_to_fullscreen(*pass_id);
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -457,18 +627,18 @@ impl Cx {
             }
         }
     }
-
-    fn panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
+    
+    fn _panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
         self.os.keyboard_visible = true;
-
+        
         let screen_height = (self.os.display_size.y / self.os.dpi_factor) as i32;
         let vertical_offset = self.os.keyboard_trigger_position.y as i32;
         let ime_height = (android_ime_height as f64 / self.os.dpi_factor) as i32;
-
+        
         // Make sure there is some room between the software keyword and the text input or widget that triggered
         // the TextIME event
         let vertical_space = ime_height / 3;
-
+        
         let should_be_panned = vertical_offset > screen_height - ime_height;
         if should_be_panned {
             let panning_offset = vertical_offset - (screen_height - ime_height) + vertical_space;
@@ -478,7 +648,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, to_java: &AndroidToJava) -> EventFlow {
+    fn _handle_platform_ops(&mut self) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -500,31 +670,31 @@ impl Cx {
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
-                CxOsOp::StartTimer {timer_id, interval, repeats: _} => {
+                CxOsOp::StartTimer {timer_id:_, interval:_, repeats: _} => {
                     //android_app.start_timer(timer_id, interval, repeats);
-                    to_java.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
+                    //to_java.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
                 },
-                CxOsOp::StopTimer(timer_id) => {
-                    to_java.cancel_timeout(timer_id as i64);
+                CxOsOp::StopTimer(_timer_id) => {
+                    //to_java.cancel_timeout(timer_id as i64);
                     //android_app.stop_timer(timer_id);
                 },
                 CxOsOp::ShowTextIME(area, _pos) => {
                     self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
-                    to_java.show_text_ime();
+                   // to_java.show_text_ime();
                 },
                 CxOsOp::HideTextIME => {
                     self.os.keyboard_visible = false;
-                    to_java.hide_text_ime();
+                    //to_java.hide_text_ime();
                 },
-                CxOsOp::ShowClipboardActions(selected) => {
-                    to_java.show_clipboard_actions(selected.as_str());
+                CxOsOp::ShowClipboardActions(_selected) => {
+                    //to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::HttpRequest{request_id, request} => {
-                    to_java.http_request(request_id, request)
+                CxOsOp::HttpRequest {request_id:_, request:_} => {
+                    //to_java.http_request(request_id, request)
                 },
                 _ => ()
             }
-        }  
+        }
         EventFlow::Poll
     }
 }
@@ -544,6 +714,7 @@ impl CxOsApi for Cx {
 impl Default for CxOs {
     fn default() -> Self {
         Self {
+            last_time: Instant::now(),
             first_after_resize: true,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
@@ -551,25 +722,84 @@ impl Default for CxOs {
             keyboard_visible: false,
             keyboard_trigger_position: DVec2::default(),
             keyboard_panning_offset: 0,
-            media: CxAndroidMedia::default()
+            media: CxAndroidMedia::default(),
+            display: None ,
+            quit: false,
+            fullscreen: false
         }
     }
 }
 
+pub struct CxAndroidDisplay {
+    libegl: LibEgl,
+    egl_display: egl_sys::EGLDisplay,
+    egl_config: egl_sys::EGLConfig,
+    egl_context: egl_sys::EGLContext,
+    surface: egl_sys::EGLSurface,
+    window: *mut ndk_sys::ANativeWindow,
+    //event_handler: Box<dyn EventHandler>,
+}
+
+
 pub struct CxOs {
+    pub last_time: Instant,
     pub first_after_resize: bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
-
+    
     pub keyboard_visible: bool,
     pub keyboard_trigger_position: DVec2,
     pub keyboard_panning_offset: i32,
-
+    
+    pub quit: bool,
+    pub fullscreen: bool,
+    pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
 }
 
-impl CxOs {
+
+impl CxAndroidDisplay {
+    unsafe fn destroy_surface(&mut self) {
+        (self.libegl.eglMakeCurrent.unwrap())(
+            self.egl_display,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        (self.libegl.eglDestroySurface.unwrap())(self.egl_display, self.surface);
+        self.surface = std::ptr::null_mut();
+    }
+    
+    unsafe fn update_surface(&mut self, window: *mut ndk_sys::ANativeWindow) {
+        if !self.window.is_null() {
+            ndk_sys::ANativeWindow_release(self.window);
+        }
+        self.window = window;
+        if self.surface.is_null() == false {
+            self.destroy_surface();
+        }
+        
+        self.surface = (self.libegl.eglCreateWindowSurface.unwrap())(
+            self.egl_display,
+            self.egl_config,
+            window as _,
+            std::ptr::null_mut(),
+        );
+        
+        assert!(!self.surface.is_null());
+        
+        let res = (self.libegl.eglMakeCurrent.unwrap())(
+            self.egl_display,
+            self.surface,
+            self.surface,
+            self.egl_context,
+        );
+        
+        assert!(res != 0);
+    }
+}
+impl CxOs{
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0

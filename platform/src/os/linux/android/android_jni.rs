@@ -1,777 +1,554 @@
-#![allow(dead_code)]
-
-use {
-    self::super::{
-        jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
-    },
-    crate::{
-        makepad_live_id::*,
-        area::Area,
-        makepad_math::*,
-        event::*,
-        cx::{Cx, AndroidParams},
-    },
-    std::{
-        cell::Cell,
-        ffi::{CString},
-        marker::PhantomData,
-    },
+use crate::{
+    event::{KeyCode},
 };
 
-/// This struct corresponds to the `Makepad.Callback` interface in Java (which is implemented by
-/// the `MakepadSurface` class) and enables us to call methods on that interface while hiding as
-/// much of the Java native interface from our Rust code as possible.
+use std::{cell::RefCell, sync::mpsc};
+use self::super::ndk_sys;
+use self::super::jni_sys;
+use self::super::ndk_utils;
+
+#[no_mangle]
+pub unsafe extern "C" fn JNI_OnLoad(
+    vm: *mut jni_sys::JavaVM,
+    _: std::ffi::c_void,
+) -> jni_sys::jint {
+    VM = vm as *mut _ as _;
+
+    jni_sys::JNI_VERSION_1_6 as _
+}
+
+/// Short recap on how miniquad on Android works
+/// There is a MainActivity, a normal Java activity
+/// It creates a View and pass a reference to a view to rust.
+/// Rust spawn a thread that render things into this view as often as
+/// possible.
+/// Also MainActivty collects user input events and calls native rust functions.
 ///
-/// The lifetime is necessary here because object pointers in Java are not stable, so the object
-/// pointer wrapped by this struct is really only valid for the duration of each native call.
-pub struct AndroidToJava<'a> {
-    env: *mut JNIEnv,
-    callback: jobject,
-    phantom: PhantomData<&'a ()>,
+/// This long explanation was to illustrate how we ended up with evets callback
+/// and drawing in the different threads.
+/// Message enum is used to send data from the callbacks to the drawing thread.
+#[derive(Debug)]
+pub enum TouchPhase{
+    Moved,
+    Ended,
+    Started,
+    Cancelled,
 }
 
-impl<'a> AndroidToJava<'a> {
-    pub fn get_env(&self) -> *mut JNIEnv {
-        self.env
+#[derive(Debug)]
+pub enum FromJavaMessage {
+    SurfaceChanged {
+        window: *mut ndk_sys::ANativeWindow,
+        width: i32,
+        height: i32,
+    },
+    SurfaceCreated {
+        window: *mut ndk_sys::ANativeWindow,
+    },
+    SurfaceDestroyed,
+    Touch {
+        phase: TouchPhase,
+        touch_id: u64,
+        x: f32,
+        y: f32,
+    },
+    Character {
+        character: u32,
+    },
+    KeyDown {
+        keycode: KeyCode,
+    },
+    KeyUp {
+        keycode: KeyCode,
+    },
+    Pause,
+    Resume,
+    Destroy,
+}
+unsafe impl Send for FromJavaMessage {}
+
+thread_local! {
+    static MESSAGES_TX: RefCell<Option<mpsc::Sender<FromJavaMessage>>> = RefCell::new(None);
+}
+
+fn send_from_java_message(message: FromJavaMessage) {
+    MESSAGES_TX.with(|tx| {
+        let mut tx = tx.borrow_mut();
+        tx.as_mut().unwrap().send(message).unwrap();
+    })
+}
+
+static mut ACTIVITY: jni_sys::jobject = std::ptr::null_mut();
+static mut VM: *mut jni_sys::JavaVM = std::ptr::null_mut();
+
+pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: mpsc::Sender<FromJavaMessage>){
+    let env = attach_jni_env();
+    ACTIVITY = (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject);
+    MESSAGES_TX.with(move |messages_tx| *messages_tx.borrow_mut() = Some(from_java_tx));
+}
+/*
+pub unsafe fn console_debug(msg: *const ::std::os::raw::c_char) {
+    ndk_sys::__android_log_write(
+        ndk_sys::android_LogPriority_ANDROID_LOG_DEBUG as _,
+        b"SAPP\0".as_ptr() as _,
+        msg,
+    );
+}
+
+pub unsafe fn console_info(msg: *const ::std::os::raw::c_char) {
+    ndk_sys::__android_log_write(
+        ndk_sys::android_LogPriority_ANDROID_LOG_INFO as _,
+        b"SAPP\0".as_ptr() as _,
+        msg,
+    );
+}
+
+pub unsafe fn console_warn(msg: *const ::std::os::raw::c_char) {
+    ndk_sys::__android_log_write(
+        ndk_sys::android_LogPriority_ANDROID_LOG_WARN as _,
+        b"SAPP\0".as_ptr() as _,
+        msg,
+    );
+}
+
+pub unsafe fn console_error(msg: *const ::std::os::raw::c_char) {
+    ndk_sys::__android_log_write(
+        ndk_sys::android_LogPriority_ANDROID_LOG_ERROR as _,
+        b"SAPP\0".as_ptr() as _,
+        msg,
+    );
+}*/
+
+// fn log_info(message: &str) {
+//     use std::ffi::CString;
+
+//     let msg = CString::new(message).unwrap_or_else(|_| panic!());
+
+//     unsafe { console_info(msg.as_ptr()) };
+// }
+/*
+impl MainThreadState {
+    unsafe fn destroy_surface(&mut self) {
+        (self.libegl.eglMakeCurrent.unwrap())(
+            self.egl_display,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        (self.libegl.eglDestroySurface.unwrap())(self.egl_display, self.surface);
+        self.surface = std::ptr::null_mut();
     }
-    
-    /// Swaps the buffers of the MakepadSurface.
-    pub fn swap_buffers(&self) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("swapBuffers").unwrap();
-            let signature = CString::new("()V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
+
+    unsafe fn update_surface(&mut self, window: *mut ndk_sys::ANativeWindow) {
+        if !self.window.is_null() {
+            ndk_sys::ANativeWindow_release(self.window);
         }
-    }
-    
-    /// Schedules a call to `Cx::draw`.
-    ///
-    /// This works by marking the MakepadSurface as dirty and therefore *should* synchronize
-    /// correctly with vsync.
-    pub fn schedule_redraw(&self) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("scheduleRedraw").unwrap();
-            let signature = CString::new("()V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
+        self.window = window;
+        if self.surface.is_null() == false {
+            self.destroy_surface();
         }
+
+        self.surface = (self.libegl.eglCreateWindowSurface.unwrap())(
+            self.egl_display,
+            self.egl_config,
+            window as _,
+            std::ptr::null_mut(),
+        );
+
+        assert!(!self.surface.is_null());
+
+        let res = (self.libegl.eglMakeCurrent.unwrap())(
+            self.egl_display,
+            self.surface,
+            self.surface,
+            self.egl_context,
+        );
+
+        assert!(res != 0);
     }
+
     
-    /// Schedules a timeout with the given `id` and `delay`, where `delay` is given in
-    /// milliseconds.
-    ///
-    /// It is your responsibility to make sure that timeout ids are unique.
-    pub fn schedule_timeout(&self, id: i64, delay: i64) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("scheduleTimeout").unwrap();
-            let signature = CString::new("(JJ)V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, id, delay);
-        }
-    }
-    
-    /// Cancels the timeout with the given id.
-    ///
-    /// It is your responsibility to make sure that timeout ids are unique.
-    pub fn cancel_timeout(&self, id: i64) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("cancelTimeout").unwrap();
-            let signature = CString::new("(J)V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, id);
-        }
-    }
-    
-    /// Show software keyboard
-    pub fn show_text_ime(&self) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("showTextIME").unwrap();
-            let signature = CString::new("()V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
-        }
-    }
-    
-    /// Hide software keyboard
-    pub fn hide_text_ime(&self) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("hideTextIME").unwrap();
-            let signature = CString::new("()V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
-        }
-    }
-    
-    /// Display clipboard actions menu
-    pub fn show_clipboard_actions(&self, selected: &str) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("showClipboardActions").unwrap();
-            let signature = CString::new("(Ljava/lang/String;)V").unwrap();
-            let selected = CString::new(selected).unwrap();
-            let selected = ((**self.env).NewStringUTF.unwrap())(self.env, selected.as_ptr());
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, selected);
-        }
-    }
-    
-    pub fn copy_to_clipboard(&self, selected: &str) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("copyToClipboard").unwrap();
-            let signature = CString::new("(Ljava/lang/String;)V").unwrap();
-            let selected = CString::new(selected).unwrap();
-            let selected = ((**self.env).NewStringUTF.unwrap())(self.env, selected.as_ptr());
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, selected);
-        }
-    }
-    
-    pub fn paste_from_clipboard(&self) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            
-            let name = CString::new("pasteFromClipboard").unwrap();
-            let signature = CString::new("()V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
-        }
-    }
-    
-    /// reads an asset
-    ///
-    ///
-    pub fn read_asset(&self, file: &str) -> Option<Vec<u8 >> {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            
-            let name = CString::new("readAsset").unwrap();
-            let signature = CString::new("(Ljava/lang/String;)[B").unwrap();
-            let file = CString::new(file).unwrap();
-            let file = ((**self.env).NewStringUTF.unwrap())(self.env, file.as_ptr());
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            let byte_array = ((**self.env).CallObjectMethod.unwrap())(self.env, self.callback, method_id, file);
-            if byte_array == std::ptr::null_mut() {
-                return None
-            }
-            else {
-                return Some(java_byte_array_to_vec(self.env, byte_array));
+
+    fn frame(&mut self) {
+        self.event_handler.update();
+
+        if self.surface.is_null() == false {
+            self.event_handler.draw();
+
+            unsafe {
+                (self.libegl.eglSwapBuffers.unwrap())(self.egl_display, self.surface);
             }
         }
     }
-    
-    pub fn get_audio_devices(&self, flag: jlong) -> Vec<String> {
+/*
+    fn process_request(&mut self, request: crate::native::Request) {
+        use crate::native::Request::*;
         unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            
-            let name = CString::new("getAudioDevices").unwrap();
-            let signature = CString::new("(J)[Ljava/lang/String;").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            let string_array = ((**self.env).CallObjectMethod.unwrap())(self.env, self.callback, method_id, flag);
-            return java_string_array_to_vec(self.env, string_array);
-        }
-    }
-    
-    pub fn open_all_midi_devices(&self, delay: jlong) {
-        unsafe {
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("openAllMidiDevices").unwrap();
-            let signature = CString::new("(J)V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,
-                class,
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            ((**self.env).CallLongMethod.unwrap())(self.env, self.callback, method_id, delay);
-        }
-    }
-    
-    pub fn http_request(&self, request_id: LiveId, request: HttpRequest) {
-        unsafe {
-            let url = CString::new(request.url.clone()).unwrap();
-            let url = ((**self.env).NewStringUTF.unwrap())(self.env, url.as_ptr());
-            
-            let method = CString::new(request.method.to_string()).unwrap();
-            let method = ((**self.env).NewStringUTF.unwrap())(self.env, method.as_ptr());
-            
-            let headers_string = request.get_headers_string();
-            let headers = CString::new(headers_string).unwrap();
-            let headers = ((**self.env).NewStringUTF.unwrap())(self.env, headers.as_ptr());
-            
-            let java_body = match &request.body {
-                Some(body) => {
-                    let java_body = (**self.env).NewByteArray.unwrap()(self.env, body.len() as i32);
-                    (**self.env).SetByteArrayRegion.unwrap()(
-                        self.env,
-                        java_body,
-                        0,
-                        body.len() as i32,
-                        body.as_ptr() as *const jbyte,
-                    );
-                    java_body
+            match request {
+                SetFullscreen(fullscreen) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        set_full_screen(env, fullscreen);
+                    }
+                    self.fullscreen = fullscreen;
                 }
-                None => std::ptr::null_mut(),
-            };
-            
-            let name = CString::new("requestHttp").unwrap();
-            let signature = CString::new("(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
-            let method_id = (**self.env).GetMethodID.unwrap()(
-                self.env,
-                (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
-                name.as_ptr(),
-                signature.as_ptr(),
-            );
-            
-            (**self.env).CallVoidMethod.unwrap()(
-                self.env,
-                self.callback,
-                method_id,
-                request_id.get_value() as jlong,
-                request.metadata_id.get_value() as jlong,
-                url,
-                method,
-                headers,
-                java_body as jobject,
-            );
+                ShowKeyboard(show) => unsafe {
+                    let env = attach_jni_env();
+                    ndk_utils::call_void_method!(
+                        env,
+                        ACTIVITY,
+                        "showKeyboard",
+                        "(Z)V",
+                        show as i32
+                    );
+                },
+                _ => {}
+            }
         }
+    }*/
+}
+*/
+/// Get the JNI Env by calling ndk's AttachCurrentThread
+///
+/// Safety note: This function is not exactly correct now, it should be fixed!
+///
+/// AttachCurrentThread should be called at least once for any given thread that
+/// wants to use the JNI and DetachCurrentThread should be called only once, when
+/// the thread stack is empty and the thread is about to stop
+///
+/// calling AttachCurrentThread from the same thread multiple time is very cheap
+///
+/// BUT! there is no DetachCurrentThread call right now, this code:
+/// `thread::spawn(|| attach_jni_env());` will lead to internal jni crash :/
+/// thread::spawn(|| { attach_jni_env(); loop {} }); is basically what miniquad
+/// is doing. this is not correct, but works
+/// TODO: the problem here -
+/// TODO:   thread::spawn(|| { Attach(); .. Detach() }); will not work as well.
+/// TODO: JNI will check that thread's stack is still alive and will crash.
+///
+/// TODO: Figure how to get into the thread destructor to correctly call Detach
+/// TODO: (this should be a GH issue)
+/// TODO: for reference - grep for "pthread_setspecific" in SDL2 sources, SDL fixed it!
+pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
+    let mut env: *mut jni_sys::JNIEnv = std::ptr::null_mut();
+    let attach_current_thread = (**VM).AttachCurrentThread.unwrap();
+
+    let res = attach_current_thread(VM, &mut env, std::ptr::null_mut());
+    assert!(res == 0);
+
+    env
+}
+
+/*
+pub unsafe fn android_main(){
+    {
+        use std::ffi::CString;
+        use std::panic;
+
+        panic::set_hook(Box::new(|info| {
+            let msg = CString::new(format!("{:?}", info)).unwrap_or_else(|_| {
+                CString::new(format!("MALFORMED ERROR MESSAGE {:?}", info.location())).unwrap()
+            });
+            console_error(msg.as_ptr());
+        }));
     }
-}
 
-// The functions here correspond to the static functions on the `Makepad` class in Java.
+    //if conf.fullscreen {
+        let env = attach_jni_env();
+        set_full_screen(env, true);
+    //}
 
-// Java_nl_makepad_android_Makepad_newCx is found in main_app.rs
+    let (tx, rx) = mpsc::channel();
 
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onDropCx(_: JNIEnv, _: jclass, _cx: jlong) {
-    //log!("DROP!");
-    //drop(Box::from_raw(app as *mut Cx));
-}
+    MESSAGES_TX.with(move |messages_tx| *messages_tx.borrow_mut() = Some(tx));
 
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onPause(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_pause(AndroidToJava {env, callback, phantom: PhantomData});
-}
+    thread::spawn(move || {
+        let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResume(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_resume(AndroidToJava {env, callback, phantom: PhantomData});
-}
+        // skip all the messages until android will be able to actually open a window
+        //
+        // sometimes before launching an app android will show a permission dialog
+        // it is important to create GL context only after a first SurfaceChanged
+        let (window, screen_width, screen_height) = 'a: loop {
+            match rx.try_recv() {
+                Ok(Message::SurfaceChanged {
+                    window,
+                    width,
+                    height,
+                }) => {
+                    break 'a (window, width as f32, height as f32);
+                }
+                _ => {}
+            }
+        };
 
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onNewGL(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_new_gl(AndroidToJava {env, callback, phantom: PhantomData});
-}
+        let (egl_context, egl_config, egl_display) = android_egl::create_egl_context(
+            &mut libegl,
+            std::ptr::null_mut(), /* EGL_DEFAULT_DISPLAY */
+            false,
+        )
+        .expect("Cant create EGL context");
 
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onFreeGL(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_free_gl(AndroidToJava {env, callback, phantom: PhantomData});
-}
+        assert!(!egl_display.is_null());
+        assert!(!egl_config.is_null());
 
-unsafe fn jstring_to_string(env: *mut JNIEnv, java_string: jstring) -> String {
-    let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
-    let rust_string = std::ffi::CStr::from_ptr(chars).to_str().unwrap().to_string();
-    (**env).ReleaseStringUTFChars.unwrap()(env, java_string, chars);
-    rust_string
-}
+        unsafe {gl_sys::load_with( | s | {   
+            let s = CString::new(s).unwrap();
+            libegl.eglGetProcAddress(s.as_ptr()) 
+        })};
+        
+        let surface = (libegl.eglCreateWindowSurface.unwrap())(
+            egl_display,
+            egl_config,
+            window as _,
+            std::ptr::null_mut(),
+        );
 
-unsafe fn java_string_array_to_vec(env: *mut JNIEnv, object_array: jobject) -> Vec<String> {
-    if object_array == std::ptr::null_mut() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let length = (**env).GetArrayLength.unwrap()(env, object_array);
-    for i in 0..length {
-        let string = (**env).GetObjectArrayElement.unwrap()(env, object_array, i as jsize);
-        out.push(jstring_to_string(env, string));
-    }
-    out
-}
-
-unsafe fn java_byte_array_to_vec(env: *mut JNIEnv, byte_array: jobject) -> Vec<u8> {
-    let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
-    let length = (**env).GetArrayLength.unwrap()(env, byte_array);
-    let mut out_bytes = Vec::new();
-    let slice = std::slice::from_raw_parts(bytes as *const u8, length as usize);
-    out_bytes.extend_from_slice(slice);
-    (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, JNI_ABORT);
-    out_bytes
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onInit(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    cache_path: jstring,
-    density: jfloat,
-    callback: jobject,
-) {
-    crate::makepad_error_log::init_panic_hook();
-    (*(cx as *mut Cx)).from_java_on_init(
-        AndroidParams {
-            cache_path: jstring_to_string(env, cache_path),
-            density: density as f64,
-        },
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
+        if (libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context) == 0 {
+            panic!();
         }
-    );
+
+        let (tx, requests_rx) = std::sync::mpsc::channel();
+        /*
+        crate::set_display(NativeDisplayData {
+            high_dpi: conf.high_dpi,
+            ..NativeDisplayData::new(screen_width as _, screen_height as _, tx, clipboard)
+        });*/
+
+        let mut s = MainThreadState {
+            libegl,
+            egl_display,
+            egl_config,
+            egl_context,
+            surface,
+            window,
+            quit: false,
+            fullscreen: true,
+            /*keymods: KeyMods {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                logo: false,
+            },*/
+        };
+
+        while !s.quit {
+            while let Ok(request) = requests_rx.try_recv() {
+                s.process_request(request);
+            }
+
+            // process all the messages from the main thread
+            while let Ok(msg) = rx.try_recv() {
+                s.process_message(msg);
+            }
+
+            s.frame();
+
+            thread::yield_now();
+        }
+
+        (s.libegl.eglMakeCurrent.unwrap())(
+            s.egl_display,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        (s.libegl.eglDestroySurface.unwrap())(s.egl_display, s.surface);
+        (s.libegl.eglDestroyContext.unwrap())(s.egl_display, s.egl_context);
+        (s.libegl.eglTerminate.unwrap())(s.egl_display);
+    });
+}*/
+
+#[no_mangle]
+extern "C" fn jni_on_load(vm: *mut std::ffi::c_void) {
+    unsafe {
+        VM = vm as _;
+    }
+}
+
+unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANativeWindow {
+    let env = attach_jni_env();
+
+    ndk_sys::ANativeWindow_fromSurface(env, surface)
+}
+/*
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_activityOnCreate(
+    _: *mut ndk_sys::JNIEnv,
+    _: ndk_sys::jobject,
+    activity: ndk_sys::jobject,
+) {
+    let env = attach_jni_env();
+    ACTIVITY = (**env).NewGlobalRef.unwrap()(env, activity);
+    android_main();
+}
+*/
+#[no_mangle]
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnResume(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+) {
+    send_from_java_message(FromJavaMessage::Resume);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResize(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    width: jint,
-    height: jint,
-    callback: jobject,
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnPause(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_on_resize(
-        width,
-        height,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
+    send_from_java_message(FromJavaMessage::Pause);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onDraw(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnDestroy(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_on_draw(AndroidToJava {
-        env,
-        callback,
-        phantom: PhantomData,
+    send_from_java_message(FromJavaMessage::Destroy);
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceCreated(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    surface: jni_sys::jobject,
+) {
+    let window = unsafe { create_native_window(surface) };
+    send_from_java_message(FromJavaMessage::SurfaceCreated { window });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceDestroyed(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+) {
+    send_from_java_message(FromJavaMessage::SurfaceDestroyed);
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceChanged(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    surface: jni_sys::jobject,
+    width: jni_sys::jint,
+    height: jni_sys::jint,
+) {
+    let window = unsafe { create_native_window(surface) };
+
+    send_from_java_message(FromJavaMessage::SurfaceChanged {
+        window,
+        width: width as _,
+        height: height as _,
     });
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onKeyDown(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    event: jobject,
-    callback: jobject,
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    touch_id: jni_sys::jint,
+    action: jni_sys::jint,
+    x: jni_sys::jfloat,
+    y: jni_sys::jfloat,
 ) {
-    let key_code = unsafe {
-        let class = ((**env).GetObjectClass.unwrap())(env, event);
-        let name = CString::new("getKeyCode").unwrap();
-        let signature = CString::new("()I").unwrap();
-        let method_id =
-        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-        ((**env).CallIntMethod.unwrap())(env, event, method_id)
+    let phase = match action {
+        0 => TouchPhase::Moved,
+        1 => TouchPhase::Ended,
+        2 => TouchPhase::Started,
+        3 => TouchPhase::Cancelled,
+        x => panic!("Unsupported touch phase: {}", x),
     };
-    
-    let characters: Option<String> = unsafe {
-        let class = ((**env).GetObjectClass.unwrap())(env, event);
-        let name = CString::new("getCharacters").unwrap();
-        let signature = CString::new("()Ljava/lang/String;").unwrap();
-        let method_id =
-        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-        let string_value = ((**env).CallObjectMethod.unwrap())(env, event, method_id);
-        
-        if string_value == std::ptr::null_mut() {
-            None
-        } else {
-            Some(jstring_to_string(env, string_value))
-        }
-    };
-    
-    let meta_state = unsafe {
-        let class = ((**env).GetObjectClass.unwrap())(env, event);
-        let name = CString::new("getMetaState").unwrap();
-        let signature = CString::new("()I").unwrap();
-        let method_id =
-        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-        ((**env).CallIntMethod.unwrap())(env, event, method_id)
-    };
-    
-    (*(cx as *mut Cx)).from_java_on_key_down(
-        key_code,
-        characters,
-        meta_state,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
+
+    send_from_java_message(FromJavaMessage::Touch {
+        phase,
+        touch_id: touch_id as _,
+        x: x as f32,
+        y: y as f32,
+    });
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onTouch(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    event: jobject,
-    callback: jobject,
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyDown(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    _keycode: jni_sys::jint,
 ) {
-    let action_masked = unsafe {
-        let class = ((**env).GetObjectClass.unwrap())(env, event);
-        let name = CString::new("getActionMasked").unwrap();
-        let signature = CString::new("()I").unwrap();
-        let method_id =
-        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-        ((**env).CallIntMethod.unwrap())(env, event, method_id)
-    };
-    let action_index = unsafe {
-        let class = ((**env).GetObjectClass.unwrap())(env, event);
-        let name = CString::new("getActionIndex").unwrap();
-        let signature = CString::new("()I").unwrap();
-        let method_id =
-        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-        ((**env).CallIntMethod.unwrap())(env, event, method_id)
-    };
-    
-    let touch_count = unsafe {
-        let class = ((**env).GetObjectClass.unwrap())(env, event);
-        let name = CString::new("getPointerCount").unwrap();
-        let signature = CString::new("()I").unwrap();
-        let method_id =
-        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-        ((**env).CallIntMethod.unwrap())(env, event, method_id)
-    };
-    
-    let mut touches = Vec::with_capacity(touch_count as usize);
-    for touch_index in 0..touch_count {
-        let id = unsafe {
-            let class = ((**env).GetObjectClass.unwrap())(env, event);
-            let name = CString::new("getPointerId").unwrap();
-            let signature = CString::new("(I)I").unwrap();
-            let method_id =
-            ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-            ((**env).CallIntMethod.unwrap())(env, event, method_id, touch_index)
-        };
-        
-        let x = unsafe {
-            let class = ((**env).GetObjectClass.unwrap())(env, event);
-            let name = CString::new("getX").unwrap();
-            let signature = CString::new("(I)F").unwrap();
-            let method_id =
-            ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-            ((**env).CallFloatMethod.unwrap())(env, event, method_id, touch_index)
-        };
-        
-        let y = unsafe {
-            let class = ((**env).GetObjectClass.unwrap())(env, event);
-            let name = CString::new("getY").unwrap();
-            let signature = CString::new("(I)F").unwrap();
-            let method_id =
-            ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-            ((**env).CallFloatMethod.unwrap())(env, event, method_id, touch_index)
-        };
-        
-        let rotation_angle = unsafe {
-            let class = ((**env).GetObjectClass.unwrap())(env, event);
-            let name = CString::new("getOrientation").unwrap();
-            let signature = CString::new("(I)F").unwrap();
-            let method_id =
-            ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-            ((**env).CallFloatMethod.unwrap())(env, event, method_id, touch_index)
-        } as f64;
-        
-        let force = unsafe {
-            let class = ((**env).GetObjectClass.unwrap())(env, event);
-            let name = CString::new("getPressure").unwrap();
-            let signature = CString::new("(I)F").unwrap();
-            let method_id =
-            ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
-            ((**env).CallFloatMethod.unwrap())(env, event, method_id, touch_index)
-        } as f64;
-        
-        touches.push(TouchPoint {
-            state: {
-                if action_index == touch_index {
-                    match action_masked {
-                        0 | 5 => TouchState::Start,
-                        1 | 6 => TouchState::Stop,
-                        2 => TouchState::Move,
-                        _ => return,
-                    }
-                }
-                else {
-                    TouchState::Move
-                }
-            },
-            uid: id as u64,
-            rotation_angle,
-            force,
-            radius: dvec2(1.0, 1.0),
-            handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
-            abs: dvec2(x as f64, y as f64),
-        });
+    /*let keycode = keycodes::translate_keycode(keycode as _);
+
+    send_message(Message::KeyDown { keycode });*/
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyUp(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    _keycode: jni_sys::jint,
+) {
+    /*let keycode = keycodes::translate_keycode(keycode as _);
+
+    send_message(Message::KeyUp { keycode });*/
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnCharacter(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    _character: jni_sys::jint,
+) {
+   /* send_message(Message::Character {
+        character: character as u32,
+    });*/
+}
+
+pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: bool) {
+    ndk_utils::call_void_method!(env, ACTIVITY, "setFullScreen", "(Z)V", fullscreen as i32);
+}
+
+
+// According to documentation, AAssetManager_fromJava is as available as an
+// AAssetManager_open, which was used before
+// For some reason it is missing fron ndk_sys binding
+extern "C" {
+    pub fn AAssetManager_fromJava(
+        env: *mut jni_sys::JNIEnv,
+        assetManager: jni_sys::jobject,
+    ) -> *mut ndk_sys::AAssetManager;
+}
+
+pub(crate) unsafe fn to_java_load_asset(filepath: *const ::std::os::raw::c_char)->Option<Vec<u8>> {
+    let env = attach_jni_env();
+
+    let get_method_id = (**env).GetMethodID.unwrap();
+    let get_object_class = (**env).GetObjectClass.unwrap();
+    let call_object_method = (**env).CallObjectMethod.unwrap();
+
+    let mid = (get_method_id)(
+        env,
+        get_object_class(env, ACTIVITY),
+        b"getAssets\0".as_ptr() as _,
+        b"()Landroid/content/res/AssetManager;\0".as_ptr() as _,
+    );
+    let asset_manager = (call_object_method)(env, ACTIVITY, mid);
+    let mgr = AAssetManager_fromJava(env, asset_manager);
+    let asset = ndk_sys::AAssetManager_open(mgr, filepath, ndk_sys::AASSET_MODE_BUFFER as _);
+    if asset.is_null() {
+        return None;
     }
-    
-    (*(cx as *mut Cx)).from_java_on_touch(
-        touches,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onTimeout(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    id: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_timeout(
-        id,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onMidiDeviceOpened(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    name: jstring,
-    midi_device: jobject,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_midi_device_opened(
-        jstring_to_string(env, name),
-        midi_device,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHideTextIME(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_hide_text_ime(
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResizeTextIME(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    ime_height: jint,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_resize_text_ime(
-        ime_height,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onPasteFromClipboard(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    content: jstring,
-    callback: jobject,
-) {
-    let string_content = if content == std::ptr::null_mut() {
-        None
-    } else {
-        Some(jstring_to_string(env, content))
-    };
-    
-    (*(cx as *mut Cx)).from_java_on_paste_from_clipboard(
-        string_content,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onCutToClipboard(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_cut_to_clipboard(
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    request_id: jlong,
-    metadata_id: jlong,
-    status_code: jint,
-    headers: jstring,
-    body: jobject,
-    callback: jobject,
-) {
-    let headers = jstring_to_string(env, headers);
-    let body = java_byte_array_to_vec(env, body);
-    
-    (*(cx as *mut Cx)).from_java_on_http_response(
-        request_id as u64,
-        metadata_id as u64,
-        status_code as u16,
-        headers,
-        body,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    request_id: jlong,
-    metadata_id: jlong,
-    exception: jstring,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_on_http_request_error(
-        request_id as u64,
-        metadata_id as u64,
-        jstring_to_string(env, exception),
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHookPanic(_: *const std::ffi::c_void, _: *const std::ffi::c_void) {
-    pub fn panic_hook(info: &std::panic::PanicInfo) {
-        crate::error!("{}", info) 
+    let length = ndk_sys::AAsset_getLength64(asset);
+    // TODO: memory leak right here! this buffer would never freed
+    let mut buffer = Vec::new();
+    buffer.resize(length as usize, 0u8);
+    if ndk_sys::AAsset_read(asset, buffer.as_ptr() as *mut _, length as _) > 0 {
+        ndk_sys::AAsset_close(asset);
+        return Some(buffer)
     }
-    std::panic::set_hook(Box::new(panic_hook));
+    return None;
+    /*
+    let buffer = libc::malloc(length as _);
+    if ndk_sys::AAsset_read(asset, buffer, length as _) > 0 {
+        ndk_sys::AAsset_close(asset);
+
+        (*out).content_length = length as _;
+        (*out).content = buffer as _;
+    }*/
 }
