@@ -462,8 +462,6 @@ fn deserialize_chunk(
     let mut cursor = 0;
 
     // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | Frame data length (4b) | Pixel Data |
-    let metadata_size = 24;
-
     while cursor < frame_group.len() {
         // might have to update for different endinaess on other platforms
         let timestamp =
@@ -491,7 +489,15 @@ fn deserialize_chunk(
             .acquire(video_width as usize * video_height as usize);
 
         match color_format {
-            VideoColorFormat::YUV420Planar => todo!(),
+            VideoColorFormat::YUV420Planar => planar_to_u32(
+                pixel_data,
+                video_width,
+                video_height,
+                y_stride,
+                u_stride,
+                v_stride,
+                &mut pixel_data_u32,
+            ),
             VideoColorFormat::YUV420SemiPlanar => semi_planar_to_u32(
                 pixel_data,
                 video_width,
@@ -525,17 +531,11 @@ fn planar_to_u32(
     let mut y_idx = 0;
 
     let y_start = 0;
-    let y_end = y_stride * height;
-
-    let u_start = y_end;
-    let u_end = u_start + u_stride * (height / 2);
-
-    let v_start = u_end;
+    let u_start = y_stride * height;
+    let v_start = u_start + u_stride * (height / 2);
 
     for row in 0..height {
         let y_row_start = y_start + row * y_stride;
-        let y_row_end = y_row_start + width;
-
         let u_row_start = u_start + (row / 2) * u_stride;
         let v_row_start = v_start + (row / 2) * v_stride;
 
@@ -565,8 +565,6 @@ fn semi_planar_to_u32(
 
     for row in 0..height {
         let y_start = row * y_stride;
-        let y_end = y_start + width;
-
         let uv_row_start = uv_start + (row / 2) * uv_stride;
 
         for x in 0..width {
