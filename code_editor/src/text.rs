@@ -181,24 +181,24 @@ impl Position {
 impl Add<Length> for Position {
     type Output = Self;
 
-    fn add(self, extent: Length) -> Self::Output {
-        if extent.line_count == 0 {
+    fn add(self, length: Length) -> Self::Output {
+        if length.line_count == 0 {
             Self {
                 line_index: self.line_index,
-                byte_index: self.byte_index + extent.byte_count,
+                byte_index: self.byte_index + length.byte_count,
             }
         } else {
             Self {
-                line_index: self.line_index + extent.line_count,
-                byte_index: extent.byte_count,
+                line_index: self.line_index + length.line_count,
+                byte_index: length.byte_count,
             }
         }
     }
 }
 
 impl AddAssign<Length> for Position {
-    fn add_assign(&mut self, extent: Length) {
-        *self = *self + extent;
+    fn add_assign(&mut self, length: Length) {
+        *self = *self + length;
     }
 }
 
