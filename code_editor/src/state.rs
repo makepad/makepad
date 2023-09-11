@@ -6,7 +6,7 @@ use {
         iter::IteratorExt,
         line::Wrapped,
         move_ops,
-        selection::{Affinity, SelectionSet},
+        selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
         text::{Change, Drift, Length, Position, Text},
         token::TokenKind,
@@ -279,74 +279,67 @@ impl Session {
         true
     }
 
-    pub fn set_cursor(&mut self, cursor: Position, affinity: Affinity) {
-        self.selections.set_selection(Selection {
-            anchor: cursor,
-            cursor,
+    pub fn set_cursor(&mut self, position: Position, affinity: Affinity) {
+        self.selections.set_selection(Selection::from(Cursor {
+            position,
             affinity,
             preferred_column: None,
-        });
+        }));
         self.pending_selection_index = Some(0);
         self.document.borrow_mut().force_new_edit_group();
     }
 
-    pub fn add_cursor(&mut self, cursor: Position, affinity: Affinity) {
-        let selection = Selection {
-            anchor: cursor,
-            cursor,
-            affinity,
-            preferred_column: None,
-        };
-        self.pending_selection_index = Some(self.selections.push_selection(selection));
+    pub fn push_cursor(&mut self, position: Position, affinity: Affinity) {
+        self.pending_selection_index =
+            Some(self.selections.push_selection(Selection::from(Cursor {
+                position,
+                affinity,
+                preferred_column: None,
+            })));
         self.document.borrow_mut().force_new_edit_group();
     }
 
-    pub fn move_to(&mut self, cursor: Position, affinity: Affinity) {
-        self.pending_selection_index = Some(self.selections.update_selection(self.pending_selection_index.unwrap(), |selection| Selection {
-            cursor,
-            affinity,
-            ..selection
-        }));
+    pub fn move_to(&mut self, position: Position, affinity: Affinity) {
+        self.pending_selection_index = Some(self.selections.update_selection(
+            self.pending_selection_index.unwrap(),
+            |selection| {
+                selection.update_cursor(|_|
+                    Cursor {
+                        position,
+                        affinity,
+                        preferred_column: None,
+                    }
+                )
+            }
+        ));
         self.document.borrow_mut().force_new_edit_group();
     }
 
     pub fn move_left(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor, _, _| {
-                (
-                    move_ops::move_left(session.document.borrow().text.as_lines(), cursor),
-                    Affinity::Before,
-                    None,
-                )
+            selection.update_cursor(|cursor| {
+                move_ops::move_left(session.document.borrow().text.as_lines(), cursor)
             })
         });
     }
 
     pub fn move_right(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor, _, _| {
-                (
-                    move_ops::move_right(session.document.borrow().text.as_lines(), cursor),
-                    Affinity::Before,
-                    None,
-                )
+            selection.update_cursor(|cursor| {
+                move_ops::move_right(session.document.borrow().text.as_lines(), cursor)
             })
         });
     }
 
     pub fn move_up(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor, affinity, preferred_column| {
-                move_ops::move_up(session, cursor, affinity, preferred_column)
-            })
+            selection.update_cursor(|cursor| move_ops::move_up(session, cursor))
         });
     }
 
     pub fn move_down(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor, affinity, preferred_column| {
-                move_ops::move_down(session, cursor, affinity, preferred_column)
-            })
+            selection.update_cursor(|cursor| move_ops::move_down(session, cursor))
         });
     }
 
@@ -513,7 +506,7 @@ impl Session {
             .iter()
             .copied()
             .merge(
-                |selection_0, selection_1| match selection_0.merge(selection_1) {
+                |selection_0, selection_1| match selection_0.merge_with(selection_1) {
                     Some(selection) => Ok(selection),
                     None => Err((selection_0, selection_1)),
                 },
@@ -619,13 +612,14 @@ impl Session {
     ) {
         // TODO: This should not be needed!!!
         let mut selections = mem::take(&mut self.selections);
-        self.pending_selection_index = selections.update_all_selections(self.pending_selection_index, |selection| {
-            let mut selection = f(&self, selection);
-            if reset_anchor {
-                selection = selection.reset_anchor();
-            }
-            selection
-        });
+        self.pending_selection_index =
+            selections.update_all_selections(self.pending_selection_index, |selection| {
+                let mut selection = f(&self, selection);
+                if reset_anchor {
+                    selection = selection.reset_anchor();
+                }
+                selection
+            });
         self.selections = selections;
         self.document.borrow_mut().force_new_edit_group();
     }
@@ -813,7 +807,7 @@ impl Document {
             .iter()
             .copied()
             .merge(
-                |selection_0, selection_1| match selection_0.merge(selection_1) {
+                |selection_0, selection_1| match selection_0.merge_with(selection_1) {
                     Some(selection) => Ok(selection),
                     None => Err((selection_0, selection_1)),
                 },

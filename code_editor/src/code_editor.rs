@@ -368,7 +368,7 @@ impl CodeEditor {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
-                        session.add_cursor(cursor, affinity);
+                        session.push_cursor(cursor, affinity);
                     } else {
                         session.set_cursor(cursor, affinity);
                     }
@@ -780,7 +780,7 @@ impl<'a> DrawSelections<'a> {
             self.draw_selection(cx, line_ref, y, column);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == point && selection.affinity == affinity {
+            if selection.cursor.position == point && selection.cursor.affinity == affinity {
                 self.draw_cursor(cx, line_ref, y, column);
             }
         }
@@ -793,7 +793,7 @@ impl<'a> DrawSelections<'a> {
             })
         {
             let selection = *self.selections.next().unwrap();
-            if selection.cursor == point && selection.affinity == affinity {
+            if selection.cursor.position == point && selection.cursor.affinity == affinity {
                 self.draw_cursor(cx, line_ref, y, column);
             }
             if !selection.is_empty() {
