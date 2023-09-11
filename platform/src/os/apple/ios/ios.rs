@@ -44,7 +44,7 @@ impl Cx {
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
-        crate::log!("Hello world ! We booted up!");
+        crate::log!("Makepad iOS application started.");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));
         let device = metal_cx.borrow().device;
         init_apple_classes_global();
