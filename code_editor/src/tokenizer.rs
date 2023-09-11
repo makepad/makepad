@@ -1,4 +1,8 @@
-use crate::{change::ChangeKind, token::TokenKind, Change, Text, Token};
+use crate::{
+    text::{Change, Text},
+    token::TokenKind,
+    Token,
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Tokenizer {
@@ -13,20 +17,20 @@ impl Tokenizer {
     }
 
     pub fn apply_change(&mut self, change: &Change) {
-        match &change.kind {
-            ChangeKind::Insert(point, text) => {
-                self.state[point.line] = None;
-                let line_count = text.extent().line_count;
+        match *change {
+            Change::Insert(point, ref text) => {
+                self.state[point.line_index] = None;
+                let line_count = text.length().line_count;
                 if line_count > 0 {
-                    let line = point.line + 1;
+                    let line = point.line_index + 1;
                     self.state.splice(line..line, (0..line_count).map(|_| None));
                 }
             }
-            ChangeKind::Delete(range) => {
-                self.state[range.start().line] = None;
-                let line_count = range.extent().line_count;
+            Change::Delete(start, length) => {
+                self.state[start.line_index] = None;
+                let line_count = length.line_count;
                 if line_count > 0 {
-                    let start_line = range.start().line + 1;
+                    let start_line = start.line_index + 1;
                     let end_line = start_line + line_count;
                     self.state.drain(start_line..end_line);
                 }
@@ -188,7 +192,7 @@ impl InitialState {
                     if chars.next().unwrap().is_uppercase() {
                         match chars.next() {
                             Some(char) if char.is_uppercase() => TokenKind::Constant,
-                            _ => TokenKind::Typename
+                            _ => TokenKind::Typename,
                         }
                     } else {
                         TokenKind::Identifier
@@ -256,7 +260,7 @@ impl InitialState {
         if cursor.peek(1).is_identifier_start() && cursor.peek(2) != '\'' {
             debug_assert!(cursor.peek(0) == '\'');
             cursor.skip(2);
-            while cursor.skip_if( | ch | ch.is_identifier_continue()) {}
+            while cursor.skip_if(|ch| ch.is_identifier_continue()) {}
             if cursor.peek(0) == '\'' {
                 cursor.skip(1);
                 cursor.skip_suffix();
@@ -268,7 +272,7 @@ impl InitialState {
             self.single_quoted_string(cursor)
         }
     }
-    
+
     fn byte(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
@@ -278,25 +282,25 @@ impl InitialState {
     fn string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         self.double_quoted_string(cursor)
     }
-    
+
     fn byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.double_quoted_string(cursor)
     }
-    
+
     fn raw_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == 'r');
         cursor.skip(1);
         self.raw_double_quoted_string(cursor)
     }
-    
+
     fn raw_byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == 'b' && cursor.peek(1) == 'r');
         cursor.skip(2);
         self.raw_double_quoted_string(cursor)
     }
-    
+
     fn single_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == '\'');
         cursor.skip(1);
@@ -314,19 +318,19 @@ impl InitialState {
         }
         (State::Initial(InitialState), TokenKind::String)
     }
-    
+
     fn double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
         DoubleQuotedStringTailState.next(cursor)
     }
-    
+
     fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         let mut start_hash_count = 0;
-        while cursor.skip_if( | ch | ch == '#') {
+        while cursor.skip_if(|ch| ch == '#') {
             start_hash_count += 1;
         }
-        RawDoubleQuotedStringTailState {start_hash_count}.next(cursor)
+        RawDoubleQuotedStringTailState { start_hash_count }.next(cursor)
     }
 
     fn whitespace(self, cursor: &mut Cursor) -> (State, TokenKind) {
@@ -374,7 +378,7 @@ impl RawDoubleQuotedStringTailState {
                 '"' => {
                     cursor.skip(1);
                     let mut end_hash_count = 0;
-                    while end_hash_count < self.start_hash_count && cursor.skip_if( | ch | ch == '#') {
+                    while end_hash_count < self.start_hash_count && cursor.skip_if(|ch| ch == '#') {
                         end_hash_count += 1;
                     }
                     if end_hash_count == self.start_hash_count {
