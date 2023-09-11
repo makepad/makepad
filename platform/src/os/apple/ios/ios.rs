@@ -182,8 +182,7 @@ impl Cx {
             }
             IosEvent::AppLostFocus => {
                 self.call_event_handler(&Event::AppLostFocus);
-            }
-            
+            } 
             IosEvent::WindowGeomChange(re) => { // do this here because mac
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
