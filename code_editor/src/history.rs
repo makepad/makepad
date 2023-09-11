@@ -1,4 +1,8 @@
-use crate::{state::SessionId, Change, Selection, Text};
+use crate::{
+    state::SessionId,
+    text::{Change, Text},
+    Selection,
+};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct History {
@@ -25,7 +29,9 @@ impl History {
     ) {
         if self
             .current_edit
-            .map_or(false, |(current_origin_id, current_kind)| current_origin_id == origin_id && current_kind.can_merge(kind))
+            .map_or(false, |(current_origin_id, current_kind)| {
+                current_origin_id == origin_id && current_kind.can_merge(kind)
+            })
         {
             self.undos.last_mut().unwrap().1.extend(inverted_changes);
         } else {
@@ -76,7 +82,7 @@ pub enum EditKind {
     Indent,
     Outdent,
     Space,
-    Other
+    Other,
 }
 
 impl EditKind {

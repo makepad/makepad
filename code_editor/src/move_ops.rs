@@ -1,4 +1,4 @@
-use crate::{selection::Affinity, str::StrExt, Point, Session};
+use crate::{selection::Affinity, str::StrExt, text::Point, Session};
 
 pub fn move_left(lines: &[String], point: Point) -> Point {
     if !is_at_start_of_line(point) {
