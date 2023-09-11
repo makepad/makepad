@@ -630,6 +630,7 @@ impl Widget for ListView {
                     _ => ()
                 }
                 Hit::FingerDown(e) => {
+                    //log!("Finger down {} {}", e.time, e.abs);
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
                     }
@@ -644,6 +645,7 @@ impl Widget for ListView {
                     }
                 }
                 Hit::FingerMove(e) => {
+                    //log!("Finger move {} {}", e.time, e.abs);
                     cx.set_cursor(MouseCursor::Default);
                     match &mut self.scroll_state {
                         ScrollState::Drag {samples}=>{
@@ -659,7 +661,8 @@ impl Widget for ListView {
                         _=>()
                     }
                 }
-                Hit::FingerUp(_) => {
+                Hit::FingerUp(e) => {
+                    //log!("Finger up {} {}", e.time, e.abs);
                     match &mut self.scroll_state {
                         ScrollState::Drag {samples}=>{
                             // alright so we need to see if in the last couple of samples

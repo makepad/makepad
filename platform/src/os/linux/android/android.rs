@@ -18,7 +18,7 @@ use {
     self::super::super::{
         gl_sys,
         //libc_sys,
-    }, 
+    },
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
@@ -65,7 +65,7 @@ impl Cx {
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
         
-        while !self.os.quit{
+        while !self.os.quit {
             
             while let Ok(msg) = from_java_rx.try_recv() {
                 match msg {
@@ -111,7 +111,7 @@ impl Cx {
                         self.redraw_all();
                         self.os.first_after_resize = true;
                     }
-                    FromJavaMessage::Touch(mut touches)=>{  
+                    FromJavaMessage::Touch(mut touches) => {
                         let time = self.os.time_now();
                         let window = &mut self.windows[CxWindowPool::id_zero()];
                         let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
@@ -119,7 +119,7 @@ impl Cx {
                             // When the software keyboard shifted the UI in the vertical axis,
                             //we need to make the math here to keep touch events positions synchronized.
                             if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
-                            
+                            //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
                             touch.abs /= dpi_factor;
                         }
                         self.fingers.process_touch_update_start(time, &touches);
@@ -135,13 +135,13 @@ impl Cx {
                         let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
                         self.fingers.process_touch_update_end(&e.touches);
                     }
-                    FromJavaMessage::Character {character:_} => {
+                    FromJavaMessage::Character {character: _} => {
                         //if let Some(character) = char::from_u32(character) {
                         //    self.event_handler
                         //        .char_event(character, Default::default(), false);
                         //}
                     }
-                    FromJavaMessage::KeyDown {keycode:_} => {
+                    FromJavaMessage::KeyDown {keycode: _} => {
                         /*match keycode {
                             KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = true,
                             KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = true,
@@ -152,7 +152,7 @@ impl Cx {
                         self.event_handler
                             .key_down_event(keycode, self.keymods, false);*/
                     }
-                    FromJavaMessage::KeyUp {keycode:_} => {
+                    FromJavaMessage::KeyUp {keycode: _} => {
                         /*match keycode {
                             KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = false,
                             KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = false,
@@ -166,7 +166,7 @@ impl Cx {
                         self.call_event_handler(&Event::Pause);
                     }
                     FromJavaMessage::Stop => {
-                       // self.event_handler.window_minimized_event(),
+                        // self.event_handler.window_minimized_event(),
                         // lets destroy all of our gl resources
                         for texture in &mut self.textures.0.pool {
                             texture.os.free_resources();
@@ -209,7 +209,7 @@ impl Cx {
                     FromJavaMessage::Destroy => {
                         self.os.quit = true;
                     }
-                    FromJavaMessage::Init(_)=>{
+                    FromJavaMessage::Init(_) => {
                         panic!()
                     }
                 }
@@ -225,7 +225,7 @@ impl Cx {
                 // redraw?
                 //to_java.schedule_redraw();
             }
-            else{
+            else {
                 std::thread::sleep(std::time::Duration::from_millis(8));
                 continue
             }
@@ -261,7 +261,7 @@ impl Cx {
             
             let window = loop {
                 match from_java_rx.try_recv() {
-                    Ok(FromJavaMessage::Init(params))=>{
+                    Ok(FromJavaMessage::Init(params)) => {
                         cx.os.dpi_factor = params.density;
                         cx.os_type = OsType::Android(params);
                     }
@@ -277,28 +277,28 @@ impl Cx {
                 }
             };
             
-            let (egl_context, egl_config, egl_display) = unsafe{egl_sys::create_egl_context(
+            let (egl_context, egl_config, egl_display) = unsafe {egl_sys::create_egl_context(
                 &mut libegl,
                 std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
                 false,
             ).expect("Cant create EGL context")};
             
-            unsafe {gl_sys::load_with( | s | {   
+            unsafe {gl_sys::load_with( | s | {
                 let s = CString::new(s).unwrap();
                 libegl.eglGetProcAddress.unwrap()(s.as_ptr())
-            })};            
+            })};
             
-            let surface = unsafe{(libegl.eglCreateWindowSurface.unwrap())(
+            let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
                 egl_display,
                 egl_config,
                 window as _,
                 std::ptr::null_mut(),
             )};
             
-            if unsafe{(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
+            if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
-            cx.os.display = Some(CxAndroidDisplay{
+            cx.os.display = Some(CxAndroidDisplay {
                 libegl,
                 egl_display,
                 egl_config,
@@ -310,7 +310,7 @@ impl Cx {
             
             let display = cx.os.display.take().unwrap();
             
-            unsafe{
+            unsafe {
                 (display.libegl.eglMakeCurrent.unwrap())(
                     display.egl_display,
                     std::ptr::null_mut(),
@@ -386,7 +386,7 @@ impl Cx {
     
     pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
-            if let Some(data) = unsafe{to_java_load_asset(path)} {
+            if let Some(data) = unsafe {to_java_load_asset(path)} {
                 dep.data = Some(Ok(Rc::new(data)))
             }
             else {
@@ -430,7 +430,7 @@ impl Cx {
         self.after_every_event(&to_java);
     }*/
     
-
+    
     /// Called when a touch event happened on the software keyword
     /*
     pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
@@ -670,6 +670,12 @@ impl Cx {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
                     self.draw_pass_to_fullscreen(*pass_id);
+                    unsafe {
+                        if let Some(display) = &mut self.os.display {
+                            (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                            
+                        }
+                    }
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -681,12 +687,7 @@ impl Cx {
             }
         }
         
-        unsafe {
-            if let Some(display) = &mut self.os.display{
-                (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
-                
-            }
-        }
+        
     }
     
     fn _panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
@@ -731,7 +732,7 @@ impl Cx {
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
-                CxOsOp::StartTimer {timer_id:_, interval:_, repeats: _} => {
+                CxOsOp::StartTimer {timer_id: _, interval: _, repeats: _} => {
                     //android_app.start_timer(timer_id, interval, repeats);
                     //to_java.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
                 },
@@ -741,7 +742,7 @@ impl Cx {
                 },
                 CxOsOp::ShowTextIME(area, _pos) => {
                     self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
-                   // to_java.show_text_ime();
+                    // to_java.show_text_ime();
                 },
                 CxOsOp::HideTextIME => {
                     self.os.keyboard_visible = false;
@@ -750,7 +751,7 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_selected) => {
                     //to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::HttpRequest {request_id:_, request:_} => {
+                CxOsOp::HttpRequest {request_id: _, request: _} => {
                     //to_java.http_request(request_id, request)
                 },
                 _ => ()
@@ -784,7 +785,7 @@ impl Default for CxOs {
             keyboard_trigger_position: DVec2::default(),
             keyboard_panning_offset: 0,
             media: CxAndroidMedia::default(),
-            display: None ,
+            display: None,
             quit: false,
             fullscreen: false
         }
@@ -860,7 +861,7 @@ impl CxAndroidDisplay {
         assert!(res != 0);
     }
 }
-impl CxOs{
+impl CxOs {
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
