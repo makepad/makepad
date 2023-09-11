@@ -1,12 +1,12 @@
 use {
-    crate::{Change, Extent, Point, Range},
+    crate::text::{Change, Drift, Length, Position, Range},
     std::ops,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Hash, Eq)]
 pub struct Selection {
-    pub anchor: Point,
-    pub cursor: Point,
+    pub anchor: Position,
+    pub cursor: Position,
     pub affinity: Affinity,
     pub preferred_column: Option<usize>,
 }
@@ -24,7 +24,7 @@ impl Selection {
         }
     }
 
-    pub fn start(self) -> Point {
+    pub fn start(self) -> Position {
         self.anchor.min(self.cursor)
     }
 
@@ -36,7 +36,7 @@ impl Selection {
         }
     }
 
-    pub fn end(self) -> Point {
+    pub fn end(self) -> Position {
         self.anchor.max(self.cursor)
     }
 
@@ -48,7 +48,7 @@ impl Selection {
         }
     }
 
-    pub fn extent(self) -> Extent {
+    pub fn extent(self) -> Length {
         self.end() - self.start()
     }
 
@@ -58,12 +58,12 @@ impl Selection {
 
     pub fn line_range(self) -> ops::Range<usize> {
         if self.anchor <= self.cursor {
-            self.anchor.line..self.cursor.line + 1
+            self.anchor.line_index..self.cursor.line_index + 1
         } else {
-            self.cursor.line..if self.anchor.byte == 0 {
-                self.anchor.line
+            self.cursor.line_index..if self.anchor.byte_index == 0 {
+                self.anchor.line_index
             } else {
-                self.anchor.line + 1
+                self.anchor.line_index + 1
             }
         }
     }
@@ -77,7 +77,7 @@ impl Selection {
 
     pub fn update_cursor(
         self,
-        f: impl FnOnce(Point, Affinity, Option<usize>) -> (Point, Affinity, Option<usize>),
+        f: impl FnOnce(Position, Affinity, Option<usize>) -> (Position, Affinity, Option<usize>),
     ) -> Self {
         let (cursor, affinity, preferred_column) =
             f(self.cursor, self.affinity, self.preferred_column);
@@ -111,10 +111,10 @@ impl Selection {
         }
     }
 
-    pub fn apply_change(self, change: &Change) -> Selection {
+    pub fn apply_change(self, change: &Change, drift: Drift) -> Selection {
         Self {
-            anchor: self.anchor.apply_change(change),
-            cursor: self.cursor.apply_change(change),
+            anchor: self.anchor.apply_change(change, drift),
+            cursor: self.cursor.apply_change(change, drift),
             ..self
         }
     }

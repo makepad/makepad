@@ -1,5 +1,5 @@
 use crate::{
-    makepad_code_editor::Range,
+    makepad_code_editor::text::Range,
     makepad_micro_serde::{SerBin, DeBin, DeBinErr},
 };
 
