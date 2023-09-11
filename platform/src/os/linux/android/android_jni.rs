@@ -49,7 +49,8 @@ pub enum FromJavaMessage {
         character: u32,
     },
     KeyDown {
-        keycode: KeyCode,
+        keycode: u32,
+        meta_state: u32,
     },
     KeyUp {
         keycode: KeyCode,
@@ -255,11 +256,13 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyDown(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
-    _keycode: jni_sys::jint,
+    keycode: jni_sys::jint,
+    meta_state: jni_sys::jint,
 ) {
-    /*let keycode = keycodes::translate_keycode(keycode as _);
-
-    send_message(Message::KeyDown { keycode });*/
+    send_from_java_message(FromJavaMessage::KeyDown {
+        keycode: keycode as u32,
+        meta_state: meta_state as u32,
+    });
 }
 
 #[no_mangle]
@@ -277,11 +280,11 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyUp(
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnCharacter(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
-    _character: jni_sys::jint,
+    character: jni_sys::jint,
 ) {
-   /* send_message(Message::Character {
+    send_from_java_message(FromJavaMessage::Character {
         character: character as u32,
-    });*/
+    });
 }
 
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
@@ -347,4 +350,9 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
         return Some(buffer)
     }
     return None;
+}
+
+
+pub unsafe fn to_java_show_keyboard(env: *mut jni_sys::JNIEnv, visible: bool) {
+    ndk_utils::call_void_method!(env, ACTIVITY, "showKeyboard", "(Z)V", visible as i32);
 }

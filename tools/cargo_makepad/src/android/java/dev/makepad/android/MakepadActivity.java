@@ -92,7 +92,8 @@ class MakepadSurface
     @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
-            MakepadNative.surfaceOnKeyDown(keyCode);
+            int metaState = event.getMetaState();
+            MakepadNative.surfaceOnKeyDown(keyCode, metaState);
         }
 
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
