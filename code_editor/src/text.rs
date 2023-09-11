@@ -32,11 +32,11 @@ impl Text {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.extent() == Extent::zero()
+        self.length() == Length::zero()
     }
 
-    pub fn extent(&self) -> Extent {
-        Extent {
+    pub fn length(&self) -> Length {
+        Length {
             line_count: self.lines.len() - 1,
             byte_count: self.lines.last().unwrap().len(),
         }
@@ -46,61 +46,63 @@ impl Text {
         &self.lines
     }
 
-    pub fn slice(&self, range: Range) -> Self {
+    pub fn slice(&self, start: Position, length: Length) -> Self {
+        let end = start + length;
         let mut lines = Vec::new();
-        if range.start().line == range.end().line {
+        if start.line_index == end.line_index {
             lines.push(
-                self.lines[range.start().line][range.start().byte..range.end().byte].to_string(),
+                self.lines[start.line_index][start.byte_index..end.byte_index].to_string(),
             );
         } else {
-            lines.reserve(range.end().line - range.start().line + 1);
-            lines.push(self.lines[range.start().line][range.start().byte..].to_string());
+            lines.reserve(end.line_index - start.line_index + 1);
+            lines.push(self.lines[start.line_index][start.byte_index..].to_string());
             lines.extend(
-                self.lines[range.start().line + 1..range.end().line]
+                self.lines[start.line_index + 1..end.line_index]
                     .iter()
                     .cloned(),
             );
-            lines.push(self.lines[range.end().line][..range.end().byte].to_string());
+            lines.push(self.lines[end.line_index][..end.byte_index].to_string());
         }
         Text { lines }
     }
 
-    pub fn insert(&mut self, point: Point, mut text: Self) {
-        if text.extent().line_count == 0 {
-            self.lines[point.line]
-                .replace_range(point.byte..point.byte, text.lines.first().unwrap());
+    pub fn insert(&mut self, point: Position, mut text: Self) {
+        if text.length().line_count == 0 {
+            self.lines[point.line_index]
+                .replace_range(point.byte_index..point.byte_index, text.lines.first().unwrap());
         } else {
             text.lines
                 .first_mut()
                 .unwrap()
-                .replace_range(..0, &self.lines[point.line][..point.byte]);
+                .replace_range(..0, &self.lines[point.line_index][..point.byte_index]);
             text.lines
                 .last_mut()
                 .unwrap()
-                .push_str(&self.lines[point.line][point.byte..]);
-            self.lines.splice(point.line..point.line + 1, text.lines);
+                .push_str(&self.lines[point.line_index][point.byte_index..]);
+            self.lines.splice(point.line_index..point.line_index + 1, text.lines);
         }
     }
 
-    pub fn delete(&mut self, range: Range) {
-        if range.start().line == range.end().line {
-            self.lines[range.start().line].replace_range(range.start().byte..range.end().byte, "");
+    pub fn delete(&mut self, start: Position, length: Length) {
+        let end = start + length;
+        if start.line_index == end.line_index {
+            self.lines[start.line_index].replace_range(start.byte_index..end.byte_index, "");
         } else {
-            let mut line = self.lines[range.start().line][..range.start().byte].to_string();
-            line.push_str(&self.lines[range.end().line][range.end().byte..]);
+            let mut line = self.lines[start.line_index][..start.byte_index].to_string();
+            line.push_str(&self.lines[end.line_index][end.byte_index..]);
             self.lines
-                .splice(range.start().line..range.end().line + 1, iter::once(line));
+                .splice(start.line_index..end.line_index + 1, iter::once(line));
         }
     }
 
     pub fn apply_change(&mut self, change: Change) {
         match change.kind {
-            ChangeKind::Insert(point, additional_text) => self.insert(point, additional_text),
-            ChangeKind::Delete(range) => self.delete(range),
+            ChangeKind::Insert(position, text) => self.insert(position, text),
+            ChangeKind::Delete(start, length) => self.delete(start, length),
         }
     }
 
-    pub fn into_line_count(self) -> Vec<String> {
+    pub fn into_lines(self) -> Vec<String> {
         self.lines
     }
 }
@@ -144,12 +146,12 @@ impl From<String> for Text {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Point {
-    pub line: usize,
-    pub byte: usize,
+pub struct Position {
+    pub line_index: usize,
+    pub byte_index: usize,
 }
 
-impl Point {
+impl Position {
     pub fn zero() -> Self {
         Self::default()
     }
@@ -159,78 +161,79 @@ impl Point {
             ChangeKind::Insert(point, ref text) => match self.cmp(&point) {
                 Ordering::Less => self,
                 Ordering::Equal => match change.drift {
-                    Drift::Before => self + text.extent(),
+                    Drift::Before => point + text.length() + (self - point),
                     Drift::After => self,
                 },
-                Ordering::Greater => point + text.extent() + (self - point),
+                Ordering::Greater => point + text.length() + (self - point),
             },
-            ChangeKind::Delete(range) => {
-                if self < range.start() {
+            ChangeKind::Delete(start, length) => {
+                let end = start + length;
+                if self < start {
                     self
                 } else {
-                    range.start() + (self - range.end().min(self))
+                    start + (self - end.min(self))
                 }
             }
         }
     }
 }
 
-impl Add<Extent> for Point {
+impl Add<Length> for Position {
     type Output = Self;
 
-    fn add(self, extent: Extent) -> Self::Output {
+    fn add(self, extent: Length) -> Self::Output {
         if extent.line_count == 0 {
             Self {
-                line: self.line,
-                byte: self.byte + extent.byte_count,
+                line_index: self.line_index,
+                byte_index: self.byte_index + extent.byte_count,
             }
         } else {
             Self {
-                line: self.line + extent.line_count,
-                byte: extent.byte_count,
+                line_index: self.line_index + extent.line_count,
+                byte_index: extent.byte_count,
             }
         }
     }
 }
 
-impl AddAssign<Extent> for Point {
-    fn add_assign(&mut self, extent: Extent) {
+impl AddAssign<Length> for Position {
+    fn add_assign(&mut self, extent: Length) {
         *self = *self + extent;
     }
 }
 
-impl Sub for Point {
-    type Output = Extent;
+impl Sub for Position {
+    type Output = Length;
 
     fn sub(self, other: Self) -> Self::Output {
-        if self.line == other.line {
-            Extent {
+        if self.line_index == other.line_index {
+            Length {
                 line_count: 0,
-                byte_count: self.byte - other.byte,
+                byte_count: self.byte_index - other.byte_index,
             }
         } else {
-            Extent {
-                line_count: self.line - other.line,
-                byte_count: self.byte,
+            Length {
+                line_count: self.line_index - other.line_index,
+                byte_count: self.byte_index,
             }
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Extent {
+pub struct Length {
     pub line_count: usize,
     pub byte_count: usize,
 }
 
-impl Extent {
-    pub fn zero() -> Extent {
+impl Length {
+    pub fn zero() -> Length {
         Self::default()
     }
 }
 
-impl Add for Extent {
-    type Output = Extent;
+impl Add for Length {
+    type Output = Length;
 
     fn add(self, other: Self) -> Self::Output {
         if other.line_count == 0 {
@@ -247,14 +250,14 @@ impl Add for Extent {
     }
 }
 
-impl AddAssign for Extent {
+impl AddAssign for Length {
     fn add_assign(&mut self, other: Self) {
         *self = *self + other;
     }
 }
 
-impl Sub for Extent {
-    type Output = Extent;
+impl Sub for Length {
+    type Output = Length;
 
     fn sub(self, other: Self) -> Self::Output {
         if self.line_count == other.line_count {
@@ -271,7 +274,7 @@ impl Sub for Extent {
     }
 }
 
-impl SubAssign for Extent {
+impl SubAssign for Length {
     fn sub_assign(&mut self, other: Self) {
         *self = *self - other;
     }
@@ -279,19 +282,19 @@ impl SubAssign for Extent {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Range {
-    start: Point,
-    end: Point,
+    start: Position,
+    end: Position,
 }
 
 impl Range {
-    pub fn new(start: Point, end: Point) -> Option<Self> {
+    pub fn new(start: Position, end: Position) -> Option<Self> {
         if start > end {
             return None;
         }
         Some(Self { start, end })
     }
 
-    pub fn from_start_and_extent(start: Point, extent: Extent) -> Self {
+    pub fn from_start_and_extent(start: Position, extent: Length) -> Self {
         Self {
             start,
             end: start + extent,
@@ -302,15 +305,15 @@ impl Range {
         self.start == self.end
     }
 
-    pub fn start(self) -> Point {
+    pub fn start(self) -> Position {
         self.start
     }
 
-    pub fn end(self) -> Point {
+    pub fn end(self) -> Position {
         self.end
     }
 
-    pub fn extent(self) -> Extent {
+    pub fn extent(self) -> Length {
         self.end - self.start
     }
 }
@@ -327,22 +330,23 @@ impl Change {
             drift: self.drift,
             kind: match self.kind {
                 ChangeKind::Insert(point, text) => {
-                    ChangeKind::Delete(Range::from_start_and_extent(point, text.extent()))
+                    ChangeKind::Delete(point, text.length())
                 }
-                ChangeKind::Delete(range) => ChangeKind::Insert(range.start(), text.slice(range)),
+                ChangeKind::Delete(start, length) => ChangeKind::Insert(start, text.slice(start, length)),
             },
         }
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ChangeKind {
+    Insert(Position, Text),
+    Delete(Position, Length),
+}
+
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Drift {
     Before,
     After,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum ChangeKind {
-    Insert(Point, Text),
-    Delete(Range),
 }
