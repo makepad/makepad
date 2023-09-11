@@ -1,5 +1,5 @@
 use crate::{
-    text::{Change, ChangeKind, Text},
+    text::{Change, Text},
     token::TokenKind,
     Token,
 };
@@ -17,8 +17,8 @@ impl Tokenizer {
     }
 
     pub fn apply_change(&mut self, change: &Change) {
-        match &change.kind {
-            ChangeKind::Insert(point, text) => {
+        match *change {
+            Change::Insert(point, ref text) => {
                 self.state[point.line_index] = None;
                 let line_count = text.length().line_count;
                 if line_count > 0 {
@@ -26,7 +26,7 @@ impl Tokenizer {
                     self.state.splice(line..line, (0..line_count).map(|_| None));
                 }
             }
-            ChangeKind::Delete(start, length) => {
+            Change::Delete(start, length) => {
                 self.state[start.line_index] = None;
                 let line_count = length.line_count;
                 if line_count > 0 {
