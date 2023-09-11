@@ -162,8 +162,6 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
-
-                    return EventFlow::Poll;
                 }
             }
             _ => ()
@@ -199,9 +197,7 @@ impl Cx {
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 // ok here we send out to all our childprocesses
-                
                 self.handle_repaint(ios_app, metal_cx);
-                
             }
             IosEvent::TouchUpdate(e)=>{
                 self.fingers.process_touch_update_start(e.time, &e.touches);
@@ -250,7 +246,7 @@ impl Cx {
             IosEvent::TextCut(e) => {
                 self.call_event_handler(&Event::TextCut(e))
             }
-            IosEvent::Timer(e) => {
+            IosEvent::Timer(e) => if e.timer_id != 0 {
                 self.call_event_handler(&Event::Timer(e))
             }
             IosEvent::MenuCommand(e) => {
