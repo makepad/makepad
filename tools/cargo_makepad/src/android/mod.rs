@@ -162,7 +162,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         "javac" => {
             compile::javac(&sdk_dir, host_os, &args[1..])
         },
-        "rustup-toolchain-install" => {
+        "rustup-toolchain-install" | "rustup-install-toolchain"  => {
             sdk::rustup_toolchain_install(&targets)
         }
         "download-sdk" => {
@@ -174,7 +174,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         "remove-sdk-sources" => {
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
         }
-        "toolchain-install" => {
+        "toolchain-install" | "install-toolchain"=> {
             println!("Installing Android toolchain\n");
             sdk::rustup_toolchain_install(&targets) ?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;

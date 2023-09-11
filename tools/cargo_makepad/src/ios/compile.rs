@@ -289,32 +289,42 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     
     copy_resources(Path::new(&app_dir), build_crate)?;
     
-    shell_env(&[], &cwd ,"codesign", &[
+    shell_env_cap(&[], &cwd ,"codesign", &[
         "--force",
         "--timestamp=none",
         "--sign",
-        long_hex_id,
+        long_hex_id, 
         &result.dst_bin.into_os_string().into_string().unwrap()
     ]) ?; 
     
-    shell_env(&[], &cwd ,"codesign", &[
+    shell_env_cap(&[], &cwd ,"codesign", &[
         "--force",
         "--timestamp=none",
-        "--sign",
+        "--sign", 
         long_hex_id,
         "--entitlements",
         &scent_file.into_os_string().into_string().unwrap(),
         "--generate-entitlement-der",
         &app_dir
-    ]) ?; 
+    ]) ?;  
     
     let cwd = std::env::current_dir().unwrap();
     let ios_deploy = cwd.join(format!("{}/ios-deploy/build/Release/", env!("CARGO_MANIFEST_DIR")));
     
-    shell_env(&[], &ios_deploy ,"./ios-deploy", &[
+    // kill previous lldb
+    let ps_result = shell_env_cap(&[], &ios_deploy ,"ps", &[])?;
+    let lines = ps_result.lines();
+    for line in lines{
+        if line.contains("lldb") && line.contains("fruitstrap"){
+            shell_env_cap(&[], &ios_deploy ,"kill", &["-9",line.split(" ").next().unwrap()])?;
+        }
+    } 
+    println!("Installing application on device");
+    shell_env_filter("Makepad iOS application started.", &[], &ios_deploy ,"./ios-deploy", &[
         "-i",
-        &provision.device,
-        "-I",
+        &provision.device,  
+        "-d",
+        "-u",
         "-b",
         &app_dir
     ]) ?; 
