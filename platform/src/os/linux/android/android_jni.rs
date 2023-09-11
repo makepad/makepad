@@ -55,6 +55,9 @@ pub enum FromJavaMessage {
     KeyUp {
         keycode: KeyCode,
     },
+    ResizeTextIME {
+        keyboard_height: u32,
+    },
     Pause,
     Resume,
     Stop,
@@ -284,6 +287,17 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnCharacter(
 ) {
     send_from_java_message(FromJavaMessage::Character {
         character: character as u32,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    keyboard_height: jni_sys::jint,
+) {
+    send_from_java_message(FromJavaMessage::ResizeTextIME {
+        keyboard_height: keyboard_height as u32,
     });
 }
 

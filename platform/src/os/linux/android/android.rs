@@ -203,6 +203,9 @@ impl Cx {
                         }
                         self.event_handler.key_up_event(keycode, self.keymods);*/
                     }
+                    FromJavaMessage::ResizeTextIME {keyboard_height} => {
+                        self.panning_adjust_for_text_ime(keyboard_height);
+                    }
                     FromJavaMessage::Pause => {
                         self.call_event_handler(&Event::Pause);
                     }
@@ -729,7 +732,7 @@ impl Cx {
         
     }
     
-    fn _panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
+    fn panning_adjust_for_text_ime(&mut self, android_ime_height: u32) {
         self.os.keyboard_visible = true;
         
         let screen_height = (self.os.display_size.y / self.os.dpi_factor) as i32;
