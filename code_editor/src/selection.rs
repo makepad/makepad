@@ -1,6 +1,6 @@
 use {
     crate::text::{Change, Drift, Length, Position, Range},
-    std::ops,
+    std::{ops, ops::Deref},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Hash, Eq)]
@@ -129,5 +129,114 @@ pub enum Affinity {
 impl Default for Affinity {
     fn default() -> Self {
         Self::Before
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SelectionSet {
+    selections: Vec<Selection>,
+}
+
+impl SelectionSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update_selection(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(Selection) -> Selection,
+    ) -> usize {
+        self.selections[index] = f(self.selections[index]);
+        let mut index = index;
+        while index > 0 {
+            let prev_index = index - 1;
+            if !self.selections[prev_index].should_merge(self.selections[index]) {
+                break;
+            }
+            self.selections.remove(prev_index);
+            index -= 1;
+        }
+        while index + 1 < self.selections.len() {
+            let next_index = index + 1;
+            if !self.selections[index].should_merge(self.selections[next_index]) {
+                break;
+            }
+            self.selections.remove(next_index);
+        }
+        index
+    }
+
+    pub fn update_all_selections(
+        &mut self,
+        index: Option<usize>,
+        mut f: impl FnMut(Selection) -> Selection,
+    ) -> Option<usize> {
+        for selection in &mut self.selections {
+            *selection = f(*selection);
+        }
+        let mut index = index;
+        let mut current_index = 0;
+        while current_index + 1 < self.selections.len() {
+            let next_index = current_index + 1;
+            let current_selection = self.selections[current_index];
+            let next_selection = self.selections[next_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if let Some(merged_selection) = current_selection.merge(next_selection) {
+                self.selections[current_index] = merged_selection;
+                self.selections.remove(next_index);
+                if let Some(index) = &mut index {
+                    if next_index < *index {
+                        *index -= 1;
+                    }
+                }
+            } else {
+                current_index += 1;
+            }
+        }
+        index
+    }
+
+    pub fn apply_change(&mut self, change: &Change, drift: Drift) {
+        for selection in &mut self.selections {
+            *selection = selection.apply_change(change, drift);
+        }
+    }
+
+    pub fn push_selection(&mut self, selection: Selection) -> usize {
+        match self
+            .selections
+            .binary_search_by_key(&selection.start(), |selection| selection.start())
+        {
+            Ok(index) => {
+                self.selections[index] = selection;
+                index
+            }
+            Err(index) => {
+                self.selections.insert(index, selection);
+                index
+            }
+        }
+    }
+
+    pub fn set_selection(&mut self, selection: Selection) {
+        self.selections.clear();
+        self.selections.push(selection);
+    }
+}
+
+impl Default for SelectionSet {
+    fn default() -> Self {
+        Self {
+            selections: vec![Selection::default()],
+        }
+    }
+}
+
+impl Deref for SelectionSet {
+    type Target = [Selection];
+
+    fn deref(&self) -> &Self::Target {
+        &self.selections
     }
 }

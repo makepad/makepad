@@ -50,9 +50,7 @@ impl Text {
         let end = start + length;
         let mut lines = Vec::new();
         if start.line_index == end.line_index {
-            lines.push(
-                self.lines[start.line_index][start.byte_index..end.byte_index].to_string(),
-            );
+            lines.push(self.lines[start.line_index][start.byte_index..end.byte_index].to_string());
         } else {
             lines.reserve(end.line_index - start.line_index + 1);
             lines.push(self.lines[start.line_index][start.byte_index..].to_string());
@@ -68,8 +66,10 @@ impl Text {
 
     pub fn insert(&mut self, point: Position, mut text: Self) {
         if text.length().line_count == 0 {
-            self.lines[point.line_index]
-                .replace_range(point.byte_index..point.byte_index, text.lines.first().unwrap());
+            self.lines[point.line_index].replace_range(
+                point.byte_index..point.byte_index,
+                text.lines.first().unwrap(),
+            );
         } else {
             text.lines
                 .first_mut()
@@ -79,7 +79,8 @@ impl Text {
                 .last_mut()
                 .unwrap()
                 .push_str(&self.lines[point.line_index][point.byte_index..]);
-            self.lines.splice(point.line_index..point.line_index + 1, text.lines);
+            self.lines
+                .splice(point.line_index..point.line_index + 1, text.lines);
         }
     }
 
@@ -327,9 +328,7 @@ pub enum Change {
 impl Change {
     pub fn invert(self, text: &Text) -> Self {
         match self {
-            Self::Insert(position, text) => {
-                Change::Delete(position, text.length())
-            }
+            Self::Insert(position, text) => Change::Delete(position, text.length()),
             Self::Delete(start, length) => Change::Insert(start, text.slice(start, length)),
         }
     }
