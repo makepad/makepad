@@ -61,7 +61,7 @@ pub struct Video {
     source: LiveDependency,
     #[rust]
     texture: Option<Texture>,
-    #[rust]
+
     // Playback options
     #[live(true)]
     is_looping: bool,
@@ -134,7 +134,6 @@ impl LiveHook for Video {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.id = LiveId::new(cx);
         self.initialize_decoding(cx);
-        self.is_looping = true; // TODO: remove this line
     }
 }
 
