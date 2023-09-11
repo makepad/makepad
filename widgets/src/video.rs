@@ -122,6 +122,8 @@ impl VideoSet {}
 enum DecodingState {
     #[default]
     NotStarted,
+    Initializing,
+    Initialized,
     Decoding,
     Finished,
 }
@@ -132,7 +134,7 @@ impl LiveHook for Video {
     }
 
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.id = LiveId::new(cx);
+        self.id = LiveId::unique();
         self.initialize_decoding(cx);
     }
 }
@@ -228,6 +230,7 @@ impl Video {
     }
 
     fn handle_decoding_initialized(&mut self, cx: &mut Cx, event: &VideoDecodingInitializedEvent) {
+        self.decoding_state = DecodingState::Initialized;
         self.video_width = event.video_width as usize;
         self.video_height = event.video_height as usize;
         self.original_frame_rate = event.frame_rate;
@@ -339,13 +342,16 @@ impl Video {
             .release(pixel_data.lock().unwrap().to_vec());
     }
 
-    fn initialize_decoding(&self, cx: &mut Cx) {
-        match cx.get_dependency(self.source.as_str()) {
-            Ok(data) => {
-                cx.initialize_video_decoding(self.id, data, 100);
-            }
-            Err(_e) => {
-                todo!()
+    fn initialize_decoding(&mut self, cx: &mut Cx) {
+        if self.decoding_state == DecodingState::NotStarted {
+            match cx.get_dependency(self.source.as_str()) {
+                Ok(data) => {
+                    cx.initialize_video_decoding(self.id, data, 100);
+                    self.decoding_state = DecodingState::Initialized;
+                }
+                Err(_e) => {
+                    todo!()
+                }
             }
         }
     }
