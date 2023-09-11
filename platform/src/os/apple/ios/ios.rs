@@ -26,6 +26,7 @@ use {
         },
         pass::{CxPassParent},
         thread::Signal,
+        window::CxWindowPool,
         event::{
             Event,
             NetworkResponseChannel
@@ -161,8 +162,6 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
-
-                    return EventFlow::Poll;
                 }
             }
             _ => ()
@@ -181,13 +180,15 @@ impl Cx {
             }
             IosEvent::AppLostFocus => {
                 self.call_event_handler(&Event::AppLostFocus);
-            }
-            
+            } 
             IosEvent::WindowGeomChange(re) => { // do this here because mac
-                
+                let window_id = CxWindowPool::id_zero();
+                let window = &mut self.windows[window_id];
+                window.window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
+                self.redraw_all();
             }
-            IosEvent::Paint => {
+            IosEvent::Paint => { 
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(ios_app.time_now());
                 }
@@ -196,9 +197,7 @@ impl Cx {
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 // ok here we send out to all our childprocesses
-                
                 self.handle_repaint(ios_app, metal_cx);
-                
             }
             IosEvent::TouchUpdate(e)=>{
                 self.fingers.process_touch_update_start(e.time, &e.touches);
@@ -247,7 +246,7 @@ impl Cx {
             IosEvent::TextCut(e) => {
                 self.call_event_handler(&Event::TextCut(e))
             }
-            IosEvent::Timer(e) => {
+            IosEvent::Timer(e) => if e.timer_id != 0 {
                 self.call_event_handler(&Event::Timer(e))
             }
             IosEvent::MenuCommand(e) => {
