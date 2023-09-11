@@ -115,7 +115,8 @@ pub fn define_mtk_view_dlg() -> *const Class {
     }
     
     extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _:ObjcId) {
-        get_ios_app_global().draw_in_rect();
+        //crate::log!("Draw size will change");
+        //get_ios_app_global().draw_in_rect();
     }
     unsafe {
         decl.add_method(
