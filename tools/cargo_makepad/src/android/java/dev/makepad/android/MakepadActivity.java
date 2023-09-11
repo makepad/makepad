@@ -28,6 +28,10 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.widget.LinearLayout;
 
+import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
+import android.graphics.Rect;
+
 import dev.makepad.android.MakepadNative;
 
 // note: //% is a special miniquad's pre-processor for plugins
@@ -42,6 +46,7 @@ class MakepadSurface
     implements
         View.OnTouchListener,
         View.OnKeyListener,
+        ViewTreeObserver.OnGlobalLayoutListener,
         SurfaceHolder.Callback {
 
     public MakepadSurface(Context context){
@@ -53,6 +58,7 @@ class MakepadSurface
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
+        getViewTreeObserver().addOnGlobalLayoutListener(this);
     }
 
     @Override
@@ -83,6 +89,24 @@ class MakepadSurface
     public boolean onTouch(View view, MotionEvent event) {
         MakepadNative.surfaceOnTouch(event);
         return true;    
+    }
+
+     @Override
+    public void onGlobalLayout() {
+        WindowInsets insets = this.getRootWindowInsets();
+        if (insets == null) {
+            return;
+        }
+
+        if (insets.isVisible(WindowInsets.Type.ime())) {
+            Rect r = new Rect();
+            this.getWindowVisibleDisplayFrame(r);
+            int screenHeight = this.getRootView().getHeight();
+            int visibleHeight = r.height();
+            int keyboardHeight = screenHeight - visibleHeight;
+
+            MakepadNative.surfaceOnResizeTextIME(keyboardHeight);
+        }
     }
 
     // docs says getCharacters are deprecated

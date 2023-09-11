@@ -20,4 +20,5 @@ public class MakepadNative {
     public native static void surfaceOnKeyDown(int keycode, int meta_state);
     public native static void surfaceOnKeyUp(int keycode);
     public native static void surfaceOnCharacter(int character);
+    public native static void surfaceOnResizeTextIME(int keyboard_height);
 }
