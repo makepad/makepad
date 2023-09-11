@@ -1,10 +1,14 @@
-use crate::{state::SessionId, Change, Selection, Text};
+use crate::{
+    state::SessionId,
+    text::{Change, Drift, Text},
+    Selection,
+};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct History {
     current_edit: Option<(SessionId, EditKind)>,
-    undos: Vec<(Vec<Selection>, Vec<Change>)>,
-    redos: Vec<(Vec<Selection>, Vec<Change>)>,
+    undos: Vec<(Vec<Selection>, Vec<(Change, Drift)>)>,
+    redos: Vec<(Vec<Selection>, Vec<(Change, Drift)>)>,
 }
 
 impl History {
@@ -21,11 +25,13 @@ impl History {
         origin_id: SessionId,
         kind: EditKind,
         selections: &[Selection],
-        inverted_changes: Vec<Change>,
+        inverted_changes: Vec<(Change, Drift)>,
     ) {
         if self
             .current_edit
-            .map_or(false, |(current_origin_id, current_kind)| current_origin_id == origin_id && current_kind.can_merge(kind))
+            .map_or(false, |(current_origin_id, current_kind)| {
+                current_origin_id == origin_id && current_kind.can_merge(kind)
+            })
         {
             self.undos.last_mut().unwrap().1.extend(inverted_changes);
         } else {
@@ -35,15 +41,15 @@ impl History {
         self.redos.clear();
     }
 
-    pub fn undo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<Change>)> {
+    pub fn undo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<(Change, Drift)>)> {
         if let Some((selections, mut inverted_changes)) = self.undos.pop() {
             self.current_edit = None;
             let mut changes = Vec::new();
             inverted_changes.reverse();
-            for inverted_change in inverted_changes.iter().cloned() {
+            for (inverted_change, drift) in inverted_changes.iter().cloned() {
                 let change = inverted_change.clone().invert(&text);
                 text.apply_change(inverted_change);
-                changes.push(change);
+                changes.push((change, drift));
             }
             changes.reverse();
             self.redos.push((selections.clone(), changes.clone()));
@@ -53,12 +59,12 @@ impl History {
         }
     }
 
-    pub fn redo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<Change>)> {
+    pub fn redo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<(Change, Drift)>)> {
         if let Some((selections, changes)) = self.redos.pop() {
             self.current_edit = None;
             let mut inverted_changes = Vec::new();
-            for change in changes.iter().cloned() {
-                inverted_changes.push(change.clone().invert(&text));
+            for (change, drift) in changes.iter().cloned() {
+                inverted_changes.push((change.clone().invert(&text), drift));
                 text.apply_change(change);
             }
             self.undos.push((selections.clone(), inverted_changes));
@@ -76,7 +82,7 @@ pub enum EditKind {
     Indent,
     Outdent,
     Space,
-    Other
+    Other,
 }
 
 impl EditKind {
@@ -91,5 +97,5 @@ impl EditKind {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EditGroup {
     pub selections: Vec<Selection>,
-    pub changes: Vec<Change>,
+    pub changes: Vec<(Change, Drift)>,
 }
