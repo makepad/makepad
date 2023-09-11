@@ -2,16 +2,14 @@ use makepad_widgets::*;
 
 live_design!{
     import makepad_draw::shader::std::*;
-    imporkepad_widgets::base::*;
+    import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
 
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
   //self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
-    IMG_PROFILE_B = fsfsf
-    
-    
-    dep("crate://self/resources/profile_2.jpg")OGO = dep("crate://self/resources/logo.svg")
+    IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
+    LOGO = dep("crate://self/resources/logo.svg")
     ICO_FAV = dep("crate://self/resources/icon_favorite.svg")
     ICO_COMMENT = dep("crate://self/resources/icon_comment.svg")
     ICO_REPLY = dep("crate://self/resources/icon_reply.svg")
