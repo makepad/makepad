@@ -79,66 +79,10 @@ class MakepadSurface
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
-
     @Override
-    public boolean onTouch(View v, MotionEvent event) {
-        int pointerCount = event.getPointerCount();
-        int action = event.getActionMasked();
-
-        switch(action) {
-        case MotionEvent.ACTION_MOVE: {
-            for (int i = 0; i < pointerCount; i++) {
-                final int id = event.getPointerId(i);
-                final float x = event.getX(i);
-                final float y = event.getY(i);
-                MakepadNative.surfaceOnTouch(id, 0, x, y);
-            }
-            break;
-        }
-        case MotionEvent.ACTION_UP: {
-            final int id = event.getPointerId(0);
-            final float x = event.getX(0);
-            final float y = event.getY(0);
-            MakepadNative.surfaceOnTouch(id, 1, x, y);
-            break;
-        }
-        case MotionEvent.ACTION_DOWN: {
-            final int id = event.getPointerId(0);
-            final float x = event.getX(0);
-            final float y = event.getY(0);
-            MakepadNative.surfaceOnTouch(id, 2, x, y);
-            break;
-        }
-        case MotionEvent.ACTION_POINTER_UP: {
-            final int pointerIndex = event.getActionIndex();
-            final int id = event.getPointerId(pointerIndex);
-            final float x = event.getX(pointerIndex);
-            final float y = event.getY(pointerIndex);
-            MakepadNative.surfaceOnTouch(id, 1, x, y);
-            break;
-        }
-        case MotionEvent.ACTION_POINTER_DOWN: {
-            final int pointerIndex = event.getActionIndex();
-            final int id = event.getPointerId(pointerIndex);
-            final float x = event.getX(pointerIndex);
-            final float y = event.getY(pointerIndex);
-            MakepadNative.surfaceOnTouch(id, 2, x, y);
-            break;
-        }
-        case MotionEvent.ACTION_CANCEL: {
-            for (int i = 0; i < pointerCount; i++) {
-                final int id = event.getPointerId(i);
-                final float x = event.getX(i);
-                final float y = event.getY(i);
-                MakepadNative.surfaceOnTouch(id, 3, x, y);
-            }
-            break;
-        }
-        default:
-            break;
-        }
-
-        return true;
+    public boolean onTouch(View view, MotionEvent event) {
+        MakepadNative.surfaceOnTouch(event);
+        return true;    
     }
 
     // docs says getCharacters are deprecated
@@ -234,6 +178,11 @@ public class MakepadActivity extends Activity {
 
         MakepadNative.activityOnCreate(this);
 
+        String cache_path = this.getCacheDir().getAbsolutePath();
+        float density = getResources().getDisplayMetrics().density;
+
+        MakepadNative.onAndroidParams(cache_path, density);
+
         //% MAIN_ACTIVITY_ON_CREATE
     }
 
@@ -258,6 +207,7 @@ public class MakepadActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
+        MakepadNative.activityOnStop();
     }
 
     @Override
