@@ -235,7 +235,14 @@ impl IosApp {
     pub fn do_callback(&mut self, event: IosEvent) {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, event);
+            if let EventFlow::Wait = self.event_flow{
+                let () = unsafe{msg_send![self.mtk_view.unwrap(), setPaused: YES]};
+            }
+            else{
+                let () = unsafe{msg_send![self.mtk_view.unwrap(), setPaused: NO]};
+            }
             self.event_callback = Some(callback);
+            
         }
     }
     
