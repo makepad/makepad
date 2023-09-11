@@ -37,4 +37,8 @@ extern "C" {
         count: usize,
     ) -> ::std::os::raw::c_int;
     pub fn AAsset_close(asset: *mut AAsset);
+    pub fn AAssetManager_fromJava(
+        env: *mut jni_sys::JNIEnv,
+        assetManager: jni_sys::jobject,
+    ) -> *mut AAssetManager;
 }

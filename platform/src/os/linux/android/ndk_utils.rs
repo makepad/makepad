@@ -71,6 +71,13 @@ macro_rules! call_bool_method {
 }
 
 #[macro_export]
+macro_rules! call_float_method {
+    ($env:expr, $obj:expr, $method:expr, $sig:expr $(, $args:expr)*) => {{
+        $crate::call_method!(CallFloatMethod, $env, $obj, $method, $sig $(, $args)*)
+    }};
+}
+
+#[macro_export]
 macro_rules! get_utf_str {
     ($env:expr, $obj:expr) => {{
         let string = (**$env).GetStringUTFChars.unwrap()($env, $obj, std::ptr::null_mut());
@@ -94,6 +101,6 @@ macro_rules! new_local_ref {
 }
 
 pub use {
-    call_bool_method, call_int_method, call_method, call_object_method, call_void_method,
+    call_bool_method, call_int_method, call_method, call_object_method, call_void_method,call_float_method,
     get_utf_str, new_global_ref, new_local_ref, new_object,
 };
