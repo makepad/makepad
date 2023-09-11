@@ -136,8 +136,12 @@ impl IosApp {
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
+
+            let () = msg_send![view_ctrl_obj, beginAppearanceTransition: true animated: false];
+            let () = msg_send![view_ctrl_obj, endAppearanceTransition];
             
             let () = msg_send![window_obj, makeKeyAndVisible];
+            
             
             self.mtk_view = Some(mtk_view_obj);
         }
