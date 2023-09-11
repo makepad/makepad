@@ -206,11 +206,15 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
             "-d", 
             (build_paths.out_dir.to_str().unwrap()),
             (r_class_path.to_str().unwrap()),
+            (makepad_java_classes_dir.join("MakepadNative.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
+            /*
             (makepad_java_classes_dir.join("Makepad.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadSurfaceView.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadNetwork.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("HttpResponse.java").to_str().unwrap()),
+            */
             (build_paths.java_file.to_str().unwrap())
         ]   
     ) ?; 
@@ -235,20 +239,28 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
             "com.android.tools.r8.D8",
             "--classpath",
             (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
-            "--output",
+            "--output",  
             (build_paths.out_dir.to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadNative.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadSurface.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("ResizingLayout.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity$1.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity$2.class").to_str().unwrap()),
+            /*
             (compiled_java_classes_dir.join("Makepad.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadSurfaceView.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadNetwork.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("HttpResponse.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap()),
+            */
             (build_paths.java_class.to_str().unwrap()),
         ]
     ) ?;
 
     Ok(())
-}
+} 
 
 fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
@@ -259,7 +271,7 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
        &cwd,
        sdk_dir.join("android-13/aapt").to_str().unwrap(),
-       &[
+       &[ 
            "package",
            "-f",
            "-F",
