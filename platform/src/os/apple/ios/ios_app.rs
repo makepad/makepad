@@ -132,6 +132,7 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setDelegate: mtk_view_dlg_obj];
             let () = msg_send![mtk_view_obj, setDevice: self.metal_device];
             let () = msg_send![mtk_view_obj, setUserInteractionEnabled: YES];
+            let () = msg_send![mtk_view_obj, setAutoResizeDrawable: YES];
             
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             
@@ -153,6 +154,7 @@ impl IosApp {
         let screen_rect: NSRect = unsafe {msg_send![main_screen, bounds]};
         let dpi_factor: f64 = unsafe {msg_send![main_screen, scale]};
         let new_size = dvec2(screen_rect.size.width as f64, screen_rect.size.height as f64);
+
         let new_geom = WindowGeom {
             xr_is_presenting: false,
             is_topmost: false,
