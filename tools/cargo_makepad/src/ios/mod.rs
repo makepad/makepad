@@ -24,7 +24,7 @@ impl IosTarget {
 pub fn handle_ios(args: &[String]) -> Result<(), String> {
     
     match args[0].as_ref() {
-        "toolchain-install"=>{
+        "toolchain-install" | "install-toolchain"=>{
             #[cfg(target_arch = "x86_64")]
             let toolchains = vec![IosTarget::x86_64_sim, IosTarget::aarch64];
             #[cfg(target_arch = "aarch64")]
