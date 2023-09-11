@@ -60,12 +60,13 @@ impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         
         self.android_load_dependencies();
-        //self.os.dpi_factor = params.density;
-        //self.os_type = OsType::Android(params);
         self.gpu_info.performance = GpuPerformance::Tier1;
+        
         self.call_event_handler(&Event::Construct);
+        self.redraw_all();
         
         while !self.os.quit{
+            
             while let Ok(msg) = from_java_rx.try_recv() {
                 match msg {
                     FromJavaMessage::SurfaceCreated {window} => unsafe {
@@ -76,12 +77,40 @@ impl Cx {
                     },
                     FromJavaMessage::SurfaceChanged {
                         window,
-                        width:_,
-                        height:_,
+                        width,
+                        height,
                     } => {
                         unsafe {
                             self.os.display.as_mut().unwrap().update_surface(window);
                         }
+                        self.os.display_size = dvec2(width as f64, height as f64);
+                        let window_id = CxWindowPool::id_zero();
+                        let window = &mut self.windows[window_id];
+                        let old_geom = window.window_geom.clone();
+                        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                        let size = self.os.display_size / dpi_factor;
+                        window.window_geom = WindowGeom {
+                            dpi_factor,
+                            can_fullscreen: false,
+                            xr_is_presenting: false,
+                            is_fullscreen: true,
+                            is_topmost: true,
+                            position: dvec2(0.0, 0.0),
+                            inner_size: size,
+                            outer_size: size,
+                        };
+                        let new_geom = window.window_geom.clone();
+                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                            window_id,
+                            new_geom,
+                            old_geom
+                        }));
+                        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                            self.redraw_pass_and_child_passes(main_pass_id);
+                        }
+                        self.redraw_all();
+                        self.os.first_after_resize = true;
+                        
                         /*
                         {
                             let mut d = crate::native_display().lock().unwrap();
@@ -90,13 +119,29 @@ impl Cx {
                         }*/
                         // self.event_handler.resize_event(width as _, height as _);
                     }
-                    FromJavaMessage::Touch {
-                        phase:_,
-                        touch_id:_,
-                        x:_,
-                        y:_,
-                    } => {
-                        //self.event_handler.touch_event(phase, touch_id, x, y);
+                    FromJavaMessage::Touch(mut touches)=>{  
+                        let time = self.os.time_now();
+                        let window = &mut self.windows[CxWindowPool::id_zero()];
+                        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                        for touch in &mut touches {
+                            // When the software keyboard shifted the UI in the vertical axis,
+                            //we need to make the math here to keep touch events positions synchronized.
+                            if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
+                            
+                            touch.abs /= dpi_factor;
+                        }
+                        self.fingers.process_touch_update_start(time, &touches);
+                        let e = Event::TouchUpdate(
+                            TouchUpdateEvent {
+                                time,
+                                window_id: CxWindowPool::id_zero(),
+                                touches,
+                                modifiers: Default::default()
+                            }
+                        );
+                        self.call_event_handler(&e);
+                        let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
+                        self.fingers.process_touch_update_end(&e.touches);
                     }
                     FromJavaMessage::Character {character:_} => {
                         //if let Some(character) = char::from_u32(character) {
@@ -126,7 +171,32 @@ impl Cx {
                         self.event_handler.key_up_event(keycode, self.keymods);*/
                     }
                     FromJavaMessage::Pause => {
+                        self.call_event_handler(&Event::Pause);
+                    }
+                    FromJavaMessage::Stop => {
                        // self.event_handler.window_minimized_event(),
+                        // lets destroy all of our gl resources
+                        for texture in &mut self.textures.0.pool {
+                            texture.os.free_resources();
+                        }
+                        // delete all geometry buffers
+                        for geometry in &mut self.geometries.0.pool {
+                            geometry.os.free_resources();
+                        }
+                        
+                        for pass in &mut self.passes.0.pool {
+                            pass.os.free_resources();
+                        }
+                        // ok now we walk the views and remove all vaos and indexbuffers
+                        for draw_list in &mut self.draw_lists.0.pool {
+                            for item in &mut draw_list.draw_items.buffer {
+                                item.os.free_resources();
+                            }
+                        }
+                        
+                        for shader in &mut self.draw_shaders.os_shaders {
+                            shader.free_resources();
+                        }
                     }
                     FromJavaMessage::Resume => {
                         if self.os.fullscreen {
@@ -135,14 +205,50 @@ impl Cx {
                                 android_jni::to_java_set_full_screen(env, true);
                             }
                         }
-                        
+                        self.call_event_handler(&Event::Resume);
+                        let window_id = CxWindowPool::id_zero();
+                        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                            self.redraw_pass_and_child_passes(main_pass_id);
+                        }
+                        self.redraw_all();
+                        self.reinitialise_media();
                         //self.event_handler.window_restored_event()
                     }
                     FromJavaMessage::Destroy => {
                         self.os.quit = true;
                     }
+                    FromJavaMessage::Init(_)=>{
+                        panic!()
+                    }
                 }
             }
+            
+            self.handle_platform_ops();
+            if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
+                // redraw?
+                //to_java.schedule_redraw();
+            }
+            else{
+                std::thread::sleep(std::time::Duration::from_millis(8));
+                continue
+            }
+            
+            crate::profile_end!(self.os.last_time);
+            self.os.last_time = crate::profile_start();
+            if self.new_next_frames.len() != 0 {
+                self.call_next_frame_event(self.os.time_now());
+            }
+            if self.need_redrawing() {
+                self.call_draw_event();
+                self.opengl_compile_shaders();
+            }
+            
+            if self.os.first_after_resize {
+                self.os.first_after_resize = false;
+                self.redraw_all();
+            }
+            
+            self.handle_repaint();
         }
     }
     
@@ -158,14 +264,19 @@ impl Cx {
             
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
             
-            let (window, _screen_width, _screen_height) = 'a: loop {
+            let window = loop {
                 match from_java_rx.try_recv() {
+                    Ok(FromJavaMessage::Init(params))=>{
+                        cx.os.dpi_factor = params.density;
+                        cx.os_type = OsType::Android(params);
+                    }
                     Ok(FromJavaMessage::SurfaceChanged {
                         window,
                         width,
                         height,
                     }) => {
-                        break 'a (window, width as f32, height as f32);
+                        cx.os.display_size = dvec2(width as f64, height as f64);
+                        break window;
                     }
                     _ => {}
                 }
@@ -606,7 +717,7 @@ impl Cx {
         //}
     }
     
-    pub (crate) fn _handle_repaint(&mut self) {
+    pub (crate) fn handle_repaint(&mut self) {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -624,6 +735,13 @@ impl Cx {
                 CxPassParent::None => {
                     self.draw_pass_to_texture(*pass_id);
                 }
+            }
+        }
+        
+        unsafe {
+            if let Some(display) = &mut self.os.display{
+                (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                
             }
         }
     }
@@ -648,7 +766,7 @@ impl Cx {
         }
     }
     
-    fn _handle_platform_ops(&mut self) -> EventFlow {
+    fn handle_platform_ops(&mut self) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
