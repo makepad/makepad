@@ -110,6 +110,7 @@ impl Cx {
                         }
                         self.redraw_all();
                         self.os.first_after_resize = true;
+                        self.call_event_handler(&Event::ClearAtlasses);
                     }
                     FromJavaMessage::Touch(mut touches) => {
                         let time = self.os.time_now();
@@ -199,7 +200,7 @@ impl Cx {
                                 android_jni::to_java_set_full_screen(env, true);
                             }
                         }
-                        self.call_event_handler(&Event::Resume);
+                        //self.call_event_handler(&Event::ClearAtlas);
                         //`let window_id = CxWindowPool::id_zero();
                         /*if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
                             self.redraw_pass_and_child_passes(main_pass_id);
