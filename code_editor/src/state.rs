@@ -1,6 +1,5 @@
 use {
     crate::{
-        change::{ChangeKind, Drift},
         char::CharExt,
         history::EditKind,
         inlays::{BlockInlay, InlineInlay},
@@ -9,11 +8,12 @@ use {
         move_ops,
         selection::Affinity,
         str::StrExt,
+        text::{Change, ChangeKind, Drift, Extent, Point, Range, Text},
         token::TokenKind,
         widgets::BlockWidget,
         wrap,
         wrap::WrapData,
-        Change, Extent, History, Line, Point, Range, Selection, Settings, Text, Token, Tokenizer,
+        History, Line, Selection, Settings, Token, Tokenizer,
     },
     std::{
         cell::RefCell,
@@ -549,7 +549,8 @@ impl Session {
 
     pub fn copy(&self) -> String {
         let mut string = String::new();
-        for range in self.selections
+        for range in self
+            .selections
             .iter()
             .copied()
             .merge(
@@ -560,7 +561,12 @@ impl Session {
             )
             .map(|selection| selection.range())
         {
-            write!(&mut string, "{}", self.document.borrow().text().slice(range)).unwrap();
+            write!(
+                &mut string,
+                "{}",
+                self.document.borrow().text().slice(range)
+            )
+            .unwrap();
         }
         string
     }
@@ -891,11 +897,15 @@ impl Document {
                     point.byte -= delete_extent_before.byte_count;
                 } else {
                     point.line -= delete_extent_before.line_count;
-                    point.byte = self.text.as_lines()[point.line].len() - delete_extent_before.byte_count;
+                    point.byte =
+                        self.text.as_lines()[point.line].len() - delete_extent_before.byte_count;
                 }
                 let change = Change {
                     drift: Drift::Before,
-                    kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent_before)),
+                    kind: ChangeKind::Delete(Range::from_start_and_extent(
+                        point,
+                        delete_extent_before,
+                    )),
                 };
                 let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
@@ -903,17 +913,30 @@ impl Document {
                 inverted_changes.push(inverted_change);
             }
             if delete_after {
-                let delete_extent_after = if let Some(grapheme) = self.text.as_lines()[point.line][point.byte..].graphemes().next() {
-                    Some(Extent { line_count: 0, byte_count: grapheme.len() })
+                let delete_extent_after = if let Some(grapheme) = self.text.as_lines()[point.line]
+                    [point.byte..]
+                    .graphemes()
+                    .next()
+                {
+                    Some(Extent {
+                        line_count: 0,
+                        byte_count: grapheme.len(),
+                    })
                 } else if point.line < self.text.as_lines().len() - 1 {
-                    Some(Extent { line_count: 1, byte_count: 0 })
+                    Some(Extent {
+                        line_count: 1,
+                        byte_count: 0,
+                    })
                 } else {
                     None
                 };
                 if let Some(delete_extent_after) = delete_extent_after {
                     let change = Change {
                         drift: Drift::Before,
-                        kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent_after)),
+                        kind: ChangeKind::Delete(Range::from_start_and_extent(
+                            point,
+                            delete_extent_after,
+                        )),
                     };
                     let inverted_change = change.clone().invert(&self.text);
                     self.text.apply_change(change.clone());

@@ -1,5 +1,5 @@
 use {
-    crate::{Change, Extent, Point, Range},
+    crate::text::{Change, Extent, Point, Range},
     std::ops,
 };
 
