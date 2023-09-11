@@ -56,7 +56,7 @@ pub struct ListView {
     #[rust(u64::MAX)] range_end: u64,
     #[rust(0u64)] view_window: u64,
     #[live(0.2)] flick_scroll_minimum: f64,
-    #[live(100.0)] flick_scroll_maximum: f64,
+    #[live(80.0)] flick_scroll_maximum: f64,
     #[live(0.005)] flick_scroll_scaling: f64,
     #[live(0.98)] flick_scroll_decay: f64,
     #[live(0.2)] swipe_drag_duration: f64,
@@ -661,7 +661,7 @@ impl Widget for ListView {
                         _=>()
                     }
                 }
-                Hit::FingerUp(e) => {
+                Hit::FingerUp(_e) => {
                     //log!("Finger up {} {}", e.time, e.abs);
                     match &mut self.scroll_state {
                         ScrollState::Drag {samples}=>{
