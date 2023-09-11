@@ -21,15 +21,13 @@ live_design! {
 }
 
 // TODO:
-// - Add support for other color conversions. Currently only YUV420 Semi-Planar is supported, (and only nv12)
-//      - adding color conversions is easy, we need to figure out how to get the codecs to give us the color format info.
-//      - currently the flags I've tried like MediaFormat.KEY_COLOR_FORMAT, are null on most codecs.
+// - Add support for SemiPlanar nv21, currently we assume nv12
 
 // - Test frame rate to make sure it works right on different devices, current solution for ticks is somewhat a hack:
 //     - sporadically some texture updates take longer than desired (5 - 10 ms) which causes subsequent calls create the next timeout a delay.
 //       accumulated delays overtime make for slower playback.
 //     - the current fix is to check for irregularities and compoensate on the next timeout.
-//     - a better solution would be to have a loop on a separate thread in the platform's code, that sends timer events without having to schedule each one through events. 
+//     - a better solution would be to have a loop on a separate thread in the platform's code, that sends timer events without having to schedule each one through events.
 //       tried this on Java but was missing some polisihng, it was actually too fast.
 //     - a defentivie solution would be to fix the irregualarities, I believ they happen due to waiting for locks on the frame buffer and vec pools.
 //       this can be improved by double buffering. (separate swappable read and write buffers)
@@ -62,12 +60,10 @@ pub struct Video {
     #[live]
     source: LiveDependency,
     #[rust]
-    y_texture: Option<Texture>,
+    texture: Option<Texture>,
     #[rust]
-    uv_texture: Option<Texture>,
-
     // Playback options
-    #[live]
+    #[live(true)]
     is_looping: bool,
 
     // Original video metadata
@@ -106,9 +102,7 @@ pub struct Video {
     #[rust]
     decoding_state: DecodingState,
     #[rust]
-    vec_pool_y: SharedVecPool,
-    #[rust]
-    vec_pool_uv: SharedVecPool,
+    vec_pool: SharedVecPool,
     #[rust]
     last_timeout: Option<Instant>,
 
@@ -140,6 +134,7 @@ impl LiveHook for Video {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.id = LiveId::new(cx);
         self.initialize_decoding(cx);
+        self.is_looping = true; // TODO: remove this line
     }
 }
 
@@ -150,21 +145,18 @@ pub enum VideoAction {
 
 impl Widget for Video {
     fn redraw(&mut self, cx: &mut Cx) {
-        if self.uv_texture.is_none() || self.uv_texture.is_none() {
+        if self.texture.is_none() {
             return;
         }
 
         self.draw_bg
             .draw_vars
-            .set_texture(0, self.y_texture.as_ref().unwrap());
+            .set_texture(0, self.texture.as_ref().unwrap());
 
-        self.draw_bg
-            .draw_vars
-            .set_texture(1, self.uv_texture.as_ref().unwrap());
         self.draw_bg.redraw(cx);
     }
 
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
 
@@ -202,7 +194,7 @@ impl Video {
         if let Event::VideoChunkDecoded(video_id) = event {
             if *video_id == self.id {
                 self.decoding_state = DecodingState::Finished;
-                cx.fetch_next_video_frames(self.id, MAX_FRAMES_TO_DECODE);    
+                cx.fetch_next_video_frames(self.id, MAX_FRAMES_TO_DECODE);
             }
         }
 
@@ -215,7 +207,7 @@ impl Video {
             let adjusted_interval = if elapsed_time > ideal_interval {
                 ideal_interval - (elapsed_time - ideal_interval)
             } else {
-                ideal_interval                
+                ideal_interval
             };
 
             self.tick = cx.start_timeout(adjusted_interval as f64);
@@ -243,6 +235,13 @@ impl Video {
         self.total_duration = event.duration;
         self.color_format = event.color_format;
         self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
+
+        let is_planar = match self.color_format {
+            VideoColorFormat::YUV420Planar => 1.0,
+            _ => 0.0,
+        };
+
+        self.draw_bg.set_uniform(cx, id!(is_planar), &[is_planar]);
 
         makepad_error_log::log!(
             "<<<<<<<<<<<<<<< Decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
@@ -288,7 +287,7 @@ impl Video {
         match maybe_current_frame {
             Some(current_frame) => {
                 if self.accumulated_time >= current_frame.timestamp_us {
-                    self.update_textures(cx, current_frame.y_data, current_frame.uv_data);
+                    self.update_textures(cx, current_frame.pixel_data);
                     self.redraw(cx);
 
                     // if at latest frame, restart
@@ -314,13 +313,8 @@ impl Video {
         }
     }
 
-    fn update_textures(
-        &mut self,
-        cx: &mut Cx,
-        y_data: Arc<Mutex<Vec<u32>>>,
-        uv_data: Arc<Mutex<Vec<u32>>>,
-    ) {
-        if self.y_texture.is_none() {
+    fn update_textures(&mut self, cx: &mut Cx, pixel_data: Arc<Mutex<Vec<u32>>>) {
+        if self.texture.is_none() {
             let texture = Texture::new(cx);
             texture.set_desc(
                 cx,
@@ -330,43 +324,20 @@ impl Video {
                     height: Some(self.video_height),
                 },
             );
-            self.y_texture = Some(texture);
+            self.texture = Some(texture);
         }
 
-        if self.uv_texture.is_none() {
-            let texture = Texture::new(cx);
-            texture.set_desc(
-                cx,
-                TextureDesc {
-                    format: TextureFormat::ImageBGRA,
-                    width: Some(self.video_width / 2),
-                    height: Some(self.video_height / 2),
-                },
-            );
-            self.uv_texture = Some(texture);
-        }
-
-        let y_texture = self.y_texture.as_mut().unwrap();
-        let uv_texture = self.uv_texture.as_mut().unwrap();
+        let texture = self.texture.as_mut().unwrap();
 
         {
-            let mut y_data_locked = y_data.lock().unwrap();
-            y_texture.swap_image_u32(cx, &mut *y_data_locked);
+            let mut data_locked = pixel_data.lock().unwrap();
+            texture.swap_image_u32(cx, &mut *data_locked);
         }
 
-        {
-            let mut uv_data_locked = uv_data.lock().unwrap();
-            uv_texture.swap_image_u32(cx, &mut *uv_data_locked);
-        }
-
-        self.vec_pool_y
+        self.vec_pool
             .lock()
             .unwrap()
-            .release(y_data.lock().unwrap().to_vec());
-        self.vec_pool_uv
-            .lock()
-            .unwrap()
-            .release(uv_data.lock().unwrap().to_vec());
+            .release(pixel_data.lock().unwrap().to_vec());
     }
 
     fn initialize_decoding(&self, cx: &mut Cx) {
@@ -387,11 +358,11 @@ impl Video {
         });
 
         let frames_buffer = Arc::clone(&self.frames_buffer);
-        let vec_pool_y = Arc::clone(&self.vec_pool_y);
-        let vec_pool_uv = Arc::clone(&self.vec_pool_uv);
+        let vec_pool = Arc::clone(&self.vec_pool);
 
         let video_width = self.video_width.clone();
         let video_height = self.video_height.clone();
+        let color_format = self.color_format.clone();
 
         let (_new_sender, new_receiver) = channel();
         let old_receiver = std::mem::replace(&mut self.decoding_receiver.receiver, new_receiver);
@@ -400,11 +371,11 @@ impl Video {
             let frame_group = old_receiver.recv().unwrap();
             deserialize_chunk(
                 Arc::clone(&frames_buffer),
-                Arc::clone(&vec_pool_y),
-                Arc::clone(&vec_pool_uv),
+                Arc::clone(&vec_pool),
                 &frame_group,
                 video_width,
                 video_height,
+                color_format,
             );
         });
     }
@@ -452,8 +423,7 @@ impl Default for RingBuffer {
 
 #[derive(Clone, Default)]
 struct VideoFrame {
-    y_data: Arc<Mutex<Vec<u32>>>,
-    uv_data: Arc<Mutex<Vec<u32>>>,
+    pixel_data: Arc<Mutex<Vec<u32>>>,
     timestamp_us: u128,
 }
 
@@ -483,54 +453,59 @@ impl VecPool {
 
 fn deserialize_chunk(
     frames_buffer: SharedRingBuffer,
-    vec_pool_y: SharedVecPool,
-    vec_pool_uv: SharedVecPool,
+    vec_pool: SharedVecPool,
     frame_group: &[u8],
     video_width: usize,
     video_height: usize,
+    color_format: VideoColorFormat,
 ) {
     let mut cursor = 0;
 
-    // | Timestamp (8B)  | Y Stride (4B) | UV Stride (4B) | Frame data length (4b) | Pixel Data |
-    let metadata_size = 20;
+    // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | Frame data length (4b) | Pixel Data |
+    let metadata_size = 24;
 
     while cursor < frame_group.len() {
         // might have to update for different endinaess on other platforms
         let timestamp =
             u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
-        let y_stride = u32::from_be_bytes(frame_group[cursor + 8..cursor + 12].try_into().unwrap());
-        let uv_stride =
-            u32::from_be_bytes(frame_group[cursor + 12..cursor + 16].try_into().unwrap());
+        cursor += 8;
+        let y_stride =
+            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        let u_stride =
+            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        let v_stride =
+            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
         let frame_length =
-            u32::from_be_bytes(frame_group[cursor + 16..cursor + 20].try_into().unwrap()) as usize;
+            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
 
-        let frame_data_start = cursor + metadata_size;
-        let frame_data_end = frame_data_start + frame_length;
+        let frame_data_end = cursor + frame_length;
+        let pixel_data = &frame_group[cursor..frame_data_end];
 
-        let pixel_data = &frame_group[frame_data_start..frame_data_end];
-
-        let mut y_data = vec_pool_y
+        let mut pixel_data_u32 = vec_pool
             .lock()
             .unwrap()
-            .acquire(video_width * video_height);
-        let mut uv_data = vec_pool_uv
-            .lock()
-            .unwrap()
-            .acquire((video_width / 2) * (video_height / 2));
+            .acquire(video_width as usize * video_height as usize);
 
-        split_nv12_data(
-            pixel_data,
-            video_width,
-            video_height,
-            y_stride as usize,
-            uv_stride as usize,
-            y_data.as_mut_slice(),
-            uv_data.as_mut_slice(),
-        );
+        match color_format {
+            VideoColorFormat::YUV420Planar => todo!(),
+            VideoColorFormat::YUV420SemiPlanar => semi_planar_to_u32(
+                pixel_data,
+                video_width,
+                video_height,
+                y_stride,
+                u_stride,
+                &mut pixel_data_u32,
+            ),
+            VideoColorFormat::YUV420Flexible => todo!(),
+            VideoColorFormat::Unknown => todo!(),
+        };
 
         frames_buffer.lock().unwrap().push(VideoFrame {
-            y_data: Arc::new(Mutex::new(y_data)),
-            uv_data: Arc::new(Mutex::new(uv_data)),
+            pixel_data: Arc::new(Mutex::new(pixel_data_u32)),
             timestamp_us: timestamp,
         });
 
@@ -538,49 +513,74 @@ fn deserialize_chunk(
     }
 }
 
-fn split_nv12_data(
+fn planar_to_u32(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    y_stride: usize,
+    u_stride: usize,
+    v_stride: usize,
+    packed_data: &mut [u32],
+) {
+    let mut y_idx = 0;
+
+    let y_start = 0;
+    let y_end = y_stride * height;
+
+    let u_start = y_end;
+    let u_end = u_start + u_stride * (height / 2);
+
+    let v_start = u_end;
+
+    for row in 0..height {
+        let y_row_start = y_start + row * y_stride;
+        let y_row_end = y_row_start + width;
+
+        let u_row_start = u_start + (row / 2) * u_stride;
+        let v_row_start = v_start + (row / 2) * v_stride;
+
+        for x in 0..width {
+            let y = data[y_row_start + x];
+            let u = data[u_row_start + x / 2];
+            let v = data[v_row_start + x / 2];
+
+            // Pack Y, U, and V into u32: Y in Blue channel, U in Green, V in Red
+            packed_data[y_idx] = (v as u32) << 16 | (u as u32) << 8 | (y as u32);
+
+            y_idx += 1;
+        }
+    }
+}
+
+fn semi_planar_to_u32(
     data: &[u8],
     width: usize,
     height: usize,
     y_stride: usize,
     uv_stride: usize,
-    y_data: &mut [u32],
-    uv_data: &mut [u32],
+    packed_data: &mut [u32],
 ) {
     let mut y_idx = 0;
-    let mut uv_idx = 0;
-
-    if y_data.len() < width * height || uv_data.len() < (width / 2) * (height / 2) {
-        makepad_error_log::log!(
-            "y_data len: {}, uv_data len: {}, width: {}, height: {}",
-            y_data.len(),
-            uv_data.len(),
-            width,
-            height
-        );
-        return;
-    }
-
-    // Extract and convert Y data
-    for row in 0..height {
-        let start = row * y_stride;
-        let end = start + width;
-        for &y in &data[start..end] {
-            y_data[y_idx] = 0xFFFFFF00u32 | (y as u32);
-            y_idx += 1;
-        }
-    }
-
-    // Extract and convert UV data
     let uv_start = y_stride * height;
-    for row in 0..(height / 2) {
-        let start = uv_start + row * uv_stride;
-        let end = start + width;
-        for chunk in data[start..end].chunks(2) {
-            let u = chunk[0];
-            let v = chunk[1];
-            uv_data[uv_idx] = (u as u32) << 16 | (v as u32) << 8 | 0xFF000000u32;
-            uv_idx += 1;
+
+    for row in 0..height {
+        let y_start = row * y_stride;
+        let y_end = y_start + width;
+
+        let uv_row_start = uv_start + (row / 2) * uv_stride;
+
+        for x in 0..width {
+            let y = data[y_start + x];
+
+            // calculate index for UV data
+            let uv_idx = uv_row_start + (x / 2) * 2;
+            let u = data[uv_idx];
+            let v = data[uv_idx + 1];
+
+            // pack Y, U, and V into u32: Y in Blue channel, U in Green, V in Red
+            packed_data[y_idx] = (v as u32) << 16 | (u as u32) << 8 | (y as u32);
+
+            y_idx += 1;
         }
     }
 }
