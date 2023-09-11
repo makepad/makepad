@@ -50,11 +50,11 @@ use {
 };
 
 // Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
-const _ANDROID_META_CTRL_MASK: i32 = 28672;
+const ANDROID_META_CTRL_MASK: u32 = 28672;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_SHIFT_MASK
-const _ANDROID_META_SHIFT_MASK: i32 = 193;
+const ANDROID_META_SHIFT_MASK: u32 = 193;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
-const _ANDROID_META_ALT_MASK: i32 = 50;
+const ANDROID_META_ALT_MASK: u32 = 50;
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
@@ -136,22 +136,62 @@ impl Cx {
                         let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
                         self.fingers.process_touch_update_end(&e.touches);
                     }
-                    FromJavaMessage::Character {character: _} => {
-                        //if let Some(character) = char::from_u32(character) {
-                        //    self.event_handler
-                        //        .char_event(character, Default::default(), false);
-                        //}
-                    }
-                    FromJavaMessage::KeyDown {keycode: _} => {
-                        /*match keycode {
-                            KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = true,
-                            KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = true,
-                            KeyCode::LeftAlt | KeyCode::RightAlt => self.keymods.alt = true,
-                            KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = true,
-                            _ => {}
+                    FromJavaMessage::Character {character} => {
+                        if let Some(character) = char::from_u32(character) {
+                            let e = Event::TextInput(
+                                TextInputEvent {
+                                    input: character.to_string(),
+                                    replace_last: false,
+                                    was_paste: false,
+                                }
+                            );
+                            self.call_event_handler(&e);
                         }
-                        self.event_handler
-                            .key_down_event(keycode, self.keymods, false);*/
+                    }
+                    FromJavaMessage::KeyDown {keycode, meta_state} => {
+                        let e: Event;
+                        let makepad_keycode = android_to_makepad_key_code(keycode);
+                        if !makepad_keycode.is_unknown() {
+                            let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                            let alt = meta_state & ANDROID_META_ALT_MASK != 0;
+                            let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+                            let is_shortcut = control || alt;
+                            if is_shortcut {
+                                if makepad_keycode == KeyCode::KeyC {  
+                                    let response = Rc::new(RefCell::new(None));
+                                    e = Event::TextCopy(TextClipboardEvent {
+                                        response: response.clone()
+                                    });
+                                    self.call_event_handler(&e);
+                                    // let response = response.borrow();
+                                    // if let Some(response) = response.as_ref(){
+                                    //     to_java.copy_to_clipboard(response);
+                                    // }
+                                } else if makepad_keycode == KeyCode::KeyX {
+                                    let response = Rc::new(RefCell::new(None));
+                                    let e = Event::TextCut(TextClipboardEvent {
+                                        response: response.clone()
+                                    });
+                                    self.call_event_handler(&e);
+                                    // let response = response.borrow();
+                                    // if let Some(response) = response.as_ref(){
+                                    //     to_java.copy_to_clipboard(response);
+                                    // }
+                                } else if makepad_keycode == KeyCode::KeyV {  
+                                    //to_java.paste_from_clipboard();
+                                }
+                            } else {
+                                e = Event::KeyDown(
+                                    KeyEvent {
+                                        key_code: makepad_keycode,
+                                        is_repeat: false,
+                                        modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
+                                        time: self.os.time_now()
+                                    }
+                                );
+                                self.call_event_handler(&e);
+                            }
+                        }
                     }
                     FromJavaMessage::KeyUp {keycode: _} => {
                         /*match keycode {
@@ -432,7 +472,7 @@ impl Cx {
     
     /// Called when a touch event happened on the software keyword
     /*
-    pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
+    pub fn from_java_on_key_down(&mut self, keycode: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
         let e: Event;
         
         match characters {
@@ -447,7 +487,7 @@ impl Cx {
                 self.call_event_handler(&e);
             }
             None => {
-                let key_code = android_to_makepad_key_code(key_code_val);
+                let key_code = android_to_makepad_key_code(keycode);
                 if !key_code.is_unknown() {
                     let control = meta_state & ANDROID_META_CTRL_MASK != 0;
                     let alt = meta_state & ANDROID_META_ALT_MASK != 0;
@@ -741,11 +781,17 @@ impl Cx {
                 },
                 CxOsOp::ShowTextIME(area, _pos) => {
                     self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
-                    // to_java.show_text_ime();
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_show_keyboard(env, true);
+                    }
                 },
                 CxOsOp::HideTextIME => {
                     self.os.keyboard_visible = false;
-                    //to_java.hide_text_ime();
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_show_keyboard(env, false);
+                    }
                 },
                 CxOsOp::ShowClipboardActions(_selected) => {
                     //to_java.show_clipboard_actions(selected.as_str());
