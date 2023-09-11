@@ -110,6 +110,7 @@ impl Cx {
                         }
                         self.redraw_all();
                         self.os.first_after_resize = true;
+                        self.call_event_handler(&Event::ClearAtlasses);
                     }
                     FromJavaMessage::Touch(mut touches) => {
                         let time = self.os.time_now();
@@ -166,11 +167,13 @@ impl Cx {
                         self.call_event_handler(&Event::Pause);
                     }
                     FromJavaMessage::Stop => {
+                        //crate::log!("STOP!");
                         // self.event_handler.window_minimized_event(),
                         // lets destroy all of our gl resources
-                        for texture in &mut self.textures.0.pool {
-                            texture.os.free_resources();
-                        }
+                        //for texture in &mut self.textures.0.pool {
+                        //    texture.os.free_resources();
+                        //}
+                        /*
                         // delete all geometry buffers
                         for geometry in &mut self.geometries.0.pool {
                             geometry.os.free_resources();
@@ -179,16 +182,16 @@ impl Cx {
                         for pass in &mut self.passes.0.pool {
                             pass.os.free_resources();
                         }
+                        
                         // ok now we walk the views and remove all vaos and indexbuffers
                         for draw_list in &mut self.draw_lists.0.pool {
                             for item in &mut draw_list.draw_items.buffer {
                                 item.os.free_resources();
                             }
                         }
-                        
                         for shader in &mut self.draw_shaders.os_shaders {
                             shader.free_resources();
-                        }
+                        }*/
                     }
                     FromJavaMessage::Resume => {
                         if self.os.fullscreen {
@@ -197,11 +200,11 @@ impl Cx {
                                 android_jni::to_java_set_full_screen(env, true);
                             }
                         }
-                        self.call_event_handler(&Event::Resume);
-                        let window_id = CxWindowPool::id_zero();
-                        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                        //self.call_event_handler(&Event::ClearAtlas);
+                        //`let window_id = CxWindowPool::id_zero();
+                        /*if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
                             self.redraw_pass_and_child_passes(main_pass_id);
-                        }
+                        }*/
                         self.redraw_all();
                         self.reinitialise_media();
                         //self.event_handler.window_restored_event()
@@ -222,28 +225,24 @@ impl Cx {
             
             self.handle_platform_ops();
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
-                // redraw?
-                //to_java.schedule_redraw();
+                if self.new_next_frames.len() != 0 {
+                    self.call_next_frame_event(self.os.time_now());
+                }
+                if self.need_redrawing() {
+                    self.call_draw_event();
+                    self.opengl_compile_shaders();
+                }
+                
+                if self.os.first_after_resize {
+                    self.os.first_after_resize = false;
+                    self.redraw_all();
+                }
+                
+                self.handle_repaint();
             }
             else {
                 std::thread::sleep(std::time::Duration::from_millis(8));
-                continue
             }
-            
-            if self.new_next_frames.len() != 0 {
-                self.call_next_frame_event(self.os.time_now());
-            }
-            if self.need_redrawing() {
-                self.call_draw_event();
-                self.opengl_compile_shaders();
-            }
-            
-            if self.os.first_after_resize {
-                self.os.first_after_resize = false;
-                self.redraw_all();
-            }
-            
-            self.handle_repaint();
         }
     }
     
