@@ -9,7 +9,7 @@ pub struct WrapData {
 pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: usize) -> WrapData {
     let mut indent_column_count: usize = line
         .text
-        .indentation()
+        .leading_whitespace()
         .unwrap_or("")
         .chars()
         .map(|char| char.column_count(tab_column_count))
