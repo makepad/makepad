@@ -233,31 +233,7 @@ impl Cx {
                         self.call_event_handler(&Event::Pause);
                     }
                     FromJavaMessage::Stop => {
-                        //crate::log!("STOP!");
-                        // self.event_handler.window_minimized_event(),
-                        // lets destroy all of our gl resources
-                        //for texture in &mut self.textures.0.pool {
-                        //    texture.os.free_resources();
-                        //}
-                        /*
-                        // delete all geometry buffers
-                        for geometry in &mut self.geometries.0.pool {
-                            geometry.os.free_resources();
-                        }
                         
-                        for pass in &mut self.passes.0.pool {
-                            pass.os.free_resources();
-                        }
-                        
-                        // ok now we walk the views and remove all vaos and indexbuffers
-                        for draw_list in &mut self.draw_lists.0.pool {
-                            for item in &mut draw_list.draw_items.buffer {
-                                item.os.free_resources();
-                            }
-                        }
-                        for shader in &mut self.draw_shaders.os_shaders {
-                            shader.free_resources();
-                        }*/
                     }
                     FromJavaMessage::Resume => {
                         if self.os.fullscreen {
@@ -266,14 +242,8 @@ impl Cx {
                                 android_jni::to_java_set_full_screen(env, true);
                             }
                         }
-                        //self.call_event_handler(&Event::ClearAtlas);
-                        //`let window_id = CxWindowPool::id_zero();
-                        /*if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
-                            self.redraw_pass_and_child_passes(main_pass_id);
-                        }*/
                         self.redraw_all();
                         self.reinitialise_media();
-                        //self.event_handler.window_restored_event()
                     }
                     FromJavaMessage::Destroy => {
                         self.os.quit = true;
