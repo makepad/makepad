@@ -109,7 +109,7 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     Ok(out)
 }
 
-pub fn shell_env_filter(what:&str, env: &[(&str, &str)], cwd: &Path, cmd: &str,  args: &[&str]) -> Result<(), String> {
+pub fn shell_env_filter(start:&str, minus:Vec<String>, env: &[(&str, &str)], cwd: &Path, cmd: &str,  args: &[&str]) -> Result<(), String> {
 
     let mut cmd_build = Command::new(cmd);
     
@@ -125,18 +125,23 @@ pub fn shell_env_filter(what:&str, env: &[(&str, &str)], cwd: &Path, cmd: &str, 
     let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
     
     let stdout = child.stdout.take().expect("stdout cannot be taken!");
-    let what = what.to_string();
+    let start = start.to_string();
     let _stdout_thread = {
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut output = false;
-            loop{
+            'a: loop{
                 let mut line = String::new();
                 if let Ok(_) = reader.read_line(&mut line){
-                    if line.contains(&what){
+                    if line.contains(&start){
                         output = true;
                     }
                     if output{
+                        for min in &minus{
+                            if line.contains(min){
+                                continue 'a;
+                            }
+                        }
                         println!("{}",line);
                     }
                 }

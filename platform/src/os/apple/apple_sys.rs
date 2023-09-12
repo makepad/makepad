@@ -1140,6 +1140,11 @@ pub enum AudioObjectPropertyScope {
     Output = four_char_as_u32("outp"),
     Input = four_char_as_u32("inpt")
 }
+#[repr(usize)]
+pub enum AVAudioSessionCategoryOption {
+    AllowBluetooth = 0x4,
+    DefaultToSpeaker = 0x8,
+}
 
 #[repr(u32)]
 pub enum AudioObjectPropertyElement {
@@ -1156,6 +1161,7 @@ pub struct AudioObjectPropertyAddress {
 pub const kAudioObjectSystemObject: AudioDeviceID = 1;
 pub type AudioObjectID = u32;
 pub type AudioDeviceID = u32;
+
 
 #[link(name = "CoreMidi", kind = "framework")]
 extern "C" {
@@ -1230,6 +1236,9 @@ unsafe extern "system" fn(
 
 #[link(name = "CoreAudio", kind = "framework")]
 extern "C" {
+    pub static AVAudioSessionCategoryPlayAndRecord: ObjcId;
+    pub static AVAudioSessionCategoryPlayback: ObjcId;
+    
     pub fn AudioObjectGetPropertyDataSize(
         inObjectId: AudioObjectID,
         inAddress: *const AudioObjectPropertyAddress,
@@ -1255,4 +1264,6 @@ extern "C" {
     ) -> OSStatus;
     
 }
+
+
 
