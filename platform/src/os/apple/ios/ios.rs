@@ -36,7 +36,6 @@ use {
     }
 };
 
-const KEEP_ALIVE_COUNT: usize = 5;
 
 impl Cx {
     
@@ -141,15 +140,9 @@ impl Cx {
             IosEvent::KeyDown(_) |
             IosEvent::KeyUp(_) |
             IosEvent::TextInput(_) => {
-                self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
             }
             IosEvent::Timer(te) => {
                 if te.timer_id == 0 {
-                    if self.os.keep_alive_counter>0 {
-                        self.os.keep_alive_counter -= 1;
-                        self.repaint_windows();
-                    }
-
                     // check signals
                     if Signal::check_and_clear_ui_signal(){
                         self.handle_media_signals();
@@ -360,7 +353,6 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) keep_alive_counter: usize,
     pub (crate) media: CxAppleMedia,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
