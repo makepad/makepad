@@ -44,7 +44,7 @@ fn show_help(err: &str){
     println!("       --host-os=<linux-x64|windows-x64|macos-aarch64|macos-x64>");
     println!("       --all-targets                             install all android targets, default only aarch64");
     println!("                                                 Host OS is autodetected but can be overridden here");
-    println!("    [Android toolchain-install separated steps]");
+    println!("    [Android install-toolchain separated steps]");
     println!("    android [options] rustup-install-toolchain");
     println!("    android [options] download-sdk");
     println!("    android [options] expand-sdk");
@@ -61,7 +61,7 @@ fn main() {
     let args:Vec<String> = std::env::args().collect();
 
     // Skip the first argument if it's the binary path or 'cargo'
-    let args = if args.len() > 1 && (args[0].ends_with("cargo-makepad") || args[0] == "cargo") {
+    let args = if args.len() > 1 && (args[0].ends_with("cargo-makepad") || args[0] == "cargo" || args[0].ends_with("cargo-makepad.exe")) {
         // If it's 'cargo makepad', then skip the second argument as well
         if args.len() > 2 && args[1] == "makepad" {
             args[2..].to_vec()

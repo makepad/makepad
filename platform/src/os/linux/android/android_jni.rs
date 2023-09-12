@@ -8,8 +8,9 @@ use {
         ndk_utils,
     },
     crate::{
+        makepad_live_id::*,
         area::Area,
-        event::{KeyCode, TouchPoint, TouchState},
+        event::{KeyCode, TouchPoint, TouchState, HttpRequest},
         cx::AndroidParams,
     },
 };
@@ -49,10 +50,26 @@ pub enum FromJavaMessage {
         character: u32,
     },
     KeyDown {
-        keycode: KeyCode,
+        keycode: u32,
+        meta_state: u32,
     },
     KeyUp {
         keycode: KeyCode,
+    },
+    ResizeTextIME {
+        keyboard_height: u32,
+    },
+    HttpResponse {
+        request_id: u64,
+        metadata_id: u64,
+        status_code: u16,
+        headers: String,
+        body: Vec<u8>
+    },
+    HttpRequestError {
+        request_id: u64,
+        metadata_id: u64,
+        error: String,
     },
     Pause,
     Resume,
@@ -255,11 +272,13 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyDown(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
-    _keycode: jni_sys::jint,
+    keycode: jni_sys::jint,
+    meta_state: jni_sys::jint,
 ) {
-    /*let keycode = keycodes::translate_keycode(keycode as _);
-
-    send_message(Message::KeyDown { keycode });*/
+    send_from_java_message(FromJavaMessage::KeyDown {
+        keycode: keycode as u32,
+        meta_state: meta_state as u32,
+    });
 }
 
 #[no_mangle]
@@ -277,11 +296,62 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyUp(
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnCharacter(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
-    _character: jni_sys::jint,
+    character: jni_sys::jint,
 ) {
-   /* send_message(Message::Character {
+    send_from_java_message(FromJavaMessage::Character {
         character: character as u32,
-    });*/
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    keyboard_height: jni_sys::jint,
+) {
+    send_from_java_message(FromJavaMessage::ResizeTextIME {
+        keyboard_height: keyboard_height as u32,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    request_id: jni_sys::jlong,
+    metadata_id: jni_sys::jlong,
+    status_code: jni_sys::jint,
+    headers: jni_sys::jstring,
+    body: jni_sys::jobject,
+) {
+    let env = unsafe { attach_jni_env() };
+    let headers = unsafe { jstring_to_string(env, headers) };
+    let body = unsafe { java_byte_array_to_vec(env, body) };
+
+    send_from_java_message(FromJavaMessage::HttpResponse {
+        request_id: request_id as u64,
+        metadata_id: metadata_id as u64,
+        status_code: status_code as u16,
+        headers,
+        body
+    });
+}
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    request_id: jni_sys::jlong,
+    metadata_id: jni_sys::jlong,
+    error: jni_sys::jstring,
+) {
+    let env = unsafe { attach_jni_env() };
+    let error = unsafe { jstring_to_string(env, error) };
+
+    send_from_java_message(FromJavaMessage::HttpRequestError {
+        request_id: request_id as u64,
+        metadata_id: metadata_id as u64,
+        error,
+    });
 }
 
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
@@ -304,7 +374,7 @@ unsafe fn _java_string_array_to_vec(env: *mut jni_sys::JNIEnv, object_array: jni
     out
 }
 
-unsafe fn _java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys::jobject) -> Vec<u8> {
+unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys::jobject) -> Vec<u8> {
     let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
     let length = (**env).GetArrayLength.unwrap()(env, byte_array);
     let mut out_bytes = Vec::new();
@@ -347,4 +417,49 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
         return Some(buffer)
     }
     return None;
+}
+
+
+pub unsafe fn to_java_show_keyboard(env: *mut jni_sys::JNIEnv, visible: bool) {
+    ndk_utils::call_void_method!(env, ACTIVITY, "showKeyboard", "(Z)V", visible as i32);
+}
+
+pub unsafe fn to_java_http_request(env: *mut jni_sys::JNIEnv, request_id: LiveId, request: HttpRequest) {
+    let url = CString::new(request.url.clone()).unwrap();
+    let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+
+    let method = CString::new(request.method.to_string()).unwrap();
+    let method = ((**env).NewStringUTF.unwrap())(env, method.as_ptr());
+
+    let headers_string = request.get_headers_string();
+    let headers = CString::new(headers_string.clone()).unwrap();
+    let headers = ((**env).NewStringUTF.unwrap())(env, headers.as_ptr());
+
+    let java_body = match &request.body {
+        Some(body) => {
+            let java_body = (**env).NewByteArray.unwrap()(env, body.len() as i32);
+            (**env).SetByteArrayRegion.unwrap()(
+                env,
+                java_body,
+                0,
+                body.len() as i32,
+                body.as_ptr() as *const jni_sys::jbyte,
+            );
+            java_body
+        }
+        None => std::ptr::null_mut(),
+    };
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "requestHttp",
+        "(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V",
+        request_id.get_value() as jni_sys::jlong,
+        request.metadata_id.get_value() as jni_sys::jlong,
+        url,
+        method,
+        headers,
+        java_body as jni_sys::jobject
+    );
 }
