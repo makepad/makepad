@@ -44,6 +44,8 @@ pub enum Event {
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
+
+    ClearAtlasses,
     
     MouseDown(MouseDownEvent),
     MouseMove(MouseMoveEvent),

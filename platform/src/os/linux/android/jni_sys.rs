@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 
 use std::ffi::{c_char, c_void};
+pub const JNI_VERSION_1_6: jint = 0x00010006;
 
 pub type va_list = *mut c_void;
 
@@ -73,7 +74,7 @@ pub struct JNIInvokeInterface_ {
     pub AttachCurrentThread: Option<
         unsafe extern "system" fn(
             vm: *mut JavaVM,
-            penv: *mut *mut c_void,
+            penv: *mut *mut JNIEnv,
             args: *mut c_void,
         ) -> jint,
     >,
