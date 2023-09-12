@@ -180,18 +180,21 @@ impl Cx {
         let live_registry = self.live_registry.borrow();
         let (send, recv) = std::sync::mpsc::channel();
         self.live_file_changes = Some(recv);
-        let mut file_list:Vec<(String,Option<String>)> = Vec::new();
+        let mut file_list:Vec<(String,String, Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
-            file_list.push((file.file_name.clone(), None));
+            if let Some(start) = file.file_name.find("/src/"){
+                let path = format!("{}{}", file.cargo_manifest_path, &file.file_name[start..]);
+                file_list.push((path, file.file_name.clone(), None));
+            }
         }
         std::thread::spawn(move || loop{
             let mut changed_files = Vec::new();
-            for (file_name, content) in &mut file_list{
-                let next = std::fs::read_to_string(&file_name);
+            for (full_path, file_name, content) in &mut file_list{
+                let next = std::fs::read_to_string(&full_path);
                 if let Ok(next) = next{
                     if let Some(content_str) = content{
                         if content_str != &next{
-                            //crate::log!("Live reloading application: {}",file_name.clone());
+                            crate::log!("Live reloading application: {}",file_name.clone());
                             changed_files.push(LiveFileChange{
                                 file_name:file_name.clone(), 
                                 content: next.clone()
