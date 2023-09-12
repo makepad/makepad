@@ -339,7 +339,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     println!("Installing application on device");
     shell_env_filter("Makepad iOS application started.", vec![
         "HALS_Device.cpp:90".to_string(),
-        "[BTAudio]".to_string()
+       // "[BTAudio]".to_string()
     ], &[], &ios_deploy ,"./ios-deploy", &[
         "-i",
         &provision.device,  
