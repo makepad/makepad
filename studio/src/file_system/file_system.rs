@@ -1,7 +1,5 @@
 use {
     std::collections::{HashMap,hash_map},
-    std::rc::Rc,
-    std::cell::RefCell,
     crate::{
         makepad_code_editor::{Document, Session},
         makepad_platform::*,
@@ -28,7 +26,7 @@ pub struct FileSystem {
     pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
     pub tab_id_to_path: HashMap<LiveId, String>,
     pub tab_id_to_session: HashMap<LiveId, Session>,
-    pub open_documents: HashMap<String, Option<Rc<RefCell<Document>>>>
+    pub open_documents: HashMap<String, Option<Document>>
 }
 
 #[derive(Debug)]
@@ -97,7 +95,7 @@ impl FileSystem {
                                     dock.redraw_tab(cx, *tab_id);
                                 }
                             }
-                            self.open_documents.insert(unix_path, Some(Rc::new(RefCell::new(Document::new(data.into())))));
+                            self.open_documents.insert(unix_path, Some(Document::new(data.into())));
                             ui.redraw(cx);
                         }
                         Err(FileError::CannotOpen(_unix_path))=>{
@@ -165,7 +163,7 @@ impl FileSystem {
         // ifnot, we create a new one
         if let Some(path) = self.tab_id_to_path.get(&tab_id){
             if let Some(Some(doc)) = self.open_documents.get(path){
-                let text = doc.borrow().text().to_string();
+                let text = doc.text().to_string();
                 self.file_client.send_request(FileRequest::SaveFile(path.clone(), text));
             }
         };
