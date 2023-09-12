@@ -310,6 +310,7 @@ impl Cx {
                     win32_app.stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
+                    win32_app.start_dragging(_dragged_item);
                 },
                 CxOsOp::UpdateMenu(_menu) => {
                 },

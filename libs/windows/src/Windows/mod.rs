@@ -1542,6 +1542,27 @@ where
     DragQueryFileW(hdrop.into_param().abi(), ifile, ::core::mem::transmute(lpszfile.as_deref().map_or(::core::ptr::null(), |slice| slice.as_ptr())), lpszfile.as_deref().map_or(0, |slice| slice.len() as _))
 }
 
+#[repr(C, packed(1))]pub struct DROPFILES {
+    pub pFiles: u32,
+    pub pt: super::super::Foundation::POINT,
+    pub fNC: super::super::Foundation::BOOL,
+    pub fWide: super::super::Foundation::BOOL,
+}
+impl ::core::marker::Copy for DROPFILES {}
+impl ::core::clone::Clone for DROPFILES {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DROPFILES {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::windows_core::TypeKind for DROPFILES {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HDROP(pub isize);
 impl HDROP {
     pub fn is_invalid(&self) -> bool {
@@ -12401,6 +12422,15 @@ impl ::windows_core::TypeKind for BOOL {
 
 pub type FARPROC = ::core::option::Option<unsafe extern "system" fn() -> isize>;
 
+pub unsafe fn GlobalFree<P0>(hmem: P0) -> ::windows_core::Result<HGLOBAL>
+where
+    P0: ::windows_core::IntoParam<HGLOBAL>,
+{
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalFree(hmem : HGLOBAL) -> HGLOBAL);
+    let result__ = GlobalFree(hmem.into_param().abi());
+    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows_core::Error::from_win32)
+}
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HANDLE(pub isize);
 impl HANDLE {
     pub fn is_invalid(&self) -> bool {
@@ -12994,6 +13024,32 @@ impl ::windows_core::TypeKind for DECIMAL_1_0 {
     type TypeKind = ::windows_core::CopyType;
 }
 
+pub const FALSE: BOOL = BOOL(0i32);
+
+pub const DRAGDROP_S_DROP: ::windows_core::HRESULT = ::windows_core::HRESULT(262400i32);
+
+pub const DRAGDROP_S_USEDEFAULTCURSORS: ::windows_core::HRESULT = ::windows_core::HRESULT(262402i32);
+
+pub const E_NOTIMPL: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147467263i32);
+
+pub const OLE_E_ADVISENOTSUPPORTED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221501i32);
+
+pub const OLE_S_USEREG: ::windows_core::HRESULT = ::windows_core::HRESULT(262144i32);
+
+pub const DATA_S_SAMEFORMATETC: ::windows_core::HRESULT = ::windows_core::HRESULT(262448i32);
+
+pub const DV_E_FORMATETC: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221404i32);
+
+pub const DV_E_DVASPECT: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221397i32);
+
+pub const DV_E_LINDEX: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221400i32);
+
+pub const DV_E_TYMED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221399i32);
+
+pub const S_FALSE: ::windows_core::HRESULT = ::windows_core::HRESULT(1i32);
+
+pub const E_UNEXPECTED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147418113i32);
+
 }
 pub mod System{
 pub mod Threading{
@@ -13077,150 +13133,83 @@ pub unsafe fn OleInitialize(pvreserved: ::core::option::Option<*const ::core::ff
     OleInitialize(::core::mem::transmute(pvreserved.unwrap_or(::std::ptr::null()))).ok()
 }
 
-pub const CF_UNICODETEXT: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(13u16);
-
-pub unsafe fn RegisterDragDrop<P0, P1>(hwnd: P0, pdroptarget: P1) -> ::windows_core::Result<()>
-where
-    P0: ::windows_core::IntoParam<super::super::Foundation::HWND>,
-    P1: ::windows_core::IntoParam<IDropTarget>,
-{
-    ::windows_targets::link!("ole32.dll" "system" fn RegisterDragDrop(hwnd : super::super::Foundation:: HWND, pdroptarget : * mut::core::ffi::c_void) -> ::windows_core::HRESULT);
-    RegisterDragDrop(hwnd.into_param().abi(), pdroptarget.into_param().abi()).ok()
-}
-
-#[repr(transparent)]pub struct IDropTarget(::windows_core::IUnknown);
-impl IDropTarget {
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`, `\"Win32_System_SystemServices\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub unsafe fn DragEnter<P0>(&self, pdataobj: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>
-    where
-        P0: ::windows_core::IntoParam<super::Com::IDataObject>,
-    {
-        (::windows_core::Interface::vtable(self).DragEnter)(::windows_core::Interface::as_raw(self), pdataobj.into_param().abi(), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
-    }
+#[repr(transparent)]pub struct IDropSource(::windows_core::IUnknown);
+impl IDropSource {
     #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_SystemServices\"`*"]
     #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
-    pub unsafe fn DragOver(&self, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()> {
-        (::windows_core::Interface::vtable(self).DragOver)(::windows_core::Interface::as_raw(self), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
-    }
-    pub unsafe fn DragLeave(&self) -> ::windows_core::Result<()> {
-        (::windows_core::Interface::vtable(self).DragLeave)(::windows_core::Interface::as_raw(self)).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`, `\"Win32_System_SystemServices\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub unsafe fn Drop<P0>(&self, pdataobj: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>
+    pub unsafe fn QueryContinueDrag<P0>(&self, fescapepressed: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT
     where
-        P0: ::windows_core::IntoParam<super::Com::IDataObject>,
+        P0: ::windows_core::IntoParam<super::super::Foundation::BOOL>,
     {
-        (::windows_core::Interface::vtable(self).Drop)(::windows_core::Interface::as_raw(self), pdataobj.into_param().abi(), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
+        (::windows_core::Interface::vtable(self).QueryContinueDrag)(::windows_core::Interface::as_raw(self), fescapepressed.into_param().abi(), grfkeystate)
+    }
+    pub unsafe fn GiveFeedback(&self, dweffect: DROPEFFECT) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).GiveFeedback)(::windows_core::Interface::as_raw(self), dweffect)
     }
 }
-impl ::core::cmp::Eq for IDropTarget {}
-impl ::core::cmp::PartialEq for IDropTarget {
+impl ::core::cmp::Eq for IDropSource {}
+impl ::core::cmp::PartialEq for IDropSource {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 }
-impl ::core::clone::Clone for IDropTarget {
+impl ::core::clone::Clone for IDropSource {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
-impl ::core::fmt::Debug for IDropTarget {
+impl ::core::fmt::Debug for IDropSource {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("IDropTarget").field(&self.0).finish()
+        f.debug_tuple("IDropSource").field(&self.0).finish()
     }
 }
-unsafe impl ::windows_core::Interface for IDropTarget {
-    type Vtable = IDropTarget_Vtbl;
+unsafe impl ::windows_core::Interface for IDropSource {
+    type Vtable = IDropSource_Vtbl;
 }
-unsafe impl ::windows_core::ComInterface for IDropTarget {
-    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000122_0000_0000_c000_000000000046);
+unsafe impl ::windows_core::ComInterface for IDropSource {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000121_0000_0000_c000_000000000046);
 }
 
-::windows_core::imp::interface_hierarchy!(IDropTarget, ::windows_core::IUnknown);
+::windows_core::imp::interface_hierarchy!(IDropSource, ::windows_core::IUnknown);
 
 #[repr(C)]
-pub struct IDropTarget_Vtbl {
+pub struct IDropSource_Vtbl {
     pub base__: ::windows_core::IUnknown_Vtbl,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub DragEnter: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices")))]
-    DragEnter: usize,
     #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
-    pub DragOver: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
+    pub QueryContinueDrag: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, fescapepressed: super::super::Foundation::BOOL, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT,
     #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices")))]
-    DragOver: usize,
-    pub DragLeave: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub Drop: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices")))]
-    Drop: usize,
+    QueryContinueDrag: usize,
+    pub GiveFeedback: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dweffect: DROPEFFECT) -> ::windows_core::HRESULT,
 }
 
-pub trait IDropTarget_Impl: Sized {
-    fn DragEnter(&self, pdataobj: ::core::option::Option<&super::Com::IDataObject>, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
-    fn DragOver(&self, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
-    fn DragLeave(&self) -> ::windows_core::Result<()>;
-    fn Drop(&self, pdataobj: ::core::option::Option<&super::Com::IDataObject>, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
+pub trait IDropSource_Impl: Sized {
+    fn QueryContinueDrag(&self, fescapepressed: super::super::Foundation::BOOL, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT;
+    fn GiveFeedback(&self, dweffect: DROPEFFECT) -> ::windows_core::HRESULT;
 }
 
-impl ::windows_core::RuntimeName for IDropTarget {}
+impl ::windows_core::RuntimeName for IDropSource {}
 
-impl IDropTarget_Vtbl {
-    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>() -> IDropTarget_Vtbl {
-        unsafe extern "system" fn DragEnter<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
+impl IDropSource_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropSource_Impl, const OFFSET: isize>() -> IDropSource_Vtbl {
+        unsafe extern "system" fn QueryContinueDrag<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropSource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, fescapepressed: super::super::Foundation::BOOL, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT {
             let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
             let this = (*this).get_impl();
-            this.DragEnter(::windows_core::from_raw_borrowed(&pdataobj), ::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
+            this.QueryContinueDrag(::core::mem::transmute_copy(&fescapepressed), ::core::mem::transmute_copy(&grfkeystate))
         }
-        unsafe extern "system" fn DragOver<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
+        unsafe extern "system" fn GiveFeedback<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropSource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dweffect: DROPEFFECT) -> ::windows_core::HRESULT {
             let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
             let this = (*this).get_impl();
-            this.DragOver(::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
-        }
-        unsafe extern "system" fn DragLeave<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.DragLeave().into()
-        }
-        unsafe extern "system" fn Drop<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.Drop(::windows_core::from_raw_borrowed(&pdataobj), ::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
+            this.GiveFeedback(::core::mem::transmute_copy(&dweffect))
         }
         Self {
             base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
-            DragEnter: DragEnter::<Identity, Impl, OFFSET>,
-            DragOver: DragOver::<Identity, Impl, OFFSET>,
-            DragLeave: DragLeave::<Identity, Impl, OFFSET>,
-            Drop: Drop::<Identity, Impl, OFFSET>,
+            QueryContinueDrag: QueryContinueDrag::<Identity, Impl, OFFSET>,
+            GiveFeedback: GiveFeedback::<Identity, Impl, OFFSET>,
         }
     }
     pub fn matches(iid: &::windows_core::GUID) -> bool {
-        iid == &<IDropTarget as ::windows_core::ComInterface>::IID
+        iid == &<IDropSource as ::windows_core::ComInterface>::IID
     }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CLIPBOARD_FORMAT(pub u16);
-impl ::core::marker::Copy for CLIPBOARD_FORMAT {}
-impl ::core::clone::Clone for CLIPBOARD_FORMAT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for CLIPBOARD_FORMAT {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-impl ::core::fmt::Debug for CLIPBOARD_FORMAT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("CLIPBOARD_FORMAT").field(&self.0).finish()
-    }
-}
-impl ::windows_core::TypeKind for CLIPBOARD_FORMAT {
-    type TypeKind = ::windows_core::CopyType;
 }
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DROPEFFECT(pub u32);
@@ -13274,6 +13263,33 @@ impl ::core::ops::Not for DROPEFFECT {
     }
 }
 impl ::windows_core::TypeKind for DROPEFFECT {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+pub const DROPEFFECT_COPY: DROPEFFECT = DROPEFFECT(1u32);
+
+pub const DROPEFFECT_MOVE: DROPEFFECT = DROPEFFECT(2u32);
+
+pub const CF_UNICODETEXT: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(13u16);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CLIPBOARD_FORMAT(pub u16);
+impl ::core::marker::Copy for CLIPBOARD_FORMAT {}
+impl ::core::clone::Clone for CLIPBOARD_FORMAT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CLIPBOARD_FORMAT {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for CLIPBOARD_FORMAT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("CLIPBOARD_FORMAT").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for CLIPBOARD_FORMAT {
     type TypeKind = ::windows_core::CopyType;
 }
 
@@ -13704,25 +13720,29 @@ impl ::windows_core::TypeKind for PARAMDESC {
     type TypeKind = ::windows_core::CopyType;
 }
 
-pub const DROPEFFECT_COPY: DROPEFFECT = DROPEFFECT(1u32);
-
-pub const DROPEFFECT_MOVE: DROPEFFECT = DROPEFFECT(2u32);
-
 pub const DROPEFFECT_LINK: DROPEFFECT = DROPEFFECT(4u32);
 
 pub const DROPEFFECT_SCROLL: DROPEFFECT = DROPEFFECT(2147483648u32);
-
-pub const CF_TEXT: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(1u16);
-
-pub const CF_HDROP: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(15u16);
 
 pub unsafe fn ReleaseStgMedium(param0: *mut super::Com::STGMEDIUM) {
     ::windows_targets::link!("ole32.dll" "system" fn ReleaseStgMedium(param0 : *mut super::Com:: STGMEDIUM) -> ());
     ReleaseStgMedium(param0)
 }
 
+pub const CF_HDROP: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(15u16);
+
 }
 pub mod Memory{
+pub unsafe fn GlobalAlloc(uflags: GLOBAL_ALLOC_FLAGS, dwbytes: usize) -> ::windows_core::Result<super::super::Foundation::HGLOBAL> {
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalAlloc(uflags : GLOBAL_ALLOC_FLAGS, dwbytes : usize) -> super::super::Foundation:: HGLOBAL);
+    let result__ = GlobalAlloc(uflags, dwbytes);
+    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows_core::Error::from_win32)
+}
+
+pub const GMEM_ZEROINIT: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(64u32);
+
+pub const GMEM_FIXED: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(0u32);
+
 pub unsafe fn GlobalLock<P0>(hmem: P0) -> *mut ::core::ffi::c_void
 where
     P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
@@ -13731,10 +13751,12 @@ where
     GlobalLock(hmem.into_param().abi())
 }
 
-pub unsafe fn GlobalAlloc(uflags: GLOBAL_ALLOC_FLAGS, dwbytes: usize) -> ::windows_core::Result<super::super::Foundation::HGLOBAL> {
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalAlloc(uflags : GLOBAL_ALLOC_FLAGS, dwbytes : usize) -> super::super::Foundation:: HGLOBAL);
-    let result__ = GlobalAlloc(uflags, dwbytes);
-    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows_core::Error::from_win32)
+pub unsafe fn GlobalUnlock<P0>(hmem: P0) -> ::windows_core::Result<()>
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
+{
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalUnlock(hmem : super::super::Foundation:: HGLOBAL) -> super::super::Foundation:: BOOL);
+    GlobalUnlock(hmem.into_param().abi()).ok()
 }
 
 pub unsafe fn GlobalSize<P0>(hmem: P0) -> usize
@@ -13743,14 +13765,6 @@ where
 {
     ::windows_targets::link!("kernel32.dll" "system" fn GlobalSize(hmem : super::super::Foundation:: HGLOBAL) -> usize);
     GlobalSize(hmem.into_param().abi())
-}
-
-pub unsafe fn GlobalUnlock<P0>(hmem: P0) -> ::windows_core::Result<()>
-where
-    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
-{
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalUnlock(hmem : super::super::Foundation:: HGLOBAL) -> super::super::Foundation:: BOOL);
-    GlobalUnlock(hmem.into_param().abi()).ok()
 }
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct GLOBAL_ALLOC_FLAGS(pub u32);
@@ -19214,8 +19228,6 @@ impl ::windows_core::TypeKind for DVASPECT {
     type TypeKind = ::windows_core::CopyType;
 }
 
-pub const DVASPECT_ICON: DVASPECT = DVASPECT(4u32);
-
 pub const DVASPECT_CONTENT: DVASPECT = DVASPECT(1u32);
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct TYMED(pub i32);
@@ -19238,8 +19250,6 @@ impl ::core::fmt::Debug for TYMED {
 impl ::windows_core::TypeKind for TYMED {
     type TypeKind = ::windows_core::CopyType;
 }
-
-pub const TYMED_FILE: TYMED = TYMED(2i32);
 
 pub const TYMED_HGLOBAL: TYMED = TYMED(1i32);
 
