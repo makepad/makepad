@@ -5,6 +5,7 @@ use {
         opengl_x11::{OpenglWindow,OpenglCx},
     },
     self::super::super::{
+        egl_sys,
         x11::xlib_event::*,
         x11::xlib_app::*,
         linux_media::CxLinuxMedia
@@ -53,7 +54,12 @@ impl Cx {
             }
         }));
         
-        *opengl_cx.borrow_mut() = Some(OpenglCx::new(get_xlib_app_global().display));
+        *opengl_cx.borrow_mut() = Some(unsafe {
+            OpenglCx::from_egl_platform_display(
+                egl_sys::EGL_PLATFORM_X11_EXT,
+                get_xlib_app_global().display,
+            )
+        });
         
         if is_stdin_loop{
             let mut cx = cx.borrow_mut();
