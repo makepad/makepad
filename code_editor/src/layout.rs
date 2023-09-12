@@ -1,8 +1,9 @@
 use {
     crate::{
+        document::DocumentLayout,
         inlays::{BlockInlay, InlineInlay},
         selection::Affinity,
-        state::{DocumentLayout, SessionLayout},
+        state::SessionLayout,
         str::StrExt,
         text::Text,
         widgets::{BlockWidget, InlineWidget},
@@ -166,7 +167,6 @@ impl<'a> Line<'a> {
         &self,
         byte_index: usize,
         affinity: Affinity,
-        tab_column_count: usize,
     ) -> (usize, usize) {
         let mut current_byte_index = 0;
         let mut current_row_index = 0;
@@ -185,7 +185,7 @@ impl<'a> Line<'a> {
                             return (current_row_index, current_column_index);
                         }
                         current_byte_index += grapheme.len();
-                        current_column_index += grapheme.column_count(tab_column_count);
+                        current_column_index += grapheme.column_count();
                         if current_byte_index == byte_index && affinity == Affinity::Before {
                             return (current_row_index, current_column_index);
                         }
@@ -195,7 +195,7 @@ impl<'a> Line<'a> {
                     is_inlay: true,
                     text,
                 } => {
-                    current_column_index += text.column_count(tab_column_count);
+                    current_column_index += text.column_count();
                 }
                 WrappedElement::Widget(widget) => {
                     current_column_index += widget.column_count;
@@ -216,7 +216,6 @@ impl<'a> Line<'a> {
         &self,
         row_index: usize,
         column_index: usize,
-        tab_column_count: usize,
     ) -> (usize, Affinity) {
         let mut current_row_index = 0;
         let mut current_column_index = 0;
@@ -229,7 +228,7 @@ impl<'a> Line<'a> {
                 } => {
                     for grapheme in text.graphemes() {
                         let next_column =
-                            current_column_index + grapheme.column_count(tab_column_count);
+                            current_column_index + grapheme.column_count();
                         if current_row_index == row_index
                             && (current_column_index..next_column).contains(&column_index)
                         {
@@ -243,7 +242,7 @@ impl<'a> Line<'a> {
                     is_inlay: true,
                     text,
                 } => {
-                    let next_column = current_column_index + text.column_count(tab_column_count);
+                    let next_column = current_column_index + text.column_count();
                     if current_row_index == row_index
                         && (current_column_index..next_column).contains(&column_index)
                     {
