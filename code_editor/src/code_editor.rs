@@ -1,6 +1,6 @@
 use {
     crate::{
-        layout::{Block, Wrapped},
+        layout::{BlockElement, WrappedElement},
         selection::Affinity,
         state::Session,
         str::StrExt,
@@ -390,14 +390,14 @@ impl CodeEditor {
         let mut y = session.layout().line(self.start_line).y();
         for block in session.layout().blocks(self.start_line, self.end_line) {
             match block {
-                Block::Line { line, .. } => {
+                BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = line.scale();
                     let mut token_iter = line.tokens().iter().copied();
                     let mut token_slot = token_iter.next();
                     let mut column = 0;
-                    for wrapped in line.wrappeds() {
+                    for wrapped in line.wrapped_elements() {
                         match wrapped {
-                            Wrapped::Text {
+                            WrappedElement::Text {
                                 is_inlay: false,
                                 mut text,
                             } => {
@@ -457,7 +457,7 @@ impl CodeEditor {
                                         .column_count(session.settings().tab_column_count);
                                 }
                             }
-                            Wrapped::Text {
+                            WrappedElement::Text {
                                 is_inlay: true,
                                 text,
                             } => {
@@ -473,10 +473,10 @@ impl CodeEditor {
                                 column +=
                                     text.column_count(session.settings().tab_column_count);
                             }
-                            Wrapped::Widget(widget) => {
+                            WrappedElement::Widget(widget) => {
                                 column += widget.column_count;
                             }
-                            Wrapped::Wrap => {
+                            WrappedElement::Wrap => {
                                 column = line.wrap_indent_column_count();
                                 y += line.scale();
                             }
@@ -484,7 +484,7 @@ impl CodeEditor {
                     }
                     y += line.scale();
                 }
-                Block::Widget(widget) => {
+                BlockElement::Widget(widget) => {
                     y += widget.height;
                 }
             }
@@ -521,15 +521,15 @@ impl CodeEditor {
         let mut y = session.layout().line(line).y();
         for block in session.layout().blocks(line, line + 1) {
             match block {
-                Block::Line {
+                BlockElement::Line {
                     is_inlay: false,
                     line: line_ref,
                 } => {
                     let mut byte = 0;
                     let mut column = 0;
-                    for wrapped in line_ref.wrappeds() {
+                    for wrapped in line_ref.wrapped_elements() {
                         match wrapped {
-                            Wrapped::Text {
+                            WrappedElement::Text {
                                 is_inlay: false,
                                 text,
                             } => {
@@ -566,7 +566,7 @@ impl CodeEditor {
                                     column = next_column;
                                 }
                             }
-                            Wrapped::Text {
+                            WrappedElement::Text {
                                 is_inlay: true,
                                 text,
                             } => {
@@ -588,10 +588,10 @@ impl CodeEditor {
                                 }
                                 column = next_column;
                             }
-                            Wrapped::Widget(widget) => {
+                            WrappedElement::Widget(widget) => {
                                 column += widget.column_count;
                             }
-                            Wrapped::Wrap => {
+                            WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&point.y) {
                                     return Some((
@@ -620,7 +620,7 @@ impl CodeEditor {
                     line += 1;
                     y = next_y;
                 }
-                Block::Line {
+                BlockElement::Line {
                     is_inlay: true,
                     line: line_ref,
                 } => {
@@ -636,7 +636,7 @@ impl CodeEditor {
                     }
                     y = next_y;
                 }
-                Block::Widget(widget) => {
+                BlockElement::Widget(widget) => {
                     y += widget.height;
                 }
             }
@@ -664,7 +664,7 @@ impl<'a> DrawSelections<'a> {
             self.code_editor.start_line,
             self.code_editor.end_line) {
             match block {
-                Block::Line {
+                BlockElement::Line {
                     is_inlay: false,
                     line: line_ref,
                 } => {
@@ -679,9 +679,9 @@ impl<'a> DrawSelections<'a> {
                         y,
                         column,
                     );
-                    for wrapped in line_ref.wrappeds() {
+                    for wrapped in line_ref.wrapped_elements() {
                         match wrapped {
-                            Wrapped::Text {
+                            WrappedElement::Text {
                                 is_inlay: false,
                                 text,
                             } => {
@@ -709,17 +709,17 @@ impl<'a> DrawSelections<'a> {
                                     );
                                 }
                             }
-                            Wrapped::Text {
+                            WrappedElement::Text {
                                 is_inlay: true,
                                 text,
                             } => {
                                 column +=
                                     text.column_count(session.settings().tab_column_count);
                             }
-                            Wrapped::Widget(widget) => {
+                            WrappedElement::Widget(widget) => {
                                 column += widget.column_count;
                             }
-                            Wrapped::Wrap => {
+                            WrappedElement::Wrap => {
                                 if self.active_selection.is_some() {
                                     self.draw_selection(cx, line_ref, y, column);
                                 }
@@ -736,13 +736,13 @@ impl<'a> DrawSelections<'a> {
                     line += 1;
                     y += line_ref.scale();
                 }
-                Block::Line {
+                BlockElement::Line {
                     is_inlay: true,
                     line: line_ref,
                 } => {
                     y += line_ref.height();
                 }
-                Block::Widget(widget) => {
+                BlockElement::Widget(widget) => {
                     y += widget.height;
                 }
             }
