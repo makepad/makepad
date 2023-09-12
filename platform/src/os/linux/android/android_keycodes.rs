@@ -307,7 +307,7 @@ use crate::event::KeyCode;
     DemoApp4 = 304,
 */
 
-pub(crate) fn android_to_makepad_key_code(key_code: i32) -> KeyCode {
+pub(crate) fn android_to_makepad_key_code(key_code: u32) -> KeyCode {
     match key_code {
         7 => KeyCode::Key0,
         8 => KeyCode::Key1,

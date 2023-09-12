@@ -1,15 +1,14 @@
-use makepad_widgets::*; 
+use makepad_widgets::*;
 
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-
+    
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
-    IMG_B = dep("crate://self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
+    //self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
-    
     LOGO = dep("crate://self/resources/logo.svg")
     ICO_FAV = dep("crate://self/resources/icon_favorite.svg")
     ICO_COMMENT = dep("crate://self/resources/icon_comment.svg")
@@ -45,7 +44,7 @@ live_design!{
     COLOR_DIVIDER_DARK = #x00000044
     COLOR_PROFILE_CIRCLE = #xfff8ee
     COLOR_P = #x999
-    
+     
     FillerY = <View> {width: Fill}
     
     FillerX = <View> {height: Fill}
@@ -114,25 +113,38 @@ live_design!{
     
     
     Header = <RoundedYView> {
-        width: Fill, height: 70
-        flow: Right, padding: 10.0, spacing: 10.0
+        width: Fill,
+        height: 70
+        flow: Right,
+        padding: 10.0,
+        spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: vec2(0.5, 4.5)}
         
         <Logo> {
-            height: Fit, width: Fill, margin: {top: 0.0}
+            height: Fit,
+            width: Fill,
+            margin: {top: 0.0}
             icon_walk: {width: Fit, height: 27.0}
         }
         
     }
     
     Menu = <RoundedYView> {
-        width: Fill, height: 80
-        flow: Right, padding: 10.0, spacing: 10.0
+        width: Fill,
+        height: 80
+        flow: Right,
+        padding: 10.0,
+        spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
         
         <View> {
-            width: Fill, height: Fit, margin: 0.0
-            flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}
+            width: Fill,
+            height: Fit,
+            margin: 0.0
+            flow: Right,
+            padding: 0.0,
+            spacing: 25.0,
+            align: {x: 0.5, y: 0.5}
             
             <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 30.0, height: Fit}, text: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, text: ""}
@@ -143,18 +155,29 @@ live_design!{
     }
     
     LineH = <RoundedView> {
-        width: Fill, height: 2, margin: 0.0
-        padding: 0.0, spacing: 0.0
+        width: Fill,
+        height: 2,
+        margin: 0.0
+        padding: 0.0,
+        spacing: 0.0
         draw_bg: {color: (COLOR_DIVIDER)}
     }
     
     PostMenu = <View> {
-        width: Fill, height: Fit, margin: 0.0
-        flow: Down, padding: 0.0, spacing: 0.0
+        width: Fill,
+        height: Fit,
+        margin: 0.0
+        flow: Down,
+        padding: 0.0,
+        spacing: 0.0
         
-        <View> {
-            width: Fill, height: Fit, margin: 0.0
-            flow: Right, padding: 0.0, spacing: 10.0
+            <View> {
+            width: Fill,
+            height: Fit,
+            margin: 0.0
+            flow: Right,
+            padding: 0.0,
+            spacing: 10.0
             
             likes = <IconButton> {draw_icon: {svg_file: (ICO_FAV)} icon_walk: {width: 15.0, height: Fit}}
             comments = <IconButton> {draw_icon: {svg_file: (ICO_COMMENT)} icon_walk: {width: 15.0, height: Fit}, text: "7"}
@@ -165,19 +188,31 @@ live_design!{
     }
     
     Post = <View> {
-        width: Fill, height: Fit, margin: 0.0
-        flow: Down, padding: 0.0, spacing: 0.0
+        width: Fill,
+        height: Fit,
+        margin: 0.0
+        flow: Down,
+        padding: 0.0,
+        spacing: 0.0
         
         body = <View> {
-            width: Fill, height: Fit
-            flow: Right, padding: 10.0, spacing: 10.0
+            width: Fill,
+            height: Fit
+            flow: Right,
+            padding: 10.0,
+            spacing: 10.0
             
             profile = <View> {
-                width: Fit, height: Fit, margin: {top: 7.5}
-                flow: Down, padding: 0.0
+                width: Fit,
+                height: Fit,
+                margin: {top: 7.5}
+                flow: Down,
+                padding: 0.0
                 profile_img = <Image> {
                     source: (IMG_PROFILE_A)
-                    margin: 0, width: 50., height: 50.
+                    margin: 0,
+                    width: 50.,
+                    height: 50.
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -191,8 +226,10 @@ live_design!{
                 }
             }
             content = <View> {
-                width: Fill, height: Fit
-                flow: Down, padding: 0.0
+                width: Fill,
+                height: Fit
+                flow: Down,
+                padding: 0.0
                 
                 meta = <Label> {
                     margin: {bottom: 10.0, top: 10.0}
@@ -203,7 +240,8 @@ live_design!{
                     text: "@Hello world· 13h"
                 }
                 text = <Label> {
-                    width: Fill, height: Fit
+                    width: Fill,
+                    height: Fit
                     draw_text: {
                         wrap: Word,
                         text_style: <TEXT_P> {},
@@ -226,13 +264,18 @@ live_design!{
     }
     
     PostImage = <View> {
-        width: Fill, height: Fit
-        flow: Down, padding: 0.0, spacing: 0.0
+        width: Fill,
+        height: Fit
+        flow: Down,
+        padding: 0.0,
+        spacing: 0.0
         
         hero = <Image> {
             source: (IMG_A),
             //image_scale: 1.0,
-            margin: 0, width: Fill, height: 200
+            margin: 0,
+            width: Fill,
+            height: 200
         }
         
         post = <Post> {
@@ -255,7 +298,7 @@ live_design!{
         ui: <DesktopWindow> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
-        
+            
             flow: Overlay,
             padding: 0.0
             spacing: 0,
@@ -271,7 +314,8 @@ live_design!{
             }
             
             news_feed = <ListView> {
-                height: Fill, width: Fill
+                height: Fill,
+                width: Fill
                 flow: Down
                 TopSpace = <View> {height: 80}
                 Post = <Post> {}
@@ -280,10 +324,11 @@ live_design!{
             }
             
             <View> {
-                height: Fill, width: Fill
+                height: Fill,
+                width: Fill
                 flow: Down
                 
-                <Header> {}
+                    <Header> {}
                 <FillerY> {}
                 <Menu> {}
             }
@@ -339,7 +384,7 @@ impl AppMain for App {
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
-
+        
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
                 log!("Test {}", item_id);
