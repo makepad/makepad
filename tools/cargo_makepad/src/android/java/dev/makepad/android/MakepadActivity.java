@@ -301,26 +301,20 @@ public class MakepadActivity extends Activity {
         });
     }
 
-    public void requestHttp(long id, String url, String method, String headers, byte[] body) {
+    public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {
         try {
-            Log.w("SAPP", "requestHttp START");
-            Log.i("SAPP", "url {" + url + "}");
             MakepadNetwork network = new MakepadNetwork();
-            Log.w("SAPP", "requestHttp START 2");
 
             CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
 
             future.thenAccept(response -> {
-                 Log.w("SAPP", "onHttpResponse");
-                runOnUiThread(() -> MakepadNative.onHttpResponse(id, response.getStatusCode(), response.getHeaders(), response.getBody()));
+                runOnUiThread(() -> MakepadNative.onHttpResponse(id, metadataId, response.getStatusCode(), response.getHeaders(), response.getBody()));
             }).exceptionally(ex -> {
-                Log.w("SAPP", "onHttpResponse ERROR");
-                runOnUiThread(() -> MakepadNative.onHttpRequestError(id, ex.toString()));
+                runOnUiThread(() -> MakepadNative.onHttpRequestError(id, metadataId, ex.toString()));
                 return null;
             });
         } catch (Exception e) {
-            Log.w("SAPP", "onHttpResponse ERROR");
-            MakepadNative.onHttpRequestError(id, e.toString());
+            MakepadNative.onHttpRequestError(id, metadataId, e.toString());
         }
     }
 }
