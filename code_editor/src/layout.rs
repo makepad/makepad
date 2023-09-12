@@ -1,10 +1,128 @@
 use {
     crate::{
-        inlays::InlineInlay, selection::Affinity, str::StrExt, widgets::InlineWidget,
+        inlays::{BlockInlay, InlineInlay}, selection::Affinity, str::StrExt, widgets::{BlockWidget, InlineWidget},
         wrap::WrapData, Token,
+        state::{SessionLayout, DocumentLayout},
+        text::Text,
     },
-    std::slice::Iter,
+    std::{cell::Ref, slice::Iter},
 };
+
+#[derive(Debug)]
+pub struct Layout<'a> {
+    pub text: Ref<'a, Text>,
+    pub document_layout: Ref<'a, DocumentLayout>,
+    pub session_layout: Ref<'a, SessionLayout>,
+}
+
+impl<'a> Layout<'a> {
+    pub fn width(&self) -> f64 {
+        let mut width: f64 = 0.0;
+        for line in self.lines(0, self.line_count()) {
+            width = width.max(line.width());
+        }
+        width
+    }
+
+    pub fn height(&self) -> f64 {
+        self.session_layout.y[self.line_count()]
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.text.as_lines().len()
+    }
+
+    pub fn find_first_line_ending_after_y(&self, y: f64) -> usize {
+        match self.session_layout.y[..self.session_layout.y.len() - 1]
+            .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
+        {
+            Ok(line) => line,
+            Err(line) => line.saturating_sub(1),
+        }
+    }
+
+    pub fn find_first_line_starting_after_y(&self, y: f64) -> usize {
+        match self.session_layout.y[..self.session_layout.y.len() - 1]
+            .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
+        {
+            Ok(line) => line + 1,
+            Err(line) => line,
+        }
+    }
+
+    pub fn line(&self, index: usize) -> Line<'_> {
+        Line {
+            y: self.session_layout.y.get(index).copied(),
+            column_count: self.session_layout.column_count[index],
+            fold_column: self.session_layout.fold_column[index],
+            scale: self.session_layout.scale[index],
+            text: &self.text.as_lines()[index],
+            tokens: &self.document_layout.tokens[index],
+            inline_inlays: &self.document_layout.inline_inlays[index],
+            wrap_data: self.session_layout.wrap_data[index].as_ref(),
+        }
+    }
+
+    pub fn lines(&self, start: usize, end: usize) -> Lines<'_> {
+        Lines {
+            y: self.session_layout.y[start.min(self.session_layout.y.len())..end.min(self.session_layout.y.len())].iter(),
+            column_count: self.session_layout.column_count[start..end].iter(),
+            fold_column: self.session_layout.fold_column[start..end].iter(),
+            scale: self.session_layout.scale[start..end].iter(),
+            text: self.text.as_lines()[start..end].iter(),
+            tokens: self.document_layout.tokens[start..end].iter(),
+            inline_inlays: self.document_layout.inline_inlays[start..end].iter(),
+            wrap_data: self.session_layout.wrap_data[start..end].iter(),
+        }
+    }
+
+    pub fn blocks(&self, line_start: usize, line_end: usize) -> Blocks<'_> {
+        let mut block_inlays = self.document_layout.block_inlays.iter();
+        while block_inlays
+            .as_slice()
+            .first()
+            .map_or(false, |&(position, _)| position < line_start)
+        {
+            block_inlays.next();
+        }
+        Blocks {
+            lines: self.lines(line_start, line_end),
+            block_inlays,
+            position: line_start,
+        }
+    }
+}
+
+
+#[derive(Clone, Debug)]
+pub struct Lines<'a> {
+    y: Iter<'a, f64>,
+    column_count: Iter<'a, Option<usize>>,
+    fold_column: Iter<'a, usize>,
+    scale: Iter<'a, f64>,
+    text: Iter<'a, String>,
+    tokens: Iter<'a, Vec<Token>>,
+    inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
+    wrap_data: Iter<'a, Option<WrapData>>,
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = Line<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let text = self.text.next()?;
+        Some(Line {
+            y: self.y.next().copied(),
+            column_count: *self.column_count.next().unwrap(),
+            fold_column: *self.fold_column.next().unwrap(),
+            scale: *self.scale.next().unwrap(),
+            text,
+            tokens: self.tokens.next().unwrap(),
+            inline_inlays: self.inline_inlays.next().unwrap(),
+            wrap_data: self.wrap_data.next().unwrap().as_ref(),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line<'a> {
@@ -215,7 +333,7 @@ impl<'a> Iterator for Inlines<'a> {
         if self.text.is_empty() {
             return None;
         }
-        let mut mid = self.text.len();
+        let mut mid: usize = self.text.len();
         if let Some(&(byte, _)) = self.inline_inlays.as_slice().first() {
             mid = mid.min(byte - self.position);
         }
@@ -258,7 +376,7 @@ impl<'a> Iterator for Wrappeds<'a> {
         }
         Some(match self.inline.take()? {
             Inline::Text { is_inlay, text } => {
-                let mut mid = text.len();
+                let mut mid: usize = text.len();
                 if let Some(&position) = self.wraps.as_slice().first() {
                     mid = mid.min(position - self.position);
                 }
@@ -289,4 +407,42 @@ pub enum Wrapped<'a> {
     Text { is_inlay: bool, text: &'a str },
     Widget(InlineWidget),
     Wrap,
+}
+
+
+#[derive(Clone, Debug)]
+pub struct Blocks<'a> {
+    lines: Lines<'a>,
+    block_inlays: Iter<'a, (usize, BlockInlay)>,
+    position: usize,
+}
+
+impl<'a> Iterator for Blocks<'a> {
+    type Item = Block<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self
+            .block_inlays
+            .as_slice()
+            .first()
+            .map_or(false, |&(line, _)| line == self.position)
+        {
+            let (_, block_inlay) = self.block_inlays.next().unwrap();
+            return Some(match *block_inlay {
+                BlockInlay::Widget(widget) => Block::Widget(widget),
+            });
+        }
+        let line = self.lines.next()?;
+        self.position += 1;
+        Some(Block::Line {
+            is_inlay: false,
+            line,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Block<'a> {
+    Line { is_inlay: bool, line: Line<'a> },
+    Widget(BlockWidget),
 }
