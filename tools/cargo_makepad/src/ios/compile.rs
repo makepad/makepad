@@ -2,6 +2,7 @@ use crate::shell::*;
 use crate::ios::{IosTarget};
 use std::path::{PathBuf, Path};
 use std::collections::HashSet;
+use std::io;
 
 pub struct PlistValues{
     identifier: String,
@@ -239,18 +240,39 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     let build_crate = get_build_crate_from_args(args)?;
     let result = build(app_id, args, ios_target)?;
     let cwd = std::env::current_dir().unwrap();
-    // ok lets parse these things out
-    let long_hex_id = shell_env_cap(&[], &cwd ,"security", &[
+
+    // parse identities for code signing
+    let security_result = shell_env_cap(&[], &cwd ,"security", &[
         "find-identity",
         "-v",
         "-p",
         "codesigning"])?;
+
+    let identities: Vec<&str> = security_result.split("\n").collect();
+    let selected_identity: &str;
+    if identities.len() > 1 {
+        // if there are multiple signing identies, prompt the user which one to select
+        println!("Multiple signing identities found, please select one:\n{:}", security_result);
+        let mut input_str = String::new();
+        io::stdin()
+            .read_line(&mut input_str)
+            .expect("Failed to read line");
         
-    let long_hex_id = if let Some(long_hex_id) = long_hex_id.strip_prefix("  1) ") {
-        &long_hex_id[0..40]
-    }
-    else{
-       return Err(format!("Error parsing the security result #{}#", long_hex_id)) 
+        let index: usize = input_str
+            .trim()
+            .parse()
+            .expect("Invalid input, try again");
+
+        selected_identity = &identities[index - 1][5..45];
+        println!("Selected signing identity: {:}", identities[index - 1]);
+
+    } else {
+        selected_identity = if let Some(long_hex_id) = security_result.strip_prefix("  1) ") {
+            &long_hex_id[0..40]
+        }
+        else{
+            return Err(format!("Error parsing the security result #{}#", security_result)) 
+        };
     };
     
     //
@@ -293,7 +315,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         "--force",
         "--timestamp=none",
         "--sign",
-        long_hex_id, 
+        selected_identity, 
         &result.dst_bin.into_os_string().into_string().unwrap()
     ]) ?; 
     
@@ -301,7 +323,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         "--force",
         "--timestamp=none",
         "--sign", 
-        long_hex_id,
+        selected_identity, 
         "--entitlements",
         &scent_file.into_os_string().into_string().unwrap(),
         "--generate-entitlement-der",
