@@ -193,7 +193,9 @@ impl CodeEditor {
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
-        self.start_line = session.layout().find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
+        self.start_line = session
+            .layout()
+            .find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
         self.end_line = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
@@ -432,13 +434,9 @@ impl CodeEditor {
                                         }
                                         TokenKind::Constant => self.token_colors.constant,
                                         TokenKind::Identifier => self.token_colors.identifier,
-                                        TokenKind::LoopKeyword => {
-                                            self.token_colors.loop_keyword
-                                        }
+                                        TokenKind::LoopKeyword => self.token_colors.loop_keyword,
                                         TokenKind::Number => self.token_colors.number,
-                                        TokenKind::OtherKeyword => {
-                                            self.token_colors.other_keyword
-                                        }
+                                        TokenKind::OtherKeyword => self.token_colors.other_keyword,
                                         TokenKind::Punctuator => self.token_colors.punctuator,
                                         TokenKind::String => self.token_colors.string,
                                         TokenKind::Typename => self.token_colors.typename,
@@ -453,8 +451,8 @@ impl CodeEditor {
                                             + self.viewport_rect.pos,
                                         text_0,
                                     );
-                                    column += text_0
-                                        .column_count(session.settings().tab_column_count);
+                                    column +=
+                                        text_0.column_count(session.settings().tab_column_count);
                                 }
                             }
                             WrappedElement::Text {
@@ -470,8 +468,7 @@ impl CodeEditor {
                                         + self.viewport_rect.pos,
                                     text,
                                 );
-                                column +=
-                                    text.column_count(session.settings().tab_column_count);
+                                column += text.column_count(session.settings().tab_column_count);
                             }
                             WrappedElement::Widget(widget) => {
                                 column += widget.column_count;
@@ -570,8 +567,8 @@ impl CodeEditor {
                                 is_inlay: true,
                                 text,
                             } => {
-                                let next_column = column
-                                    + text.column_count(session.settings().tab_column_count);
+                                let next_column =
+                                    column + text.column_count(session.settings().tab_column_count);
                                 let next_y = y + line_ref.scale();
                                 let x = line_ref.column_to_x(column);
                                 let next_x = line_ref.column_to_x(next_column);
@@ -660,9 +657,10 @@ impl<'a> DrawSelections<'a> {
     fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line = self.code_editor.start_line;
         let mut y = session.layout().line(line).y();
-        for block in session.layout().blocks(
-            self.code_editor.start_line,
-            self.code_editor.end_line) {
+        for block in session
+            .layout()
+            .blocks(self.code_editor.start_line, self.code_editor.end_line)
+        {
             match block {
                 BlockElement::Line {
                     is_inlay: false,
@@ -670,15 +668,7 @@ impl<'a> DrawSelections<'a> {
                 } => {
                     let mut byte = 0;
                     let mut column = 0;
-                    self.handle_event(
-                        cx,
-                        line,
-                        line_ref,
-                        byte,
-                        Affinity::Before,
-                        y,
-                        column,
-                    );
+                    self.handle_event(cx, line, line_ref, byte, Affinity::Before, y, column);
                     for wrapped in line_ref.wrapped_elements() {
                         match wrapped {
                             WrappedElement::Text {
@@ -696,8 +686,8 @@ impl<'a> DrawSelections<'a> {
                                         column,
                                     );
                                     byte += grapheme.len();
-                                    column += grapheme
-                                        .column_count(session.settings().tab_column_count);
+                                    column +=
+                                        grapheme.column_count(session.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
@@ -713,8 +703,7 @@ impl<'a> DrawSelections<'a> {
                                 is_inlay: true,
                                 text,
                             } => {
-                                column +=
-                                    text.column_count(session.settings().tab_column_count);
+                                column += text.column_count(session.settings().tab_column_count);
                             }
                             WrappedElement::Widget(widget) => {
                                 column += widget.column_count;
