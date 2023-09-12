@@ -508,7 +508,10 @@ fn main() {
     generate_outputs_from_file("./platform/src/os/windows/media_foundation.rs", &mut output, &mut cache);
     generate_outputs_from_file("./tools/windows_strip/dep_of_deps.rs", &mut output, &mut cache);
 
-    generate_outputs_from_file("./platform/src/os/windows/win32_droptarget.rs", &mut output, &mut cache);
+    generate_outputs_from_file("./platform/src/os/windows/droptarget.rs", &mut output, &mut cache);
+    generate_outputs_from_file("./platform/src/os/windows/dropsource.rs", &mut output, &mut cache);
+    generate_outputs_from_file("./platform/src/os/windows/dataobject.rs", &mut output, &mut cache);
+    generate_outputs_from_file("./platform/src/os/windows/enumformatetc.rs", &mut output, &mut cache);
     
     fn generate_string_from_outputs(node: &Node, output: &mut String) {
         match node {
