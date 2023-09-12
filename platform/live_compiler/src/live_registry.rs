@@ -26,7 +26,7 @@ pub struct LiveFile {
     pub module_id: LiveModuleId,
     pub (crate) start_pos: TextPos,
     pub file_name: String,
-    pub (crate) cargo_manifest_path: String,
+    pub cargo_manifest_path: String,
     pub (crate) source: String,
     pub (crate) deps: BTreeSet<LiveModuleId>,
     

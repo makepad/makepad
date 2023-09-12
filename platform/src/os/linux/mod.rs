@@ -27,6 +27,9 @@ pub mod pulse_sys;
 pub mod android;
 
 #[cfg(target_os="android")]
+pub mod egl_sys;
+
+#[cfg(target_os="android")]
 pub(crate) use self::android::android::CxOs;
 
 #[cfg(not(any(linux_direct, target_os="android")))]

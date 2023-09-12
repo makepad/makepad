@@ -1,0 +1,27 @@
+genrule(
+    name = "lldb_py_h",
+    srcs = [":src/scripts/lldb.py"],
+    outs = ["lldb.py.h"],
+    cmd = """awk '{ print "\\""$$0"\\\\n\\""}' $< > $@""",
+)
+
+objc_library(
+    name = "ios_deploy_lib",
+    srcs = [
+        "src/ios-deploy/MobileDevice.h",
+        "src/ios-deploy/device_db.h",
+        "src/ios-deploy/errors.h",
+        "src/ios-deploy/version.h",
+        ":lldb_py_h",
+    ],
+    non_arc_srcs = ["src/ios-deploy/ios-deploy.m"],
+)
+
+apple_binary(
+    name = "ios_deploy",
+    linkopts = ["-F/Library/Apple/System/Library/PrivateFrameworks"],
+    platform_type = "macos",
+    sdk_frameworks = ["MobileDevice"],
+    visibility = ["//visibility:public"],
+    deps = [":ios_deploy_lib"],
+)

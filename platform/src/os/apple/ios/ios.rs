@@ -2,11 +2,16 @@ use {
     std::{
         rc::Rc,
         cell::{RefCell},
+        io::prelude::*,
+        fs::File,
     },
 
     crate::{
         makepad_live_id::*,
+        makepad_objc_sys::runtime::{ObjcId},
         os::{
+            apple::apple_sys::*,
+            apple::apple_util::nsstring_to_string,
             cx_native::EventFlow,
             apple::{
                 ios::{
@@ -21,6 +26,7 @@ use {
         },
         pass::{CxPassParent},
         thread::Signal,
+        window::CxWindowPool,
         event::{
             Event,
             NetworkResponseChannel
@@ -39,7 +45,7 @@ impl Cx {
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
-        crate::log!("Hello world ! We booted up!");
+        crate::log!("Makepad iOS application started.");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));
         let device = metal_cx.borrow().device;
         init_apple_classes_global();
@@ -94,6 +100,31 @@ impl Cx {
         }
     }
     
+    #[allow(dead_code)]
+    pub (crate) fn ios_load_dependencies(&mut self){
+        
+        let bundle_path = unsafe{
+            let main:ObjcId = msg_send![class!(NSBundle), mainBundle];
+            let path:ObjcId = msg_send![main, resourcePath];
+            nsstring_to_string(path)
+        };
+        
+        for (path,dep) in &mut self.dependencies{
+            if let Ok(mut file_handle) = File::open(format!("{}/{}",bundle_path,path)) {
+                let mut buffer = Vec::<u8>::new();
+                if file_handle.read_to_end(&mut buffer).is_ok() {
+                    dep.data = Some(Ok(Rc::new(buffer)));
+                }
+                else{
+                    dep.data = Some(Err("read_to_end failed".to_string()));
+                }
+            }
+            else{
+                dep.data = Some(Err("File open failed".to_string()));
+            }
+        }
+    }
+    
     fn ios_event_callback(
         &mut self,
         ios_app: &mut IosApp,
@@ -131,8 +162,6 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
-
-                    return EventFlow::Poll;
                 }
             }
             _ => ()
@@ -151,13 +180,15 @@ impl Cx {
             }
             IosEvent::AppLostFocus => {
                 self.call_event_handler(&Event::AppLostFocus);
-            }
-            
+            } 
             IosEvent::WindowGeomChange(re) => { // do this here because mac
-                
+                let window_id = CxWindowPool::id_zero();
+                let window = &mut self.windows[window_id];
+                window.window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
+                self.redraw_all();
             }
-            IosEvent::Paint => {
+            IosEvent::Paint => { 
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(ios_app.time_now());
                 }
@@ -166,9 +197,7 @@ impl Cx {
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 // ok here we send out to all our childprocesses
-                
                 self.handle_repaint(ios_app, metal_cx);
-                
             }
             IosEvent::TouchUpdate(e)=>{
                 self.fingers.process_touch_update_start(e.time, &e.touches);
@@ -217,7 +246,7 @@ impl Cx {
             IosEvent::TextCut(e) => {
                 self.call_event_handler(&Event::TextCut(e))
             }
-            IosEvent::Timer(e) => {
+            IosEvent::Timer(e) => if e.timer_id != 0 {
                 self.call_event_handler(&Event::Timer(e))
             }
             IosEvent::MenuCommand(e) => {
@@ -298,11 +327,21 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
-    fn init_cx_os(&mut self) {
+    fn init_cx_os(&mut self) { 
+        
+        #[cfg(not(ios_sim))]{
+            self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
+        }
+        
         self.live_expand();
         self.start_live_file_watcher();
         self.live_scan_dependencies();
+        //#[cfg(target_feature="sim")]
+        #[cfg(ios_sim)]
         self.native_load_dependencies();
+        
+        #[cfg(not(ios_sim))]
+        self.ios_load_dependencies();
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {

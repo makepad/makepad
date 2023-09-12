@@ -682,6 +682,10 @@ impl Event {
                                 continue;
                             }
                             
+                            if cx.fingers.get_area_capture(area).is_some(){
+                                continue;
+                            }
+                            
                             let rect = area.get_clipped_rect(&cx);
                             if !Margin::rect_contains_with_margin(&rect, t.abs, &options.margin) {
                                 continue;

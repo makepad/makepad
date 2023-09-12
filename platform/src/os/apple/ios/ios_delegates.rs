@@ -79,7 +79,10 @@ pub fn define_mtk_view() -> *const Class {
         get_ios_app_global().send_touch_update();
     }
 
-    extern "C" fn touches_canceled(_: &Object, _: Sel, _: ObjcId, _: ObjcId) {}
+    extern "C" fn touches_canceled(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
+        on_touch(this, event, TouchState::Stop);
+        get_ios_app_global().send_touch_update();
+    }
 
     unsafe {
         decl.add_method(sel!(isOpaque), yes as extern "C" fn(&Object, Sel) -> BOOL);
@@ -110,10 +113,19 @@ pub fn define_mtk_view_dlg() -> *const Class {
     extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
         get_ios_app_global().draw_in_rect();
     }
+    
+    extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _:ObjcId) {
+        //crate::log!("Draw size will change");
+        //get_ios_app_global().draw_in_rect();
+    }
     unsafe {
         decl.add_method(
             sel!(drawInMTKView:),
             draw_in_rect as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(mtkView: drawableSizeWillChange:),
+            draw_size_will_change as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 
