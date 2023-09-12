@@ -112,8 +112,6 @@ impl Document {
         drop(history);
         self.autoindent(
             &line_ranges,
-            settings.use_soft_tabs,
-            settings.tab_column_count,
             settings.indent_column_count,
             &mut edits,
         );
@@ -169,18 +167,15 @@ impl Document {
     fn autoindent(
         &self,
         line_ranges: &[Range<usize>],
-        use_soft_tabs: bool,
-        tab_column_count: usize,
         indent_column_count: usize,
         edits: &mut Vec<Edit>,
     ) {
         fn next_line_indentation_column_count(
             line: &str,
-            tab_column_count: usize,
             indent_column_count: usize,
         ) -> Option<usize> {
             if let Some(indentation) = line.leading_whitespace() {
-                let mut indentation_column_count = indentation.column_count(tab_column_count);
+                let mut indentation_column_count = indentation.column_count();
                 if line
                     .chars()
                     .rev()
@@ -219,7 +214,7 @@ impl Document {
                 .iter()
                 .rev()
                 .find_map(|line| {
-                    next_line_indentation_column_count(line, tab_column_count, indent_column_count)
+                    next_line_indentation_column_count(line, indent_column_count)
                 })
                 .unwrap_or(0);
             for line in line_range {
@@ -239,13 +234,12 @@ impl Document {
                     desired_indentation_column_count -= 4;
                 }
                 self.edit_lines_internal(line, edits, |line| {
-                    crate::state::reindent(line, use_soft_tabs, tab_column_count, |_| {
+                    crate::state::reindent(line, |_| {
                         desired_indentation_column_count
                     })
                 });
                 if let Some(next_line_indentation_column_count) = next_line_indentation_column_count(
                     &self.as_text().as_lines()[line],
-                    tab_column_count,
                     indent_column_count,
                 ) {
                     desired_indentation_column_count = next_line_indentation_column_count;
