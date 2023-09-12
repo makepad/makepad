@@ -33,6 +33,7 @@ pub mod desktop_window;
 pub mod scroll_shadow;
 pub mod rotated_image;
 pub mod slide_panel;
+pub mod page_flip;
 
 pub mod file_tree;
 pub mod slides_view;
@@ -66,6 +67,7 @@ pub use crate::{
     text_input::*,
     link_label::*,
     list_view::*,
+    page_flip::*,
     slide_panel::*,
     desktop_window::*,
     scroll_bars::{ScrollBars},
@@ -94,6 +96,7 @@ pub use crate::{
 
 pub fn live_design(cx: &mut Cx) {
     makepad_draw::live_design(cx);
+    crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
