@@ -1,10 +1,10 @@
 use crate::char::CharExt;
 
 pub trait StrExt {
-    fn column_count(&self, tab_column_count: usize) -> usize;
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
-    fn next_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
-    fn prev_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn column_count(&self) -> usize;
+    fn indent_level(&self, indent_column_count: usize) -> usize;
+    fn next_indent_level(&self, indent_column_count: usize) -> usize;
+    fn prev_indent_level(&self, indent_column_count: usize) -> usize;
     fn leading_whitespace(&self) -> Option<&str>;
     fn longest_common_prefix(&self, other: &str) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
@@ -13,32 +13,32 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn column_count(&self, tab_column_count: usize) -> usize {
+    fn column_count(&self) -> usize {
         self.chars()
-            .map(|char| char.column_count(tab_column_count))
+            .map(|char| char.column_count())
             .sum()
     }
 
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+    fn indent_level(&self, indent_column_count: usize) -> usize {
         self.leading_whitespace()
             .unwrap_or("")
-            .column_count(tab_column_count)
+            .column_count()
             / indent_column_count
     }
 
-    fn next_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+    fn next_indent_level(&self, indent_column_count: usize) -> usize {
         (self
             .leading_whitespace()
             .unwrap_or("")
-            .column_count(tab_column_count)
+            .column_count()
             + indent_column_count)
             / indent_column_count
     }
 
-    fn prev_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+    fn prev_indent_level(&self, indent_column_count: usize) -> usize {
         self.leading_whitespace()
             .unwrap_or("")
-            .column_count(tab_column_count)
+            .column_count()
             .saturating_sub(1)
             / indent_column_count
     }
