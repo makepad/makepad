@@ -668,6 +668,7 @@ impl AudioUnitAccess {
                     }
                     _ => ()
                 }
+                #[cfg(target_os = "macos")]
                 AudioUnitAccess::observe_audio_unit_termination(change_signal, core_device_id);
                 Ok(AudioUnit {
                     view_controller: Arc::new(Mutex::new(None)),
