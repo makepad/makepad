@@ -2,7 +2,10 @@ use crate::char::CharExt;
 
 pub trait StrExt {
     fn column_count(&self, tab_column_count: usize) -> usize;
-    fn indentation(&self) -> Option<&str>;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn next_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn prev_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn leading_whitespace(&self) -> Option<&str>;
     fn longest_common_prefix(&self, other: &str) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -16,7 +19,31 @@ impl StrExt for str {
             .sum()
     }
 
-    fn indentation(&self) -> Option<&str> {
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.leading_whitespace()
+            .unwrap_or("")
+            .column_count(tab_column_count)
+            / indent_column_count
+    }
+
+    fn next_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        (self
+            .leading_whitespace()
+            .unwrap_or("")
+            .column_count(tab_column_count)
+            + indent_column_count)
+            / indent_column_count
+    }
+
+    fn prev_indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.leading_whitespace()
+            .unwrap_or("")
+            .column_count(tab_column_count)
+            .saturating_sub(1)
+            / indent_column_count
+    }
+
+    fn leading_whitespace(&self) -> Option<&str> {
         self.char_indices()
             .find(|(_, char)| !char.is_whitespace())
             .map(|(index, _)| &self[..index])
