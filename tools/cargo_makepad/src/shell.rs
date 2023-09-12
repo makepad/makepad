@@ -3,8 +3,29 @@ use std::{
     fs::File,
     io::{Write,Read},
     fs,
+    io::prelude::*,
+    io::BufReader,
     process::{Command, Stdio}
 };
+
+pub fn extract_dependency_info(line: &str) -> Option<(String, String)> {
+    let dependency_output_start = line.find(|c: char| c.is_alphanumeric())?;
+    let dependency_output = &line[dependency_output_start..];
+
+    let mut tokens = dependency_output.split(' ');
+    if let Some(name) = tokens.next() {
+        for token in tokens.collect::<Vec<&str>>() {
+            if token == "(*)" || token == "(proc-macro)" {
+                continue;
+            }
+            if token.starts_with('(') {
+                let path = token[1..token.len() - 1].to_owned();
+                return Some((name.to_string(), path))
+            }
+        }
+    }
+    None
+}
 
 pub fn get_crate_dir(build_crate: &str) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
@@ -86,6 +107,48 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     let mut out = String::new();
     let _ = child.stdout.unwrap().read_to_string(&mut out);
     Ok(out)
+}
+
+pub fn shell_env_filter(what:&str, env: &[(&str, &str)], cwd: &Path, cmd: &str,  args: &[&str]) -> Result<(), String> {
+
+    let mut cmd_build = Command::new(cmd);
+    
+    cmd_build.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .current_dir(cwd);
+    
+    for (key, value) in env {
+        cmd_build.env(key, value);
+    }
+    
+    let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
+    
+    let stdout = child.stdout.take().expect("stdout cannot be taken!");
+    let what = what.to_string();
+    let _stdout_thread = {
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut output = false;
+            loop{
+                let mut line = String::new();
+                if let Ok(_) = reader.read_line(&mut line){
+                    if line.contains(&what){
+                        output = true;
+                    }
+                    if output{
+                        println!("{}",line);
+                    }
+                }
+            }
+        })
+    };
+
+    let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
+    if !r.success() {
+        return Err(format!("Process {} in dir {:?} returned error exit code {} ", cmd, cwd, r));
+    }
+    Ok(())
 }
 
 pub fn write_text(path: &Path, data:&str) -> Result<(), String> {

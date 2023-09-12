@@ -13,22 +13,31 @@ use {
         makepad_math::*,
         os::{
             cx_native::EventFlow,
-            apple::apple_sys::*,
-            cocoa_event::{CocoaEvent},
+            apple::{
+                apple_sys::*,
+                macos::{
+                    macos_event::MacosEvent,
+                    macos_app::{
+                        MacosApp,
+                        get_macos_app_global,
+                        init_macos_app_global
+                    },
+                    macos_window::MacosWindow
+                },
+                apple_classes::init_apple_classes_global,
+                ns_url_session::{make_http_request, web_socket_open},
+            }, 
             metal_xpc::{
                 start_xpc_service,
             },
-            cocoa_app::{
-                CocoaApp,
-                get_cocoa_app_global,
-                init_cocoa_app_global
-            },
             apple_media::CxAppleMedia,
-            metal::{MetalCx, MetalWindow, DrawPassMode},
+            metal::{MetalCx, DrawPassMode},
         },
         pass::{CxPassParent},
         thread::Signal,
+        window::WindowId,
         event::{
+            WindowGeom,
             MouseUpEvent,
             Event,
             NetworkResponseChannel
@@ -38,6 +47,92 @@ use {
         cx::{Cx, OsType},
     }
 };
+
+
+#[derive(Clone)]
+pub struct MetalWindow {
+    pub window_id: WindowId,
+    pub window_geom: WindowGeom,
+    cal_size: DVec2,
+    pub ca_layer: ObjcId,
+    pub cocoa_window: Box<MacosWindow>,
+    pub is_resizing: bool
+}
+
+impl MetalWindow {
+    pub (crate) fn new(
+        window_id: WindowId,
+        metal_cx: &MetalCx,
+        cocoa_app: &mut MacosApp,
+        inner_size: DVec2,
+        position: Option<DVec2>,
+        title: &str
+    ) -> MetalWindow {
+        
+        let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
+        
+        let mut cocoa_window = Box::new(MacosWindow::new(cocoa_app, window_id));
+        
+        cocoa_window.init(title, inner_size, position);
+        unsafe {
+            let () = msg_send![ca_layer, setDevice: metal_cx.device];
+            let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+            let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
+            let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
+            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
+            let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
+            let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
+            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
+            let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
+            let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
+            
+            let view = cocoa_window.view;
+            let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
+            let () = msg_send![view, setWantsLayer: YES];
+            let () = msg_send![view, setLayerContentsPlacement: 11];
+            let () = msg_send![view, setLayer: ca_layer];
+        }
+        
+        MetalWindow {
+            is_resizing: false,
+            window_id,
+            cal_size: DVec2::default(),
+            ca_layer,
+            window_geom: cocoa_window.get_window_geom(),
+            cocoa_window
+        }
+    }
+    
+    pub (crate) fn start_resize(&mut self) {
+        self.is_resizing = true;
+        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
+    }
+    
+    pub (crate) fn stop_resize(&mut self) {
+        self.is_resizing = false;
+        let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
+    }
+    
+    pub (crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
+        let cal_size = DVec2 {
+            x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
+            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
+        };
+        if self.cal_size != cal_size {
+            self.cal_size = cal_size;
+            unsafe {
+                let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x, height: cal_size.y}];
+                let () = msg_send![self.ca_layer, setContentsScale: self.window_geom.dpi_factor];
+            }
+            true
+        }
+        else {
+            false
+        }
+    }
+    
+}
+
 
 const KEEP_ALIVE_COUNT: usize = 5;
 
@@ -64,8 +159,8 @@ impl Cx {
         }
         
         let metal_windows = Rc::new(RefCell::new(Vec::new()));
-        
-        init_cocoa_app_global(Box::new({
+        init_apple_classes_global();
+        init_macos_app_global(Box::new({
             let cx = cx.clone();
             move | cocoa_app,
             event | {
@@ -84,10 +179,10 @@ impl Cx {
         // lets set our signal poll timer
         
         // final bit of initflow
-        get_cocoa_app_global().start_timer(0, 0.008, true);
+        get_macos_app_global().start_timer(0, 0.008, true);
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
-        get_cocoa_app_global().event_loop();
+        get_macos_app_global().event_loop();
     }
     
     pub (crate) fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
@@ -135,8 +230,8 @@ impl Cx {
     
     fn cocoa_event_callback(
         &mut self,
-        cocoa_app: &mut CocoaApp,
-        event: CocoaEvent,
+        cocoa_app: &mut MacosApp,
+        event: MacosEvent,
         metal_cx: &mut MetalCx,
         metal_windows: &mut Vec<MetalWindow>
     ) -> EventFlow {
@@ -147,16 +242,16 @@ impl Cx {
         
         let mut paint_dirty = false;
         match &event {
-            CocoaEvent::MouseDown(_) |
-            CocoaEvent::MouseMove(_) |
-            CocoaEvent::MouseUp(_) |
-            CocoaEvent::Scroll(_) |
-            CocoaEvent::KeyDown(_) |
-            CocoaEvent::KeyUp(_) |
-            CocoaEvent::TextInput(_) => {
+            MacosEvent::MouseDown(_) |
+            MacosEvent::MouseMove(_) |
+            MacosEvent::MouseUp(_) |
+            MacosEvent::Scroll(_) |
+            MacosEvent::KeyDown(_) |
+            MacosEvent::KeyUp(_) |
+            MacosEvent::TextInput(_) => {
                 self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
             }
-            CocoaEvent::Timer(te) => {
+            MacosEvent::Timer(te) => {
                 if te.timer_id == 0 {
                     if self.os.keep_alive_counter>0 {
                         self.os.keep_alive_counter -= 1;
@@ -184,7 +279,7 @@ impl Cx {
         
         //self.process_desktop_pre_event(&mut event);
         match event {
-            CocoaEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+            MacosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in metal_windows.iter_mut() {
                     if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
                         self.repaint_pass(main_pass_id);
@@ -193,20 +288,20 @@ impl Cx {
                 paint_dirty = true;
                 self.call_event_handler(&Event::AppGotFocus);
             }
-            CocoaEvent::AppLostFocus => {
+            MacosEvent::AppLostFocus => {
                 self.call_event_handler(&Event::AppLostFocus);
             }
-            CocoaEvent::WindowResizeLoopStart(window_id) => {
+            MacosEvent::WindowResizeLoopStart(window_id) => {
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
                     window.start_resize();
                 }
             }
-            CocoaEvent::WindowResizeLoopStop(window_id) => {
+            MacosEvent::WindowResizeLoopStop(window_id) => {
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
                     window.stop_resize();
                 }
             }
-            CocoaEvent::WindowGeomChange(mut re) => { // do this here because mac
+            MacosEvent::WindowGeomChange(mut re) => { // do this here because mac
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
                     if let Some(dpi_override) = self.windows[re.window_id].dpi_override{
                         re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
@@ -225,7 +320,7 @@ impl Cx {
                 // ok lets not redraw all, just this window
                 self.call_event_handler(&Event::WindowGeomChange(re));
             }
-            CocoaEvent::WindowClosed(wc) => {
+            MacosEvent::WindowClosed(wc) => {
                 // lets remove the window from the set
                 let window_id = wc.window_id;
                 self.call_event_handler(&Event::WindowClosed(wc));
@@ -238,7 +333,7 @@ impl Cx {
                     }
                 }
             }
-            CocoaEvent::Paint => {
+            MacosEvent::Paint => {
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(cocoa_app.time_now());
                 }
@@ -251,7 +346,7 @@ impl Cx {
                 self.handle_repaint(metal_windows, metal_cx);
                 
             }
-            CocoaEvent::MouseDown(e) => {
+            MacosEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
                     e.abs,
                     e.time
@@ -259,42 +354,42 @@ impl Cx {
                 self.fingers.mouse_down(e.button);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
-            CocoaEvent::MouseMove(e) => {
+            MacosEvent::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            CocoaEvent::MouseUp(e) => {
+            MacosEvent::MouseUp(e) => {
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            CocoaEvent::Scroll(e) => {
+            MacosEvent::Scroll(e) => {
                 self.call_event_handler(&Event::Scroll(e.into()))
             }
-            CocoaEvent::WindowDragQuery(e) => {
+            MacosEvent::WindowDragQuery(e) => {
                 self.call_event_handler(&Event::WindowDragQuery(e))
             }
-            CocoaEvent::WindowCloseRequested(e) => {
+            MacosEvent::WindowCloseRequested(e) => {
                 self.call_event_handler(&Event::WindowCloseRequested(e))
             }
-            CocoaEvent::TextInput(e) => {
+            MacosEvent::TextInput(e) => {
                 self.call_event_handler(&Event::TextInput(e))
             }
-            CocoaEvent::Drag(e) => {
+            MacosEvent::Drag(e) => {
                 self.call_event_handler(&Event::Drag(e));
                 self.drag_drop.cycle_drag();
             }
-            CocoaEvent::Drop(e) => {
+            MacosEvent::Drop(e) => {
                 self.call_event_handler(&Event::Drop(e));
                 self.drag_drop.cycle_drag();
             }
-            CocoaEvent::DragEnd => {
+            MacosEvent::DragEnd => {
                 // lets send mousebutton ups to fix missing it.
                 // TODO! make this more resilient
                 self.call_event_handler(&Event::MouseUp(MouseUpEvent{
-                    abs: dvec2(0.0,0.0),
+                    abs: dvec2(-100000.0,-100000.0),
                     button: 0,
                     window_id: CxWindowPool::id_zero(),
                     modifiers: Default::default(),
@@ -306,24 +401,24 @@ impl Cx {
                 self.call_event_handler(&Event::DragEnd);
                 self.drag_drop.cycle_drag();
             }
-            CocoaEvent::KeyDown(e) => {
+            MacosEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
                 self.call_event_handler(&Event::KeyDown(e))
             }
-            CocoaEvent::KeyUp(e) => {
+            MacosEvent::KeyUp(e) => {
                 self.keyboard.process_key_up(e.clone());
                 self.call_event_handler(&Event::KeyUp(e))
             }
-            CocoaEvent::TextCopy(e) => {
+            MacosEvent::TextCopy(e) => {
                 self.call_event_handler(&Event::TextCopy(e))
             }
-            CocoaEvent::TextCut(e) => {
+            MacosEvent::TextCut(e) => {
                 self.call_event_handler(&Event::TextCut(e))
             }
-            CocoaEvent::Timer(e) => {
+            MacosEvent::Timer(e) => {
                 self.call_event_handler(&Event::Timer(e))
             }
-            CocoaEvent::MenuCommand(e) => {
+            MacosEvent::MenuCommand(e) => {
                 self.call_event_handler(&Event::MenuCommand(e))
             }
         }
@@ -335,7 +430,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp){
+    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut MacosApp){
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -414,13 +509,13 @@ impl Cx {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
                 },
                 CxOsOp::HttpRequest{request_id, request} => {
-                    cocoa_app.make_http_request(request_id, request, self.os.network_response.sender.clone());
+                    make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
                 CxOsOp::WebSocketOpen{request_id, request}=>{
-                    cocoa_app.web_socket_open(request_id, request, self.os.network_response.sender.clone());
+                    web_socket_open(request_id, request, self.os.network_response.sender.clone());
                 }
                 CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
                     todo!()

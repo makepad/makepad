@@ -208,7 +208,7 @@ impl RunView {
 }
 
 impl Widget for RunView {
-    fn walk(&self) -> Walk {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
     

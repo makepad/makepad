@@ -184,7 +184,7 @@ impl DesktopWindow {
             }
         }
         
-        if let Event::Resume = event {
+        if let Event::ClearAtlasses = event {
             Cx2d::reset_fonts_atlas(cx);
             Cx2d::reset_icon_atlas(cx);
         }
@@ -259,7 +259,7 @@ impl Widget for DesktopWindow {
         });
     }
     
-    fn walk(&self) -> Walk {Walk::default()}
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.view.redraw(cx)
