@@ -7,7 +7,6 @@ pub mod history;
 pub mod inlays;
 pub mod iter;
 pub mod layout;
-pub mod move_ops;
 pub mod selection;
 pub mod settings;
 pub mod state;

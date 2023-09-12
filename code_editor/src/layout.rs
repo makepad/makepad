@@ -26,18 +26,14 @@ impl<'a> Layout<'a> {
 
     pub fn width(&self) -> f64 {
         let mut width: f64 = 0.0;
-        for line in self.lines(0, self.line_count()) {
+        for line in self.lines(0, self.as_text().as_lines().len()) {
             width = width.max(line.width());
         }
         width
     }
 
     pub fn height(&self) -> f64 {
-        self.session_layout.y[self.line_count()]
-    }
-
-    pub fn line_count(&self) -> usize {
-        self.text.as_lines().len()
+        *self.session_layout.y.last().unwrap()
     }
 
     pub fn find_first_line_ending_after_y(&self, y: f64) -> usize {
