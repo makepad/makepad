@@ -148,8 +148,11 @@ impl IosApp {
         }
     }
     
+    pub fn draw_size_will_change(&mut self){
+        self.check_window_geom();
+    }
     
-    pub fn draw_in_rect(&mut self) {
+    pub fn check_window_geom(&mut self){
         let main_screen: ObjcId = unsafe {msg_send![class!(UIScreen), mainScreen]};
         let screen_rect: NSRect = unsafe {msg_send![main_screen, bounds]};
         let dpi_factor: f64 = unsafe {msg_send![main_screen, scale]};
@@ -182,6 +185,10 @@ impl IosApp {
                 }),
             );
         }
+    }
+    
+    pub fn draw_in_rect(&mut self) {
+        self.check_window_geom();
         self.first_draw = false;
         self.do_callback(IosEvent::Paint);
     }
