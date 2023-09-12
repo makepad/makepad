@@ -206,6 +206,29 @@ impl Cx {
                     FromJavaMessage::ResizeTextIME {keyboard_height} => {
                         self.panning_adjust_for_text_ime(keyboard_height);
                     }
+                    FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
+                        let e = Event::NetworkResponses(vec![
+                            NetworkResponseEvent {
+                                request_id: LiveId(request_id),
+                                response: NetworkResponse::HttpResponse(HttpResponse::new(
+                                    LiveId(metadata_id),
+                                    status_code,
+                                    headers,
+                                    Some(body)
+                                ))
+                            }
+                        ]);
+                        self.call_event_handler(&e);
+                    }
+                    FromJavaMessage::HttpRequestError {request_id, error, ..} => {
+                        let e = Event::NetworkResponses(vec![
+                            NetworkResponseEvent {
+                                request_id: LiveId(request_id),
+                                response: NetworkResponse::HttpRequestError(error)
+                            }
+                        ]);
+                        self.call_event_handler(&e);
+                    }
                     FromJavaMessage::Pause => {
                         self.call_event_handler(&Event::Pause);
                     }
@@ -799,8 +822,11 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_selected) => {
                     //to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::HttpRequest {request_id: _, request: _} => {
-                    //to_java.http_request(request_id, request)
+                CxOsOp::HttpRequest {request_id, request} => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_http_request(env, request_id, request);
+                    }
                 },
                 _ => ()
             }
