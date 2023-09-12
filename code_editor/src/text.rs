@@ -42,6 +42,17 @@ impl Text {
         }
     }
 
+    pub fn to_single_char(&self) -> Option<char> {
+        if self.lines.len() > 1 {
+            return None;
+        }
+        let mut chars = self.lines[0].chars();
+        match (chars.next(), chars.next()) {
+            (Some(char), None) => Some(char),
+            _ => None,
+        }
+    }
+
     pub fn as_lines(&self) -> &[String] {
         &self.lines
     }
@@ -64,7 +75,18 @@ impl Text {
         Text { lines }
     }
 
-    pub fn insert(&mut self, point: Position, mut text: Self) {
+    pub fn apply_change(&mut self, change: Change) {
+        match change {
+            Change::Insert(position, text) => self.insert(position, text),
+            Change::Delete(start, length) => self.delete(start, length),
+        }
+    }
+
+    pub fn into_lines(self) -> Vec<String> {
+        self.lines
+    }
+
+    fn insert(&mut self, point: Position, mut text: Self) {
         if text.length().line_count == 0 {
             self.lines[point.line_index].replace_range(
                 point.byte_index..point.byte_index,
@@ -84,7 +106,7 @@ impl Text {
         }
     }
 
-    pub fn delete(&mut self, start: Position, length: Length) {
+    fn delete(&mut self, start: Position, length: Length) {
         let end = start + length;
         if start.line_index == end.line_index {
             self.lines[start.line_index].replace_range(start.byte_index..end.byte_index, "");
@@ -94,17 +116,6 @@ impl Text {
             self.lines
                 .splice(start.line_index..end.line_index + 1, iter::once(line));
         }
-    }
-
-    pub fn apply_change(&mut self, change: Change) {
-        match change {
-            Change::Insert(position, text) => self.insert(position, text),
-            Change::Delete(start, length) => self.delete(start, length),
-        }
-    }
-
-    pub fn into_lines(self) -> Vec<String> {
-        self.lines
     }
 }
 
@@ -123,6 +134,14 @@ impl fmt::Display for Text {
             writeln!(f, "{}", line)?;
         }
         write!(f, "{}", last_line)
+    }
+}
+
+impl From<char> for Text {
+    fn from(char: char) -> Self {
+        Self {
+            lines: vec![String::from(char)],
+        }
     }
 }
 
@@ -146,6 +165,36 @@ impl From<String> for Text {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Edit {
+    pub change: Change,
+    pub drift: Drift,
+}
+
+impl Edit {
+    pub fn invert(self, text: &Text) -> Self {
+        Self {
+            change: self.change.invert(text),
+            drift: self.drift,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum Change {
+    Insert(Position, Text),
+    Delete(Position, Length),
+}
+
+impl Change {
+    pub fn invert(self, text: &Text) -> Self {
+        match self {
+            Self::Insert(position, text) => Change::Delete(position, text.length()),
+            Self::Delete(start, length) => Change::Insert(start, text.slice(start, length)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Position {
     pub line_index: usize,
@@ -157,11 +206,11 @@ impl Position {
         Self::default()
     }
 
-    pub fn apply_change(self, change: &Change, drift: Drift) -> Self {
-        match *change {
+    pub fn apply_edit(self, edit: &Edit) -> Self {
+        match edit.change {
             Change::Insert(point, ref text) => match self.cmp(&point) {
                 Ordering::Less => self,
-                Ordering::Equal => match drift {
+                Ordering::Equal => match edit.drift {
                     Drift::Before => point + text.length() + (self - point),
                     Drift::After => self,
                 },
@@ -316,21 +365,6 @@ impl Range {
 
     pub fn extent(self) -> Length {
         self.end - self.start
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum Change {
-    Insert(Position, Text),
-    Delete(Position, Length),
-}
-
-impl Change {
-    pub fn invert(self, text: &Text) -> Self {
-        match self {
-            Self::Insert(position, text) => Change::Delete(position, text.length()),
-            Self::Delete(start, length) => Change::Insert(start, text.slice(start, length)),
-        }
     }
 }
 

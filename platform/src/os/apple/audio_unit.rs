@@ -123,6 +123,9 @@ impl AudioUnitAccess {
     pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
         Self::observe_route_changes(change_signal.clone());
         
+        #[cfg(target_os = "ios")]
+        Self::init_ios_access();
+        
         Arc::new(Mutex::new(Self{
             failed_devices: Default::default(),
             change_signal,
@@ -142,6 +145,21 @@ impl AudioUnitAccess {
         }
         out
     }
+    
+    #[cfg(target_os = "ios")]
+    pub fn init_ios_access(){
+        unsafe{
+            let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+            let mut error: ObjcId = nil;
+            let _success: bool = msg_send![
+                session, 
+                setCategory:AVAudioSessionCategoryPlayAndRecord
+                withOptions:AVAudioSessionCategoryOption::DefaultToSpeaker as usize// | AVAudioSessionCategoryOption::AllowBluetooth as usize
+                error:&mut error
+            ];
+        }
+    }
+        
     
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
@@ -332,6 +350,7 @@ impl AudioUnitAccess {
         }
     }
     
+    #[cfg(target_os = "macos")]
     pub fn update_device_list(&mut self) -> Result<(), OSError> {
         self.device_descs.clear();
         
@@ -415,8 +434,10 @@ impl AudioUnitAccess {
                 println!("Error getting name for device {}", core_device_id);
                 continue;
             }
+            
             let device_name = device_name.unwrap();
             let device_name = unsafe {cfstring_ref_to_string(device_name)};
+            
             // lets probe input/outputness
             fn probe_channels(device_id: AudioDeviceID, scope: AudioObjectPropertyScope) -> Result<usize, OSError> {
                 let buffer_data: Vec<u8> = get_array(
@@ -470,6 +491,37 @@ impl AudioUnitAccess {
         Ok(())
     }
     
+     #[cfg(target_os = "ios")]
+    pub fn update_device_list(&mut self) -> Result<(), OSError> {
+        self.device_descs.clear();
+
+        self.device_descs.push(CoreAudioDeviceDesc {
+            core_device_id:0,
+            desc: AudioDeviceDesc {
+                has_failed:false,
+                device_id:AudioDeviceId(live_id!(default_input)),
+                device_type: AudioDeviceType::Input,
+                channel_count: 2,
+                is_default: true,
+                name: "Default Output".to_string(),
+            }
+        });
+         
+        self.device_descs.push(CoreAudioDeviceDesc {
+            core_device_id:0,
+            desc: AudioDeviceDesc {
+                has_failed: false,
+                device_id: AudioDeviceId(live_id!(default_output)),
+                device_type: AudioDeviceType::Output,
+                channel_count: 2,
+                is_default: true,
+                name: "Default Input".to_string(),
+            }
+        });
+        Ok(())
+    }
+    
+    
     pub fn query_audio_units(unit_query: AudioUnitQuery) -> Vec<AudioUnitInfo> {
         let desc = match unit_query {
             AudioUnitQuery::MusicDevice => {
@@ -489,7 +541,7 @@ impl AudioUnitAccess {
             AudioUnitQuery::Output => {
                 AudioComponentDescription::new_all_manufacturers(
                     AudioUnitType::IO,
-                    AudioUnitSubType::RemoteIO,
+                    AudioUnitSubType::RemoteIO, 
                 )
             }
             AudioUnitQuery::Input => {
@@ -510,6 +562,7 @@ impl AudioUnitAccess {
             let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
             let count: usize = msg_send![components, count];
             let mut out = Vec::new();
+            
             for i in 0..count {
                 let component: ObjcId = msg_send![components, objectAtIndex: i];
                 let name = nsstring_to_string(msg_send![component, name]);
@@ -533,7 +586,7 @@ impl AudioUnitAccess {
         
         let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             let () = unsafe {msg_send![av_audio_unit, retain]};
-            unsafe fn inner(change_signal: Signal, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
+            unsafe fn inner(_change_signal: Signal, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
                 OSError::from_nserror(error) ?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
                 let () = msg_send![av_audio_unit, retain];
@@ -581,7 +634,6 @@ impl AudioUnitAccess {
                             OSError::from_nserror(err) ?;
                         }
                         
-                        // lets hardcode the format to 44100 float
                         let mut err: ObjcId = nil;
                         let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                         OSError::from_nserror(err) ?;
@@ -616,7 +668,8 @@ impl AudioUnitAccess {
                     }
                     _ => ()
                 }
-                AudioUnitAccess::observe_audio_unit_termination(change_signal, core_device_id);
+                #[cfg(target_os = "macos")]
+                AudioUnitAccess::observe_audio_unit_termination(_change_signal, core_device_id);
                 Ok(AudioUnit {
                     view_controller: Arc::new(Mutex::new(None)),
                     param_tree_observer: None,

@@ -1,7 +1,6 @@
 use {
     crate::{
         char::CharExt,
-        history::Edit,
         history::EditKind,
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
@@ -9,7 +8,7 @@ use {
         move_ops,
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
-        text::{Change, Drift, Length, Position, Text},
+        text::{Change, Drift, Edit, Length, Position, Text},
         token::TokenKind,
         widgets::BlockWidget,
         wrap,
@@ -17,11 +16,12 @@ use {
         History, Line, Selection, Settings, Token, Tokenizer,
     },
     std::{
-        cell::RefCell,
+        cell::{Ref, RefCell},
         cmp,
         collections::{HashMap, HashSet},
         fmt::Write,
         iter, mem, ops,
+        ops::Range,
         rc::Rc,
         slice::Iter,
         sync::{
@@ -37,7 +37,7 @@ use {
 pub struct Session {
     id: SessionId,
     settings: Rc<Settings>,
-    document: Rc<RefCell<Document>>,
+    document: Document,
     wrap_column: Option<usize>,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
@@ -49,15 +49,16 @@ pub struct Session {
     unfolding_lines: HashSet<usize>,
     selections: SelectionSet,
     pending_selection_index: Option<usize>,
+    delimiter_stack: Vec<char>,
     edit_receiver: Receiver<(Option<SelectionSet>, Vec<Edit>)>,
 }
 
 impl Session {
-    pub fn new(document: Rc<RefCell<Document>>) -> Self {
+    pub fn new(document: Document) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (edit_sender, edit_receiver) = mpsc::channel();
-        let line_count = document.borrow().history.as_text().as_lines().len();
+        let line_count = document.text().as_lines().len();
         let mut session = Self {
             id: SessionId(ID.fetch_add(1, atomic::Ordering::AcqRel)),
             settings: Rc::new(Settings::default()),
@@ -73,6 +74,7 @@ impl Session {
             unfolding_lines: HashSet::new(),
             selections: SelectionSet::new(),
             pending_selection_index: None,
+            delimiter_stack: Vec::new(),
             edit_receiver,
         };
         for line in 0..line_count {
@@ -81,6 +83,7 @@ impl Session {
         session.update_y();
         session
             .document
+            .0
             .borrow_mut()
             .edit_senders
             .insert(session.id, edit_sender);
@@ -92,17 +95,21 @@ impl Session {
     }
 
     pub fn width(&self) -> f64 {
-        self.lines(0, self.document.borrow().history.as_text().as_lines().len(), |lines| {
-            let mut width: f64 = 0.0;
-            for line in lines {
-                width = width.max(line.width());
-            }
-            width
-        })
+        self.lines(
+            0,
+            self.document.text().as_lines().len(),
+            |lines| {
+                let mut width: f64 = 0.0;
+                for line in lines {
+                    width = width.max(line.width());
+                }
+                width
+            },
+        )
     }
 
     pub fn height(&self) -> f64 {
-        let index = self.document.borrow().history.as_text().as_lines().len() - 1;
+        let index = self.document.text().as_lines().len() - 1;
         let mut y = self.line(index, |line| line.y() + line.height());
         self.blocks(index, index, |blocks| {
             for block in blocks {
@@ -123,7 +130,7 @@ impl Session {
         &self.settings
     }
 
-    pub fn document(&self) -> &Rc<RefCell<Document>> {
+    pub fn document(&self) -> &Document {
         &self.document
     }
 
@@ -150,15 +157,15 @@ impl Session {
     }
 
     pub fn line<T>(&self, line: usize, f: impl FnOnce(Line<'_>) -> T) -> T {
-        let document = self.document.borrow();
+        let document_inner = self.document.0.borrow();
         f(Line {
             y: self.y.get(line).copied(),
             column_count: self.column_count[line],
             fold_column: self.fold_column[line],
             scale: self.scale[line],
-            text: &document.history.as_text().as_lines()[line],
-            tokens: &document.tokens[line],
-            inline_inlays: &document.inline_inlays[line],
+            text: &document_inner.history.as_text().as_lines()[line],
+            tokens: &document_inner.tokens[line],
+            inline_inlays: &document_inner.inline_inlays[line],
             wrap_data: self.wrap_data[line].as_ref(),
         })
     }
@@ -169,15 +176,15 @@ impl Session {
         end_line: usize,
         f: impl FnOnce(Lines<'_>) -> T,
     ) -> T {
-        let document = self.document.borrow();
+        let document_inner = self.document.0.borrow();
         f(Lines {
             y: self.y[start_line.min(self.y.len())..end_line.min(self.y.len())].iter(),
             column_count: self.column_count[start_line..end_line].iter(),
             fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
-            text: document.history.as_text().as_lines()[start_line..end_line].iter(),
-            tokens: document.tokens[start_line..end_line].iter(),
-            inline_inlays: document.inline_inlays[start_line..end_line].iter(),
+            text: document_inner.history.as_text().as_lines()[start_line..end_line].iter(),
+            tokens: document_inner.tokens[start_line..end_line].iter(),
+            inline_inlays: document_inner.inline_inlays[start_line..end_line].iter(),
             wrap_data: self.wrap_data[start_line..end_line].iter(),
         })
     }
@@ -188,8 +195,8 @@ impl Session {
         end_line: usize,
         f: impl FnOnce(Blocks<'_>) -> T,
     ) -> T {
-        let document = self.document.borrow();
-        let mut block_inlays = document.block_inlays.iter();
+        let document_inner = self.document.0.borrow();
+        let mut block_inlays = document_inner.block_inlays.iter();
         while block_inlays
             .as_slice()
             .first()
@@ -215,7 +222,7 @@ impl Session {
             return;
         }
         self.wrap_column = wrap_column;
-        let line_count = self.document.borrow().history.as_text().as_lines().len();
+        let line_count = self.document.text().as_lines().len();
         for line in 0..line_count {
             self.update_wrap_data(line);
         }
@@ -223,8 +230,8 @@ impl Session {
     }
 
     pub fn fold(&mut self) {
-        let document = self.document.borrow();
-        let lines = document.history.as_text().as_lines();
+        let text = self.document.text();
+        let lines = text.as_lines();
         for line in 0..lines.len() {
             let indent_level = lines[line]
                 .indentation()
@@ -284,10 +291,11 @@ impl Session {
         self.selections.set_selection(Selection::from(Cursor {
             position,
             affinity,
-            preferred_column: None,
+            preferred_column_index: None,
         }));
         self.pending_selection_index = Some(0);
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.force_new_group();
     }
 
     pub fn push_cursor(&mut self, position: Position, affinity: Affinity) {
@@ -295,9 +303,10 @@ impl Session {
             Some(self.selections.push_selection(Selection::from(Cursor {
                 position,
                 affinity,
-                preferred_column: None,
+                preferred_column_index: None,
             })));
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.force_new_group();
     }
 
     pub fn move_to(&mut self, position: Position, affinity: Affinity) {
@@ -307,17 +316,21 @@ impl Session {
                 selection.update_cursor(|_| Cursor {
                     position,
                     affinity,
-                    preferred_column: None,
+                    preferred_column_index: None,
                 })
             },
         ));
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.force_new_group();
     }
 
     pub fn move_left(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
             selection.update_cursor(|cursor| {
-                move_ops::move_left(session.document.borrow().history.as_text().as_lines(), cursor)
+                move_ops::move_left(
+                    session.document.text().as_lines(),
+                    cursor,
+                )
             })
         });
     }
@@ -325,7 +338,10 @@ impl Session {
     pub fn move_right(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
             selection.update_cursor(|cursor| {
-                move_ops::move_right(session.document.borrow().history.as_text().as_lines(), cursor)
+                move_ops::move_right(
+                    session.document.text().as_lines(),
+                    cursor,
+                )
             })
         });
     }
@@ -343,78 +359,142 @@ impl Session {
     }
 
     pub fn insert(&mut self, text: Text) {
-        self.document.borrow_mut().edit(
+        let mut edit_kind = EditKind::Insert;
+        let mut inject_delimiter = None;
+        let mut uninject_delimiter = None;
+        match text.to_single_char() {
+            Some(' ') => {
+                edit_kind = EditKind::InsertSpace;
+            }
+            Some(char) if char.is_opening_delimiter() => {
+                let char = char.opposite_delimiter().unwrap();
+                inject_delimiter = Some(char);
+                self.delimiter_stack.push(char);
+            }
+            Some(char)
+                if self
+                    .delimiter_stack
+                    .last()
+                    .map_or(false, |&last_char| last_char == char) =>
+            {
+                uninject_delimiter = Some(self.delimiter_stack.pop().unwrap());
+            }
+            _ => {}
+        }
+        self.document.edit_selections(
             self.id,
-            if text.as_lines().len() == 1 && &text.as_lines()[0] == " " {
-                EditKind::Space
-            } else {
-                EditKind::Insert
-            },
+            edit_kind,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |_, _, _| (Length::zero(), false, Some(text.clone()), None),
+            &self.settings,
+            |mut editor, position, length| {
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                if let Some(uninject_delimiter) = uninject_delimiter {
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(
+                            position,
+                            Length {
+                                line_count: 0,
+                                byte_count: uninject_delimiter.len_utf8(),
+                            },
+                        ),
+                        drift: Drift::Before,
+                    })
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Insert(position, text.clone()),
+                    drift: Drift::Before,
+                });
+                if let Some(inject_delimiter) = inject_delimiter {
+                    editor.apply_edit(Edit {
+                        change: Change::Insert(
+                            position + text.length(),
+                            Text::from(inject_delimiter),
+                        ),
+                        drift: Drift::After,
+                    })
+                }
+            },
         );
     }
 
     pub fn enter(&mut self) {
-        self.document.borrow_mut().edit(
+        self.document.edit_selections(
             self.id,
             EditKind::Other,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |line, index, _| {
-                (
-                    if line[..index].chars().all(|char| char.is_whitespace()) {
-                        Length {
-                            line_count: 0,
-                            byte_count: index,
+            &self.settings,
+            |mut editor, position, length| {
+                let line = &editor.as_text().as_lines()[position.line_index];
+                let delete_whitespace = line.chars().all(|char| char.is_whitespace());
+                let inject_newline = line[..position.byte_index]
+                    .chars()
+                    .rev()
+                    .find_map(|char| {
+                        if char.is_opening_delimiter() {
+                            return Some(true);
                         }
-                    } else {
-                        Length::zero()
-                    },
-                    false,
-                    Some(Text::newline()),
-                    if line[..index]
+                        if char.is_closing_delimiter() {
+                            return Some(false);
+                        }
+                        None
+                    })
+                    .unwrap_or(false)
+                    && line[position.byte_index..]
                         .chars()
-                        .rev()
                         .find_map(|char| {
-                            if char.is_opening_delimiter() {
+                            if char.is_closing_delimiter() {
                                 return Some(true);
                             }
-                            if char.is_closing_delimiter() {
+                            if !char.is_whitespace() {
                                 return Some(false);
                             }
                             None
                         })
-                        .unwrap_or(false)
-                        && line[index..]
-                            .chars()
-                            .find_map(|char| {
-                                if char.is_closing_delimiter() {
-                                    return Some(true);
-                                }
-                                if !char.is_whitespace() {
-                                    return Some(false);
-                                }
-                                None
-                            })
-                            .unwrap_or(false)
-                    {
-                        Some(Text::newline())
-                    } else {
-                        None
-                    },
-                )
+                        .unwrap_or(false);
+                if delete_whitespace {
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(
+                            Position {
+                                line_index: position.line_index,
+                                byte_index: 0,
+                            },
+                            Length {
+                                line_count: 0,
+                                byte_count: position.byte_index,
+                            },
+                        ),
+                        drift: Drift::Before,
+                    });
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                editor.apply_edit(Edit {
+                    change: Change::Insert(position, Text::newline()),
+                    drift: Drift::Before,
+                });
+                if inject_newline {
+                    editor.apply_edit(Edit {
+                        change: Change::Insert(
+                            Position {
+                                line_index: position.line_index + 1,
+                                byte_index: 0,
+                            },
+                            Text::newline(),
+                        ),
+                        drift: Drift::After,
+                    });
+                }
             },
         );
     }
 
     pub fn indent(&mut self) {
-        self.document.borrow_mut().edit_lines(
+        self.document.edit_lines(
             self.id,
             EditKind::Indent,
             &self.selections,
@@ -434,7 +514,7 @@ impl Session {
     }
 
     pub fn outdent(&mut self) {
-        self.document.borrow_mut().edit_lines(
+        self.document.edit_lines(
             self.id,
             EditKind::Outdent,
             &self.selections,
@@ -454,46 +534,59 @@ impl Session {
     }
 
     pub fn delete(&mut self) {
-        self.document.borrow_mut().edit(
+        self.document.edit_selections(
             self.id,
             EditKind::Delete,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |_, _, is_empty| (Length::zero(), is_empty, None, None),
+            &self.settings,
+            |mut editor, position, length| {
+                let mut length = length;
+                if length == Length::zero() {
+                    let lines = editor.as_text().as_lines();
+                    if position.byte_index < lines[position.line_index].len() {
+                        length.byte_count += 1;
+                    } else if position.line_index < lines.len() {
+                        length.line_count += 1;
+                        length.byte_count = 0;
+                    }
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+            },
         );
     }
 
     pub fn backspace(&mut self) {
-        self.document.borrow_mut().edit(
+        self.document.edit_selections(
             self.id,
             EditKind::Delete,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |line, index, is_empty| {
-                (
-                    if is_empty {
-                        if index == 0 {
-                            Length {
-                                line_count: 1,
-                                byte_count: 0,
-                            }
-                        } else {
-                            Length {
-                                line_count: 0,
-                                byte_count: line[..index].graphemes().next_back().unwrap().len(),
-                            }
-                        }
-                    } else {
-                        Length::zero()
-                    },
-                    false,
-                    None,
-                    None,
-                )
+            &self.settings,
+            |mut editor, position, length| {
+                let mut position = position;
+                let mut length = length;
+                if length == Length::zero() {
+                    let lines = editor.as_text().as_lines();
+                    if position.byte_index > 0 {
+                        let byte_count = lines[position.line_index]
+                            .graphemes()
+                            .next_back()
+                            .unwrap()
+                            .len();
+                        position.byte_index -= byte_count;
+                        length.byte_count += byte_count;
+                    } else if position.line_index > 0 {
+                        position.line_index -= 1;
+                        position.byte_index = lines[position.line_index].len();
+                        length.line_count += 1;
+                    }
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
             },
         );
     }
@@ -516,7 +609,6 @@ impl Session {
                 &mut string,
                 "{}",
                 self.document
-                    .borrow()
                     .text()
                     .slice(range.start(), range.extent())
             )
@@ -526,16 +618,16 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.document.borrow_mut().undo(self.id, &self.selections)
+        self.document.undo(self.id, &self.selections)
     }
 
     pub fn redo(&mut self) -> bool {
-        self.document.borrow_mut().redo(self.id, &self.selections)
+        self.document.redo(self.id, &self.selections)
     }
 
     fn update_y(&mut self) {
         let start = self.y.len();
-        let end = self.document.borrow().history.as_text().as_lines().len();
+        let end = self.document.0.borrow().history.as_text().as_lines().len();
         if start == end + 1 {
             return;
         }
@@ -620,7 +712,8 @@ impl Session {
                 selection
             });
         self.selections = selections;
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.force_new_group();
     }
 
     fn apply_edits(&mut self, selections: Option<SelectionSet>, edits: &[Edit]) {
@@ -658,7 +751,7 @@ impl Session {
                 }
             }
         }
-        let line_count = self.document.borrow().history.as_text().as_lines().len();
+        let line_count = self.document.0.borrow().history.as_text().as_lines().len();
         for line in 0..line_count {
             if self.wrap_data[line].is_none() {
                 self.update_wrap_data(line);
@@ -668,7 +761,7 @@ impl Session {
             self.selections = selections;
         } else {
             for edit in edits {
-                self.selections.apply_change(&edit.change, edit.drift);
+                self.selections.apply_change(edit);
             }
         }
         self.update_y();
@@ -677,7 +770,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.document.borrow_mut().edit_senders.remove(&self.id);
+        self.document.0.borrow_mut().edit_senders.remove(&self.id);
     }
 }
 
@@ -751,8 +844,11 @@ pub enum Block<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(usize);
 
+#[derive(Clone, Debug)]
+pub struct Document(Rc<RefCell<DocumentInner>>);
+
 #[derive(Debug)]
-pub struct Document {
+struct DocumentInner {
     history: History,
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
@@ -767,7 +863,7 @@ impl Document {
         let tokens: Vec<_> = (0..line_count)
             .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
             .collect();
-        let mut document = Self {
+        let mut inner = DocumentInner {
             history: History::from(text),
             tokens,
             inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
@@ -775,164 +871,87 @@ impl Document {
             tokenizer: Tokenizer::new(line_count),
             edit_senders: HashMap::new(),
         };
-        document
+        inner
             .tokenizer
-            .update(&document.history.as_text(), &mut document.tokens);
-        document
+            .update(&inner.history.as_text(), &mut inner.tokens);
+        Self(Rc::new(RefCell::new(inner)))
     }
 
-    pub fn text(&self) -> &Text {
-        self.history.as_text()
+    pub fn text(&self) -> Ref<'_, Text> {
+        Ref::map(self.0.borrow(), |inner| inner.history.as_text())
     }
 
-    fn edit(
-        &mut self,
-        origin_id: SessionId,
+    fn edit_selections(
+        &self,
+        session_id: SessionId,
         kind: EditKind,
         selections: &SelectionSet,
-        use_soft_tabs: bool,
-        tab_column_count: usize,
-        indent_column_count: usize,
-        mut f: impl FnMut(&String, usize, bool) -> (Length, bool, Option<Text>, Option<Text>),
+        settings: &Settings,
+        mut f: impl FnMut(Editor<'_>, Position, Length),
     ) {
-        self.history
-            .push_or_extend_edit_group(origin_id, kind, selections);
+        let mut inner = self.0.borrow_mut();
+        inner.history
+            .push_or_extend_group(session_id, kind, selections);
         let mut edits = Vec::new();
         let mut line_ranges = Vec::new();
-        let mut point = Position::zero();
-        let mut prev_range_end = Position::zero();
-        for range in selections
-            .iter()
-            .copied()
-            .merge(
-                |selection_0, selection_1| match selection_0.merge_with(selection_1) {
-                    Some(selection) => Ok(selection),
-                    None => Err((selection_0, selection_1)),
+        let mut prev_start = Position::zero();
+        let mut prev_adjusted_start = Position::zero();
+        let mut prev_edit_start = 0;
+        for &selection in selections {
+            let mut adjusted_start = prev_adjusted_start + (selection.start() - prev_start);
+            for edit in &edits[prev_edit_start..] {
+                adjusted_start = adjusted_start.apply_edit(edit);
+            }
+            let edit_start = edits.len();
+            f(
+                Editor {
+                    history: &mut inner.history,
+                    edits: &mut edits,
                 },
-            )
-            .map(|selection| selection.range())
-        {
-            point += range.start() - prev_range_end;
-            if !range.is_empty() {
-                let edit = Edit {
-                    change: Change::Delete(point, range.extent()),
-                    drift: Drift::Before,
-                };
-                edits.push(edit.clone());
-                self.history.edit(edit);
-            }
-            let (delete_extent_before, delete_after, insert_text_before, insert_text_after) = f(
-                &self.history.as_text().as_lines()[point.line_index],
-                point.byte_index,
-                range.is_empty(),
+                adjusted_start,
+                selection.length(),
             );
-            if delete_extent_before != Length::zero() {
-                if delete_extent_before.line_count == 0 {
-                    point.byte_index -= delete_extent_before.byte_count;
-                } else {
-                    point.line_index -= delete_extent_before.line_count;
-                    point.byte_index = self.history.as_text().as_lines()[point.line_index].len()
-                        - delete_extent_before.byte_count;
-                }
-                let edit = Edit {
-                    change: Change::Delete(point, delete_extent_before),
-                    drift: Drift::Before,
-                };
-                edits.push(edit.clone());
-                self.history.edit(edit);
-            }
-            if delete_after {
-                let delete_extent_after = if let Some(grapheme) = self.history.as_text().as_lines()
-                    [point.line_index][point.byte_index..]
-                    .graphemes()
-                    .next()
-                {
-                    Some(Length {
-                        line_count: 0,
-                        byte_count: grapheme.len(),
-                    })
-                } else if point.line_index < self.history.as_text().as_lines().len() - 1 {
-                    Some(Length {
-                        line_count: 1,
-                        byte_count: 0,
-                    })
-                } else {
-                    None
-                };
-                if let Some(delete_extent_after) = delete_extent_after {
-                    let edit = Edit {
-                        change: Change::Delete(point, delete_extent_after),
-                        drift: Drift::Before,
-                    };
-                    edits.push(edit.clone());
-                    self.history.edit(edit);
+            for edit in &edits[edit_start..] {
+                match edit.change {
+                    Change::Insert(position, ref text) if text.as_lines().len() > 1 => {
+                        line_ranges.push(Range {
+                            start: if inner.history.as_text().as_lines()[position.line_index]
+                                [..position.byte_index]
+                                .chars()
+                                .all(|char| char.is_whitespace())
+                            {
+                                position.line_index
+                            } else {
+                                position.line_index + 1
+                            },
+                            end: position.line_index + text.as_lines().len(),
+                        });
+                    }
+                    _ => {}
                 }
             }
-            if let Some(insert_text_before) = insert_text_before {
-                let line_count = insert_text_before.as_lines().len();
-                if line_count > 1 {
-                    line_ranges.push(
-                        (if self.history.as_text().as_lines()[point.line_index][..point.byte_index]
-                            .chars()
-                            .all(|char| char.is_whitespace())
-                        {
-                            point.line_index
-                        } else {
-                            point.line_index + 1
-                        })..point.line_index + line_count,
-                    );
-                }
-                let extent = insert_text_before.length();
-                let edit = Edit {
-                    change: Change::Insert(point, insert_text_before),
-                    drift: Drift::Before,
-                };
-                point += extent;
-                edits.push(edit.clone());
-                self.history.edit(edit);
-            }
-            if let Some(insert_text_after) = insert_text_after {
-                let line_count = insert_text_after.as_lines().len();
-                if line_count > 1 {
-                    line_ranges.push(
-                        (if self.history.as_text().as_lines()[point.line_index][..point.byte_index]
-                            .chars()
-                            .all(|char| char.is_whitespace())
-                        {
-                            point.line_index
-                        } else {
-                            point.line_index + 1
-                        })..point.line_index + line_count,
-                    );
-                }
-                let extent = insert_text_after.length();
-                let edit = Edit {
-                    change: Change::Insert(point, insert_text_after),
-                    drift: Drift::After,
-                };
-                point += extent;
-                edits.push(edit.clone());
-                self.history.edit(edit);
-            }
-            prev_range_end = range.end();
+            prev_start = selection.start();
+            prev_adjusted_start = adjusted_start;
+            prev_edit_start = edit_start;
         }
+        drop(inner);
         self.autoindent(
             &line_ranges,
-            use_soft_tabs,
-            tab_column_count,
-            indent_column_count,
+            settings.use_soft_tabs,
+            settings.tab_column_count,
+            settings.indent_column_count,
             &mut edits,
         );
-        self.apply_edits(origin_id, None, &edits);
+        self.apply_edits(session_id, None, &edits);
     }
 
     fn autoindent(
-        &mut self,
+        &self,
         line_ranges: &[ops::Range<usize>],
         use_soft_tabs: bool,
         tab_column_count: usize,
         indent_column_count: usize,
-        changes: &mut Vec<Edit>,
+        edits: &mut Vec<Edit>,
     ) {
         fn next_line_indentation_column_count(
             line: &str,
@@ -974,7 +993,8 @@ impl Document {
                 }
             })
         {
-            let mut desired_indentation_column_count = self.history.as_text().as_lines()[..line_range.start]
+            let mut desired_indentation_column_count = self.text().as_lines()
+                [..line_range.start]
                 .iter()
                 .rev()
                 .find_map(|line| {
@@ -982,7 +1002,7 @@ impl Document {
                 })
                 .unwrap_or(0);
             for line in line_range {
-                if self.history.as_text().as_lines()[line]
+                if self.text().as_lines()[line]
                     .chars()
                     .find_map(|char| {
                         if char.is_closing_delimiter() {
@@ -997,13 +1017,13 @@ impl Document {
                 {
                     desired_indentation_column_count -= 4;
                 }
-                self.edit_lines_internal(line, changes, |line| {
+                self.edit_lines_internal(line, edits, |line| {
                     reindent(line, use_soft_tabs, tab_column_count, |_| {
                         desired_indentation_column_count
                     })
                 });
                 if let Some(next_line_indentation_column_count) = next_line_indentation_column_count(
-                    &self.history.as_text().as_lines()[line],
+                    &self.text().as_lines()[line],
                     tab_column_count,
                     indent_column_count,
                 ) {
@@ -1014,15 +1034,16 @@ impl Document {
     }
 
     fn edit_lines(
-        &mut self,
+        &self,
         origin_id: SessionId,
         kind: EditKind,
         selections: &SelectionSet,
         mut f: impl FnMut(&str) -> (usize, usize, String),
     ) {
+        let mut inner = self.0.borrow_mut();
         let mut edits = Vec::new();
-        self.history
-            .push_or_extend_edit_group(origin_id, kind, selections);
+        inner.history
+            .push_or_extend_group(origin_id, kind, selections);
         for line_range in selections
             .iter()
             .copied()
@@ -1043,12 +1064,13 @@ impl Document {
     }
 
     fn edit_lines_internal(
-        &mut self,
+        &self,
         line: usize,
         edits: &mut Vec<Edit>,
         mut f: impl FnMut(&str) -> (usize, usize, String),
     ) {
-        let (byte, delete_byte_count, insert_text) = f(&self.history.as_text().as_lines()[line]);
+        let mut inner = self.0.borrow_mut();
+        let (byte, delete_byte_count, insert_text) = f(&inner.history.as_text().as_lines()[line]);
         if delete_byte_count > 0 {
             let edit = Edit {
                 change: Change::Delete(
@@ -1064,7 +1086,7 @@ impl Document {
                 drift: Drift::Before,
             };
             edits.push(edit.clone());
-            self.history.edit(edit);
+            inner.history.apply_edit(edit);
         }
         if !insert_text.is_empty() {
             let edit = Edit {
@@ -1078,17 +1100,18 @@ impl Document {
                 drift: Drift::Before,
             };
             edits.push(edit.clone());
-            self.history.edit(edit);
+            inner.history.apply_edit(edit);
         }
     }
 
-    fn force_new_edit_group(&mut self) {
-        self.history.force_new_edit_group()
+    fn force_new_group(&mut self) {
+        self.0.borrow_mut().history.force_new_group()
     }
 
     fn undo(&mut self, origin_id: SessionId, selections: &SelectionSet) -> bool {
         let mut changes = Vec::new();
-        if let Some(selections) = self.history.undo(selections, &mut changes) {
+        let selections = self.0.borrow_mut().history.undo(selections, &mut changes);
+        if let Some(selections) = selections {
             self.apply_edits(origin_id, Some(selections), &changes);
             true
         } else {
@@ -1098,7 +1121,8 @@ impl Document {
 
     fn redo(&mut self, origin_id: SessionId, selections: &SelectionSet) -> bool {
         let mut changes = Vec::new();
-        if let Some(selections) = self.history.redo(selections, &mut changes) {
+        let selections = self.0.borrow_mut().history.redo(selections, &mut changes);
+        if let Some(selections) = selections {
             self.apply_edits(origin_id, Some(selections), &changes);
             true
         } else {
@@ -1107,7 +1131,7 @@ impl Document {
     }
 
     fn apply_edits(
-        &mut self,
+        &self,
         origin_id: SessionId,
         selections: Option<SelectionSet>,
         edits: &[Edit],
@@ -1115,10 +1139,14 @@ impl Document {
         for edit in edits {
             self.apply_change_to_tokens(&edit.change);
             self.apply_change_to_inline_inlays(&edit.change, edit.drift);
-            self.tokenizer.apply_change(&edit.change);
+            self.0.borrow_mut().tokenizer.apply_change(&edit.change);
         }
-        self.tokenizer.update(self.history.as_text(), &mut self.tokens);
-        for (&session_id, edit_sender) in &self.edit_senders {
+        let mut inner = self.0.borrow_mut();
+        // I'm not sure why this is needed
+        let inner_ref = &mut *inner;
+        inner_ref.tokenizer
+            .update(inner_ref.history.as_text(), &mut inner_ref.tokens);
+        for (&session_id, edit_sender) in &inner.edit_senders {
             if session_id == origin_id {
                 edit_sender
                     .send((selections.clone(), edits.to_vec()))
@@ -1141,11 +1169,12 @@ impl Document {
         }
     }
 
-    fn apply_change_to_tokens(&mut self, change: &Change) {
+    fn apply_change_to_tokens(&self, change: &Change) {
+        let mut inner = self.0.borrow_mut();
         match *change {
             Change::Insert(point, ref text) => {
                 let mut byte = 0;
-                let mut index = self.tokens[point.line_index]
+                let mut index = inner.tokens[point.line_index]
                     .iter()
                     .position(|token| {
                         if byte + token.len > point.byte_index {
@@ -1154,16 +1183,16 @@ impl Document {
                         byte += token.len;
                         false
                     })
-                    .unwrap_or(self.tokens[point.line_index].len());
+                    .unwrap_or(inner.tokens[point.line_index].len());
                 if byte != point.byte_index {
-                    let token = self.tokens[point.line_index][index];
+                    let token = inner.tokens[point.line_index][index];
                     let mid = point.byte_index - byte;
-                    self.tokens[point.line_index][index] = Token {
+                    inner.tokens[point.line_index][index] = Token {
                         len: mid,
                         kind: token.kind,
                     };
                     index += 1;
-                    self.tokens[point.line_index].insert(
+                    inner.tokens[point.line_index].insert(
                         index,
                         Token {
                             len: token.len - mid,
@@ -1172,7 +1201,7 @@ impl Document {
                     );
                 }
                 if text.length().line_count == 0 {
-                    self.tokens[point.line_index]
+                    inner.tokens[point.line_index]
                         .splice(index..index, tokenize(text.as_lines().first().unwrap()));
                 } else {
                     let mut tokens = (0..text.as_lines().len())
@@ -1181,19 +1210,19 @@ impl Document {
                     tokens
                         .first_mut()
                         .unwrap()
-                        .splice(..0, self.tokens[point.line_index][..index].iter().copied());
+                        .splice(..0, inner.tokens[point.line_index][..index].iter().copied());
                     tokens
                         .last_mut()
                         .unwrap()
-                        .splice(..0, self.tokens[point.line_index][index..].iter().copied());
-                    self.tokens
+                        .splice(..0, inner.tokens[point.line_index][index..].iter().copied());
+                        inner.tokens
                         .splice(point.line_index..point.line_index + 1, tokens);
                 }
             }
             Change::Delete(start, length) => {
                 let end = start + length;
                 let mut byte = 0;
-                let mut start_token = self.tokens[start.line_index]
+                let mut start_token = inner.tokens[start.line_index]
                     .iter()
                     .position(|token| {
                         if byte + token.len > start.byte_index {
@@ -1202,16 +1231,16 @@ impl Document {
                         byte += token.len;
                         false
                     })
-                    .unwrap_or(self.tokens[start.line_index].len());
+                    .unwrap_or(inner.tokens[start.line_index].len());
                 if byte != start.byte_index {
-                    let token = self.tokens[start.line_index][start_token];
+                    let token = inner.tokens[start.line_index][start_token];
                     let mid = start.byte_index - byte;
-                    self.tokens[start.line_index][start_token] = Token {
+                    inner.tokens[start.line_index][start_token] = Token {
                         len: mid,
                         kind: token.kind,
                     };
                     start_token += 1;
-                    self.tokens[start.line_index].insert(
+                    inner.tokens[start.line_index].insert(
                         start_token,
                         Token {
                             len: token.len - mid,
@@ -1220,7 +1249,7 @@ impl Document {
                     );
                 }
                 let mut byte = 0;
-                let mut end_token = self.tokens[end.line_index]
+                let mut end_token = inner.tokens[end.line_index]
                     .iter()
                     .position(|token| {
                         if byte + token.len > end.byte_index {
@@ -1229,16 +1258,16 @@ impl Document {
                         byte += token.len;
                         false
                     })
-                    .unwrap_or(self.tokens[end.line_index].len());
+                    .unwrap_or(inner.tokens[end.line_index].len());
                 if byte != end.byte_index {
-                    let token = self.tokens[end.line_index][end_token];
+                    let token = inner.tokens[end.line_index][end_token];
                     let mid = end.byte_index - byte;
-                    self.tokens[end.line_index][end_token] = Token {
+                    inner.tokens[end.line_index][end_token] = Token {
                         len: mid,
                         kind: token.kind,
                     };
                     end_token += 1;
-                    self.tokens[end.line_index].insert(
+                    inner.tokens[end.line_index].insert(
                         end_token,
                         Token {
                             len: token.len - mid,
@@ -1247,24 +1276,25 @@ impl Document {
                     );
                 }
                 if length.line_count == 0 {
-                    self.tokens[start.line_index].drain(start_token..end_token);
+                    inner.tokens[start.line_index].drain(start_token..end_token);
                 } else {
-                    let mut tokens = self.tokens[start.line_index][..start_token]
+                    let mut tokens = inner.tokens[start.line_index][..start_token]
                         .iter()
                         .copied()
                         .collect::<Vec<_>>();
-                    tokens.extend(self.tokens[end.line_index][end_token..].iter().copied());
-                    self.tokens
+                    tokens.extend(inner.tokens[end.line_index][end_token..].iter().copied());
+                    inner.tokens
                         .splice(start.line_index..end.line_index + 1, iter::once(tokens));
                 }
             }
         }
     }
 
-    fn apply_change_to_inline_inlays(&mut self, change: &Change, drift: Drift) {
+    fn apply_change_to_inline_inlays(&self, change: &Change, drift: Drift) {
+        let mut inner = self.0.borrow_mut();
         match *change {
             Change::Insert(point, ref text) => {
-                let index = self.inline_inlays[point.line_index]
+                let index = inner.inline_inlays[point.line_index]
                     .iter()
                     .position(|(byte, _)| match byte.cmp(&point.byte_index) {
                         cmp::Ordering::Less => false,
@@ -1274,9 +1304,9 @@ impl Document {
                         },
                         cmp::Ordering::Greater => true,
                     })
-                    .unwrap_or(self.inline_inlays[point.line_index].len());
+                    .unwrap_or(inner.inline_inlays[point.line_index].len());
                 if text.length().line_count == 0 {
-                    for (byte, _) in &mut self.inline_inlays[point.line_index][index..] {
+                    for (byte, _) in &mut inner.inline_inlays[point.line_index][index..] {
                         *byte += text.length().byte_count;
                     }
                 } else {
@@ -1286,38 +1316,38 @@ impl Document {
                     inline_inlays
                         .first_mut()
                         .unwrap()
-                        .splice(..0, self.inline_inlays[point.line_index].drain(..index));
+                        .splice(..0, inner.inline_inlays[point.line_index].drain(..index));
                     inline_inlays.last_mut().unwrap().splice(
                         ..0,
-                        self.inline_inlays[point.line_index].drain(..).map(
+                        inner.inline_inlays[point.line_index].drain(..).map(
                             |(byte, inline_inlay)| (byte + text.length().byte_count, inline_inlay),
                         ),
                     );
-                    self.inline_inlays
+                    inner.inline_inlays
                         .splice(point.line_index..point.line_index + 1, inline_inlays);
                 }
             }
             Change::Delete(start, length) => {
                 let end = start + length;
-                let start_inlay = self.inline_inlays[start.line_index]
+                let start_inlay = inner.inline_inlays[start.line_index]
                     .iter()
                     .position(|&(byte, _)| byte >= start.byte_index)
-                    .unwrap_or(self.inline_inlays[start.line_index].len());
-                let end_inlay = self.inline_inlays[end.line_index]
+                    .unwrap_or(inner.inline_inlays[start.line_index].len());
+                let end_inlay = inner.inline_inlays[end.line_index]
                     .iter()
                     .position(|&(byte, _)| byte >= end.byte_index)
-                    .unwrap_or(self.inline_inlays[end.line_index].len());
+                    .unwrap_or(inner.inline_inlays[end.line_index].len());
                 if length.line_count == 0 {
-                    self.inline_inlays[start.line_index].drain(start_inlay..end_inlay);
-                    for (byte, _) in &mut self.inline_inlays[start.line_index][start_inlay..] {
+                    inner.inline_inlays[start.line_index].drain(start_inlay..end_inlay);
+                    for (byte, _) in &mut inner.inline_inlays[start.line_index][start_inlay..] {
                         *byte = start.byte_index + (*byte - end.byte_index.min(*byte));
                     }
                 } else {
-                    let mut inline_inlays = self.inline_inlays[start.line_index]
+                    let mut inline_inlays = inner.inline_inlays[start.line_index]
                         .drain(..start_inlay)
                         .collect::<Vec<_>>();
                     inline_inlays.extend(
-                        self.inline_inlays[end.line_index].drain(end_inlay..).map(
+                        inner.inline_inlays[end.line_index].drain(end_inlay..).map(
                             |(byte, inline_inlay)| {
                                 (
                                     start.byte_index + byte - end.byte_index.min(byte),
@@ -1326,13 +1356,30 @@ impl Document {
                             },
                         ),
                     );
-                    self.inline_inlays.splice(
+                    inner.inline_inlays.splice(
                         start.line_index..end.line_index + 1,
                         iter::once(inline_inlays),
                     );
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct Editor<'a> {
+    history: &'a mut History,
+    edits: &'a mut Vec<Edit>,
+}
+
+impl<'a> Editor<'a> {
+    fn as_text(&mut self) -> &Text {
+        self.history.as_text()
+    }
+
+    fn apply_edit(&mut self, edit: Edit) {
+        self.history.apply_edit(edit.clone());
+        self.edits.push(edit);
     }
 }
 

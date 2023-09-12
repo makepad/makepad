@@ -31,7 +31,6 @@ pub struct DesktopWindow {
     #[live] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[deref] view: View,
-    
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
     /*#[rust(Menu::main(vec![
         Menu::sub("App", vec![
