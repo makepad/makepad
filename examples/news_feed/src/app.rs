@@ -44,7 +44,7 @@ live_design!{
     COLOR_DIVIDER_DARK = #x00000044
     COLOR_PROFILE_CIRCLE = #xfff8ee
     COLOR_P = #x999
-    
+     
     FillerY = <View> {width: Fill}
     
     FillerX = <View> {height: Fill}
