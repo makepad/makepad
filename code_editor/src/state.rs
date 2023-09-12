@@ -5,7 +5,6 @@ use {
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
         layout::{BlockElement, Layout, WrappedElement},
-        move_ops,
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
         text::{Change, Drift, Edit, Length, Position, Text},
@@ -224,27 +223,27 @@ impl Session {
 
     pub fn move_left(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |selection, layout| {
-            selection.update_cursor(|cursor| move_ops::move_left(cursor, layout))
+            selection.update_cursor(|cursor| cursor.move_left(layout.as_text().as_lines()))
         });
     }
 
     pub fn move_right(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |selection, layout| {
-            selection.update_cursor(|cursor| move_ops::move_right(cursor, layout))
+            selection.update_cursor(|cursor| cursor.move_right(layout.as_text().as_lines()))
         });
     }
 
     pub fn move_up(&mut self, reset_anchor: bool) {
         let tab_column_count = self.settings.tab_column_count;
         self.modify_selections(reset_anchor, |selection, layout| {
-            selection.update_cursor(|cursor| move_ops::move_up(cursor, layout, tab_column_count))
+            selection.update_cursor(|cursor| cursor.move_up(layout, tab_column_count))
         });
     }
 
     pub fn move_down(&mut self, reset_anchor: bool) {
         let tab_column_count = self.settings.tab_column_count;
         self.modify_selections(reset_anchor, |selection, layout| {
-            selection.update_cursor(|cursor| move_ops::move_down(cursor, layout, tab_column_count))
+            selection.update_cursor(|cursor| cursor.move_down(layout, tab_column_count))
         });
     }
 
