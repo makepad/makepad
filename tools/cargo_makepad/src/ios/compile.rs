@@ -32,6 +32,23 @@ impl PlistValues{
               <string>{4}</string>
               <key>UILaunchStoryboardName</key>
               <string></string>
+             	<key>UIRequiredDeviceCapabilities</key>
+                	<array>
+                		<string>armv7</string>
+                	</array>
+            	<key>UISupportedInterfaceOrientations</key>
+            	<array>
+            		<string>UIInterfaceOrientationPortrait</string>
+            		<string>UIInterfaceOrientationLandscapeLeft</string>
+            		<string>UIInterfaceOrientationLandscapeRight</string>
+            	</array>
+            	<key>UISupportedInterfaceOrientations~ipad</key>
+            	<array>
+            		<string>UIInterfaceOrientationPortrait</string>
+            		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+            		<string>UIInterfaceOrientationLandscapeLeft</string>
+            		<string>UIInterfaceOrientationLandscapeRight</string>
+            	</array>
             </dict>
             </plist>"#,
             self.identifier,
@@ -320,7 +337,10 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         }
     } 
     println!("Installing application on device");
-    shell_env_filter("Makepad iOS application started.", &[], &ios_deploy ,"./ios-deploy", &[
+    shell_env_filter("Makepad iOS application started.", vec![
+        "HALS_Device.cpp:90".to_string(),
+        "[BTAudio]".to_string()
+    ], &[], &ios_deploy ,"./ios-deploy", &[
         "-i",
         &provision.device,  
         "-d",
