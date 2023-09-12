@@ -1,6 +1,6 @@
 use {
-    crate::text::{Change, Drift, Length, Position, Range},
-    std::{ops, ops::Deref},
+    crate::text::{Edit, Length, Position, Range},
+    std::{ops, ops::Deref, slice::Iter},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Hash, Eq)]
@@ -98,10 +98,10 @@ impl Selection {
         }
     }
 
-    pub fn apply_change(self, change: &Change, drift: Drift) -> Selection {
+    pub fn apply_edit(self, edit: &Edit) -> Selection {
         Self {
-            anchor: self.anchor.apply_change(change, drift),
-            cursor: self.cursor.apply_change(change, drift),
+            anchor: self.anchor.apply_edit(edit),
+            cursor: self.cursor.apply_edit(edit),
             ..self
         }
     }
@@ -153,13 +153,13 @@ impl SelectionSet {
 
     pub fn update_all_selections(
         &mut self,
-        index: Option<usize>,
+        retained_index: Option<usize>,
         mut f: impl FnMut(Selection) -> Selection,
     ) -> Option<usize> {
         for selection in &mut self.selections {
             *selection = f(*selection);
         }
-        let mut index = index;
+        let mut index = retained_index;
         let mut current_index = 0;
         while current_index + 1 < self.selections.len() {
             let next_index = current_index + 1;
@@ -181,9 +181,9 @@ impl SelectionSet {
         index
     }
 
-    pub fn apply_change(&mut self, change: &Change, drift: Drift) {
+    pub fn apply_change(&mut self, edit: &Edit) {
         for selection in &mut self.selections {
-            *selection = selection.apply_change(change, drift);
+            *selection = selection.apply_edit(edit);
         }
     }
 
@@ -225,17 +225,26 @@ impl Deref for SelectionSet {
     }
 }
 
+impl<'a> IntoIterator for &'a SelectionSet {
+    type Item = &'a Selection;
+    type IntoIter = Iter<'a, Selection>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Cursor {
     pub position: Position,
     pub affinity: Affinity,
-    pub preferred_column: Option<usize>,
+    pub preferred_column_index: Option<usize>,
 }
 
 impl Cursor {
-    pub fn apply_change(self, change: &Change, drift: Drift) -> Self {
+    pub fn apply_edit(self, edit: &Edit) -> Self {
         Self {
-            position: self.position.apply_change(change, drift),
+            position: self.position.apply_edit(edit),
             ..self
         }
     }

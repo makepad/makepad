@@ -94,7 +94,7 @@ fn move_to_prev_grapheme(lines: &[String], cursor: Cursor) -> Cursor {
                 .unwrap(),
         },
         affinity: Affinity::Before,
-        preferred_column: None,
+        preferred_column_index: None,
     }
 }
 
@@ -110,7 +110,7 @@ fn move_to_next_grapheme(lines: &[String], cursor: Cursor) -> Cursor {
                 .unwrap_or(line.len()),
         },
         affinity: Affinity::After,
-        preferred_column: None,
+        preferred_column_index: None,
     }
 }
 
@@ -122,7 +122,7 @@ fn move_to_end_of_prev_line(lines: &[String], cursor: Cursor) -> Cursor {
             byte_index: lines[prev_line].len(),
         },
         affinity: Affinity::Before,
-        preferred_column: None,
+        preferred_column_index: None,
     }
 }
 
@@ -133,7 +133,7 @@ fn move_to_start_of_next_line(cursor: Cursor) -> Cursor {
             byte_index: 0,
         },
         affinity: Affinity::After,
-        preferred_column: None,
+        preferred_column_index: None,
     }
 }
 
@@ -144,7 +144,7 @@ fn move_to_prev_row_of_line(session: &Session, cursor: Cursor) -> Cursor {
             cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = cursor.preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column_index {
             column = preferred_column;
         }
         let (byte, affinity) = line.row_and_column_to_byte_and_affinity(
@@ -158,7 +158,7 @@ fn move_to_prev_row_of_line(session: &Session, cursor: Cursor) -> Cursor {
                 byte_index: byte,
             },
             affinity,
-            preferred_column: Some(column),
+            preferred_column_index: Some(column),
         }
     })
 }
@@ -170,7 +170,7 @@ fn move_to_next_row_of_line(session: &Session, cursor: Cursor) -> Cursor {
             cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = cursor.preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column_index {
             column = preferred_column;
         }
         let (byte, affinity) = line.row_and_column_to_byte_and_affinity(
@@ -184,7 +184,7 @@ fn move_to_next_row_of_line(session: &Session, cursor: Cursor) -> Cursor {
                 byte_index: byte,
             },
             affinity,
-            preferred_column: Some(column),
+            preferred_column_index: Some(column),
         }
     })
 }
@@ -196,7 +196,7 @@ fn move_to_last_row_of_prev_line(session: &Session, cursor: Cursor) -> Cursor {
             cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = cursor.preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column_index {
             column = preferred_column;
         }
         session.line(cursor.position.line_index - 1, |prev_line| {
@@ -211,7 +211,7 @@ fn move_to_last_row_of_prev_line(session: &Session, cursor: Cursor) -> Cursor {
                     byte_index: byte,
                 },
                 affinity,
-                preferred_column: Some(column),
+                preferred_column_index: Some(column),
             }
         })
     })
@@ -224,7 +224,7 @@ fn move_to_first_row_of_next_line(session: &Session, cursor: Cursor) -> Cursor {
             cursor.affinity,
             session.settings().tab_column_count,
         );
-        if let Some(preferred_column) = cursor.preferred_column {
+        if let Some(preferred_column) = cursor.preferred_column_index {
             column = preferred_column;
         }
         session.line(cursor.position.line_index + 1, |next_line| {
@@ -239,7 +239,7 @@ fn move_to_first_row_of_next_line(session: &Session, cursor: Cursor) -> Cursor {
                     byte_index: byte,
                 },
                 affinity,
-                preferred_column: Some(column),
+                preferred_column_index: Some(column),
             }
         })
     })
