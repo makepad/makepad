@@ -306,6 +306,7 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
             cwd.join(format!("target/{android_target_dir}/release/lib{underscore_target}.so"))
         }
         else{
+            println!("WARNING: Building debug build, this creates a very slow application. Use --release if this is not what you want.");
             cwd.join(format!("target/{android_target_dir}/debug/lib{underscore_target}.so"))
         };
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
