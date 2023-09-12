@@ -3,7 +3,7 @@ use {
     std::sync::{Arc, Mutex},
     self::super::{
         android_audio::*,
-        android_jni::*,
+        /*android_jni::*,*/
         android_midi::*,
         android_camera::*,
     },
@@ -30,15 +30,15 @@ pub struct CxAndroidMedia {
 }
 
 impl Cx {
-    pub (crate) fn handle_media_signals(&mut self, to_java: &AndroidToJava) {
+    pub (crate) fn handle_media_signals(&mut self/*, to_java: &AndroidToJava*/) {
         if self.os.media.android_audio_change.check_and_clear() {
-            let descs = self.os.media.android_audio().lock().unwrap().get_updated_descs(to_java);
+            let descs = self.os.media.android_audio().lock().unwrap().get_updated_descs();
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent {
                 descs
             }));
         }
         if self.os.media.android_midi_change.check_and_clear() {
-            let descs = self.os.media.android_midi().lock().unwrap().get_updated_descs(to_java);
+            let descs = self.os.media.android_midi().lock().unwrap().get_updated_descs();
             if let Some(descs) = descs{
                 self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
                     descs,

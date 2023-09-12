@@ -26,24 +26,50 @@ macro_rules!app_main {
             Cx::event_loop(cx);
         }
         
+        /*
         #[cfg(target_os = "android")]
         #[no_mangle]
         pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onNewCx(_: *const std::ffi::c_void, _: *const std::ffi::c_void) -> i64 {
-            let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
-                if let Event::Construct = event {
-                    *app.borrow_mut() = Some($app::new_main(cx));
-                }
-                if let Event::LiveEdit = event{
-                    app.borrow_mut().update_main(cx);
-                }
-                app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
-            })));
-            live_design(&mut cx);
-            cx.init_cx_os();
-            
-            let ptr = Box::into_raw(cx) as i64;
-            ptr
+            Cx::android_entry(||{
+                let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
+                    if let Event::Construct = event {
+                        *app.borrow_mut() = Some($app::new_main(cx));
+                    }
+                    if let Event::LiveEdit = event{
+                        app.borrow_mut().update_main(cx);
+                    }
+                    app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                })));
+                live_design(&mut cx);
+                cx.init_cx_os();
+                cx
+            })
+        }*/
+
+        
+        #[cfg(target_os = "android")]
+        #[no_mangle]
+        pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnCreate(
+            _: *const std::ffi::c_void,
+            _: *const std::ffi::c_void,
+            activity: *const std::ffi::c_void,
+        ) {
+            Cx::android_entry(activity, ||{
+                let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
+                    if let Event::Construct = event {
+                        *app.borrow_mut() = Some($app::new_main(cx));
+                    }
+                    if let Event::LiveEdit = event{
+                        app.borrow_mut().update_main(cx);
+                    }
+                    app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                })));
+                live_design(&mut cx);
+                cx.init_cx_os();
+                cx
+            })
         }
         
         #[cfg(target_arch = "wasm32")]

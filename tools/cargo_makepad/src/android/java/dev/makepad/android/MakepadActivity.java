@@ -1,389 +1,321 @@
 package dev.makepad.android;
-import android.Manifest;
 
-import android.os.Bundle;
+import javax.microedition.khronos.egl.EGLConfig;
+import javax.microedition.khronos.opengles.GL10;
+
 import android.app.Activity;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.view.inputmethod.InputMethodManager;
-import android.view.MenuInflater;
-import android.view.ContextMenu;
-import android.view.ContextMenu.ContextMenuInfo;
-import android.view.MenuItem;
-import android.content.Context;
-import android.content.ClipData;
-import android.content.ClipDescription;
-import android.content.ClipboardManager;
-import android.util.Log;
-import android.content.pm.PackageManager;
-import android.content.res.AssetManager;
-import android.os.Handler;
-import android.os.Looper;
-
-import java.util.HashMap;
-import java.util.ArrayList;
-import java.util.Set;
-import java.util.UUID;
-import java.io.File;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
-
 import android.os.Bundle;
-import android.os.ParcelUuid;
+import android.os.Build;
+import android.util.Log;
 
-import android.media.midi.MidiManager;
-import android.media.midi.MidiDeviceInfo;
-import android.media.midi.MidiDevice;
-import android.media.midi.MidiReceiver;
-import android.media.AudioManager;
-import android.media.midi.MidiOutputPort;
-import android.media.AudioDeviceInfo;
+import android.view.View;
+import android.view.Surface;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowManager.LayoutParams;
+import android.view.SurfaceView;
+import android.view.SurfaceHolder;
+import android.view.MotionEvent;
+import android.view.KeyEvent;
+import android.view.inputmethod.InputMethodManager;
 
-import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
+import android.content.Context;
+import android.content.Intent;
+
+import android.graphics.Color;
+import android.graphics.Insets;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.widget.LinearLayout;
+
+import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
+import android.graphics.Rect;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 
-public class MakepadActivity extends Activity implements 
-MidiManager.OnDeviceOpenedListener,
-View.OnCreateContextMenuListener,
-Makepad.Callback{
+import dev.makepad.android.MakepadNative;
+
+// note: //% is a special miniquad's pre-processor for plugins
+// when there are no plugins - //% whatever will be replaced to an empty string
+// before compiling
+
+//% IMPORTS
+
+class MakepadSurface
+    extends
+        SurfaceView
+    implements
+        View.OnTouchListener,
+        View.OnKeyListener,
+        ViewTreeObserver.OnGlobalLayoutListener,
+        SurfaceHolder.Callback {
+
+    public MakepadSurface(Context context){
+        super(context);
+        getHolder().addCallback(this);
+
+        setFocusable(true);
+        setFocusableInTouchMode(true);
+        requestFocus();
+        setOnTouchListener(this);
+        setOnKeyListener(this);
+        getViewTreeObserver().addOnGlobalLayoutListener(this);
+    }
+
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        // this causes a pause/resume cycle.
-        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
-            checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED){
-            requestPermissions(
-                new String[]{
-                    Manifest.permission.BLUETOOTH_CONNECT, 
-                    Manifest.permission.CAMERA,
-                    Manifest.permission.INTERNET
-                    }, 
-                123
-            );
+    public void surfaceCreated(SurfaceHolder holder) {
+        Log.i("SAPP", "surfaceCreated");
+        Surface surface = holder.getSurface();
+        MakepadNative.surfaceOnSurfaceCreated(surface);
+    }
+
+    @Override
+    public void surfaceDestroyed(SurfaceHolder holder) {
+        Log.i("SAPP", "surfaceDestroyed");
+        Surface surface = holder.getSurface();
+        MakepadNative.surfaceOnSurfaceDestroyed(surface);
+    }
+
+    @Override
+    public void surfaceChanged(SurfaceHolder holder,
+                               int format,
+                               int width,
+                               int height) {
+        Log.i("SAPP", "surfaceChanged");
+        Surface surface = holder.getSurface();
+        MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
+
+    }
+    @Override
+    public boolean onTouch(View view, MotionEvent event) {
+        MakepadNative.surfaceOnTouch(event);
+        return true;    
+    }
+
+     @Override
+    public void onGlobalLayout() {
+        WindowInsets insets = this.getRootWindowInsets();
+        if (insets == null) {
+            return;
         }
 
-        super.onCreate(savedInstanceState);
-        Makepad.onHookPanic();
-        mCx = Makepad.onNewCx();
+        if (insets.isVisible(WindowInsets.Type.ime())) {
+            Rect r = new Rect();
+            this.getWindowVisibleDisplayFrame(r);
+            int screenHeight = this.getRootView().getHeight();
+            int visibleHeight = r.height();
+            int keyboardHeight = screenHeight - visibleHeight;
 
-        mHandler = new Handler(Looper.getMainLooper());
-        mRunnables = new HashMap<Long, Runnable>();
+            MakepadNative.surfaceOnResizeTextIME(keyboardHeight);
+        }
+    }
+
+    // docs says getCharacters are deprecated
+    // but somehow on non-latyn input all keyCode and all the relevant fields in the KeyEvent are zeros
+    // and only getCharacters has some usefull data
+    @SuppressWarnings("deprecation")
+    @Override
+    public boolean onKey(View v, int keyCode, KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
+            int metaState = event.getMetaState();
+            MakepadNative.surfaceOnKeyDown(keyCode, metaState);
+        }
+
+        if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
+            MakepadNative.surfaceOnKeyUp(keyCode);
+        }
+        
+        if (event.getAction() == KeyEvent.ACTION_UP || event.getAction() == KeyEvent.ACTION_MULTIPLE) {
+            int character = event.getUnicodeChar();
+            if (character == 0) {
+                String characters = event.getCharacters();
+                if (characters != null && characters.length() >= 0) {
+                    character = characters.charAt(0);
+                }
+            }
+
+            if (character != 0) {
+                MakepadNative.surfaceOnCharacter(character);
+            }
+        }
+
+        return true;
+    }
+
+    // There is an Android bug when screen is in landscape,
+    // the keyboard inset height is reported as 0.
+    // This code is a workaround which fixes the bug.
+    // See https://groups.google.com/g/android-developers/c/50XcWooqk7I
+    // For some reason it only works if placed here and not in the parent layout.
+    @Override
+    public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+        InputConnection connection = super.onCreateInputConnection(outAttrs);
+        outAttrs.imeOptions |= EditorInfo.IME_FLAG_NO_FULLSCREEN;
+        return connection;
+    }
+
+    public Surface getNativeSurface() {
+        return getHolder().getSurface();
+    }
+}
+
+class ResizingLayout
+    extends
+        LinearLayout
+    implements
+        View.OnApplyWindowInsetsListener {
+
+    public ResizingLayout(Context context){
+        super(context);
+        // When viewing in landscape mode with keyboard shown, there are
+        // gaps on both sides so we fill the negative space with black.
+        setBackgroundColor(Color.BLACK);
+        setOnApplyWindowInsetsListener(this);
+    }
+
+    @Override
+    public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+        Insets imeInsets = insets.getInsets(WindowInsets.Type.ime());
+        v.setPadding(0, 0, 0, imeInsets.bottom);
+        return insets;
+    }
+}
+
+public class MakepadActivity extends Activity {
+    //% MAIN_ACTIVITY_BODY
+
+    private MakepadSurface view;
+
+    static {
+        System.loadLibrary("makepad");
+    }
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        this.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+        view = new MakepadSurface(this);
+        // Put it inside a parent layout which can resize it using padding
+        ResizingLayout layout = new ResizingLayout(this);
+        layout.addView(view);
+        setContentView(layout);
+
+        MakepadNative.activityOnCreate(this);
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
 
-        Makepad.onInit(mCx, cache_path, density, this);
-    }
+        MakepadNative.onAndroidParams(cache_path, density);
 
-    @Override
-    protected void onStart() {
-        super.onStart();
-        mView = new MakepadSurfaceView(this, mCx);
-
-        // This is a requirement to have access to the IME (soft keyword)
-        mView.setFocusable(true);
-        mView.setFocusableInTouchMode(true);
-
-        setContentView(mView);
-        Makepad.onNewGL(mCx, this);
-
-        registerForContextMenu(mView);
-    }
-
-    @Override
-    protected void onPause() {
-         super.onPause();
-        Makepad.onPause(mCx, this);
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        Makepad.onFreeGL(mCx, this);
+        //% MAIN_ACTIVITY_ON_CREATE
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if(mCx != 0){
-            //mView = new MakepadSurfaceView(this, mCx);
-            //setContentView(mView);
-            Makepad.onResume(mCx, this);
-        }
+        MakepadNative.activityOnResume();
+
+        //% MAIN_ACTIVITY_ON_RESUME
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        Log.w("SAPP", "onBackPressed");
+
+        // TODO: here is the place to handle request_quit/order_quit/cancel_quit
+
+        super.onBackPressed();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        MakepadNative.activityOnStop();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        Makepad.onDropCx(mCx);
+
+        MakepadNative.activityOnDestroy();
     }
 
-    public void scheduleTimeout(long id, long delay) {
-        Runnable runnable = () -> {
-            mRunnables.remove(id);
-            Makepad.onTimeout(mCx, id, this);
-        };
-        mRunnables.put(id, runnable);
-        mHandler.postDelayed(runnable, delay);
+    @Override
+    protected void onPause() {
+        super.onPause();
+        MakepadNative.activityOnPause();
+
+        //% MAIN_ACTIVITY_ON_PAUSE
     }
 
-    public void cancelTimeout(long id) {
-        mHandler.removeCallbacks(mRunnables.get(id));
-        mRunnables.remove(id);
-    }
-
-    public void scheduleRedraw() {
-        mView.invalidate();
-    }
-
-    public String[] getAudioDevices(long flag){
-        try{
-          
-            AudioManager am = (AudioManager)this.getSystemService(Context.AUDIO_SERVICE);
-            AudioDeviceInfo[] devices = null;
-            ArrayList<String> out = new ArrayList<String>();
-            if(flag == 0){
-                devices = am.getDevices(AudioManager.GET_DEVICES_INPUTS);
-            }
-            else{
-                devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
-            }
-            for(AudioDeviceInfo device: devices){
-                int[] channel_counts = device.getChannelCounts();
-                for(int cc: channel_counts){
-                    out.add(String.format(
-                        "%d$$%d$$%d$$%s", 
-                        device.getId(), 
-                        device.getType(), 
-                        cc,
-                        device.getProductName().toString()
-                    ));
-                }
-            }
-            return out.toArray(new String[0]);
-        }
-        catch(Exception e){
-            Log.e("Makepad", "exception: " + e.getMessage());             
-            Log.e("Makepad", "exception: " + e.toString());
-            return null;
-        }
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        //% MAIN_ACTIVITY_ON_ACTIVITY_RESULT
     }
 
     @SuppressWarnings("deprecation")
-    public void openAllMidiDevices(long delay){
-        Runnable runnable = () -> {
-            try{                                
-                BluetoothManager bm = (BluetoothManager) this.getSystemService(Context.BLUETOOTH_SERVICE);
-                BluetoothAdapter ba = bm.getAdapter();   
-                Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
-                ArrayList<String> bt_names = new ArrayList<String>();
-                MidiManager mm = (MidiManager)this.getSystemService(Context.MIDI_SERVICE);
-                for(BluetoothDevice device: bluetooth_devices){
-                    if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
-                        String name =device.getName();
-                        bt_names.add(name);
-                        mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
-                    }
-                }
-                // this appears to give you nonworking BLE midi devices. So we skip those by name (not perfect but ok)
-                for (MidiDeviceInfo info : mm.getDevices()){
-                    String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
-                    boolean found = false;
-                    for (String bt_name : bt_names){
-                        if (bt_name.equals(name)){
-                            found = true;
-                            break;
+    public void setFullScreen(final boolean fullscreen) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    View decorView = getWindow().getDecorView();
+
+                    if (fullscreen) {
+                        getWindow().setFlags(LayoutParams.FLAG_LAYOUT_NO_LIMITS, LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+                        getWindow().getAttributes().layoutInDisplayCutoutMode = LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            getWindow().setDecorFitsSystemWindows(false);
+                        } else {
+                            int uiOptions = View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+                            decorView.setSystemUiVisibility(uiOptions);
                         }
                     }
-                    if(!found){
-                        mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+                    else {
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            getWindow().setDecorFitsSystemWindows(true);
+                        } else {
+                          decorView.setSystemUiVisibility(0);
+                        }
+
                     }
                 }
-            }
-            catch(Exception e){
-                Log.e("Makepad", "exception: " + e.getMessage());             
-                Log.e("Makepad", "exception: " + e.toString());
-            }
-        };
-        if(delay != 0){
-            mHandler.postDelayed(runnable, delay);
-        }
-        else{ // run now
-            runnable.run();
-        }
+            });
     }
 
-    public void onDeviceOpened(MidiDevice device) {
-        if(device == null){
-            return;
-        }
-        MidiDeviceInfo info = device.getInfo();
-        if(info != null){
-            String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
-            Makepad.onMidiDeviceOpened(mCx, name, device, this);
-        }
-    }
-
-    public byte[] readAsset(String path){
-       try{
-            InputStream in = this.getAssets().open(path);
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            int byteCount = 0;
-            byte[] buffer = new byte[4096];
-            while (true) {
-                int read = in.read(buffer);
-                if (read == -1) {
-                    break;
+    public void showKeyboard(final boolean show) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (show) {
+                    InputMethodManager imm = (InputMethodManager)getSystemService(Context.INPUT_METHOD_SERVICE);
+                    imm.showSoftInput(view, 0);
+                } else {
+                    InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                    imm.hideSoftInputFromWindow(view.getWindowToken(),0); 
                 }
-                out.write(buffer, 0, read);
-                byteCount += read;
             }
-            return out.toByteArray();
-        }catch(Exception e){
-            return null;
-        }
+        });
     }
 
-    public void swapBuffers() {
-        mView.swapBuffers();
-    }
-
-    public void showTextIME() {
-        if (mView.requestFocus()) {
-            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-            imm.showSoftInput(mView, 0);
-        } else {
-            Log.e("Makepad", "can not display software keyboard (IME)");
-        }
-    }
-
-    public void hideTextIME() {
-        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-        imm.hideSoftInputFromWindow(mView.getWindowToken(), 0);
-    }
-
-    public void showClipboardActions(String selected) {
-        mSelectedText = selected;
-        mView.showContextMenu();
-    }
-
-    public void copyToClipboard(String selected) {
-        mSelectedText = selected;
-        copySelectedTextToClipboard();
-    }
-
-    public void pasteFromClipboard(){
-        String text = getTextFromClipboard();
-        Makepad.onPasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
-    }
-
-    @Override
-    public void onCreateContextMenu(ContextMenu menu, View v, ContextMenuInfo menuInfo) {
-        super.onCreateContextMenu(menu, v, menuInfo);
-
-        MenuInflater inflater = getMenuInflater();
-        inflater.inflate(R.menu.context_menu, menu);
-
-        MenuItem copyItem = menu.findItem(R.id.menu_copy);
-        MenuItem cutItem = menu.findItem(R.id.menu_cut);
-        if (mSelectedText == null || mSelectedText.isEmpty()) {
-            copyItem.setVisible(false);
-            cutItem.setVisible(false);
-        } else {
-            copyItem.setVisible(true);
-            cutItem.setVisible(true);
-        }
-
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        MenuItem pasteItem = menu.findItem(R.id.menu_paste);
-        if (!(clipboard.hasPrimaryClip())) {
-            pasteItem.setVisible(false);
-        } else if (
-            clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) ||
-            clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML)
-        ) {
-            pasteItem.setVisible(true);
-        } else {
-            pasteItem.setVisible(false);
-        }
-    }
-
-    @Override
-    public boolean onContextItemSelected(MenuItem item) {
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        ClipData clip;
-        switch (item.getItemId()) {
-            case R.id.menu_copy:
-                copySelectedTextToClipboard();
-                return true;
-
-            case R.id.menu_cut:
-                copySelectedTextToClipboard();
-                Makepad.onCutToClipboard(mCx, (Makepad.Callback)mView.getContext());
-                return true;
-
-            case R.id.menu_paste:
-                String text = getTextFromClipboard();
-                Makepad.onPasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
-                return true;
-                
-            default:
-                return super.onContextItemSelected(item);
-        }
-    }
-
-    public void requestHttp(long requestId, long metadataId, String url, String method, String headers, byte[] body) {
+    public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {
         try {
             MakepadNetwork network = new MakepadNetwork();
 
             CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
 
             future.thenAccept(response -> {
-                runOnUiThread(() -> Makepad.onHttpResponse(mCx, requestId, metadataId, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
+                runOnUiThread(() -> MakepadNative.onHttpResponse(id, metadataId, response.getStatusCode(), response.getHeaders(), response.getBody()));
             }).exceptionally(ex -> {
-                runOnUiThread(() -> Makepad.onHttpRequestError(mCx, requestId, metadataId, ex.toString(), (Makepad.Callback) mView.getContext()));
+                runOnUiThread(() -> MakepadNative.onHttpRequestError(id, metadataId, ex.toString()));
                 return null;
             });
         } catch (Exception e) {
-            Makepad.onHttpRequestError(mCx, requestId, metadataId, e.toString(), (Makepad.Callback) mView.getContext());
+            MakepadNative.onHttpRequestError(id, metadataId, e.toString());
         }
     }
-
-    private void copySelectedTextToClipboard() {
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        ClipData clip = ClipData.newPlainText("Makepad", mSelectedText);
-        clipboard.setPrimaryClip(clip);
-    }
-        
-    private String getTextFromClipboard() {
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        try{
-            String text;
-            if (clipboard.hasPrimaryClip()) {
-                ClipData.Item cb_item = clipboard.getPrimaryClip().getItemAt(0);
-                text = cb_item.getText().toString();
-            } else {
-                text = null;
-            }
-
-            return text;
-        }
-        catch(Exception e){
-            Log.e("Makepad", "exception: " + e.getMessage());
-            Log.e("Makepad", "exception: " + e.toString());
-
-            return null;
-        }
-    }
-
-    Handler mHandler;
-    HashMap<Long, Runnable> mRunnables;
-    MakepadSurfaceView mView;
-    long mCx;
-    String mSelectedText;
 }
+

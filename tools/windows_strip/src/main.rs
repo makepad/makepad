@@ -316,6 +316,8 @@ fn remove_node(output: &mut Node, what: &[LiveId]) {
 
 fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(String, Vec<TokenWithString>)>) {
     
+    println!("processing {}",file);
+
     let source = parse_file(file, cache).unwrap();
     let symbols = source.parse_use();
     let symbols = filter_symbols(symbols, id!(crate.windows));
@@ -452,7 +454,7 @@ fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(S
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows_core::ComInterface for {}", sym_id));
             
             push_unique(output, &sym, out);
-        }
+        } 
         
         if let Some((_, is_com)) = mod_tokens.at(&format!("pub struct {}_Vtbl", sym_id)) {
             
@@ -472,11 +474,6 @@ fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(S
             // fetch impl tokens
             
             let impl_tokens = parse_file(&format!("{}/impl.rs", path), cache).unwrap();
-            
-           /* let mut out = String::new();
-            sym[sym_end] = LiveId::from_str_with_lut(&format!("{}_RuntimeName", sym_id)).unwrap();
-            add_impl(&mut out, impl_tokens, format!("impl ::windows_core::RuntimeName for {}", sym_id));
-            push_unique(output, &sym, out);*/ 
  
             if let Some((_, is_trait)) = impl_tokens.at(&format!("pub trait {}_Impl", sym_id)){
                 let is_trait = is_trait.find_close(Delim::Brace).unwrap();
@@ -510,6 +507,8 @@ fn main() {
     generate_outputs_from_file("./platform/src/os/windows/winrt_midi.rs", &mut output, &mut cache);
     generate_outputs_from_file("./platform/src/os/windows/media_foundation.rs", &mut output, &mut cache);
     generate_outputs_from_file("./tools/windows_strip/dep_of_deps.rs", &mut output, &mut cache);
+
+    generate_outputs_from_file("./platform/src/os/windows/win32_droptarget.rs", &mut output, &mut cache);
     
     fn generate_string_from_outputs(node: &Node, output: &mut String) {
         match node {
