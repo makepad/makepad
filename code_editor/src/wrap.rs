@@ -1,4 +1,4 @@
-use crate::{char::CharExt, layout::Inline, str::StrExt, Line};
+use crate::{char::CharExt, layout::InlineElement, str::StrExt, Line};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct WrapData {
@@ -14,9 +14,9 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
         .chars()
         .map(|char| char.column_count(tab_column_count))
         .sum();
-    for inline in line.inlines() {
+    for inline in line.inline_elements() {
         match inline {
-            Inline::Text { text, .. } => {
+            InlineElement::Text { text, .. } => {
                 for string in text.split_whitespace_boundaries() {
                     let column_count: usize = string
                         .chars()
@@ -28,7 +28,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
                     }
                 }
             }
-            Inline::Widget(widget) => {
+            InlineElement::Widget(widget) => {
                 if indent_column_count + widget.column_count > wrap_column {
                     indent_column_count = 0;
                     break;
@@ -39,9 +39,9 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
     let mut byte = 0;
     let mut column = 0;
     let mut wraps = Vec::new();
-    for inline in line.inlines() {
+    for inline in line.inline_elements() {
         match inline {
-            Inline::Text { text, .. } => {
+            InlineElement::Text { text, .. } => {
                 for string in text.split_whitespace_boundaries() {
                     let column_count: usize = string
                         .chars()
@@ -55,7 +55,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
                     byte += string.len();
                 }
             }
-            Inline::Widget(widget) => {
+            InlineElement::Widget(widget) => {
                 if column + widget.column_count > wrap_column {
                     column = indent_column_count;
                     wraps.push(byte);

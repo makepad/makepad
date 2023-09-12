@@ -54,11 +54,11 @@ impl<'a> Layout<'a> {
         Line {
             y: self.session_layout.y.get(index).copied(),
             column_count: self.session_layout.column_count[index],
-            fold_column: self.session_layout.fold_column[index],
+            fold: self.session_layout.fold_column[index],
             scale: self.session_layout.scale[index],
             text: &self.text.as_lines()[index],
             tokens: &self.document_layout.tokens[index],
-            inline_inlays: &self.document_layout.inline_inlays[index],
+            inlays: &self.document_layout.inline_inlays[index],
             wrap_data: self.session_layout.wrap_data[index].as_ref(),
         }
     }
@@ -67,7 +67,7 @@ impl<'a> Layout<'a> {
         Lines {
             y: self.session_layout.y[start.min(self.session_layout.y.len())..end.min(self.session_layout.y.len())].iter(),
             column_count: self.session_layout.column_count[start..end].iter(),
-            fold_column: self.session_layout.fold_column[start..end].iter(),
+            fold: self.session_layout.fold_column[start..end].iter(),
             scale: self.session_layout.scale[start..end].iter(),
             text: self.text.as_lines()[start..end].iter(),
             tokens: self.document_layout.tokens[start..end].iter(),
@@ -76,7 +76,7 @@ impl<'a> Layout<'a> {
         }
     }
 
-    pub fn blocks(&self, line_start: usize, line_end: usize) -> Blocks<'_> {
+    pub fn blocks(&self, line_start: usize, line_end: usize) -> BlockElements<'_> {
         let mut block_inlays = self.document_layout.block_inlays.iter();
         while block_inlays
             .as_slice()
@@ -85,7 +85,7 @@ impl<'a> Layout<'a> {
         {
             block_inlays.next();
         }
-        Blocks {
+        BlockElements {
             lines: self.lines(line_start, line_end),
             block_inlays,
             position: line_start,
@@ -98,7 +98,7 @@ impl<'a> Layout<'a> {
 pub struct Lines<'a> {
     y: Iter<'a, f64>,
     column_count: Iter<'a, Option<usize>>,
-    fold_column: Iter<'a, usize>,
+    fold: Iter<'a, usize>,
     scale: Iter<'a, f64>,
     text: Iter<'a, String>,
     tokens: Iter<'a, Vec<Token>>,
@@ -114,11 +114,11 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line {
             y: self.y.next().copied(),
             column_count: *self.column_count.next().unwrap(),
-            fold_column: *self.fold_column.next().unwrap(),
+            fold: *self.fold.next().unwrap(),
             scale: *self.scale.next().unwrap(),
             text,
             tokens: self.tokens.next().unwrap(),
-            inline_inlays: self.inline_inlays.next().unwrap(),
+            inlays: self.inline_inlays.next().unwrap(),
             wrap_data: self.wrap_data.next().unwrap().as_ref(),
         })
     }
@@ -128,11 +128,11 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Line<'a> {
     pub y: Option<f64>,
     pub column_count: Option<usize>,
-    pub fold_column: usize,
+    pub fold: usize,
     pub scale: f64,
     pub text: &'a str,
     pub tokens: &'a [Token],
-    pub inline_inlays: &'a [(usize, InlineInlay)],
+    pub inlays: &'a [(usize, InlineInlay)],
     pub wrap_data: Option<&'a WrapData>,
 }
 
@@ -157,7 +157,7 @@ impl<'a> Line<'a> {
         self.column_to_x(self.column_count())
     }
 
-    pub fn byte_and_affinity_to_row_and_column(
+    pub fn byte_affinity_to_row_column(
         &self,
         byte: usize,
         affinity: Affinity,
@@ -169,9 +169,9 @@ impl<'a> Line<'a> {
         if current_byte == byte && affinity == Affinity::Before {
             return (row, column);
         }
-        for wrapped in self.wrappeds() {
-            match wrapped {
-                Wrapped::Text {
+        for element in self.wrapped_elements() {
+            match element {
+                WrappedElement::Text {
                     is_inlay: false,
                     text,
                 } => {
@@ -186,16 +186,16 @@ impl<'a> Line<'a> {
                         }
                     }
                 }
-                Wrapped::Text {
+                WrappedElement::Text {
                     is_inlay: true,
                     text,
                 } => {
                     column += text.column_count(tab_column_count);
                 }
-                Wrapped::Widget(widget) => {
+                WrappedElement::Widget(widget) => {
                     column += widget.column_count;
                 }
-                Wrapped::Wrap => {
+                WrappedElement::Wrap => {
                     row += 1;
                     column = self.wrap_indent_column_count();
                 }
@@ -207,23 +207,23 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn row_and_column_to_byte_and_affinity(
+    pub fn row_column_to_byte_affinity(
         &self,
         row: usize,
         column: usize,
-        tab_width: usize,
+        tab_column_count: usize,
     ) -> (usize, Affinity) {
         let mut current_row = 0;
         let mut current_column = 0;
         let mut byte = 0;
-        for wrapped in self.wrappeds() {
-            match wrapped {
-                Wrapped::Text {
+        for element in self.wrapped_elements() {
+            match element {
+                WrappedElement::Text {
                     is_inlay: false,
                     text,
                 } => {
                     for grapheme in text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_width);
+                        let next_column = current_column + grapheme.column_count(tab_column_count);
                         if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
@@ -231,20 +231,20 @@ impl<'a> Line<'a> {
                         current_column = next_column;
                     }
                 }
-                Wrapped::Text {
+                WrappedElement::Text {
                     is_inlay: true,
                     text,
                 } => {
-                    let next_column = current_column + text.column_count(tab_width);
+                    let next_column = current_column + text.column_count(tab_column_count);
                     if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
                     current_column = next_column;
                 }
-                Wrapped::Widget(widget) => {
+                WrappedElement::Widget(widget) => {
                     current_column += widget.column_count;
                 }
-                Wrapped::Wrap => {
+                WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
@@ -260,13 +260,13 @@ impl<'a> Line<'a> {
     }
 
     pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold = column.min(self.fold_column);
-        let column_count_after_fold = column - column_count_before_fold;
-        column_count_before_fold as f64 + column_count_after_fold as f64 * self.scale
+        let before_fold = column.min(self.fold);
+        let after_fold = column - before_fold;
+        before_fold as f64 + after_fold as f64 * self.scale
     }
 
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
+    pub fn fold(&self) -> usize {
+        self.fold
     }
 
     pub fn scale(&self) -> f64 {
@@ -285,19 +285,19 @@ impl<'a> Line<'a> {
         self.tokens
     }
 
-    pub fn inlines(&self) -> Inlines<'a> {
-        Inlines {
+    pub fn inline_elements(&self) -> InlineElements<'a> {
+        InlineElements {
             text: self.text,
-            inline_inlays: self.inline_inlays.iter(),
+            inlays: self.inlays.iter(),
             position: 0,
         }
     }
 
-    pub fn wrappeds(&self) -> Wrappeds<'a> {
-        let mut inlines = self.inlines();
-        Wrappeds {
-            inline: inlines.next(),
-            inlines,
+    pub fn wrapped_elements(&self) -> WrappedElements<'a> {
+        let mut elements = self.inline_elements();
+        WrappedElements {
+            element: elements.next(),
+            elements,
             wraps: self.wrap_data.unwrap().wraps.iter(),
             position: 0,
         }
@@ -305,42 +305,42 @@ impl<'a> Line<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Inlines<'a> {
-    pub(super) text: &'a str,
-    pub(super) inline_inlays: Iter<'a, (usize, InlineInlay)>,
-    pub(super) position: usize,
+pub struct InlineElements<'a> {
+    text: &'a str,
+    inlays: Iter<'a, (usize, InlineInlay)>,
+    position: usize,
 }
 
-impl<'a> Iterator for Inlines<'a> {
-    type Item = Inline<'a>;
+impl<'a> Iterator for InlineElements<'a> {
+    type Item = InlineElement<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .inline_inlays
+            .inlays
             .as_slice()
             .first()
             .map_or(false, |&(position, _)| position == self.position)
         {
-            let (_, inline_inlay) = self.inline_inlays.next().unwrap();
+            let (_, inline_inlay) = self.inlays.next().unwrap();
             return Some(match *inline_inlay {
-                InlineInlay::Text(ref text) => Inline::Text {
+                InlineInlay::Text(ref text) => InlineElement::Text {
                     is_inlay: true,
                     text,
                 },
-                InlineInlay::Widget(widget) => Inline::Widget(widget),
+                InlineInlay::Widget(widget) => InlineElement::Widget(widget),
             });
         }
         if self.text.is_empty() {
             return None;
         }
-        let mut mid: usize = self.text.len();
-        if let Some(&(byte, _)) = self.inline_inlays.as_slice().first() {
-            mid = mid.min(byte - self.position);
+        let mut len: usize = self.text.len();
+        if let Some(&(position, _)) = self.inlays.as_slice().first() {
+            len = len.min(position - self.position);
         }
-        let (text_0, text_1) = self.text.split_at(mid);
+        let (text_0, text_1) = self.text.split_at(len);
         self.text = text_1;
         self.position += text_0.len();
-        Some(Inline::Text {
+        Some(InlineElement::Text {
             is_inlay: false,
             text: text_0,
         })
@@ -348,21 +348,21 @@ impl<'a> Iterator for Inlines<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Inline<'a> {
+pub enum InlineElement<'a> {
     Text { is_inlay: bool, text: &'a str },
     Widget(InlineWidget),
 }
 
 #[derive(Clone, Debug)]
-pub struct Wrappeds<'a> {
-    pub(super) inline: Option<Inline<'a>>,
-    pub(super) inlines: Inlines<'a>,
-    pub(super) wraps: Iter<'a, usize>,
-    pub(super) position: usize,
+pub struct WrappedElements<'a> {
+    element: Option<InlineElement<'a>>,
+    elements: InlineElements<'a>,
+    wraps: Iter<'a, usize>,
+    position: usize,
 }
 
-impl<'a> Iterator for Wrappeds<'a> {
-    type Item = Wrapped<'a>;
+impl<'a> Iterator for WrappedElements<'a> {
+    type Item = WrappedElement<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
@@ -372,38 +372,38 @@ impl<'a> Iterator for Wrappeds<'a> {
             .map_or(false, |&position| position == self.position)
         {
             self.wraps.next();
-            return Some(Wrapped::Wrap);
+            return Some(WrappedElement::Wrap);
         }
-        Some(match self.inline.take()? {
-            Inline::Text { is_inlay, text } => {
-                let mut mid: usize = text.len();
+        Some(match self.element.take()? {
+            InlineElement::Text { is_inlay, text } => {
+                let mut len: usize = text.len();
                 if let Some(&position) = self.wraps.as_slice().first() {
-                    mid = mid.min(position - self.position);
+                    len = len.min(position - self.position);
                 }
-                let text = if mid < text.len() {
-                    let (text_0, text_1) = text.split_at(mid);
-                    self.inline = Some(Inline::Text {
+                let text = if len < text.len() {
+                    let (text_0, text_1) = text.split_at(len);
+                    self.element = Some(InlineElement::Text {
                         is_inlay,
                         text: text_1,
                     });
                     text_0
                 } else {
-                    self.inline = self.inlines.next();
+                    self.element = self.elements.next();
                     text
                 };
                 self.position += text.len();
-                Wrapped::Text { is_inlay, text }
+                WrappedElement::Text { is_inlay, text }
             }
-            Inline::Widget(widget) => {
+            InlineElement::Widget(widget) => {
                 self.position += 1;
-                Wrapped::Widget(widget)
+                WrappedElement::Widget(widget)
             }
         })
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Wrapped<'a> {
+pub enum WrappedElement<'a> {
     Text { is_inlay: bool, text: &'a str },
     Widget(InlineWidget),
     Wrap,
@@ -411,14 +411,14 @@ pub enum Wrapped<'a> {
 
 
 #[derive(Clone, Debug)]
-pub struct Blocks<'a> {
+pub struct BlockElements<'a> {
     lines: Lines<'a>,
     block_inlays: Iter<'a, (usize, BlockInlay)>,
     position: usize,
 }
 
-impl<'a> Iterator for Blocks<'a> {
-    type Item = Block<'a>;
+impl<'a> Iterator for BlockElements<'a> {
+    type Item = BlockElement<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
@@ -429,12 +429,12 @@ impl<'a> Iterator for Blocks<'a> {
         {
             let (_, block_inlay) = self.block_inlays.next().unwrap();
             return Some(match *block_inlay {
-                BlockInlay::Widget(widget) => Block::Widget(widget),
+                BlockInlay::Widget(widget) => BlockElement::Widget(widget),
             });
         }
         let line = self.lines.next()?;
         self.position += 1;
-        Some(Block::Line {
+        Some(BlockElement::Line {
             is_inlay: false,
             line,
         })
@@ -442,7 +442,7 @@ impl<'a> Iterator for Blocks<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Block<'a> {
+pub enum BlockElement<'a> {
     Line { is_inlay: bool, line: Line<'a> },
     Widget(BlockWidget),
 }

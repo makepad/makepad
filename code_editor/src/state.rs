@@ -4,7 +4,7 @@ use {
         history::EditKind,
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
-        layout::{Block, Layout, Wrapped},
+        layout::{BlockElement, Layout, WrappedElement},
         move_ops,
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
@@ -523,13 +523,13 @@ impl Session {
         let mut ys = mem::take(&mut self.layout.borrow_mut().y);
         for block in self.layout().blocks(start, end) {
             match block {
-                Block::Line { is_inlay, line } => {
+                BlockElement::Line { is_inlay, line } => {
                     if !is_inlay {
                         ys.push(y);
                     }
                     y += line.height();
                 }
-                Block::Widget(widget) => {
+                BlockElement::Widget(widget) => {
                     y += widget.height;
                 }
             }
@@ -549,15 +549,15 @@ impl Session {
         let mut column = 0;
         let layout = self.layout();
         let line = layout.line(index);
-        for wrapped in line.wrappeds() {
+        for wrapped in line.wrapped_elements() {
             match wrapped {
-                Wrapped::Text { text, .. } => {
+                WrappedElement::Text { text, .. } => {
                     column += text.column_count(self.settings.tab_column_count);
                 }
-                Wrapped::Widget(widget) => {
+                WrappedElement::Widget(widget) => {
                     column += widget.column_count;
                 }
-                Wrapped::Wrap => {
+                WrappedElement::Wrap => {
                     column_count = column_count.max(column);
                     column = line.wrap_indent_column_count();
                 }
