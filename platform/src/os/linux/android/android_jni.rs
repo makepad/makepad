@@ -61,10 +61,15 @@ pub enum FromJavaMessage {
     },
     HttpResponse {
         request_id: u64,
-       // metadata_id: u64,
+        metadata_id: u64,
         status_code: u16,
         headers: String,
         body: Vec<u8>
+    },
+    HttpRequestError {
+        request_id: u64,
+        metadata_id: u64,
+        error: String,
     },
     Pause,
     Resume,
@@ -314,6 +319,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     request_id: jni_sys::jlong,
+    metadata_id: jni_sys::jlong,
     status_code: jni_sys::jint,
     headers: jni_sys::jstring,
     body: jni_sys::jobject,
@@ -324,9 +330,27 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
 
     send_from_java_message(FromJavaMessage::HttpResponse {
         request_id: request_id as u64,
+        metadata_id: metadata_id as u64,
         status_code: status_code as u16,
         headers,
         body
+    });
+}
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    request_id: jni_sys::jlong,
+    metadata_id: jni_sys::jlong,
+    error: jni_sys::jstring,
+) {
+    let env = unsafe { attach_jni_env() };
+    let error = unsafe { jstring_to_string(env, error) };
+
+    send_from_java_message(FromJavaMessage::HttpRequestError {
+        request_id: request_id as u64,
+        metadata_id: metadata_id as u64,
+        error,
     });
 }
 
@@ -430,8 +454,9 @@ pub unsafe fn to_java_http_request(env: *mut jni_sys::JNIEnv, request_id: LiveId
         env,
         ACTIVITY,
         "requestHttp",
-        "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V",
+        "(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V",
         request_id.get_value() as jni_sys::jlong,
+        request.metadata_id.get_value() as jni_sys::jlong,
         url,
         method,
         headers,
