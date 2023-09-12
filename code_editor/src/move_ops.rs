@@ -39,7 +39,7 @@ pub fn move_down(session: &Session, cursor: Cursor) -> Cursor {
     if !is_at_last_row_of_line(session, cursor) {
         return move_to_next_row_of_line(session, cursor);
     }
-    if !is_at_last_line(session.document().borrow().text().as_lines(), cursor) {
+    if !is_at_last_line(session.document().text().as_lines(), cursor) {
         return move_to_first_row_of_next_line(session, cursor);
     }
     cursor
