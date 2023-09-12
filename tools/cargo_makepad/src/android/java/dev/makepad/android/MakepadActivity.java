@@ -32,6 +32,8 @@ import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.graphics.Rect;
 
+import java.util.concurrent.CompletableFuture;
+
 import dev.makepad.android.MakepadNative;
 
 // note: //% is a special miniquad's pre-processor for plugins
@@ -297,6 +299,23 @@ public class MakepadActivity extends Activity {
                 }
             }
         });
+    }
+
+    public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {
+        try {
+            MakepadNetwork network = new MakepadNetwork();
+
+            CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
+
+            future.thenAccept(response -> {
+                runOnUiThread(() -> MakepadNative.onHttpResponse(id, metadataId, response.getStatusCode(), response.getHeaders(), response.getBody()));
+            }).exceptionally(ex -> {
+                runOnUiThread(() -> MakepadNative.onHttpRequestError(id, metadataId, ex.toString()));
+                return null;
+            });
+        } catch (Exception e) {
+            MakepadNative.onHttpRequestError(id, metadataId, e.toString());
+        }
     }
 }
 
