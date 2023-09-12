@@ -4,16 +4,15 @@ use {
         history::EditKind,
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
-        line::Wrapped,
+        layout::{Block, Layout, Wrapped},
         move_ops,
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
         text::{Change, Drift, Edit, Length, Position, Text},
         token::TokenKind,
-        widgets::BlockWidget,
         wrap,
         wrap::WrapData,
-        History, Line, Selection, Settings, Token, Tokenizer,
+        History, Selection, Settings, Token, Tokenizer,
     },
     std::{
         cell::{Ref, RefCell},
@@ -23,7 +22,6 @@ use {
         iter, mem, ops,
         ops::Range,
         rc::Rc,
-        slice::Iter,
         sync::{
             atomic,
             atomic::AtomicUsize,
@@ -38,8 +36,8 @@ pub struct Session {
     id: SessionId,
     settings: Rc<Settings>,
     document: Document,
-    wrap_column: Option<usize>,
     layout: RefCell<SessionLayout>,
+    wrap_column: Option<usize>,
     folding_lines: HashSet<usize>,
     folded_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
@@ -54,12 +52,11 @@ impl Session {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (edit_sender, edit_receiver) = mpsc::channel();
-        let line_count = document.text().as_lines().len();
+        let line_count = document.as_text().as_lines().len();
         let mut session = Self {
             id: SessionId(ID.fetch_add(1, atomic::Ordering::AcqRel)),
             settings: Rc::new(Settings::default()),
             document,
-            wrap_column: None,
             layout: RefCell::new(SessionLayout {
                 y: Vec::new(),
                 column_count: (0..line_count).map(|_| None).collect(),
@@ -67,6 +64,7 @@ impl Session {
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 wrap_data: (0..line_count).map(|_| None).collect(),
             }),
+            wrap_column: None,
             folding_lines: HashSet::new(),
             folded_lines: HashSet::new(),
             unfolding_lines: HashSet::new(),
@@ -92,34 +90,6 @@ impl Session {
         self.id
     }
 
-    pub fn width(&self) -> f64 {
-        self.lines(0, self.document.text().as_lines().len(), |lines| {
-            let mut width: f64 = 0.0;
-            for line in lines {
-                width = width.max(line.width());
-            }
-            width
-        })
-    }
-
-    pub fn height(&self) -> f64 {
-        let index = self.document.text().as_lines().len() - 1;
-        let mut y = self.line(index, |line| line.y() + line.height());
-        self.blocks(index, index, |blocks| {
-            for block in blocks {
-                match block {
-                    Block::Line {
-                        is_inlay: true,
-                        line,
-                    } => y += line.height(),
-                    Block::Widget(widget) => y += widget.height,
-                    _ => unreachable!(),
-                }
-            }
-        });
-        y
-    }
-
     pub fn settings(&self) -> &Rc<Settings> {
         &self.settings
     }
@@ -128,84 +98,16 @@ impl Session {
         &self.document
     }
 
+    pub fn layout(&self) -> Layout<'_> {
+        Layout {
+            text: self.document.as_text(),
+            document_layout: self.document.layout(),
+            session_layout: self.layout.borrow(),
+        }
+    }
+
     pub fn wrap_column(&self) -> Option<usize> {
         self.wrap_column
-    }
-
-    pub fn find_first_line_ending_after_y(&self, y: f64) -> usize {
-        match self.layout.borrow().y[..self.layout.borrow().y.len() - 1]
-            .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
-        {
-            Ok(line) => line,
-            Err(line) => line.saturating_sub(1),
-        }
-    }
-
-    pub fn find_first_line_starting_after_y(&self, y: f64) -> usize {
-        match self.layout.borrow().y[..self.layout.borrow().y.len() - 1]
-            .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
-        {
-            Ok(line) => line + 1,
-            Err(line) => line,
-        }
-    }
-
-    pub fn line<T>(&self, line: usize, f: impl FnOnce(Line<'_>) -> T) -> T {
-        let document = self.document();
-        f(Line {
-            y: self.layout.borrow().y.get(line).copied(),
-            column_count: self.layout.borrow().column_count[line],
-            fold_column: self.layout.borrow().fold_column[line],
-            scale: self.layout.borrow().scale[line],
-            text: &document.0.history.borrow().as_text().as_lines()[line],
-            tokens: &document.0.layout.borrow().tokens[line],
-            inline_inlays: &document.0.layout.borrow().inline_inlays[line],
-            wrap_data: self.layout.borrow().wrap_data[line].as_ref(),
-        })
-    }
-
-    pub fn lines<T>(
-        &self,
-        start_line: usize,
-        end_line: usize,
-        f: impl FnOnce(Lines<'_>) -> T,
-    ) -> T {
-        let document = self.document();
-        f(Lines {
-            y: self.layout.borrow().y[start_line.min(self.layout.borrow().y.len())..end_line.min(self.layout.borrow().y.len())].iter(),
-            column_count: self.layout.borrow().column_count[start_line..end_line].iter(),
-            fold_column: self.layout.borrow().fold_column[start_line..end_line].iter(),
-            scale: self.layout.borrow().scale[start_line..end_line].iter(),
-            text: document.0.history.borrow().as_text().as_lines()[start_line..end_line].iter(),
-            tokens: document.0.layout.borrow().tokens[start_line..end_line].iter(),
-            inline_inlays: document.0.layout.borrow().inline_inlays[start_line..end_line].iter(),
-            wrap_data: self.layout.borrow().wrap_data[start_line..end_line].iter(),
-        })
-    }
-
-    pub fn blocks<T>(
-        &self,
-        start_line: usize,
-        end_line: usize,
-        f: impl FnOnce(Blocks<'_>) -> T,
-    ) -> T {
-        let document = self.document();
-        let layout = document.0.layout.borrow();
-        let mut block_inlays = layout.block_inlays.iter();
-        while block_inlays
-            .as_slice()
-            .first()
-            .map_or(false, |&(position, _)| position < start_line)
-        {
-            block_inlays.next();
-        }
-        self.lines(start_line, end_line, |lines| {
-            f(Blocks {
-                lines,
-                block_inlays,
-                position: start_line,
-            })
-        })
     }
 
     pub fn selections(&self) -> &[Selection] {
@@ -217,7 +119,7 @@ impl Session {
             return;
         }
         self.wrap_column = wrap_column;
-        let line_count = self.document.text().as_lines().len();
+        let line_count = self.document.as_text().as_lines().len();
         for line in 0..line_count {
             self.update_wrap_data(line);
         }
@@ -225,7 +127,7 @@ impl Session {
     }
 
     pub fn fold(&mut self) {
-        let text = self.document.text();
+        let text = self.document.as_text();
         let lines = text.as_lines();
         for line in 0..lines.len() {
             let indent_level = lines[line]
@@ -323,7 +225,7 @@ impl Session {
     pub fn move_left(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
             selection.update_cursor(|cursor| {
-                move_ops::move_left(session.document.text().as_lines(), cursor)
+                move_ops::move_left(session.document.as_text().as_lines(), cursor)
             })
         });
     }
@@ -331,7 +233,7 @@ impl Session {
     pub fn move_right(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
             selection.update_cursor(|cursor| {
-                move_ops::move_right(session.document.text().as_lines(), cursor)
+                move_ops::move_right(session.document.as_text().as_lines(), cursor)
             })
         });
     }
@@ -590,7 +492,7 @@ impl Session {
             write!(
                 &mut string,
                 "{}",
-                self.document.text().slice(range.start(), range.extent())
+                self.document.as_text().slice(range.start(), range.extent())
             )
             .unwrap();
         }
@@ -607,31 +509,31 @@ impl Session {
 
     fn update_y(&mut self) {
         let start = self.layout.borrow().y.len();
-        let end = self.document.text().as_lines().len();
+        let end = self.document.as_text().as_lines().len();
         if start == end + 1 {
             return;
         }
         let mut y = if start == 0 {
             0.0
         } else {
-            self.line(start - 1, |line| line.y() + line.height())
+            let layout = self.layout();
+            let line = layout.line(start - 1);
+            line.y() + line.height()
         };
         let mut ys = mem::take(&mut self.layout.borrow_mut().y);
-        self.blocks(start, end, |blocks| {
-            for block in blocks {
-                match block {
-                    Block::Line { is_inlay, line } => {
-                        if !is_inlay {
-                            ys.push(y);
-                        }
-                        y += line.height();
+        for block in self.layout().blocks(start, end) {
+            match block {
+                Block::Line { is_inlay, line } => {
+                    if !is_inlay {
+                        ys.push(y);
                     }
-                    Block::Widget(widget) => {
-                        y += widget.height;
-                    }
+                    y += line.height();
+                }
+                Block::Widget(widget) => {
+                    y += widget.height;
                 }
             }
-        });
+        }
         ys.push(y);
         self.layout.borrow_mut().y = ys;
     }
@@ -645,30 +547,33 @@ impl Session {
     fn update_column_count(&mut self, index: usize) {
         let mut column_count = 0;
         let mut column = 0;
-        self.line(index, |line| {
-            for wrapped in line.wrappeds() {
-                match wrapped {
-                    Wrapped::Text { text, .. } => {
-                        column += text.column_count(self.settings.tab_column_count);
-                    }
-                    Wrapped::Widget(widget) => {
-                        column += widget.column_count;
-                    }
-                    Wrapped::Wrap => {
-                        column_count = column_count.max(column);
-                        column = line.wrap_indent_column_count();
-                    }
+        let layout = self.layout();
+        let line = layout.line(index);
+        for wrapped in line.wrappeds() {
+            match wrapped {
+                Wrapped::Text { text, .. } => {
+                    column += text.column_count(self.settings.tab_column_count);
+                }
+                Wrapped::Widget(widget) => {
+                    column += widget.column_count;
+                }
+                Wrapped::Wrap => {
+                    column_count = column_count.max(column);
+                    column = line.wrap_indent_column_count();
                 }
             }
-        });
+        }
+        drop(layout);
         self.layout.borrow_mut().column_count[index] = Some(column_count.max(column));
     }
 
     fn update_wrap_data(&mut self, line: usize) {
         let wrap_data = match self.wrap_column {
-            Some(wrap_column) => self.line(line, |line| {
+            Some(wrap_column) => {
+                let layout = self.layout();
+                let line = layout.line(line);
                 wrap::compute_wrap_data(line, wrap_column, self.settings.tab_column_count)
-            }),
+            },
             None => WrapData::default(),
         };
         self.layout.borrow_mut().wrap_data[line] = Some(wrap_data);
@@ -731,7 +636,7 @@ impl Session {
                 }
             }
         }
-        let line_count = self.document.text().as_lines().len();
+        let line_count = self.document.as_text().as_lines().len();
         for line in 0..line_count {
             if self.layout.borrow().wrap_data[line].is_none() {
                 self.update_wrap_data(line);
@@ -754,83 +659,16 @@ impl Drop for Session {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Lines<'a> {
-    pub y: Iter<'a, f64>,
-    pub column_count: Iter<'a, Option<usize>>,
-    pub fold_column: Iter<'a, usize>,
-    pub scale: Iter<'a, f64>,
-    pub text: Iter<'a, String>,
-    pub tokens: Iter<'a, Vec<Token>>,
-    pub inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
-    pub wrap_data: Iter<'a, Option<WrapData>>,
-}
-
-impl<'a> Iterator for Lines<'a> {
-    type Item = Line<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let text = self.text.next()?;
-        Some(Line {
-            y: self.y.next().copied(),
-            column_count: *self.column_count.next().unwrap(),
-            fold_column: *self.fold_column.next().unwrap(),
-            scale: *self.scale.next().unwrap(),
-            text,
-            tokens: self.tokens.next().unwrap(),
-            inline_inlays: self.inline_inlays.next().unwrap(),
-            wrap_data: self.wrap_data.next().unwrap().as_ref(),
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Blocks<'a> {
-    lines: Lines<'a>,
-    block_inlays: Iter<'a, (usize, BlockInlay)>,
-    position: usize,
-}
-
-impl<'a> Iterator for Blocks<'a> {
-    type Item = Block<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self
-            .block_inlays
-            .as_slice()
-            .first()
-            .map_or(false, |&(line, _)| line == self.position)
-        {
-            let (_, block_inlay) = self.block_inlays.next().unwrap();
-            return Some(match *block_inlay {
-                BlockInlay::Widget(widget) => Block::Widget(widget),
-            });
-        }
-        let line = self.lines.next()?;
-        self.position += 1;
-        Some(Block::Line {
-            is_inlay: false,
-            line,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Block<'a> {
-    Line { is_inlay: bool, line: Line<'a> },
-    Widget(BlockWidget),
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(usize);
 
 #[derive(Debug)]
-struct SessionLayout {
-    y: Vec<f64>,
-    column_count: Vec<Option<usize>>,
-    fold_column: Vec<usize>,
-    scale: Vec<f64>,
-    wrap_data: Vec<Option<WrapData>>,
+pub struct SessionLayout {
+    pub y: Vec<f64>,
+    pub column_count: Vec<Option<usize>>,
+    pub fold_column: Vec<usize>,
+    pub scale: Vec<f64>,
+    pub wrap_data: Vec<Option<WrapData>>,
 }
 
 #[derive(Clone, Debug)]
@@ -860,7 +698,7 @@ impl Document {
         session
     }
 
-    pub fn text(&self) -> Ref<'_, Text> {
+    pub fn as_text(&self) -> Ref<'_, Text> {
         Ref::map(self.0.history.borrow(), |history| history.as_text())
     }
 
@@ -982,7 +820,7 @@ impl Document {
                 }
             })
         {
-            let mut desired_indentation_column_count = self.text().as_lines()[..line_range.start]
+            let mut desired_indentation_column_count = self.as_text().as_lines()[..line_range.start]
                 .iter()
                 .rev()
                 .find_map(|line| {
@@ -990,7 +828,7 @@ impl Document {
                 })
                 .unwrap_or(0);
             for line in line_range {
-                if self.text().as_lines()[line]
+                if self.as_text().as_lines()[line]
                     .chars()
                     .find_map(|char| {
                         if char.is_closing_delimiter() {
@@ -1011,7 +849,7 @@ impl Document {
                     })
                 });
                 if let Some(next_line_indentation_column_count) = next_line_indentation_column_count(
-                    &self.text().as_lines()[line],
+                    &self.as_text().as_lines()[line],
                     tab_column_count,
                     indent_column_count,
                 ) {
@@ -1351,9 +1189,9 @@ impl Document {
 
 #[derive(Debug)]
 pub struct DocumentLayout {
-    tokens: Vec<Vec<Token>>,
-    inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
-    block_inlays: Vec<(usize, BlockInlay)>,
+    pub tokens: Vec<Vec<Token>>,
+    pub inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
+    pub block_inlays: Vec<(usize, BlockInlay)>,
 }
 
 #[derive(Debug)]
