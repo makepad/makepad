@@ -2,7 +2,6 @@ use crate::shell::*;
 use crate::ios::{IosTarget};
 use std::path::{PathBuf, Path};
 use std::collections::HashSet;
-use std::io;
 
 pub struct PlistValues{
     identifier: String,
@@ -263,7 +262,7 @@ fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
+pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<String>, device_uuid: Option<String>, app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
     let build_crate = get_build_crate_from_args(args)?;
     let result = build(app_id, args, ios_target)?;
     let cwd = std::env::current_dir().unwrap();
@@ -275,61 +274,59 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         "-p",
         "codesigning"])?;
 
-    let identities: Vec<&str> = security_result.split("\n").collect();
-    let selected_identity: &str;
-    if identities.len() > 1 {
-        // if there are multiple signing identies, prompt the user which one to select
-        println!("\nMultiple signing identities found, please select one:\n{:}", security_result);
-        let index = prompt_selection();
-        selected_identity = &identities[index - 1][5..45];
-        println!("Selected signing identity: {:}", identities[index - 1]);
-
+    // select signing identity
+    let found_identities: Vec<&str> = security_result.split("\n").collect();
+    let selected_identity = if let Some(signing_identity) = &signing_identity {
+        // find passed in identity in security result
+        &found_identities.iter().find(|i| i.contains(signing_identity)).unwrap()[5..45]
+    } else if let Some(long_hex_id) = security_result.strip_prefix("  1) ") {
+        // if no argument passed, take first identity found
+        &long_hex_id[0..40]
     } else {
-        selected_identity = if let Some(long_hex_id) = security_result.strip_prefix("  1) ") {
-            &long_hex_id[0..40]
-        }
-        else{
-            return Err(format!("Error parsing the security result #{}#", security_result)) 
-        };
+        return Err(format!("Error reading the signing identity security result #{}#", security_result)) 
     };
+    println!("Selected signing identity {}", selected_identity);
     
-    //
     let home = std::env::var("HOME").unwrap();
     let profiles = std::fs::read_dir(format!("{}/Library/MobileDevice/Provisioning Profiles/", home)).unwrap();
-    let mut provisioning_profiles = Vec::new();
+    let mut found_profiles = Vec::new();
     for profile in profiles {
         // lets read it
         let profile_path = profile.unwrap().path();
         if let Some(prov) = parse_provision(profile_path, app_id){
-            provisioning_profiles.push(prov);
+            found_profiles.push(prov);
         }
     }
 
-    let provision: &ProvisionData;
-    if provisioning_profiles.len() == 0 {
-        return Err(format!("Could not find a matching mobile provision profile for name {}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again.", app_id))
-    } else if provisioning_profiles.len() == 1 {
-        provision = &provisioning_profiles[0];
+    // select provisioning profile
+    let provision = if let Some(provisioning_profile) = &provisioning_profile {
+        // find passed in provisioning profile
+        found_profiles.iter()
+            .find(|i| i.path.to_str().unwrap().contains(provisioning_profile))
+            .unwrap_or_else(|| 
+                panic!("Provisioning profile {} not found", provisioning_profile))
+    } else if found_profiles.len() > 0 {
+        // if no argument passed, take first profile found
+        &found_profiles[0]
     } else {
-        println!("\nMultiple provisioning profiles found for app id {:}, please select one:\n", app_id);
-        for (i, profile) in provisioning_profiles.iter().enumerate() {
-            println!("{:}) team: {:}, devices: {:?}", i + 1,  profile.team, profile.devices);
-        }
-        let index = prompt_selection();
-        provision = &provisioning_profiles[index - 1];
-        println!("Selected provisioning profile {}: {}", index, provision.team);
-    }
+        return Err(format!("Could not find a matching mobile provision profile for name {}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again.", app_id))
+    };
+    println!("Selected provisioning profile {:?}, for team {}", provision.path, provision.team);
 
-    let selected_device = &provision.devices[0];
-    if provision.devices.len() > 1 {
-        println!("\nMultiple devices found in provisioning profile, please select one:\n");
-        for (i, uuid) in provision.devices.iter().enumerate() {
-            println!("{:}) UUID: {:}", i + 1, uuid);
-        }
-        let index = prompt_selection();
-        let device = &provision.devices[index - 1];
-        println!("Selected device with UUID: {}", device);
-    }
+    // select device
+    let selected_device = if let Some(device_uuid) = &device_uuid {
+        // find passed in device in selected profile
+        provision.devices.iter()
+            .find(|i| i.contains(device_uuid))
+            .unwrap_or_else(|| 
+                panic!("Device with UUID {} not found in provisioning profile {:?}", device_uuid, provision.path))
+    } else if provision.devices.len() > 0 {
+        // if no argument passed, take first device found in profile
+        &provision.devices[0]
+    } else {
+        return Err(format!("No devices found in provisioning profile {:?}", provision.path))
+    };
+    println!("Selected device with UUID: {}", selected_device);
     
     // ok lets find the mobile provision for this application
     // we can also find the team ids from there to build the scent
@@ -390,18 +387,4 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     ]) ?; 
     
     Ok(())
-}
-
-fn prompt_selection() -> usize {
-    let mut input_str = String::new();
-    io::stdin()
-        .read_line(&mut input_str)
-        .expect("Failed to read line");
-
-    let index: usize = input_str
-        .trim()
-        .parse()
-        .expect("Invalid input, try again");
-
-    index
 }
