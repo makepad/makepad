@@ -152,9 +152,10 @@ pub fn run_sim(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<()
     Ok(())
 }
 
+#[derive(Debug)]
 struct ProvisionData{
     team: String,
-    device: String,
+    devices: Vec<String>,
     path: PathBuf,
 }
 
@@ -169,16 +170,42 @@ fn parse_provision(path:PathBuf, app_id:&str)->Option<ProvisionData>{
                 if bytes[i..(i+team_prefix.len())] == *team_prefix{
                     let team = std::str::from_utf8(&bytes[i+team_prefix.len()..i+team_prefix.len()+10]).unwrap().to_string();
                     let device_prefix = "<key>ProvisionedDevices</key>\n\t<array>\n\t\t<string>".as_bytes();
-                    for i in 0..(bytes.len() - device_prefix.len() + 1){
-                        if bytes[i..(i+device_prefix.len())] == *device_prefix{
-                            let device = std::str::from_utf8(&bytes[i+device_prefix.len()..i+device_prefix.len()+25]).unwrap().to_string();
-                            return Some(ProvisionData{
-                                team,
-                                device,
-                                path,
-                            })
+                    let mut devices = Vec::new();
+                    for i in 0..(bytes.len() - device_prefix.len() + 1) {
+                        if bytes[i..(i + device_prefix.len())] == *device_prefix {
+                            // loop through ProvisionedDevices array and add all uuids
+                            for j in i..(bytes.len() - device_prefix.len() + 1) {
+                                // break out of loop at end of array
+                                let array_end = "</array>".as_bytes();
+                                if bytes[j..(j + array_end.len())] == *array_end {
+                                    break;
+                                }   
+                                let str_open = "<string>".as_bytes();
+                                let mut open_idx = 0;
+                                let str_close = "</string>".as_bytes();
+                                let mut close_idx = 0;
+                                if bytes[j..(j+str_open.len())] == *str_open {
+                                    open_idx = j;
+                                }
+                                for k in j..(bytes.len()) {
+                                    if bytes[k..(k + str_close.len())] == *str_close {
+                                        close_idx = k;
+                                        break;
+                                    }
+                                }
+                                if open_idx != 0 && close_idx != 0 {
+                                    let uuid = std::str::from_utf8(&bytes[open_idx + str_open.len()..close_idx]).unwrap().to_string();
+                                    devices.push(uuid);
+                                }
+                            }
                         }
                     }
+
+                    return Some(ProvisionData{
+                        team,
+                        devices,
+                        path,
+                    });
                 }
             }
             break;
@@ -252,7 +279,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     let selected_identity: &str;
     if identities.len() > 1 {
         // if there are multiple signing identies, prompt the user which one to select
-        println!("Multiple signing identities found, please select one:\n{:}", security_result);
+        println!("\nMultiple signing identities found, please select one:\n{:}", security_result);
         let mut input_str = String::new();
         io::stdin()
             .read_line(&mut input_str)
@@ -278,20 +305,59 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     //
     let home = std::env::var("HOME").unwrap();
     let profiles = std::fs::read_dir(format!("{}/Library/MobileDevice/Provisioning Profiles/", home)).unwrap();
-    let mut provision = None;
+    let mut provisioning_profiles = Vec::new();
     for profile in profiles {
         // lets read it
         let profile_path = profile.unwrap().path();
         if let Some(prov) = parse_provision(profile_path, app_id){
-            provision = Some(prov);
-            break;
+            provisioning_profiles.push(prov);
         }
     }
-    
-    if provision.is_none(){
+
+    let provision: &ProvisionData;
+    if provisioning_profiles.len() == 0 {
         return Err(format!("Could not find a matching mobile provision profile for name {}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again.", app_id))
-    } 
-    let provision = provision.unwrap();
+    } else if provisioning_profiles.len() == 1 {
+        provision = &provisioning_profiles[0];
+    } else {
+        println!("\nMultiple provisioning profiles found for app id {:}, please select one:\n", app_id);
+        for (i, profile) in provisioning_profiles.iter().enumerate() {
+            println!("{:}) team: {:}, devices: {:?}", i + 1,  profile.team, profile.devices);
+        }
+
+        let mut input_str = String::new();
+        io::stdin()
+            .read_line(&mut input_str)
+            .expect("Failed to read line");
+        
+        let index: usize = input_str
+            .trim()
+            .parse()
+            .expect("Invalid input, try again");
+
+        provision = &provisioning_profiles[index - 1];
+        println!("Selected provisioning profile {}: {}", index, provision.team);
+    }
+
+    let selected_device = &provision.devices[0];
+    if provision.devices.len() > 1 {
+        println!("Multiple devices found in provisioning profile, please select one:\n{:?}", provision.devices);
+        for (i, uuid) in provision.devices.iter().enumerate() {
+            println!("{:}) UUID: {:}", i + 1, uuid);
+        }
+        let mut input_str = String::new();
+        io::stdin()
+            .read_line(&mut input_str)
+            .expect("Failed to read line");
+        
+        let index: usize = input_str
+            .trim()
+            .parse()
+            .expect("Invalid input, try again");
+
+        let device = &provision.devices[index - 1];
+        println!("Selected device with UUID: {}", device);
+    }
     
     // ok lets find the mobile provision for this application
     // we can also find the team ids from there to build the scent
@@ -344,7 +410,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     println!("Installing application on device");
     shell_env_filter("Makepad iOS application started.", &[], &ios_deploy ,"./ios-deploy", &[
         "-i",
-        &provision.device,  
+        &selected_device,  
         "-d",
         "-u",
         "-b",
