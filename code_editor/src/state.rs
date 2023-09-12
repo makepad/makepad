@@ -119,7 +119,7 @@ impl Session {
             let indent_level = lines[line]
                 .leading_whitespace()
                 .unwrap_or("")
-                .column_count(self.settings.tab_column_count)
+                .column_count()
                 / self.settings.indent_column_count;
             if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
                 self.layout.borrow_mut().fold_column[line] =
@@ -221,16 +221,14 @@ impl Session {
     }
 
     pub fn move_up(&mut self, reset_anchor: bool) {
-        let tab_column_count = self.settings.tab_column_count;
         self.modify_selections(reset_anchor, |selection, layout| {
-            selection.update_cursor(|cursor| cursor.move_up(layout, tab_column_count))
+            selection.update_cursor(|cursor| cursor.move_up(layout))
         });
     }
 
     pub fn move_down(&mut self, reset_anchor: bool) {
-        let tab_column_count = self.settings.tab_column_count;
         self.modify_selections(reset_anchor, |selection, layout| {
-            selection.update_cursor(|cursor| cursor.move_down(layout, tab_column_count))
+            selection.update_cursor(|cursor| cursor.move_down(layout))
         });
     }
 
@@ -374,8 +372,6 @@ impl Session {
             .edit_lines(self.id, EditKind::Indent, &self.selections, |line| {
                 reindent(
                     line,
-                    self.settings.use_soft_tabs,
-                    self.settings.tab_column_count,
                     |indentation_column_count| {
                         (indentation_column_count + self.settings.indent_column_count)
                             / self.settings.indent_column_count
@@ -390,8 +386,6 @@ impl Session {
             .edit_lines(self.id, EditKind::Outdent, &self.selections, |line| {
                 reindent(
                     line,
-                    self.settings.use_soft_tabs,
-                    self.settings.tab_column_count,
                     |indentation_column_count| {
                         indentation_column_count.saturating_sub(1)
                             / self.settings.indent_column_count
@@ -536,7 +530,7 @@ impl Session {
         for wrapped in line.wrapped_elements() {
             match wrapped {
                 WrappedElement::Text { text, .. } => {
-                    column += text.column_count(self.settings.tab_column_count);
+                    column += text.column_count();
                 }
                 WrappedElement::Widget(widget) => {
                     column += widget.column_count;
@@ -556,7 +550,7 @@ impl Session {
             Some(wrap_column) => {
                 let layout = self.layout();
                 let line = layout.line(line);
-                wrap::compute_wrap_data(line, wrap_column, self.settings.tab_column_count)
+                wrap::compute_wrap_data(line, wrap_column)
             }
             None => WrapData::default(),
         };
@@ -679,17 +673,13 @@ pub struct SessionLayout {
 
 pub fn reindent(
     string: &str,
-    use_soft_tabs: bool,
-    tab_column_count: usize,
     f: impl FnOnce(usize) -> usize,
 ) -> (usize, usize, String) {
     let indentation = string.leading_whitespace().unwrap_or("");
-    let indentation_column_count = indentation.column_count(tab_column_count);
+    let indentation_column_count = indentation.column_count();
     let new_indentation_column_count = f(indentation_column_count);
     let new_indentation = new_indentation(
         new_indentation_column_count,
-        use_soft_tabs,
-        tab_column_count,
     );
     let len = indentation.longest_common_prefix(&new_indentation).len();
     (
@@ -699,17 +689,6 @@ pub fn reindent(
     )
 }
 
-fn new_indentation(column_count: usize, use_soft_tabs: bool, tab_column_count: usize) -> String {
-    let tab_count;
-    let space_count;
-    if use_soft_tabs {
-        tab_count = 0;
-        space_count = column_count;
-    } else {
-        tab_count = column_count / tab_column_count;
-        space_count = column_count % tab_column_count;
-    }
-    let tabs = iter::repeat("\t").take(tab_count);
-    let spaces = iter::repeat(" ").take(space_count);
-    tabs.chain(spaces).collect()
+fn new_indentation(column_count: usize) -> String {
+    iter::repeat(' ').take(column_count).collect()
 }

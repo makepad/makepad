@@ -6,13 +6,13 @@ pub struct WrapData {
     pub indent_column_count: usize,
 }
 
-pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: usize) -> WrapData {
+pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize) -> WrapData {
     let mut indent_column_count: usize = line
         .text
         .leading_whitespace()
         .unwrap_or("")
         .chars()
-        .map(|char| char.column_count(tab_column_count))
+        .map(|char| char.column_count())
         .sum();
     for inline in line.inline_elements() {
         match inline {
@@ -20,7 +20,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
                 for string in text.split_whitespace_boundaries() {
                     let column_count: usize = string
                         .chars()
-                        .map(|char| char.column_count(tab_column_count))
+                        .map(|char| char.column_count())
                         .sum();
                     if indent_column_count + column_count > wrap_column {
                         indent_column_count = 0;
@@ -45,7 +45,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
                 for string in text.split_whitespace_boundaries() {
                     let column_count: usize = string
                         .chars()
-                        .map(|char| char.column_count(tab_column_count))
+                        .map(|char| char.column_count())
                         .sum();
                     if column + column_count > wrap_column {
                         column = indent_column_count;
