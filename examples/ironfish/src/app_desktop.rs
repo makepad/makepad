@@ -1781,7 +1781,7 @@ live_design!{
                         draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
-                        text: "Diffuse"
+                        text: "Diffuse" 
                     }
                 }
             }
