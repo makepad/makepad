@@ -106,7 +106,6 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
         "nightly",
         "cargo",
         "build",
-        "--release",
         &target_opt
     ];
     
@@ -127,13 +126,25 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
         version: "1".to_string(),
     };    
     
-    let app_dir = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.app", ios_target.toolchain()));
+    let is_release = args.iter().find(|v| v == &"--release").is_some();
+    
+    let app_dir = if is_release{
+        cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.app", ios_target.toolchain()))
+    }
+    else{
+        cwd.join(format!("target/makepad-ios-app/{}/debug/{build_crate}.app", ios_target.toolchain()))
+    };
     mkdir(&app_dir) ?;
     
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file())?;
 
-    let src_bin = cwd.join(format!("target/{}/release/{build_crate}", ios_target.toolchain()));
+    let src_bin = if is_release{
+        cwd.join(format!("target/{}/release/{build_crate}", ios_target.toolchain()))
+    }
+    else{
+        cwd.join(format!("target/{}/debug/{build_crate}", ios_target.toolchain()))
+    };
     let dst_bin = app_dir.join(build_crate.to_string());
     
     cp(&src_bin, &dst_bin, false) ?;
