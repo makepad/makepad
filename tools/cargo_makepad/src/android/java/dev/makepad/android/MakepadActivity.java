@@ -28,6 +28,12 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.widget.LinearLayout;
 
+import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
+import android.graphics.Rect;
+
+import java.util.concurrent.CompletableFuture;
+
 import dev.makepad.android.MakepadNative;
 
 // note: //% is a special miniquad's pre-processor for plugins
@@ -42,6 +48,7 @@ class MakepadSurface
     implements
         View.OnTouchListener,
         View.OnKeyListener,
+        ViewTreeObserver.OnGlobalLayoutListener,
         SurfaceHolder.Callback {
 
     public MakepadSurface(Context context){
@@ -53,6 +60,7 @@ class MakepadSurface
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
+        getViewTreeObserver().addOnGlobalLayoutListener(this);
     }
 
     @Override
@@ -85,6 +93,24 @@ class MakepadSurface
         return true;    
     }
 
+     @Override
+    public void onGlobalLayout() {
+        WindowInsets insets = this.getRootWindowInsets();
+        if (insets == null) {
+            return;
+        }
+
+        if (insets.isVisible(WindowInsets.Type.ime())) {
+            Rect r = new Rect();
+            this.getWindowVisibleDisplayFrame(r);
+            int screenHeight = this.getRootView().getHeight();
+            int visibleHeight = r.height();
+            int keyboardHeight = screenHeight - visibleHeight;
+
+            MakepadNative.surfaceOnResizeTextIME(keyboardHeight);
+        }
+    }
+
     // docs says getCharacters are deprecated
     // but somehow on non-latyn input all keyCode and all the relevant fields in the KeyEvent are zeros
     // and only getCharacters has some usefull data
@@ -92,7 +118,8 @@ class MakepadSurface
     @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
-            MakepadNative.surfaceOnKeyDown(keyCode);
+            int metaState = event.getMetaState();
+            MakepadNative.surfaceOnKeyDown(keyCode, metaState);
         }
 
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
@@ -272,6 +299,23 @@ public class MakepadActivity extends Activity {
                 }
             }
         });
+    }
+
+    public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {
+        try {
+            MakepadNetwork network = new MakepadNetwork();
+
+            CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
+
+            future.thenAccept(response -> {
+                runOnUiThread(() -> MakepadNative.onHttpResponse(id, metadataId, response.getStatusCode(), response.getHeaders(), response.getBody()));
+            }).exceptionally(ex -> {
+                runOnUiThread(() -> MakepadNative.onHttpRequestError(id, metadataId, ex.toString()));
+                return null;
+            });
+        } catch (Exception e) {
+            MakepadNative.onHttpRequestError(id, metadataId, e.toString());
+        }
     }
 }
 
