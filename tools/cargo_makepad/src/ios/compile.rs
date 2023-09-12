@@ -143,6 +143,7 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
         cwd.join(format!("target/{}/release/{build_crate}", ios_target.toolchain()))
     }
     else{
+        println!("WARNING: Building debug build, this creates a very slow application. Use --release if this is not what you want.");
         cwd.join(format!("target/{}/debug/{build_crate}", ios_target.toolchain()))
     };
     let dst_bin = app_dir.join(build_crate.to_string());
