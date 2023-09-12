@@ -133,6 +133,8 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setDevice: self.metal_device];
             let () = msg_send![mtk_view_obj, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, setAutoResizeDrawable: YES];
+           let () = msg_send![mtk_view_obj, setMultipleTouchEnabled: YES];
+ 
             
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             

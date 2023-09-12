@@ -21,8 +21,28 @@ impl IosTarget {
 }
 
 
-pub fn handle_ios(args: &[String]) -> Result<(), String> {
-    
+pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
+    let mut signing_identity  = None;
+    let mut provisioning_profile = None;
+    let mut device_uuid = None;
+
+    for i in 0..args.len() {
+        let v = &args[i];
+        if let Some(opt) = v.strip_prefix("--signing-identity=") {
+            signing_identity = Some(opt.to_string());
+        } 
+        else if let Some(opt) = v.strip_prefix("--provisioning-profile=") {
+            provisioning_profile = Some(opt.to_string());
+        } 
+        else if let Some(opt) = v.strip_prefix("--device-uuid=") {
+            device_uuid = Some(opt.to_string());
+        } 
+        else {
+            args = &args[i..];
+            break
+        }
+    }
+
     match args[0].as_ref() {
         "toolchain-install" | "install-toolchain"=>{
             #[cfg(target_arch = "x86_64")]
@@ -32,7 +52,7 @@ pub fn handle_ios(args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install(&toolchains)
         }
         "run-real" =>{
-            compile::run_real(&args[1], &args[2..], IosTarget::aarch64)?;
+            compile::run_real(signing_identity, provisioning_profile, device_uuid, &args[1], &args[2..], IosTarget::aarch64)?;
             Ok(())
         }
         "run-sim" =>{
