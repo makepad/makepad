@@ -39,7 +39,7 @@ pub struct Session {
     settings: Rc<Settings>,
     document: Document,
     wrap_column: Option<usize>,
-    layout: SessionLayout,
+    layout: RefCell<SessionLayout>,
     folding_lines: HashSet<usize>,
     folded_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
@@ -60,13 +60,13 @@ impl Session {
             settings: Rc::new(Settings::default()),
             document,
             wrap_column: None,
-            layout: SessionLayout {
+            layout: RefCell::new(SessionLayout {
                 y: Vec::new(),
                 column_count: (0..line_count).map(|_| None).collect(),
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 wrap_data: (0..line_count).map(|_| None).collect(),
-            },
+            }),
             folding_lines: HashSet::new(),
             folded_lines: HashSet::new(),
             unfolding_lines: HashSet::new(),
@@ -133,7 +133,7 @@ impl Session {
     }
 
     pub fn find_first_line_ending_after_y(&self, y: f64) -> usize {
-        match self.layout.y[..self.layout.y.len() - 1]
+        match self.layout.borrow().y[..self.layout.borrow().y.len() - 1]
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
             Ok(line) => line,
@@ -142,7 +142,7 @@ impl Session {
     }
 
     pub fn find_first_line_starting_after_y(&self, y: f64) -> usize {
-        match self.layout.y[..self.layout.y.len() - 1]
+        match self.layout.borrow().y[..self.layout.borrow().y.len() - 1]
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
             Ok(line) => line + 1,
@@ -153,14 +153,14 @@ impl Session {
     pub fn line<T>(&self, line: usize, f: impl FnOnce(Line<'_>) -> T) -> T {
         let document = self.document();
         f(Line {
-            y: self.layout.y.get(line).copied(),
-            column_count: self.layout.column_count[line],
-            fold_column: self.layout.fold_column[line],
-            scale: self.layout.scale[line],
+            y: self.layout.borrow().y.get(line).copied(),
+            column_count: self.layout.borrow().column_count[line],
+            fold_column: self.layout.borrow().fold_column[line],
+            scale: self.layout.borrow().scale[line],
             text: &document.0.history.borrow().as_text().as_lines()[line],
             tokens: &document.0.layout.borrow().tokens[line],
             inline_inlays: &document.0.layout.borrow().inline_inlays[line],
-            wrap_data: self.layout.wrap_data[line].as_ref(),
+            wrap_data: self.layout.borrow().wrap_data[line].as_ref(),
         })
     }
 
@@ -172,14 +172,14 @@ impl Session {
     ) -> T {
         let document = self.document();
         f(Lines {
-            y: self.layout.y[start_line.min(self.layout.y.len())..end_line.min(self.layout.y.len())].iter(),
-            column_count: self.layout.column_count[start_line..end_line].iter(),
-            fold_column: self.layout.fold_column[start_line..end_line].iter(),
-            scale: self.layout.scale[start_line..end_line].iter(),
+            y: self.layout.borrow().y[start_line.min(self.layout.borrow().y.len())..end_line.min(self.layout.borrow().y.len())].iter(),
+            column_count: self.layout.borrow().column_count[start_line..end_line].iter(),
+            fold_column: self.layout.borrow().fold_column[start_line..end_line].iter(),
+            scale: self.layout.borrow().scale[start_line..end_line].iter(),
             text: document.0.history.borrow().as_text().as_lines()[start_line..end_line].iter(),
             tokens: document.0.layout.borrow().tokens[start_line..end_line].iter(),
             inline_inlays: document.0.layout.borrow().inline_inlays[start_line..end_line].iter(),
-            wrap_data: self.layout.wrap_data[start_line..end_line].iter(),
+            wrap_data: self.layout.borrow().wrap_data[start_line..end_line].iter(),
         })
     }
 
@@ -234,7 +234,7 @@ impl Session {
                 .column_count(self.settings.tab_column_count)
                 / self.settings.indent_column_count;
             if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
-                self.layout.fold_column[line] =
+                self.layout.borrow_mut().fold_column[line] =
                     self.settings.fold_level * self.settings.indent_column_count;
                 self.unfolding_lines.remove(&line);
                 self.folding_lines.insert(line);
@@ -257,25 +257,26 @@ impl Session {
         }
         let mut new_folding_lines = HashSet::new();
         for &line in &self.folding_lines {
-            self.layout.scale[line] *= 0.9;
-            if self.layout.scale[line] < 0.1 + 0.001 {
-                self.layout.scale[line] = 0.1;
+            self.layout.borrow_mut().scale[line] *= 0.9;
+            if self.layout.borrow().scale[line] < 0.1 + 0.001 {
+                self.layout.borrow_mut().scale[line] = 0.1;
                 self.folded_lines.insert(line);
             } else {
                 new_folding_lines.insert(line);
             }
-            self.layout.y.truncate(line + 1);
+            self.layout.borrow_mut().y.truncate(line + 1);
         }
         self.folding_lines = new_folding_lines;
         let mut new_unfolding_lines = HashSet::new();
         for &line in &self.unfolding_lines {
-            self.layout.scale[line] = 1.0 - 0.9 * (1.0 - self.layout.scale[line]);
-            if self.layout.scale[line] > 1.0 - 0.001 {
-                self.layout.scale[line] = 1.0;
+            let scale = self.layout.borrow().scale[line];
+            self.layout.borrow_mut().scale[line] = 1.0 - 0.9 * (1.0 - scale);
+            if self.layout.borrow().scale[line] > 1.0 - 0.001 {
+                self.layout.borrow_mut().scale[line] = 1.0;
             } else {
                 new_unfolding_lines.insert(line);
             }
-            self.layout.y.truncate(line + 1);
+            self.layout.borrow_mut().y.truncate(line + 1);
         }
         self.unfolding_lines = new_unfolding_lines;
         self.update_y();
@@ -605,7 +606,7 @@ impl Session {
     }
 
     fn update_y(&mut self) {
-        let start = self.layout.y.len();
+        let start = self.layout.borrow().y.len();
         let end = self.document.text().as_lines().len();
         if start == end + 1 {
             return;
@@ -615,7 +616,7 @@ impl Session {
         } else {
             self.line(start - 1, |line| line.y() + line.height())
         };
-        let mut ys = mem::take(&mut self.layout.y);
+        let mut ys = mem::take(&mut self.layout.borrow_mut().y);
         self.blocks(start, end, |blocks| {
             for block in blocks {
                 match block {
@@ -632,7 +633,7 @@ impl Session {
             }
         });
         ys.push(y);
-        self.layout.y = ys;
+        self.layout.borrow_mut().y = ys;
     }
 
     pub fn handle_changes(&mut self) {
@@ -660,7 +661,7 @@ impl Session {
                 }
             }
         });
-        self.layout.column_count[index] = Some(column_count.max(column));
+        self.layout.borrow_mut().column_count[index] = Some(column_count.max(column));
     }
 
     fn update_wrap_data(&mut self, line: usize) {
@@ -670,8 +671,8 @@ impl Session {
             }),
             None => WrapData::default(),
         };
-        self.layout.wrap_data[line] = Some(wrap_data);
-        self.layout.y.truncate(line + 1);
+        self.layout.borrow_mut().wrap_data[line] = Some(wrap_data);
+        self.layout.borrow_mut().y.truncate(line + 1);
         self.update_column_count(line);
     }
 
@@ -699,40 +700,40 @@ impl Session {
         for edit in edits {
             match edit.change {
                 Change::Insert(point, ref text) => {
-                    self.layout.column_count[point.line_index] = None;
-                    self.layout.wrap_data[point.line_index] = None;
+                    self.layout.borrow_mut().column_count[point.line_index] = None;
+                    self.layout.borrow_mut().wrap_data[point.line_index] = None;
                     let line_count = text.length().line_count;
                     if line_count > 0 {
                         let line = point.line_index + 1;
-                        self.layout.y.truncate(line);
-                        self.layout.column_count
+                        self.layout.borrow_mut().y.truncate(line);
+                        self.layout.borrow_mut().column_count
                             .splice(line..line, (0..line_count).map(|_| None));
-                        self.layout.fold_column
+                        self.layout.borrow_mut().fold_column
                             .splice(line..line, (0..line_count).map(|_| 0));
-                        self.layout.scale.splice(line..line, (0..line_count).map(|_| 1.0));
-                        self.layout.wrap_data
+                        self.layout.borrow_mut().scale.splice(line..line, (0..line_count).map(|_| 1.0));
+                        self.layout.borrow_mut().wrap_data
                             .splice(line..line, (0..line_count).map(|_| None));
                     }
                 }
                 Change::Delete(start, length) => {
-                    self.layout.column_count[start.line_index] = None;
-                    self.layout.wrap_data[start.line_index] = None;
+                    self.layout.borrow_mut().column_count[start.line_index] = None;
+                    self.layout.borrow_mut().wrap_data[start.line_index] = None;
                     let line_count = length.line_count;
                     if line_count > 0 {
                         let start_line = start.line_index + 1;
                         let end_line = start_line + line_count;
-                        self.layout.y.truncate(start_line);
-                        self.layout.column_count.drain(start_line..end_line);
-                        self.layout.fold_column.drain(start_line..end_line);
-                        self.layout.scale.drain(start_line..end_line);
-                        self.layout.wrap_data.drain(start_line..end_line);
+                        self.layout.borrow_mut().y.truncate(start_line);
+                        self.layout.borrow_mut().column_count.drain(start_line..end_line);
+                        self.layout.borrow_mut().fold_column.drain(start_line..end_line);
+                        self.layout.borrow_mut().scale.drain(start_line..end_line);
+                        self.layout.borrow_mut().wrap_data.drain(start_line..end_line);
                     }
                 }
             }
         }
         let line_count = self.document.text().as_lines().len();
         for line in 0..line_count {
-            if self.layout.wrap_data[line].is_none() {
+            if self.layout.borrow().wrap_data[line].is_none() {
                 self.update_wrap_data(line);
             }
         }
@@ -835,14 +836,6 @@ struct SessionLayout {
 #[derive(Clone, Debug)]
 pub struct Document(Rc<DocumentInner>);
 
-#[derive(Debug)]
-struct DocumentInner {
-    history: RefCell<History>,
-    layout: RefCell<DocumentLayout>,
-    tokenizer: RefCell<Tokenizer>,
-    edit_senders: RefCell<HashMap<SessionId, Sender<(Option<SelectionSet>, Vec<Edit>)>>>,
-}
-
 impl Document {
     pub fn new(text: Text) -> Self {
         let line_count = text.as_lines().len();
@@ -869,6 +862,10 @@ impl Document {
 
     pub fn text(&self) -> Ref<'_, Text> {
         Ref::map(self.0.history.borrow(), |history| history.as_text())
+    }
+
+    pub fn layout(&self) -> Ref<'_, DocumentLayout> {
+        self.0.layout.borrow()
     }
 
     pub fn edit_selections(
@@ -1353,6 +1350,13 @@ impl Document {
 }
 
 #[derive(Debug)]
+pub struct DocumentLayout {
+    tokens: Vec<Vec<Token>>,
+    inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
+    block_inlays: Vec<(usize, BlockInlay)>,
+}
+
+#[derive(Debug)]
 pub struct Editor<'a> {
     history: &'a mut History,
     edits: &'a mut Vec<Edit>,
@@ -1370,10 +1374,11 @@ impl<'a> Editor<'a> {
 }
 
 #[derive(Debug)]
-struct DocumentLayout {
-    tokens: Vec<Vec<Token>>,
-    inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
-    block_inlays: Vec<(usize, BlockInlay)>,
+struct DocumentInner {
+    history: RefCell<History>,
+    layout: RefCell<DocumentLayout>,
+    tokenizer: RefCell<Tokenizer>,
+    edit_senders: RefCell<HashMap<SessionId, Sender<(Option<SelectionSet>, Vec<Edit>)>>>,
 }
 
 fn tokenize(text: &str) -> impl Iterator<Item = Token> + '_ {
