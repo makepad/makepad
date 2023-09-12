@@ -26,7 +26,7 @@ pub struct LiveFile {
     pub module_id: LiveModuleId,
     pub (crate) start_pos: TextPos,
     pub file_name: String,
-    pub (crate) cargo_manifest_path: String,
+    pub cargo_manifest_path: String,
     pub (crate) source: String,
     pub (crate) deps: BTreeSet<LiveModuleId>,
     
@@ -389,18 +389,19 @@ impl LiveRegistry {
         let mut state = State::default();
         let mut scratch = String::new();
         let mut tokens = Vec::new();
-        let mut pos = start_pos;
+        let mut line_count = start_pos.line;
         for line_str in source.lines() {
             line_chars.clear();
             line_chars.extend(line_str.chars());
             let mut cursor = Cursor::new(&line_chars, &mut scratch);
+            let mut last_index = 0usize;
             loop {
                 let (next_state, full_token) = state.next(&mut cursor);
                 if let Some(full_token) = full_token {
                     let span = TextSpan {
                         file_id,
-                        start: pos,
-                        end: TextPos {column: pos.column + full_token.len as u32, line: pos.line}
+                        start: TextPos {column: last_index  as u32, line: line_count},
+                        end: TextPos {column: last_index as u32 + full_token.len  as u32, line: line_count}
                     };
                     match full_token.token {
                         FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
@@ -415,15 +416,14 @@ impl LiveRegistry {
                             tokens.push(TokenWithSpan {span, token: live_token})
                         },
                     }
-                    pos.column += full_token.len as u32;
                 }
                 else {
                     break;
                 }
                 state = next_state;
+                last_index = cursor.index();
             }
-            pos.line += 1;
-            pos.column = 0;
+            line_count += 1;
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
@@ -434,7 +434,7 @@ impl LiveRegistry {
         let mut state = State::default();
         let mut scratch = String::new();
         let mut tokens = Vec::new();
-        let mut pos = start_pos;
+        let mut line_count = start_pos.line;
         enum Parse{
             Before,
             After,
@@ -448,10 +448,10 @@ impl LiveRegistry {
             line_chars.clear();
             line_chars.extend(line_str.chars());
             let mut cursor = Cursor::new(&line_chars, &mut scratch);
+            let mut last_index = 0usize;
             loop {
                 let (next_state, full_token) = state.next(&mut cursor);
                 if let Some(full_token) = full_token {
-                    let full_token_len = full_token.len;
                     match parse{
                         Parse::Before=>{
                             if let FullToken::Ident(live_id!(live_design)) = &full_token.token{
@@ -479,6 +479,7 @@ impl LiveRegistry {
                             }
                             if let FullToken::Close(Delim::Brace) = &full_token.token{
                                 if depth == 0{
+                                    last_index = cursor.index();
                                     parse = Parse::After;
                                     continue;
                                 }
@@ -486,8 +487,8 @@ impl LiveRegistry {
                             }
                             let span = TextSpan {
                                 file_id,
-                                start: pos,
-                                end: TextPos {column: pos.column + full_token.len as u32, line: pos.line}
+                                start: TextPos {column: last_index  as u32, line: line_count},
+                                end: TextPos {column: last_index as u32 + full_token.len  as u32, line: line_count}
                             };
                             if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
                                 tokens.push(TokenWithSpan {span, token: live_token})
@@ -502,15 +503,14 @@ impl LiveRegistry {
                             }
                         }
                     }
-                    pos.column += full_token_len as u32;
                 }
                 else {
                     break;
                 }
                 state = next_state;
+                last_index = cursor.index();
             }
-            pos.line += 1;
-            pos.column = 0;
+            line_count += 1;
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)

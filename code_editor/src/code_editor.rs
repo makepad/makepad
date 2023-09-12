@@ -4,8 +4,9 @@ use {
         selection::Affinity,
         state::{Block, Session},
         str::StrExt,
+        text::Position,
         token::TokenKind,
-        Line, Point, Selection, Token,
+        Line, Selection, Token,
     },
     makepad_widgets::*,
     std::{mem, slice::Iter},
@@ -78,7 +79,7 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-    
+
         width: Fill,
         height: Fill,
         margin: 0,
@@ -154,7 +155,7 @@ impl Widget for CodeEditor {
         //self.handle_event
     }
 
-    fn walk(&self) -> Walk {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
 
@@ -175,18 +176,17 @@ impl CodeEditor {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
-        
+
         self.viewport_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
-        
-        let pad_left_top = dvec2(10.,10.);
-        
+
+        let pad_left_top = dvec2(10., 10.);
+
         self.viewport_rect.pos += pad_left_top;
         self.viewport_rect.size -= pad_left_top;
-        
-        
+
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
-        
+
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         session.handle_changes();
@@ -209,9 +209,14 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) -> Vec<CodeEditorAction> {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        session: &mut Session,
+    ) -> Vec<CodeEditorAction> {
         let mut a = Vec::new();
-        self.handle_event_with(cx, event, session, &mut | _, v | a.push(v));
+        self.handle_event_with(cx, event, session, &mut |_, v| a.push(v));
         a
     }
 
@@ -220,7 +225,7 @@ impl CodeEditor {
         cx: &mut Cx,
         event: &Event,
         session: &mut Session,
-        dispatch_action: &mut dyn  FnMut(&mut Cx, CodeEditorAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
@@ -275,7 +280,7 @@ impl CodeEditor {
                 session.move_down(!shift);
                 cx.redraw_all();
             }
-            Hit::TextInput(TextInputEvent { ref input, .. }) if input.len()>0 => {
+            Hit::TextInput(TextInputEvent { ref input, .. }) if input.len() > 0 => {
                 session.insert(input.into());
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
@@ -363,7 +368,7 @@ impl CodeEditor {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
-                        session.add_cursor(cursor, affinity);
+                        session.push_cursor(cursor, affinity);
                     } else {
                         session.set_cursor(cursor, affinity);
                     }
@@ -491,18 +496,14 @@ impl CodeEditor {
     fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
-        while selections
-            .as_slice()
-            .first()
-            .map_or(false, |selection| selection.end().line < self.start_line)
-        {
+        while selections.as_slice().first().map_or(false, |selection| {
+            selection.end().line_index < self.start_line
+        }) {
             selections.next().unwrap();
         }
-        if selections
-            .as_slice()
-            .first()
-            .map_or(false, |selection| selection.start().line < self.start_line)
-        {
+        if selections.as_slice().first().map_or(false, |selection| {
+            selection.start().line_index < self.start_line
+        }) {
             active_selection = Some(ActiveSelection {
                 selection: *selections.next().unwrap(),
                 start_x: 0.0,
@@ -516,7 +517,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &Session, point: DVec2) -> Option<(Position, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -547,15 +548,18 @@ impl CodeEditor {
                                         if (y..=next_y).contains(&point.y) {
                                             if (x..=mid_x).contains(&point.x) {
                                                 return Some((
-                                                    Point { line, byte },
+                                                    Position {
+                                                        line_index: line,
+                                                        byte_index: byte,
+                                                    },
                                                     Affinity::After,
                                                 ));
                                             }
                                             if (mid_x..=next_x).contains(&point.x) {
                                                 return Some((
-                                                    Point {
-                                                        line,
-                                                        byte: next_byte,
+                                                    Position {
+                                                        line_index: line,
+                                                        byte_index: next_byte,
                                                     },
                                                     Affinity::Before,
                                                 ));
@@ -577,7 +581,13 @@ impl CodeEditor {
                                     if (y..=next_y).contains(&point.y)
                                         && (x..=next_x).contains(&point.x)
                                     {
-                                        return Some((Point { line, byte }, Affinity::Before));
+                                        return Some((
+                                            Position {
+                                                line_index: line,
+                                                byte_index: byte,
+                                            },
+                                            Affinity::Before,
+                                        ));
                                     }
                                     column = next_column;
                                 }
@@ -587,7 +597,13 @@ impl CodeEditor {
                                 Wrapped::Wrap => {
                                     let next_y = y + line_ref.scale();
                                     if (y..=next_y).contains(&point.y) {
-                                        return Some((Point { line, byte }, Affinity::Before));
+                                        return Some((
+                                            Position {
+                                                line_index: line,
+                                                byte_index: byte,
+                                            },
+                                            Affinity::Before,
+                                        ));
                                     }
                                     column = line_ref.wrap_indent_column_count();
                                     y = next_y;
@@ -596,7 +612,13 @@ impl CodeEditor {
                         }
                         let next_y = y + line_ref.scale();
                         if (y..=y + next_y).contains(&point.y) {
-                            return Some((Point { line, byte }, Affinity::After));
+                            return Some((
+                                Position {
+                                    line_index: line,
+                                    byte_index: byte,
+                                },
+                                Affinity::After,
+                            ));
                         }
                         line += 1;
                         y = next_y;
@@ -607,7 +629,13 @@ impl CodeEditor {
                     } => {
                         let next_y = y + line_ref.height();
                         if (y..=next_y).contains(&point.y) {
-                            return Some((Point { line, byte: 0 }, Affinity::Before));
+                            return Some((
+                                Position {
+                                    line_index: line,
+                                    byte_index: 0,
+                                },
+                                Affinity::Before,
+                            ));
                         }
                         y = next_y;
                     }
@@ -742,14 +770,17 @@ impl<'a> DrawSelections<'a> {
         y: f64,
         column: usize,
     ) {
-        let point = Point { line, byte };
+        let point = Position {
+            line_index: line,
+            byte_index: byte,
+        };
         if self.active_selection.as_ref().map_or(false, |selection| {
             selection.selection.end() == point && selection.selection.end_affinity() == affinity
         }) {
             self.draw_selection(cx, line_ref, y, column);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == point && selection.affinity == affinity {
+            if selection.cursor.position == point && selection.cursor.affinity == affinity {
                 self.draw_cursor(cx, line_ref, y, column);
             }
         }
@@ -762,7 +793,7 @@ impl<'a> DrawSelections<'a> {
             })
         {
             let selection = *self.selections.next().unwrap();
-            if selection.cursor == point && selection.affinity == affinity {
+            if selection.cursor.position == point && selection.cursor.affinity == affinity {
                 self.draw_cursor(cx, line_ref, y, column);
             }
             if !selection.is_empty() {

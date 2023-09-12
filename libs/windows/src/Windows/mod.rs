@@ -396,6 +396,8 @@ pub const WM_SIZE: u32 = 5u32;
 
 pub const WM_DPICHANGED: u32 = 736u32;
 
+pub const WM_DROPFILES: u32 = 563u32;
+
 pub const WM_DESTROY: u32 = 2u32;
 
 pub const HTTOPLEFT: u32 = 13u32;
@@ -1837,6 +1839,32 @@ impl ::core::convert::From<HBRUSH> for HGDIOBJ {
     }
 }
 impl ::windows_core::TypeKind for HBRUSH {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HENHMETAFILE(pub isize);
+impl HENHMETAFILE {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == -1 || self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HENHMETAFILE {}
+impl ::core::clone::Clone for HENHMETAFILE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HENHMETAFILE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for HENHMETAFILE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HENHMETAFILE").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for HENHMETAFILE {
     type TypeKind = ::windows_core::CopyType;
 }
 
@@ -12510,6 +12538,36 @@ impl ::windows_core::TypeKind for HINSTANCE {
 
 pub const WAIT_OBJECT_0: WAIT_EVENT = WAIT_EVENT(0u32);
 
+#[repr(C)]pub struct POINTL {
+    pub x: i32,
+    pub y: i32,
+}
+impl ::core::marker::Copy for POINTL {}
+impl ::core::cmp::Eq for POINTL {}
+impl ::core::cmp::PartialEq for POINTL {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+impl ::core::clone::Clone for POINTL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for POINTL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for POINTL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("POINTL").field("x", &self.x).field("y", &self.y).finish()
+    }
+}
+impl ::windows_core::TypeKind for POINTL {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WAIT_EVENT(pub u32);
 impl ::core::marker::Copy for WAIT_EVENT {}
 impl ::core::clone::Clone for WAIT_EVENT {
@@ -13079,6 +13137,60 @@ impl ::windows_core::TypeKind for CLIPBOARD_FORMAT {
     type TypeKind = ::windows_core::CopyType;
 }
 
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DROPEFFECT(pub u32);
+impl DROPEFFECT {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl ::core::marker::Copy for DROPEFFECT {}
+impl ::core::clone::Clone for DROPEFFECT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DROPEFFECT {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for DROPEFFECT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DROPEFFECT").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for DROPEFFECT {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for DROPEFFECT {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for DROPEFFECT {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for DROPEFFECT {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for DROPEFFECT {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+impl ::windows_core::TypeKind for DROPEFFECT {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 #[repr(transparent)]pub struct IRecordInfo(::windows_core::IUnknown);
 impl IRecordInfo {
     pub unsafe fn RecordInit(&self, pvnew: *mut ::core::ffi::c_void) -> ::windows_core::Result<()> {
@@ -13506,6 +13618,120 @@ impl ::windows_core::TypeKind for PARAMDESC {
     type TypeKind = ::windows_core::CopyType;
 }
 
+#[repr(transparent)]pub struct IDropTarget(::windows_core::IUnknown);
+impl IDropTarget {
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`, `\"Win32_System_SystemServices\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
+    pub unsafe fn DragEnter<P0>(&self, pdataobj: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<super::Com::IDataObject>,
+    {
+        (::windows_core::Interface::vtable(self).DragEnter)(::windows_core::Interface::as_raw(self), pdataobj.into_param().abi(), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_SystemServices\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
+    pub unsafe fn DragOver(&self, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).DragOver)(::windows_core::Interface::as_raw(self), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
+    }
+    pub unsafe fn DragLeave(&self) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).DragLeave)(::windows_core::Interface::as_raw(self)).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`, `\"Win32_System_SystemServices\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
+    pub unsafe fn Drop<P0>(&self, pdataobj: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<super::Com::IDataObject>,
+    {
+        (::windows_core::Interface::vtable(self).Drop)(::windows_core::Interface::as_raw(self), pdataobj.into_param().abi(), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
+    }
+}
+impl ::core::cmp::Eq for IDropTarget {}
+impl ::core::cmp::PartialEq for IDropTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IDropTarget {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IDropTarget {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IDropTarget").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IDropTarget {
+    type Vtable = IDropTarget_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IDropTarget {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000122_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IDropTarget, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IDropTarget_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
+    pub DragEnter: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices")))]
+    DragEnter: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
+    pub DragOver: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices")))]
+    DragOver: usize,
+    pub DragLeave: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
+    pub Drop: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices")))]
+    Drop: usize,
+}
+
+pub trait IDropTarget_Impl: Sized {
+    fn DragEnter(&self, pdataobj: ::core::option::Option<&super::Com::IDataObject>, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
+    fn DragOver(&self, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
+    fn DragLeave(&self) -> ::windows_core::Result<()>;
+    fn Drop(&self, pdataobj: ::core::option::Option<&super::Com::IDataObject>, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
+}
+
+impl ::windows_core::RuntimeName for IDropTarget {}
+
+impl IDropTarget_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>() -> IDropTarget_Vtbl {
+        unsafe extern "system" fn DragEnter<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.DragEnter(::windows_core::from_raw_borrowed(&pdataobj), ::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
+        }
+        unsafe extern "system" fn DragOver<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.DragOver(::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
+        }
+        unsafe extern "system" fn DragLeave<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.DragLeave().into()
+        }
+        unsafe extern "system" fn Drop<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Drop(::windows_core::from_raw_borrowed(&pdataobj), ::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            DragEnter: DragEnter::<Identity, Impl, OFFSET>,
+            DragOver: DragOver::<Identity, Impl, OFFSET>,
+            DragLeave: DragLeave::<Identity, Impl, OFFSET>,
+            Drop: Drop::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IDropTarget as ::windows_core::ComInterface>::IID
+    }
+}
+
 }
 pub mod WindowsProgramming{
 pub const GMEM_DDESHARE: u32 = 8192u32;
@@ -13571,6 +13797,1854 @@ pub const CLSCTX_ALL: CLSCTX = CLSCTX(23u32);
 pub unsafe fn CoTaskMemFree(pv: ::core::option::Option<*const ::core::ffi::c_void>) {
     ::windows_targets::link!("ole32.dll" "system" fn CoTaskMemFree(pv : *const ::core::ffi::c_void) -> ());
     CoTaskMemFree(::core::mem::transmute(pv.unwrap_or(::std::ptr::null())))
+}
+
+#[repr(transparent)]pub struct IAdviseSink(::windows_core::IUnknown);
+impl IAdviseSink {
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Gdi\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn OnDataChange(&self, pformatetc: *const FORMATETC, pstgmed: *const STGMEDIUM) {
+        (::windows_core::Interface::vtable(self).OnDataChange)(::windows_core::Interface::as_raw(self), pformatetc, pstgmed)
+    }
+    pub unsafe fn OnViewChange(&self, dwaspect: u32, lindex: i32) {
+        (::windows_core::Interface::vtable(self).OnViewChange)(::windows_core::Interface::as_raw(self), dwaspect, lindex)
+    }
+    pub unsafe fn OnRename<P0>(&self, pmk: P0)
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+    {
+        (::windows_core::Interface::vtable(self).OnRename)(::windows_core::Interface::as_raw(self), pmk.into_param().abi())
+    }
+    pub unsafe fn OnSave(&self) {
+        (::windows_core::Interface::vtable(self).OnSave)(::windows_core::Interface::as_raw(self))
+    }
+    pub unsafe fn OnClose(&self) {
+        (::windows_core::Interface::vtable(self).OnClose)(::windows_core::Interface::as_raw(self))
+    }
+}
+impl ::core::cmp::Eq for IAdviseSink {}
+impl ::core::cmp::PartialEq for IAdviseSink {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IAdviseSink {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IAdviseSink {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IAdviseSink").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IAdviseSink {
+    type Vtable = IAdviseSink_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IAdviseSink {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x0000010f_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IAdviseSink, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IAdviseSink_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub OnDataChange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, pstgmed: *const STGMEDIUM),
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage")))]
+    OnDataChange: usize,
+    pub OnViewChange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwaspect: u32, lindex: i32),
+    pub OnRename: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmk: *mut ::core::ffi::c_void),
+    pub OnSave: unsafe extern "system" fn(this: *mut ::core::ffi::c_void),
+    pub OnClose: unsafe extern "system" fn(this: *mut ::core::ffi::c_void),
+}
+
+pub trait IAdviseSink_Impl: Sized {
+    fn OnDataChange(&self, pformatetc: *const FORMATETC, pstgmed: *const STGMEDIUM);
+    fn OnViewChange(&self, dwaspect: u32, lindex: i32);
+    fn OnRename(&self, pmk: ::core::option::Option<&IMoniker>);
+    fn OnSave(&self);
+    fn OnClose(&self);
+}
+
+impl ::windows_core::RuntimeName for IAdviseSink {}
+
+impl IAdviseSink_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IAdviseSink_Impl, const OFFSET: isize>() -> IAdviseSink_Vtbl {
+        unsafe extern "system" fn OnDataChange<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IAdviseSink_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, pstgmed: *const STGMEDIUM) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnDataChange(::core::mem::transmute_copy(&pformatetc), ::core::mem::transmute_copy(&pstgmed))
+        }
+        unsafe extern "system" fn OnViewChange<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IAdviseSink_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwaspect: u32, lindex: i32) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnViewChange(::core::mem::transmute_copy(&dwaspect), ::core::mem::transmute_copy(&lindex))
+        }
+        unsafe extern "system" fn OnRename<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IAdviseSink_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmk: *mut ::core::ffi::c_void) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnRename(::windows_core::from_raw_borrowed(&pmk))
+        }
+        unsafe extern "system" fn OnSave<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IAdviseSink_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnSave()
+        }
+        unsafe extern "system" fn OnClose<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IAdviseSink_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnClose()
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            OnDataChange: OnDataChange::<Identity, Impl, OFFSET>,
+            OnViewChange: OnViewChange::<Identity, Impl, OFFSET>,
+            OnRename: OnRename::<Identity, Impl, OFFSET>,
+            OnSave: OnSave::<Identity, Impl, OFFSET>,
+            OnClose: OnClose::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IAdviseSink as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(transparent)]pub struct IEnumSTATDATA(::windows_core::IUnknown);
+impl IEnumSTATDATA {
+    pub unsafe fn Next(&self, rgelt: &mut [STATDATA], pceltfetched: ::core::option::Option<*mut u32>) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Next)(::windows_core::Interface::as_raw(self), rgelt.len() as _, ::core::mem::transmute(rgelt.as_ptr()), ::core::mem::transmute(pceltfetched.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn Skip(&self, celt: u32) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Skip)(::windows_core::Interface::as_raw(self), celt).ok()
+    }
+    pub unsafe fn Reset(&self) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Reset)(::windows_core::Interface::as_raw(self)).ok()
+    }
+    pub unsafe fn Clone(&self) -> ::windows_core::Result<IEnumSTATDATA> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Clone)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IEnumSTATDATA {}
+impl ::core::cmp::PartialEq for IEnumSTATDATA {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IEnumSTATDATA {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IEnumSTATDATA {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IEnumSTATDATA").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IEnumSTATDATA {
+    type Vtable = IEnumSTATDATA_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IEnumSTATDATA {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000105_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IEnumSTATDATA, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IEnumSTATDATA_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    pub Next: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut STATDATA, pceltfetched: *mut u32) -> ::windows_core::HRESULT,
+    pub Skip: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT,
+    pub Reset: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+}
+
+pub trait IEnumSTATDATA_Impl: Sized {
+    fn Next(&self, celt: u32, rgelt: *mut STATDATA, pceltfetched: *mut u32) -> ::windows_core::Result<()>;
+    fn Skip(&self, celt: u32) -> ::windows_core::Result<()>;
+    fn Reset(&self) -> ::windows_core::Result<()>;
+    fn Clone(&self) -> ::windows_core::Result<IEnumSTATDATA>;
+}
+
+impl ::windows_core::RuntimeName for IEnumSTATDATA {}
+
+impl IEnumSTATDATA_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATDATA_Impl, const OFFSET: isize>() -> IEnumSTATDATA_Vtbl {
+        unsafe extern "system" fn Next<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATDATA_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut STATDATA, pceltfetched: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Next(::core::mem::transmute_copy(&celt), ::core::mem::transmute_copy(&rgelt), ::core::mem::transmute_copy(&pceltfetched)).into()
+        }
+        unsafe extern "system" fn Skip<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATDATA_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Skip(::core::mem::transmute_copy(&celt)).into()
+        }
+        unsafe extern "system" fn Reset<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATDATA_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Reset().into()
+        }
+        unsafe extern "system" fn Clone<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATDATA_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Clone() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenum, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Next: Next::<Identity, Impl, OFFSET>,
+            Skip: Skip::<Identity, Impl, OFFSET>,
+            Reset: Reset::<Identity, Impl, OFFSET>,
+            Clone: Clone::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IEnumSTATDATA as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(C)]pub struct STATDATA {
+    pub formatetc: FORMATETC,
+    pub advf: u32,
+    pub pAdvSink: ::std::mem::ManuallyDrop<::core::option::Option<IAdviseSink>>,
+    pub dwConnection: u32,
+}
+impl ::core::cmp::Eq for STATDATA {}
+impl ::core::cmp::PartialEq for STATDATA {
+    fn eq(&self, other: &Self) -> bool {
+        self.formatetc == other.formatetc && self.advf == other.advf && self.pAdvSink == other.pAdvSink && self.dwConnection == other.dwConnection
+    }
+}
+impl ::core::clone::Clone for STATDATA {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for STATDATA {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for STATDATA {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("STATDATA").field("formatetc", &self.formatetc).field("advf", &self.advf).field("pAdvSink", &self.pAdvSink).field("dwConnection", &self.dwConnection).finish()
+    }
+}
+impl ::windows_core::TypeKind for STATDATA {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[repr(transparent)]pub struct IPersist(::windows_core::IUnknown);
+impl IPersist {
+    pub unsafe fn GetClassID(&self) -> ::windows_core::Result<::windows_core::GUID> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetClassID)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IPersist {}
+impl ::core::cmp::PartialEq for IPersist {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IPersist {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IPersist {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IPersist").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IPersist {
+    type Vtable = IPersist_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IPersist {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x0000010c_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IPersist, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IPersist_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    pub GetClassID: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pclassid: *mut ::windows_core::GUID) -> ::windows_core::HRESULT,
+}
+
+pub trait IPersist_Impl: Sized {
+    fn GetClassID(&self) -> ::windows_core::Result<::windows_core::GUID>;
+}
+
+impl ::windows_core::RuntimeName for IPersist {}
+
+impl IPersist_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IPersist_Impl, const OFFSET: isize>() -> IPersist_Vtbl {
+        unsafe extern "system" fn GetClassID<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IPersist_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pclassid: *mut ::windows_core::GUID) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetClassID() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pclassid, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self { base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(), GetClassID: GetClassID::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IPersist as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(transparent)]pub struct IPersistStream(::windows_core::IUnknown);
+impl IPersistStream {
+    pub unsafe fn GetClassID(&self) -> ::windows_core::Result<::windows_core::GUID> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).base__.GetClassID)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn IsDirty(&self) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).IsDirty)(::windows_core::Interface::as_raw(self))
+    }
+    pub unsafe fn Load<P0>(&self, pstm: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IStream>,
+    {
+        (::windows_core::Interface::vtable(self).Load)(::windows_core::Interface::as_raw(self), pstm.into_param().abi()).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn Save<P0, P1>(&self, pstm: P0, fcleardirty: P1) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IStream>,
+        P1: ::windows_core::IntoParam<super::super::Foundation::BOOL>,
+    {
+        (::windows_core::Interface::vtable(self).Save)(::windows_core::Interface::as_raw(self), pstm.into_param().abi(), fcleardirty.into_param().abi()).ok()
+    }
+    pub unsafe fn GetSizeMax(&self) -> ::windows_core::Result<u64> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetSizeMax)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IPersistStream {}
+impl ::core::cmp::PartialEq for IPersistStream {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IPersistStream {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IPersistStream {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IPersistStream").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IPersistStream {
+    type Vtable = IPersistStream_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IPersistStream {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000109_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IPersistStream, ::windows_core::IUnknown, IPersist);
+
+#[repr(C)]
+pub struct IPersistStream_Vtbl {
+    pub base__: IPersist_Vtbl,
+    pub IsDirty: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub Load: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pstm: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub Save: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pstm: *mut ::core::ffi::c_void, fcleardirty: super::super::Foundation::BOOL) -> ::windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    Save: usize,
+    pub GetSizeMax: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcbsize: *mut u64) -> ::windows_core::HRESULT,
+}
+
+pub trait IPersistStream_Impl: Sized + IPersist_Impl {
+    fn IsDirty(&self) -> ::windows_core::HRESULT;
+    fn Load(&self, pstm: ::core::option::Option<&IStream>) -> ::windows_core::Result<()>;
+    fn Save(&self, pstm: ::core::option::Option<&IStream>, fcleardirty: super::super::Foundation::BOOL) -> ::windows_core::Result<()>;
+    fn GetSizeMax(&self) -> ::windows_core::Result<u64>;
+}
+
+impl ::windows_core::RuntimeName for IPersistStream {}
+
+impl IPersistStream_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IPersistStream_Impl, const OFFSET: isize>() -> IPersistStream_Vtbl {
+        unsafe extern "system" fn IsDirty<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IPersistStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsDirty()
+        }
+        unsafe extern "system" fn Load<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IPersistStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pstm: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Load(::windows_core::from_raw_borrowed(&pstm)).into()
+        }
+        unsafe extern "system" fn Save<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IPersistStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pstm: *mut ::core::ffi::c_void, fcleardirty: super::super::Foundation::BOOL) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Save(::windows_core::from_raw_borrowed(&pstm), ::core::mem::transmute_copy(&fcleardirty)).into()
+        }
+        unsafe extern "system" fn GetSizeMax<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IPersistStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcbsize: *mut u64) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetSizeMax() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pcbsize, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: IPersist_Vtbl::new::<Identity, Impl, OFFSET>(),
+            IsDirty: IsDirty::<Identity, Impl, OFFSET>,
+            Load: Load::<Identity, Impl, OFFSET>,
+            Save: Save::<Identity, Impl, OFFSET>,
+            GetSizeMax: GetSizeMax::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IPersistStream as ::windows_core::ComInterface>::IID || iid == &<IPersist as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(C)]pub struct BIND_OPTS {
+    pub cbStruct: u32,
+    pub grfFlags: u32,
+    pub grfMode: u32,
+    pub dwTickCountDeadline: u32,
+}
+impl ::core::marker::Copy for BIND_OPTS {}
+impl ::core::cmp::Eq for BIND_OPTS {}
+impl ::core::cmp::PartialEq for BIND_OPTS {
+    fn eq(&self, other: &Self) -> bool {
+        self.cbStruct == other.cbStruct && self.grfFlags == other.grfFlags && self.grfMode == other.grfMode && self.dwTickCountDeadline == other.dwTickCountDeadline
+    }
+}
+impl ::core::clone::Clone for BIND_OPTS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for BIND_OPTS {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for BIND_OPTS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("BIND_OPTS").field("cbStruct", &self.cbStruct).field("grfFlags", &self.grfFlags).field("grfMode", &self.grfMode).field("dwTickCountDeadline", &self.dwTickCountDeadline).finish()
+    }
+}
+impl ::windows_core::TypeKind for BIND_OPTS {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[repr(transparent)]pub struct IRunningObjectTable(::windows_core::IUnknown);
+impl IRunningObjectTable {
+    pub unsafe fn Register<P0, P1>(&self, grfflags: ROT_FLAGS, punkobject: P0, pmkobjectname: P1) -> ::windows_core::Result<u32>
+    where
+        P0: ::windows_core::IntoParam<::windows_core::IUnknown>,
+        P1: ::windows_core::IntoParam<IMoniker>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Register)(::windows_core::Interface::as_raw(self), grfflags, punkobject.into_param().abi(), pmkobjectname.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn Revoke(&self, dwregister: u32) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Revoke)(::windows_core::Interface::as_raw(self), dwregister).ok()
+    }
+    pub unsafe fn IsRunning<P0>(&self, pmkobjectname: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+    {
+        (::windows_core::Interface::vtable(self).IsRunning)(::windows_core::Interface::as_raw(self), pmkobjectname.into_param().abi()).ok()
+    }
+    pub unsafe fn GetObject<P0>(&self, pmkobjectname: P0) -> ::windows_core::Result<::windows_core::IUnknown>
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetObject)(::windows_core::Interface::as_raw(self), pmkobjectname.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn NoteChangeTime(&self, dwregister: u32, pfiletime: *const super::super::Foundation::FILETIME) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).NoteChangeTime)(::windows_core::Interface::as_raw(self), dwregister, pfiletime).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn GetTimeOfLastChange<P0>(&self, pmkobjectname: P0) -> ::windows_core::Result<super::super::Foundation::FILETIME>
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetTimeOfLastChange)(::windows_core::Interface::as_raw(self), pmkobjectname.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn EnumRunning(&self) -> ::windows_core::Result<IEnumMoniker> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).EnumRunning)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IRunningObjectTable {}
+impl ::core::cmp::PartialEq for IRunningObjectTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IRunningObjectTable {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IRunningObjectTable {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IRunningObjectTable").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IRunningObjectTable {
+    type Vtable = IRunningObjectTable_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IRunningObjectTable {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000010_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IRunningObjectTable, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IRunningObjectTable_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    pub Register: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, grfflags: ROT_FLAGS, punkobject: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void, pdwregister: *mut u32) -> ::windows_core::HRESULT,
+    pub Revoke: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwregister: u32) -> ::windows_core::HRESULT,
+    pub IsRunning: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub GetObject: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void, ppunkobject: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub NoteChangeTime: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwregister: u32, pfiletime: *const super::super::Foundation::FILETIME) -> ::windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    NoteChangeTime: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub GetTimeOfLastChange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void, pfiletime: *mut super::super::Foundation::FILETIME) -> ::windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    GetTimeOfLastChange: usize,
+    pub EnumRunning: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenummoniker: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+}
+
+pub trait IRunningObjectTable_Impl: Sized {
+    fn Register(&self, grfflags: ROT_FLAGS, punkobject: ::core::option::Option<&::windows_core::IUnknown>, pmkobjectname: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<u32>;
+    fn Revoke(&self, dwregister: u32) -> ::windows_core::Result<()>;
+    fn IsRunning(&self, pmkobjectname: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<()>;
+    fn GetObject(&self, pmkobjectname: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<::windows_core::IUnknown>;
+    fn NoteChangeTime(&self, dwregister: u32, pfiletime: *const super::super::Foundation::FILETIME) -> ::windows_core::Result<()>;
+    fn GetTimeOfLastChange(&self, pmkobjectname: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<super::super::Foundation::FILETIME>;
+    fn EnumRunning(&self) -> ::windows_core::Result<IEnumMoniker>;
+}
+
+impl ::windows_core::RuntimeName for IRunningObjectTable {}
+
+impl IRunningObjectTable_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>() -> IRunningObjectTable_Vtbl {
+        unsafe extern "system" fn Register<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, grfflags: ROT_FLAGS, punkobject: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void, pdwregister: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Register(::core::mem::transmute_copy(&grfflags), ::windows_core::from_raw_borrowed(&punkobject), ::windows_core::from_raw_borrowed(&pmkobjectname)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwregister, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn Revoke<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwregister: u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Revoke(::core::mem::transmute_copy(&dwregister)).into()
+        }
+        unsafe extern "system" fn IsRunning<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsRunning(::windows_core::from_raw_borrowed(&pmkobjectname)).into()
+        }
+        unsafe extern "system" fn GetObject<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void, ppunkobject: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetObject(::windows_core::from_raw_borrowed(&pmkobjectname)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppunkobject, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn NoteChangeTime<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwregister: u32, pfiletime: *const super::super::Foundation::FILETIME) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.NoteChangeTime(::core::mem::transmute_copy(&dwregister), ::core::mem::transmute_copy(&pfiletime)).into()
+        }
+        unsafe extern "system" fn GetTimeOfLastChange<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmkobjectname: *mut ::core::ffi::c_void, pfiletime: *mut super::super::Foundation::FILETIME) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTimeOfLastChange(::windows_core::from_raw_borrowed(&pmkobjectname)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pfiletime, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn EnumRunning<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IRunningObjectTable_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenummoniker: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.EnumRunning() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenummoniker, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Register: Register::<Identity, Impl, OFFSET>,
+            Revoke: Revoke::<Identity, Impl, OFFSET>,
+            IsRunning: IsRunning::<Identity, Impl, OFFSET>,
+            GetObject: GetObject::<Identity, Impl, OFFSET>,
+            NoteChangeTime: NoteChangeTime::<Identity, Impl, OFFSET>,
+            GetTimeOfLastChange: GetTimeOfLastChange::<Identity, Impl, OFFSET>,
+            EnumRunning: EnumRunning::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IRunningObjectTable as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(transparent)]pub struct IEnumString(::windows_core::IUnknown);
+impl IEnumString {
+    pub unsafe fn Next(&self, rgelt: &mut [::windows_core::PWSTR], pceltfetched: ::core::option::Option<*mut u32>) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).Next)(::windows_core::Interface::as_raw(self), rgelt.len() as _, ::core::mem::transmute(rgelt.as_ptr()), ::core::mem::transmute(pceltfetched.unwrap_or(::std::ptr::null_mut())))
+    }
+    pub unsafe fn Skip(&self, celt: u32) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).Skip)(::windows_core::Interface::as_raw(self), celt)
+    }
+    pub unsafe fn Reset(&self) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Reset)(::windows_core::Interface::as_raw(self)).ok()
+    }
+    pub unsafe fn Clone(&self) -> ::windows_core::Result<IEnumString> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Clone)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IEnumString {}
+impl ::core::cmp::PartialEq for IEnumString {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IEnumString {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IEnumString {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IEnumString").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IEnumString {
+    type Vtable = IEnumString_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IEnumString {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000101_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IEnumString, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IEnumString_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    pub Next: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut ::windows_core::PWSTR, pceltfetched: *mut u32) -> ::windows_core::HRESULT,
+    pub Skip: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT,
+    pub Reset: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+}
+
+pub trait IEnumString_Impl: Sized {
+    fn Next(&self, celt: u32, rgelt: *mut ::windows_core::PWSTR, pceltfetched: *mut u32) -> ::windows_core::HRESULT;
+    fn Skip(&self, celt: u32) -> ::windows_core::HRESULT;
+    fn Reset(&self) -> ::windows_core::Result<()>;
+    fn Clone(&self) -> ::windows_core::Result<IEnumString>;
+}
+
+impl ::windows_core::RuntimeName for IEnumString {}
+
+impl IEnumString_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumString_Impl, const OFFSET: isize>() -> IEnumString_Vtbl {
+        unsafe extern "system" fn Next<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumString_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut ::windows_core::PWSTR, pceltfetched: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Next(::core::mem::transmute_copy(&celt), ::core::mem::transmute_copy(&rgelt), ::core::mem::transmute_copy(&pceltfetched))
+        }
+        unsafe extern "system" fn Skip<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumString_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Skip(::core::mem::transmute_copy(&celt))
+        }
+        unsafe extern "system" fn Reset<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumString_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Reset().into()
+        }
+        unsafe extern "system" fn Clone<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumString_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Clone() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenum, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Next: Next::<Identity, Impl, OFFSET>,
+            Skip: Skip::<Identity, Impl, OFFSET>,
+            Reset: Reset::<Identity, Impl, OFFSET>,
+            Clone: Clone::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IEnumString as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct ROT_FLAGS(pub u32);
+impl ROT_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl ::core::marker::Copy for ROT_FLAGS {}
+impl ::core::clone::Clone for ROT_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for ROT_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for ROT_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ROT_FLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for ROT_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for ROT_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for ROT_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for ROT_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for ROT_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+impl ::windows_core::TypeKind for ROT_FLAGS {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[repr(transparent)]pub struct IMoniker(::windows_core::IUnknown);
+impl IMoniker {
+    pub unsafe fn GetClassID(&self) -> ::windows_core::Result<::windows_core::GUID> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).base__.base__.GetClassID)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn IsDirty(&self) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).base__.IsDirty)(::windows_core::Interface::as_raw(self))
+    }
+    pub unsafe fn Load<P0>(&self, pstm: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IStream>,
+    {
+        (::windows_core::Interface::vtable(self).base__.Load)(::windows_core::Interface::as_raw(self), pstm.into_param().abi()).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn Save<P0, P1>(&self, pstm: P0, fcleardirty: P1) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IStream>,
+        P1: ::windows_core::IntoParam<super::super::Foundation::BOOL>,
+    {
+        (::windows_core::Interface::vtable(self).base__.Save)(::windows_core::Interface::as_raw(self), pstm.into_param().abi(), fcleardirty.into_param().abi()).ok()
+    }
+    pub unsafe fn GetSizeMax(&self) -> ::windows_core::Result<u64> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).base__.GetSizeMax)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn BindToObject<P0, P1>(&self, pbc: P0, pmktoleft: P1, riidresult: *const ::windows_core::GUID, ppvresult: *mut *mut ::core::ffi::c_void) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IBindCtx>,
+        P1: ::windows_core::IntoParam<IMoniker>,
+    {
+        (::windows_core::Interface::vtable(self).BindToObject)(::windows_core::Interface::as_raw(self), pbc.into_param().abi(), pmktoleft.into_param().abi(), riidresult, ppvresult).ok()
+    }
+    pub unsafe fn BindToStorage<P0, P1>(&self, pbc: P0, pmktoleft: P1, riid: *const ::windows_core::GUID, ppvobj: *mut *mut ::core::ffi::c_void) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IBindCtx>,
+        P1: ::windows_core::IntoParam<IMoniker>,
+    {
+        (::windows_core::Interface::vtable(self).BindToStorage)(::windows_core::Interface::as_raw(self), pbc.into_param().abi(), pmktoleft.into_param().abi(), riid, ppvobj).ok()
+    }
+    pub unsafe fn Reduce<P0>(&self, pbc: P0, dwreducehowfar: u32, ppmktoleft: *mut ::core::option::Option<IMoniker>, ppmkreduced: *mut ::core::option::Option<IMoniker>) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IBindCtx>,
+    {
+        (::windows_core::Interface::vtable(self).Reduce)(::windows_core::Interface::as_raw(self), pbc.into_param().abi(), dwreducehowfar, ::core::mem::transmute(ppmktoleft), ::core::mem::transmute(ppmkreduced)).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn ComposeWith<P0, P1>(&self, pmkright: P0, fonlyifnotgeneric: P1) -> ::windows_core::Result<IMoniker>
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+        P1: ::windows_core::IntoParam<super::super::Foundation::BOOL>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).ComposeWith)(::windows_core::Interface::as_raw(self), pmkright.into_param().abi(), fonlyifnotgeneric.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn Enum<P0>(&self, fforward: P0) -> ::windows_core::Result<IEnumMoniker>
+    where
+        P0: ::windows_core::IntoParam<super::super::Foundation::BOOL>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Enum)(::windows_core::Interface::as_raw(self), fforward.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn IsEqual<P0>(&self, pmkothermoniker: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+    {
+        (::windows_core::Interface::vtable(self).IsEqual)(::windows_core::Interface::as_raw(self), pmkothermoniker.into_param().abi()).ok()
+    }
+    pub unsafe fn Hash(&self) -> ::windows_core::Result<u32> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Hash)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn IsRunning<P0, P1, P2>(&self, pbc: P0, pmktoleft: P1, pmknewlyrunning: P2) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IBindCtx>,
+        P1: ::windows_core::IntoParam<IMoniker>,
+        P2: ::windows_core::IntoParam<IMoniker>,
+    {
+        (::windows_core::Interface::vtable(self).IsRunning)(::windows_core::Interface::as_raw(self), pbc.into_param().abi(), pmktoleft.into_param().abi(), pmknewlyrunning.into_param().abi()).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn GetTimeOfLastChange<P0, P1>(&self, pbc: P0, pmktoleft: P1) -> ::windows_core::Result<super::super::Foundation::FILETIME>
+    where
+        P0: ::windows_core::IntoParam<IBindCtx>,
+        P1: ::windows_core::IntoParam<IMoniker>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetTimeOfLastChange)(::windows_core::Interface::as_raw(self), pbc.into_param().abi(), pmktoleft.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn Inverse(&self) -> ::windows_core::Result<IMoniker> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Inverse)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn CommonPrefixWith<P0>(&self, pmkother: P0) -> ::windows_core::Result<IMoniker>
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).CommonPrefixWith)(::windows_core::Interface::as_raw(self), pmkother.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn RelativePathTo<P0>(&self, pmkother: P0) -> ::windows_core::Result<IMoniker>
+    where
+        P0: ::windows_core::IntoParam<IMoniker>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).RelativePathTo)(::windows_core::Interface::as_raw(self), pmkother.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn GetDisplayName<P0, P1>(&self, pbc: P0, pmktoleft: P1) -> ::windows_core::Result<::windows_core::PWSTR>
+    where
+        P0: ::windows_core::IntoParam<IBindCtx>,
+        P1: ::windows_core::IntoParam<IMoniker>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetDisplayName)(::windows_core::Interface::as_raw(self), pbc.into_param().abi(), pmktoleft.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn ParseDisplayName<P0, P1, P2>(&self, pbc: P0, pmktoleft: P1, pszdisplayname: P2, pcheaten: *mut u32, ppmkout: *mut ::core::option::Option<IMoniker>) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<IBindCtx>,
+        P1: ::windows_core::IntoParam<IMoniker>,
+        P2: ::windows_core::IntoParam<::windows_core::PCWSTR>,
+    {
+        (::windows_core::Interface::vtable(self).ParseDisplayName)(::windows_core::Interface::as_raw(self), pbc.into_param().abi(), pmktoleft.into_param().abi(), pszdisplayname.into_param().abi(), pcheaten, ::core::mem::transmute(ppmkout)).ok()
+    }
+    pub unsafe fn IsSystemMoniker(&self) -> ::windows_core::Result<u32> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).IsSystemMoniker)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IMoniker {}
+impl ::core::cmp::PartialEq for IMoniker {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMoniker {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMoniker {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMoniker").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IMoniker {
+    type Vtable = IMoniker_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IMoniker {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x0000000f_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IMoniker, ::windows_core::IUnknown, IPersist, IPersistStream);
+
+#[repr(C)]
+pub struct IMoniker_Vtbl {
+    pub base__: IPersistStream_Vtbl,
+    pub BindToObject: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, riidresult: *const ::windows_core::GUID, ppvresult: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub BindToStorage: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, riid: *const ::windows_core::GUID, ppvobj: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub Reduce: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, dwreducehowfar: u32, ppmktoleft: *mut *mut ::core::ffi::c_void, ppmkreduced: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub ComposeWith: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmkright: *mut ::core::ffi::c_void, fonlyifnotgeneric: super::super::Foundation::BOOL, ppmkcomposite: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    ComposeWith: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub Enum: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, fforward: super::super::Foundation::BOOL, ppenummoniker: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    Enum: usize,
+    pub IsEqual: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmkothermoniker: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub Hash: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdwhash: *mut u32) -> ::windows_core::HRESULT,
+    pub IsRunning: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, pmknewlyrunning: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub GetTimeOfLastChange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, pfiletime: *mut super::super::Foundation::FILETIME) -> ::windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    GetTimeOfLastChange: usize,
+    pub Inverse: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppmk: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub CommonPrefixWith: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmkother: *mut ::core::ffi::c_void, ppmkprefix: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub RelativePathTo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pmkother: *mut ::core::ffi::c_void, ppmkrelpath: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub GetDisplayName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, ppszdisplayname: *mut ::windows_core::PWSTR) -> ::windows_core::HRESULT,
+    pub ParseDisplayName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, pszdisplayname: ::windows_core::PCWSTR, pcheaten: *mut u32, ppmkout: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub IsSystemMoniker: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdwmksys: *mut u32) -> ::windows_core::HRESULT,
+}
+
+pub trait IMoniker_Impl: Sized + IPersistStream_Impl {
+    fn BindToObject(&self, pbc: ::core::option::Option<&IBindCtx>, pmktoleft: ::core::option::Option<&IMoniker>, riidresult: *const ::windows_core::GUID, ppvresult: *mut *mut ::core::ffi::c_void) -> ::windows_core::Result<()>;
+    fn BindToStorage(&self, pbc: ::core::option::Option<&IBindCtx>, pmktoleft: ::core::option::Option<&IMoniker>, riid: *const ::windows_core::GUID, ppvobj: *mut *mut ::core::ffi::c_void) -> ::windows_core::Result<()>;
+    fn Reduce(&self, pbc: ::core::option::Option<&IBindCtx>, dwreducehowfar: u32, ppmktoleft: *mut ::core::option::Option<IMoniker>, ppmkreduced: *mut ::core::option::Option<IMoniker>) -> ::windows_core::Result<()>;
+    fn ComposeWith(&self, pmkright: ::core::option::Option<&IMoniker>, fonlyifnotgeneric: super::super::Foundation::BOOL) -> ::windows_core::Result<IMoniker>;
+    fn Enum(&self, fforward: super::super::Foundation::BOOL) -> ::windows_core::Result<IEnumMoniker>;
+    fn IsEqual(&self, pmkothermoniker: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<()>;
+    fn Hash(&self) -> ::windows_core::Result<u32>;
+    fn IsRunning(&self, pbc: ::core::option::Option<&IBindCtx>, pmktoleft: ::core::option::Option<&IMoniker>, pmknewlyrunning: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<()>;
+    fn GetTimeOfLastChange(&self, pbc: ::core::option::Option<&IBindCtx>, pmktoleft: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<super::super::Foundation::FILETIME>;
+    fn Inverse(&self) -> ::windows_core::Result<IMoniker>;
+    fn CommonPrefixWith(&self, pmkother: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<IMoniker>;
+    fn RelativePathTo(&self, pmkother: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<IMoniker>;
+    fn GetDisplayName(&self, pbc: ::core::option::Option<&IBindCtx>, pmktoleft: ::core::option::Option<&IMoniker>) -> ::windows_core::Result<::windows_core::PWSTR>;
+    fn ParseDisplayName(&self, pbc: ::core::option::Option<&IBindCtx>, pmktoleft: ::core::option::Option<&IMoniker>, pszdisplayname: &::windows_core::PCWSTR, pcheaten: *mut u32, ppmkout: *mut ::core::option::Option<IMoniker>) -> ::windows_core::Result<()>;
+    fn IsSystemMoniker(&self) -> ::windows_core::Result<u32>;
+}
+
+impl ::windows_core::RuntimeName for IMoniker {}
+
+impl IMoniker_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>() -> IMoniker_Vtbl {
+        unsafe extern "system" fn BindToObject<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, riidresult: *const ::windows_core::GUID, ppvresult: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.BindToObject(::windows_core::from_raw_borrowed(&pbc), ::windows_core::from_raw_borrowed(&pmktoleft), ::core::mem::transmute_copy(&riidresult), ::core::mem::transmute_copy(&ppvresult)).into()
+        }
+        unsafe extern "system" fn BindToStorage<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, riid: *const ::windows_core::GUID, ppvobj: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.BindToStorage(::windows_core::from_raw_borrowed(&pbc), ::windows_core::from_raw_borrowed(&pmktoleft), ::core::mem::transmute_copy(&riid), ::core::mem::transmute_copy(&ppvobj)).into()
+        }
+        unsafe extern "system" fn Reduce<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, dwreducehowfar: u32, ppmktoleft: *mut *mut ::core::ffi::c_void, ppmkreduced: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Reduce(::windows_core::from_raw_borrowed(&pbc), ::core::mem::transmute_copy(&dwreducehowfar), ::core::mem::transmute_copy(&ppmktoleft), ::core::mem::transmute_copy(&ppmkreduced)).into()
+        }
+        unsafe extern "system" fn ComposeWith<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmkright: *mut ::core::ffi::c_void, fonlyifnotgeneric: super::super::Foundation::BOOL, ppmkcomposite: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.ComposeWith(::windows_core::from_raw_borrowed(&pmkright), ::core::mem::transmute_copy(&fonlyifnotgeneric)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppmkcomposite, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn Enum<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, fforward: super::super::Foundation::BOOL, ppenummoniker: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Enum(::core::mem::transmute_copy(&fforward)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenummoniker, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn IsEqual<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmkothermoniker: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsEqual(::windows_core::from_raw_borrowed(&pmkothermoniker)).into()
+        }
+        unsafe extern "system" fn Hash<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdwhash: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Hash() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwhash, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn IsRunning<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, pmknewlyrunning: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsRunning(::windows_core::from_raw_borrowed(&pbc), ::windows_core::from_raw_borrowed(&pmktoleft), ::windows_core::from_raw_borrowed(&pmknewlyrunning)).into()
+        }
+        unsafe extern "system" fn GetTimeOfLastChange<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, pfiletime: *mut super::super::Foundation::FILETIME) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTimeOfLastChange(::windows_core::from_raw_borrowed(&pbc), ::windows_core::from_raw_borrowed(&pmktoleft)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pfiletime, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn Inverse<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppmk: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Inverse() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppmk, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn CommonPrefixWith<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmkother: *mut ::core::ffi::c_void, ppmkprefix: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.CommonPrefixWith(::windows_core::from_raw_borrowed(&pmkother)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppmkprefix, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn RelativePathTo<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pmkother: *mut ::core::ffi::c_void, ppmkrelpath: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.RelativePathTo(::windows_core::from_raw_borrowed(&pmkother)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppmkrelpath, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetDisplayName<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, ppszdisplayname: *mut ::windows_core::PWSTR) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetDisplayName(::windows_core::from_raw_borrowed(&pbc), ::windows_core::from_raw_borrowed(&pmktoleft)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppszdisplayname, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn ParseDisplayName<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbc: *mut ::core::ffi::c_void, pmktoleft: *mut ::core::ffi::c_void, pszdisplayname: ::windows_core::PCWSTR, pcheaten: *mut u32, ppmkout: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ParseDisplayName(::windows_core::from_raw_borrowed(&pbc), ::windows_core::from_raw_borrowed(&pmktoleft), ::core::mem::transmute(&pszdisplayname), ::core::mem::transmute_copy(&pcheaten), ::core::mem::transmute_copy(&ppmkout)).into()
+        }
+        unsafe extern "system" fn IsSystemMoniker<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdwmksys: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.IsSystemMoniker() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwmksys, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: IPersistStream_Vtbl::new::<Identity, Impl, OFFSET>(),
+            BindToObject: BindToObject::<Identity, Impl, OFFSET>,
+            BindToStorage: BindToStorage::<Identity, Impl, OFFSET>,
+            Reduce: Reduce::<Identity, Impl, OFFSET>,
+            ComposeWith: ComposeWith::<Identity, Impl, OFFSET>,
+            Enum: Enum::<Identity, Impl, OFFSET>,
+            IsEqual: IsEqual::<Identity, Impl, OFFSET>,
+            Hash: Hash::<Identity, Impl, OFFSET>,
+            IsRunning: IsRunning::<Identity, Impl, OFFSET>,
+            GetTimeOfLastChange: GetTimeOfLastChange::<Identity, Impl, OFFSET>,
+            Inverse: Inverse::<Identity, Impl, OFFSET>,
+            CommonPrefixWith: CommonPrefixWith::<Identity, Impl, OFFSET>,
+            RelativePathTo: RelativePathTo::<Identity, Impl, OFFSET>,
+            GetDisplayName: GetDisplayName::<Identity, Impl, OFFSET>,
+            ParseDisplayName: ParseDisplayName::<Identity, Impl, OFFSET>,
+            IsSystemMoniker: IsSystemMoniker::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IMoniker as ::windows_core::ComInterface>::IID || iid == &<IPersist as ::windows_core::ComInterface>::IID || iid == &<IPersistStream as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(transparent)]pub struct IBindCtx(::windows_core::IUnknown);
+impl IBindCtx {
+    pub unsafe fn RegisterObjectBound<P0>(&self, punk: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<::windows_core::IUnknown>,
+    {
+        (::windows_core::Interface::vtable(self).RegisterObjectBound)(::windows_core::Interface::as_raw(self), punk.into_param().abi()).ok()
+    }
+    pub unsafe fn RevokeObjectBound<P0>(&self, punk: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<::windows_core::IUnknown>,
+    {
+        (::windows_core::Interface::vtable(self).RevokeObjectBound)(::windows_core::Interface::as_raw(self), punk.into_param().abi()).ok()
+    }
+    pub unsafe fn ReleaseBoundObjects(&self) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).ReleaseBoundObjects)(::windows_core::Interface::as_raw(self)).ok()
+    }
+    pub unsafe fn SetBindOptions(&self, pbindopts: *const BIND_OPTS) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).SetBindOptions)(::windows_core::Interface::as_raw(self), pbindopts).ok()
+    }
+    pub unsafe fn GetBindOptions(&self, pbindopts: *mut BIND_OPTS) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).GetBindOptions)(::windows_core::Interface::as_raw(self), pbindopts).ok()
+    }
+    pub unsafe fn GetRunningObjectTable(&self) -> ::windows_core::Result<IRunningObjectTable> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetRunningObjectTable)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn RegisterObjectParam<P0, P1>(&self, pszkey: P0, punk: P1) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<::windows_core::PCWSTR>,
+        P1: ::windows_core::IntoParam<::windows_core::IUnknown>,
+    {
+        (::windows_core::Interface::vtable(self).RegisterObjectParam)(::windows_core::Interface::as_raw(self), pszkey.into_param().abi(), punk.into_param().abi()).ok()
+    }
+    pub unsafe fn GetObjectParam<P0>(&self, pszkey: P0) -> ::windows_core::Result<::windows_core::IUnknown>
+    where
+        P0: ::windows_core::IntoParam<::windows_core::PCWSTR>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetObjectParam)(::windows_core::Interface::as_raw(self), pszkey.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn EnumObjectParam(&self) -> ::windows_core::Result<IEnumString> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).EnumObjectParam)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn RevokeObjectParam<P0>(&self, pszkey: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<::windows_core::PCWSTR>,
+    {
+        (::windows_core::Interface::vtable(self).RevokeObjectParam)(::windows_core::Interface::as_raw(self), pszkey.into_param().abi()).ok()
+    }
+}
+impl ::core::cmp::Eq for IBindCtx {}
+impl ::core::cmp::PartialEq for IBindCtx {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IBindCtx {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IBindCtx {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IBindCtx").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IBindCtx {
+    type Vtable = IBindCtx_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IBindCtx {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x0000000e_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IBindCtx, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IBindCtx_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    pub RegisterObjectBound: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, punk: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub RevokeObjectBound: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, punk: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub ReleaseBoundObjects: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub SetBindOptions: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbindopts: *const BIND_OPTS) -> ::windows_core::HRESULT,
+    pub GetBindOptions: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbindopts: *mut BIND_OPTS) -> ::windows_core::HRESULT,
+    pub GetRunningObjectTable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pprot: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub RegisterObjectParam: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pszkey: ::windows_core::PCWSTR, punk: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub GetObjectParam: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pszkey: ::windows_core::PCWSTR, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub EnumObjectParam: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub RevokeObjectParam: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pszkey: ::windows_core::PCWSTR) -> ::windows_core::HRESULT,
+}
+
+pub trait IBindCtx_Impl: Sized {
+    fn RegisterObjectBound(&self, punk: ::core::option::Option<&::windows_core::IUnknown>) -> ::windows_core::Result<()>;
+    fn RevokeObjectBound(&self, punk: ::core::option::Option<&::windows_core::IUnknown>) -> ::windows_core::Result<()>;
+    fn ReleaseBoundObjects(&self) -> ::windows_core::Result<()>;
+    fn SetBindOptions(&self, pbindopts: *const BIND_OPTS) -> ::windows_core::Result<()>;
+    fn GetBindOptions(&self, pbindopts: *mut BIND_OPTS) -> ::windows_core::Result<()>;
+    fn GetRunningObjectTable(&self) -> ::windows_core::Result<IRunningObjectTable>;
+    fn RegisterObjectParam(&self, pszkey: &::windows_core::PCWSTR, punk: ::core::option::Option<&::windows_core::IUnknown>) -> ::windows_core::Result<()>;
+    fn GetObjectParam(&self, pszkey: &::windows_core::PCWSTR) -> ::windows_core::Result<::windows_core::IUnknown>;
+    fn EnumObjectParam(&self) -> ::windows_core::Result<IEnumString>;
+    fn RevokeObjectParam(&self, pszkey: &::windows_core::PCWSTR) -> ::windows_core::Result<()>;
+}
+
+impl ::windows_core::RuntimeName for IBindCtx {}
+
+impl IBindCtx_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>() -> IBindCtx_Vtbl {
+        unsafe extern "system" fn RegisterObjectBound<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, punk: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RegisterObjectBound(::windows_core::from_raw_borrowed(&punk)).into()
+        }
+        unsafe extern "system" fn RevokeObjectBound<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, punk: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RevokeObjectBound(::windows_core::from_raw_borrowed(&punk)).into()
+        }
+        unsafe extern "system" fn ReleaseBoundObjects<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ReleaseBoundObjects().into()
+        }
+        unsafe extern "system" fn SetBindOptions<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbindopts: *const BIND_OPTS) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetBindOptions(::core::mem::transmute_copy(&pbindopts)).into()
+        }
+        unsafe extern "system" fn GetBindOptions<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbindopts: *mut BIND_OPTS) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetBindOptions(::core::mem::transmute_copy(&pbindopts)).into()
+        }
+        unsafe extern "system" fn GetRunningObjectTable<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pprot: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetRunningObjectTable() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pprot, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn RegisterObjectParam<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pszkey: ::windows_core::PCWSTR, punk: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RegisterObjectParam(::core::mem::transmute(&pszkey), ::windows_core::from_raw_borrowed(&punk)).into()
+        }
+        unsafe extern "system" fn GetObjectParam<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pszkey: ::windows_core::PCWSTR, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetObjectParam(::core::mem::transmute(&pszkey)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppunk, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn EnumObjectParam<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.EnumObjectParam() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenum, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn RevokeObjectParam<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IBindCtx_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pszkey: ::windows_core::PCWSTR) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RevokeObjectParam(::core::mem::transmute(&pszkey)).into()
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            RegisterObjectBound: RegisterObjectBound::<Identity, Impl, OFFSET>,
+            RevokeObjectBound: RevokeObjectBound::<Identity, Impl, OFFSET>,
+            ReleaseBoundObjects: ReleaseBoundObjects::<Identity, Impl, OFFSET>,
+            SetBindOptions: SetBindOptions::<Identity, Impl, OFFSET>,
+            GetBindOptions: GetBindOptions::<Identity, Impl, OFFSET>,
+            GetRunningObjectTable: GetRunningObjectTable::<Identity, Impl, OFFSET>,
+            RegisterObjectParam: RegisterObjectParam::<Identity, Impl, OFFSET>,
+            GetObjectParam: GetObjectParam::<Identity, Impl, OFFSET>,
+            EnumObjectParam: EnumObjectParam::<Identity, Impl, OFFSET>,
+            RevokeObjectParam: RevokeObjectParam::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IBindCtx as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(transparent)]pub struct IEnumMoniker(::windows_core::IUnknown);
+impl IEnumMoniker {
+    pub unsafe fn Next(&self, rgelt: &mut [::core::option::Option<IMoniker>], pceltfetched: ::core::option::Option<*mut u32>) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).Next)(::windows_core::Interface::as_raw(self), rgelt.len() as _, ::core::mem::transmute(rgelt.as_ptr()), ::core::mem::transmute(pceltfetched.unwrap_or(::std::ptr::null_mut())))
+    }
+    pub unsafe fn Skip(&self, celt: u32) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).Skip)(::windows_core::Interface::as_raw(self), celt)
+    }
+    pub unsafe fn Reset(&self) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Reset)(::windows_core::Interface::as_raw(self)).ok()
+    }
+    pub unsafe fn Clone(&self) -> ::windows_core::Result<IEnumMoniker> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Clone)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IEnumMoniker {}
+impl ::core::cmp::PartialEq for IEnumMoniker {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IEnumMoniker {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IEnumMoniker {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IEnumMoniker").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IEnumMoniker {
+    type Vtable = IEnumMoniker_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IEnumMoniker {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000102_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IEnumMoniker, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IEnumMoniker_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    pub Next: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut *mut ::core::ffi::c_void, pceltfetched: *mut u32) -> ::windows_core::HRESULT,
+    pub Skip: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT,
+    pub Reset: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+}
+
+pub trait IEnumMoniker_Impl: Sized {
+    fn Next(&self, celt: u32, rgelt: *mut ::core::option::Option<IMoniker>, pceltfetched: *mut u32) -> ::windows_core::HRESULT;
+    fn Skip(&self, celt: u32) -> ::windows_core::HRESULT;
+    fn Reset(&self) -> ::windows_core::Result<()>;
+    fn Clone(&self) -> ::windows_core::Result<IEnumMoniker>;
+}
+
+impl ::windows_core::RuntimeName for IEnumMoniker {}
+
+impl IEnumMoniker_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumMoniker_Impl, const OFFSET: isize>() -> IEnumMoniker_Vtbl {
+        unsafe extern "system" fn Next<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut *mut ::core::ffi::c_void, pceltfetched: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Next(::core::mem::transmute_copy(&celt), ::core::mem::transmute_copy(&rgelt), ::core::mem::transmute_copy(&pceltfetched))
+        }
+        unsafe extern "system" fn Skip<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Skip(::core::mem::transmute_copy(&celt))
+        }
+        unsafe extern "system" fn Reset<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Reset().into()
+        }
+        unsafe extern "system" fn Clone<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumMoniker_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Clone() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenum, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Next: Next::<Identity, Impl, OFFSET>,
+            Skip: Skip::<Identity, Impl, OFFSET>,
+            Reset: Reset::<Identity, Impl, OFFSET>,
+            Clone: Clone::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IEnumMoniker as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(C)]pub struct DVTARGETDEVICE {
+    pub tdSize: u32,
+    pub tdDriverNameOffset: u16,
+    pub tdDeviceNameOffset: u16,
+    pub tdPortNameOffset: u16,
+    pub tdExtDevmodeOffset: u16,
+    pub tdData: [u8; 1],
+}
+impl ::core::marker::Copy for DVTARGETDEVICE {}
+impl ::core::cmp::Eq for DVTARGETDEVICE {}
+impl ::core::cmp::PartialEq for DVTARGETDEVICE {
+    fn eq(&self, other: &Self) -> bool {
+        self.tdSize == other.tdSize && self.tdDriverNameOffset == other.tdDriverNameOffset && self.tdDeviceNameOffset == other.tdDeviceNameOffset && self.tdPortNameOffset == other.tdPortNameOffset && self.tdExtDevmodeOffset == other.tdExtDevmodeOffset && self.tdData == other.tdData
+    }
+}
+impl ::core::clone::Clone for DVTARGETDEVICE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DVTARGETDEVICE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for DVTARGETDEVICE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DVTARGETDEVICE").field("tdSize", &self.tdSize).field("tdDriverNameOffset", &self.tdDriverNameOffset).field("tdDeviceNameOffset", &self.tdDeviceNameOffset).field("tdPortNameOffset", &self.tdPortNameOffset).field("tdExtDevmodeOffset", &self.tdExtDevmodeOffset).field("tdData", &self.tdData).finish()
+    }
+}
+impl ::windows_core::TypeKind for DVTARGETDEVICE {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[repr(C)]pub struct FORMATETC {
+    pub cfFormat: u16,
+    pub ptd: *mut DVTARGETDEVICE,
+    pub dwAspect: u32,
+    pub lindex: i32,
+    pub tymed: u32,
+}
+impl ::core::marker::Copy for FORMATETC {}
+impl ::core::cmp::Eq for FORMATETC {}
+impl ::core::cmp::PartialEq for FORMATETC {
+    fn eq(&self, other: &Self) -> bool {
+        self.cfFormat == other.cfFormat && self.ptd == other.ptd && self.dwAspect == other.dwAspect && self.lindex == other.lindex && self.tymed == other.tymed
+    }
+}
+impl ::core::clone::Clone for FORMATETC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for FORMATETC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for FORMATETC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("FORMATETC").field("cfFormat", &self.cfFormat).field("ptd", &self.ptd).field("dwAspect", &self.dwAspect).field("lindex", &self.lindex).field("tymed", &self.tymed).finish()
+    }
+}
+impl ::windows_core::TypeKind for FORMATETC {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[repr(transparent)]pub struct IEnumFORMATETC(::windows_core::IUnknown);
+impl IEnumFORMATETC {
+    pub unsafe fn Next(&self, rgelt: &mut [FORMATETC], pceltfetched: ::core::option::Option<*mut u32>) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Next)(::windows_core::Interface::as_raw(self), rgelt.len() as _, ::core::mem::transmute(rgelt.as_ptr()), ::core::mem::transmute(pceltfetched.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn Skip(&self, celt: u32) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Skip)(::windows_core::Interface::as_raw(self), celt).ok()
+    }
+    pub unsafe fn Reset(&self) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).Reset)(::windows_core::Interface::as_raw(self)).ok()
+    }
+    pub unsafe fn Clone(&self) -> ::windows_core::Result<IEnumFORMATETC> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).Clone)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IEnumFORMATETC {}
+impl ::core::cmp::PartialEq for IEnumFORMATETC {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IEnumFORMATETC {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IEnumFORMATETC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IEnumFORMATETC").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IEnumFORMATETC {
+    type Vtable = IEnumFORMATETC_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IEnumFORMATETC {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000103_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IEnumFORMATETC, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IEnumFORMATETC_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    pub Next: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> ::windows_core::HRESULT,
+    pub Skip: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT,
+    pub Reset: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+}
+
+pub trait IEnumFORMATETC_Impl: Sized {
+    fn Next(&self, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> ::windows_core::Result<()>;
+    fn Skip(&self, celt: u32) -> ::windows_core::Result<()>;
+    fn Reset(&self) -> ::windows_core::Result<()>;
+    fn Clone(&self) -> ::windows_core::Result<IEnumFORMATETC>;
+}
+
+impl ::windows_core::RuntimeName for IEnumFORMATETC {}
+
+impl IEnumFORMATETC_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumFORMATETC_Impl, const OFFSET: isize>() -> IEnumFORMATETC_Vtbl {
+        unsafe extern "system" fn Next<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumFORMATETC_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Next(::core::mem::transmute_copy(&celt), ::core::mem::transmute_copy(&rgelt), ::core::mem::transmute_copy(&pceltfetched)).into()
+        }
+        unsafe extern "system" fn Skip<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumFORMATETC_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Skip(::core::mem::transmute_copy(&celt)).into()
+        }
+        unsafe extern "system" fn Reset<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumFORMATETC_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Reset().into()
+        }
+        unsafe extern "system" fn Clone<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IEnumFORMATETC_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Clone() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenum, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Next: Next::<Identity, Impl, OFFSET>,
+            Skip: Skip::<Identity, Impl, OFFSET>,
+            Reset: Reset::<Identity, Impl, OFFSET>,
+            Clone: Clone::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IEnumFORMATETC as ::windows_core::ComInterface>::IID
+    }
+}
+
+#[repr(C)]pub struct STGMEDIUM {
+    pub tymed: u32,
+    pub u: STGMEDIUM_0,
+    pub pUnkForRelease: ::std::mem::ManuallyDrop<::core::option::Option<::windows_core::IUnknown>>,
+}
+impl ::core::clone::Clone for STGMEDIUM {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for STGMEDIUM {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::windows_core::TypeKind for STGMEDIUM {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[repr(C)]pub union STGMEDIUM_0 {
+    pub hBitmap: super::super::Graphics::Gdi::HBITMAP,
+    pub hMetaFilePict: *mut ::core::ffi::c_void,
+    pub hEnhMetaFile: super::super::Graphics::Gdi::HENHMETAFILE,
+    pub hGlobal: super::super::Foundation::HGLOBAL,
+    pub lpszFileName: ::windows_core::PWSTR,
+    pub pstm: ::std::mem::ManuallyDrop<::core::option::Option<IStream>>,
+    pub pstg: ::std::mem::ManuallyDrop<::core::option::Option<StructuredStorage::IStorage>>,
+}
+impl ::core::clone::Clone for STGMEDIUM_0 {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for STGMEDIUM_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+
+#[repr(transparent)]pub struct IDataObject(::windows_core::IUnknown);
+impl IDataObject {
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Gdi\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn GetData(&self, pformatetcin: *const FORMATETC) -> ::windows_core::Result<STGMEDIUM> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetData)(::windows_core::Interface::as_raw(self), pformatetcin, &mut result__).from_abi(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Gdi\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn GetDataHere(&self, pformatetc: *const FORMATETC, pmedium: *mut STGMEDIUM) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).GetDataHere)(::windows_core::Interface::as_raw(self), pformatetc, pmedium).ok()
+    }
+    pub unsafe fn QueryGetData(&self, pformatetc: *const FORMATETC) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).QueryGetData)(::windows_core::Interface::as_raw(self), pformatetc)
+    }
+    pub unsafe fn GetCanonicalFormatEtc(&self, pformatectin: *const FORMATETC, pformatetcout: *mut FORMATETC) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).GetCanonicalFormatEtc)(::windows_core::Interface::as_raw(self), pformatectin, pformatetcout)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Gdi\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn SetData<P0>(&self, pformatetc: *const FORMATETC, pmedium: *const STGMEDIUM, frelease: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<super::super::Foundation::BOOL>,
+    {
+        (::windows_core::Interface::vtable(self).SetData)(::windows_core::Interface::as_raw(self), pformatetc, pmedium, frelease.into_param().abi()).ok()
+    }
+    pub unsafe fn EnumFormatEtc(&self, dwdirection: u32) -> ::windows_core::Result<IEnumFORMATETC> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).EnumFormatEtc)(::windows_core::Interface::as_raw(self), dwdirection, &mut result__).from_abi(result__)
+    }
+    pub unsafe fn DAdvise<P0>(&self, pformatetc: *const FORMATETC, advf: u32, padvsink: P0) -> ::windows_core::Result<u32>
+    where
+        P0: ::windows_core::IntoParam<IAdviseSink>,
+    {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).DAdvise)(::windows_core::Interface::as_raw(self), pformatetc, advf, padvsink.into_param().abi(), &mut result__).from_abi(result__)
+    }
+    pub unsafe fn DUnadvise(&self, dwconnection: u32) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).DUnadvise)(::windows_core::Interface::as_raw(self), dwconnection).ok()
+    }
+    pub unsafe fn EnumDAdvise(&self) -> ::windows_core::Result<IEnumSTATDATA> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).EnumDAdvise)(::windows_core::Interface::as_raw(self), &mut result__).from_abi(result__)
+    }
+}
+impl ::core::cmp::Eq for IDataObject {}
+impl ::core::cmp::PartialEq for IDataObject {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IDataObject {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IDataObject {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IDataObject").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows_core::Interface for IDataObject {
+    type Vtable = IDataObject_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IDataObject {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x0000010e_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IDataObject, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IDataObject_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub GetData: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pformatetcin: *const FORMATETC, pmedium: *mut STGMEDIUM) -> ::windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage")))]
+    GetData: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub GetDataHere: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, pmedium: *mut STGMEDIUM) -> ::windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage")))]
+    GetDataHere: usize,
+    pub QueryGetData: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC) -> ::windows_core::HRESULT,
+    pub GetCanonicalFormatEtc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pformatectin: *const FORMATETC, pformatetcout: *mut FORMATETC) -> ::windows_core::HRESULT,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage"))]
+    pub SetData: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, pmedium: *const STGMEDIUM, frelease: super::super::Foundation::BOOL) -> ::windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Gdi", feature = "Win32_System_Com_StructuredStorage")))]
+    SetData: usize,
+    pub EnumFormatEtc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwdirection: u32, ppenumformatetc: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+    pub DAdvise: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, advf: u32, padvsink: *mut ::core::ffi::c_void, pdwconnection: *mut u32) -> ::windows_core::HRESULT,
+    pub DUnadvise: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwconnection: u32) -> ::windows_core::HRESULT,
+    pub EnumDAdvise: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenumadvise: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
+}
+
+pub trait IDataObject_Impl: Sized {
+    fn GetData(&self, pformatetcin: *const FORMATETC) -> ::windows_core::Result<STGMEDIUM>;
+    fn GetDataHere(&self, pformatetc: *const FORMATETC, pmedium: *mut STGMEDIUM) -> ::windows_core::Result<()>;
+    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> ::windows_core::HRESULT;
+    fn GetCanonicalFormatEtc(&self, pformatectin: *const FORMATETC, pformatetcout: *mut FORMATETC) -> ::windows_core::HRESULT;
+    fn SetData(&self, pformatetc: *const FORMATETC, pmedium: *const STGMEDIUM, frelease: super::super::Foundation::BOOL) -> ::windows_core::Result<()>;
+    fn EnumFormatEtc(&self, dwdirection: u32) -> ::windows_core::Result<IEnumFORMATETC>;
+    fn DAdvise(&self, pformatetc: *const FORMATETC, advf: u32, padvsink: ::core::option::Option<&IAdviseSink>) -> ::windows_core::Result<u32>;
+    fn DUnadvise(&self, dwconnection: u32) -> ::windows_core::Result<()>;
+    fn EnumDAdvise(&self) -> ::windows_core::Result<IEnumSTATDATA>;
+}
+
+impl ::windows_core::RuntimeName for IDataObject {}
+
+impl IDataObject_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>() -> IDataObject_Vtbl {
+        unsafe extern "system" fn GetData<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pformatetcin: *const FORMATETC, pmedium: *mut STGMEDIUM) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetData(::core::mem::transmute_copy(&pformatetcin)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pmedium, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetDataHere<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, pmedium: *mut STGMEDIUM) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDataHere(::core::mem::transmute_copy(&pformatetc), ::core::mem::transmute_copy(&pmedium)).into()
+        }
+        unsafe extern "system" fn QueryGetData<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.QueryGetData(::core::mem::transmute_copy(&pformatetc))
+        }
+        unsafe extern "system" fn GetCanonicalFormatEtc<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pformatectin: *const FORMATETC, pformatetcout: *mut FORMATETC) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetCanonicalFormatEtc(::core::mem::transmute_copy(&pformatectin), ::core::mem::transmute_copy(&pformatetcout))
+        }
+        unsafe extern "system" fn SetData<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, pmedium: *const STGMEDIUM, frelease: super::super::Foundation::BOOL) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetData(::core::mem::transmute_copy(&pformatetc), ::core::mem::transmute_copy(&pmedium), ::core::mem::transmute_copy(&frelease)).into()
+        }
+        unsafe extern "system" fn EnumFormatEtc<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwdirection: u32, ppenumformatetc: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.EnumFormatEtc(::core::mem::transmute_copy(&dwdirection)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenumformatetc, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn DAdvise<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pformatetc: *const FORMATETC, advf: u32, padvsink: *mut ::core::ffi::c_void, pdwconnection: *mut u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.DAdvise(::core::mem::transmute_copy(&pformatetc), ::core::mem::transmute_copy(&advf), ::windows_core::from_raw_borrowed(&padvsink)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwconnection, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn DUnadvise<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwconnection: u32) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.DUnadvise(::core::mem::transmute_copy(&dwconnection)).into()
+        }
+        unsafe extern "system" fn EnumDAdvise<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDataObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenumadvise: *mut *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.EnumDAdvise() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenumadvise, ::core::mem::transmute(ok__));
+                    ::windows_core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetData: GetData::<Identity, Impl, OFFSET>,
+            GetDataHere: GetDataHere::<Identity, Impl, OFFSET>,
+            QueryGetData: QueryGetData::<Identity, Impl, OFFSET>,
+            GetCanonicalFormatEtc: GetCanonicalFormatEtc::<Identity, Impl, OFFSET>,
+            SetData: SetData::<Identity, Impl, OFFSET>,
+            EnumFormatEtc: EnumFormatEtc::<Identity, Impl, OFFSET>,
+            DAdvise: DAdvise::<Identity, Impl, OFFSET>,
+            DUnadvise: DUnadvise::<Identity, Impl, OFFSET>,
+            EnumDAdvise: EnumDAdvise::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IDataObject as ::windows_core::ComInterface>::IID
+    }
 }
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct COINIT(pub i32);
@@ -17207,6 +19281,62 @@ impl ::core::fmt::Debug for VARIANT_0_0_0_0 {
     }
 }
 impl ::windows_core::TypeKind for VARIANT_0_0_0_0 {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+}
+pub mod SystemServices{
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct MODIFIERKEYS_FLAGS(pub u32);
+impl MODIFIERKEYS_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl ::core::marker::Copy for MODIFIERKEYS_FLAGS {}
+impl ::core::clone::Clone for MODIFIERKEYS_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for MODIFIERKEYS_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for MODIFIERKEYS_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("MODIFIERKEYS_FLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for MODIFIERKEYS_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for MODIFIERKEYS_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for MODIFIERKEYS_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for MODIFIERKEYS_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for MODIFIERKEYS_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+impl ::windows_core::TypeKind for MODIFIERKEYS_FLAGS {
     type TypeKind = ::windows_core::CopyType;
 }
 

@@ -4,9 +4,7 @@ use {
         makepad_live_id::*,
         thread::Signal,
         video::*,
-        cocoa_app::{
-            get_cocoa_class_global,
-        },
+        apple_classes::get_apple_class_global,
         os::apple::apple_util::*,
         os::apple::apple_sys::*,
         makepad_objc_sys::objc_block,
@@ -335,8 +333,8 @@ impl AvVideoCaptureCallback {
     pub fn new(callback: Box<dyn Fn(CMSampleBufferRef) + Send + 'static>) -> Self {
         unsafe {
             let double_box = Box::new(callback);
-            //let cocoa_app = get_cocoa_app_global();
-            let delegate = RcObjcId::from_owned(msg_send![get_cocoa_class_global().video_callback_delegate, alloc]);
+            //let cocoa_app = get_macos_app_global();
+            let delegate = RcObjcId::from_owned(msg_send![get_apple_class_global().video_callback_delegate, alloc]);
             (*delegate.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
             Self {
                 _callback: double_box,

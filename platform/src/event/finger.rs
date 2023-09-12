@@ -84,7 +84,7 @@ pub struct ScrollEvent {
 
 // Touch events
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum TouchState {
     Start,
     Stop,
@@ -679,6 +679,10 @@ impl Event {
                         TouchState::Start => {
                             
                             if !options.capture_overload && !t.handled.get().is_empty() {
+                                continue;
+                            }
+                            
+                            if cx.fingers.get_area_capture(area).is_some(){
                                 continue;
                             }
                             
