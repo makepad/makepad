@@ -452,7 +452,7 @@ impl CodeEditor {
                                         text_0,
                                     );
                                     column +=
-                                        text_0.column_count(session.settings().tab_column_count);
+                                        text_0.column_count();
                                 }
                             }
                             WrappedElement::Text {
@@ -468,7 +468,7 @@ impl CodeEditor {
                                         + self.viewport_rect.pos,
                                     text,
                                 );
-                                column += text.column_count(session.settings().tab_column_count);
+                                column += text.column_count();
                             }
                             WrappedElement::Widget(widget) => {
                                 column += widget.column_count;
@@ -534,7 +534,7 @@ impl CodeEditor {
                                     let next_byte = byte + grapheme.len();
                                     let next_column = column
                                         + grapheme
-                                            .column_count(session.settings().tab_column_count);
+                                            .column_count();
                                     let next_y = y + line_ref.scale();
                                     let x = line_ref.column_to_x(column);
                                     let next_x = line_ref.column_to_x(next_column);
@@ -568,7 +568,7 @@ impl CodeEditor {
                                 text,
                             } => {
                                 let next_column =
-                                    column + text.column_count(session.settings().tab_column_count);
+                                    column + text.column_count();
                                 let next_y = y + line_ref.scale();
                                 let x = line_ref.column_to_x(column);
                                 let next_x = line_ref.column_to_x(next_column);
@@ -687,7 +687,7 @@ impl<'a> DrawSelections<'a> {
                                     );
                                     byte += grapheme.len();
                                     column +=
-                                        grapheme.column_count(session.settings().tab_column_count);
+                                        grapheme.column_count();
                                     self.handle_event(
                                         cx,
                                         line,
@@ -703,7 +703,7 @@ impl<'a> DrawSelections<'a> {
                                 is_inlay: true,
                                 text,
                             } => {
-                                column += text.column_count(session.settings().tab_column_count);
+                                column += text.column_count();
                             }
                             WrappedElement::Widget(widget) => {
                                 column += widget.column_count;
