@@ -1,7 +1,6 @@
 use {
     crate::{
         char::CharExt,
-        history::Edit,
         history::EditKind,
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
@@ -9,7 +8,7 @@ use {
         move_ops,
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
-        text::{Change, Drift, Length, Position, Text},
+        text::{Change, Drift, Edit, Length, Position, Text},
         token::TokenKind,
         widgets::BlockWidget,
         wrap,
@@ -22,6 +21,7 @@ use {
         collections::{HashMap, HashSet},
         fmt::Write,
         iter, mem, ops,
+        ops::Range,
         rc::Rc,
         slice::Iter,
         sync::{
@@ -49,6 +49,7 @@ pub struct Session {
     unfolding_lines: HashSet<usize>,
     selections: SelectionSet,
     pending_selection_index: Option<usize>,
+    delimiter_stack: Vec<char>,
     edit_receiver: Receiver<(Option<SelectionSet>, Vec<Edit>)>,
 }
 
@@ -73,6 +74,7 @@ impl Session {
             unfolding_lines: HashSet::new(),
             selections: SelectionSet::new(),
             pending_selection_index: None,
+            delimiter_stack: Vec::new(),
             edit_receiver,
         };
         for line in 0..line_count {
@@ -92,13 +94,17 @@ impl Session {
     }
 
     pub fn width(&self) -> f64 {
-        self.lines(0, self.document.borrow().history.as_text().as_lines().len(), |lines| {
-            let mut width: f64 = 0.0;
-            for line in lines {
-                width = width.max(line.width());
-            }
-            width
-        })
+        self.lines(
+            0,
+            self.document.borrow().history.as_text().as_lines().len(),
+            |lines| {
+                let mut width: f64 = 0.0;
+                for line in lines {
+                    width = width.max(line.width());
+                }
+                width
+            },
+        )
     }
 
     pub fn height(&self) -> f64 {
@@ -284,10 +290,11 @@ impl Session {
         self.selections.set_selection(Selection::from(Cursor {
             position,
             affinity,
-            preferred_column: None,
+            preferred_column_index: None,
         }));
         self.pending_selection_index = Some(0);
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.borrow_mut().force_new_group();
     }
 
     pub fn push_cursor(&mut self, position: Position, affinity: Affinity) {
@@ -295,9 +302,10 @@ impl Session {
             Some(self.selections.push_selection(Selection::from(Cursor {
                 position,
                 affinity,
-                preferred_column: None,
+                preferred_column_index: None,
             })));
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.borrow_mut().force_new_group();
     }
 
     pub fn move_to(&mut self, position: Position, affinity: Affinity) {
@@ -307,17 +315,21 @@ impl Session {
                 selection.update_cursor(|_| Cursor {
                     position,
                     affinity,
-                    preferred_column: None,
+                    preferred_column_index: None,
                 })
             },
         ));
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.borrow_mut().force_new_group();
     }
 
     pub fn move_left(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
             selection.update_cursor(|cursor| {
-                move_ops::move_left(session.document.borrow().history.as_text().as_lines(), cursor)
+                move_ops::move_left(
+                    session.document.borrow().history.as_text().as_lines(),
+                    cursor,
+                )
             })
         });
     }
@@ -325,7 +337,10 @@ impl Session {
     pub fn move_right(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |session, selection| {
             selection.update_cursor(|cursor| {
-                move_ops::move_right(session.document.borrow().history.as_text().as_lines(), cursor)
+                move_ops::move_right(
+                    session.document.borrow().history.as_text().as_lines(),
+                    cursor,
+                )
             })
         });
     }
@@ -343,18 +358,61 @@ impl Session {
     }
 
     pub fn insert(&mut self, text: Text) {
-        self.document.borrow_mut().edit(
+        let mut edit_kind = EditKind::Insert;
+        let mut inject_delimiter = None;
+        let mut uninject_delimiter = None;
+        match text.to_single_char() {
+            Some(' ') => {
+                edit_kind = EditKind::InsertSpace;
+            }
+            Some(char) if char.is_opening_delimiter() => {
+                let char = char.opposite_delimiter().unwrap();
+                inject_delimiter = Some(char);
+                self.delimiter_stack.push(char);
+            }
+            Some(char)
+                if self
+                    .delimiter_stack
+                    .last()
+                    .map_or(false, |&last_char| last_char == char) =>
+            {
+                uninject_delimiter = Some(self.delimiter_stack.pop().unwrap());
+            }
+            _ => {}
+        }
+        self.document.borrow_mut().edit_selections(
             self.id,
-            if text.as_lines().len() == 1 && &text.as_lines()[0] == " " {
-                EditKind::Space
-            } else {
-                EditKind::Insert
-            },
+            edit_kind,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |_, _, _| (Length::zero(), false, Some(text.clone()), None),
+            &self.settings,
+            |mut editor, position, length| {
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                if let Some(uninject_char) = uninject_delimiter {
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(
+                            position,
+                            Length {
+                                line_count: 0,
+                                byte_count: uninject_char.len_utf8(),
+                            },
+                        ),
+                        drift: Drift::Before,
+                    })
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Insert(position, text.clone()),
+                    drift: Drift::Before,
+                });
+                if let Some(inject_char) = inject_delimiter {
+                    editor.apply_edit(Edit {
+                        change: Change::Insert(position + text.length(), Text::from(inject_char)),
+                        drift: Drift::After,
+                    })
+                }
+            },
         );
     }
 
@@ -620,7 +678,8 @@ impl Session {
                 selection
             });
         self.selections = selections;
-        self.document.borrow_mut().force_new_edit_group();
+        self.delimiter_stack.clear();
+        self.document.borrow_mut().force_new_group();
     }
 
     fn apply_edits(&mut self, selections: Option<SelectionSet>, edits: &[Edit]) {
@@ -668,7 +727,7 @@ impl Session {
             self.selections = selections;
         } else {
             for edit in edits {
-                self.selections.apply_change(&edit.change, edit.drift);
+                self.selections.apply_change(edit);
             }
         }
         self.update_y();
@@ -785,6 +844,68 @@ impl Document {
         self.history.as_text()
     }
 
+    fn edit_selections(
+        &mut self,
+        session_id: SessionId,
+        kind: EditKind,
+        selections: &SelectionSet,
+        settings: &Settings,
+        mut f: impl FnMut(Editor<'_>, Position, Length),
+    ) {
+        self.history
+            .push_or_extend_group(session_id, kind, selections);
+        let mut edits = Vec::new();
+        let mut line_ranges = Vec::new();
+        let mut prev_start = Position::zero();
+        let mut prev_adjusted_start = Position::zero();
+        let mut prev_edit_start = 0;
+        for &selection in selections {
+            let mut adjusted_start = prev_adjusted_start + (selection.start() - prev_start);
+            for edit in &edits[prev_edit_start..] {
+                adjusted_start = adjusted_start.apply_edit(edit);
+            }
+            let edit_start = edits.len();
+            f(
+                Editor {
+                    history: &mut self.history,
+                    edits: &mut edits,
+                },
+                adjusted_start,
+                selection.length(),
+            );
+            for edit in &edits[edit_start..] {
+                match edit.change {
+                    Change::Insert(position, ref text) if text.as_lines().len() > 1 => {
+                        line_ranges.push(Range {
+                            start: if self.history.as_text().as_lines()[position.line_index]
+                                [..position.byte_index]
+                                .chars()
+                                .all(|char| char.is_whitespace())
+                            {
+                                position.line_index
+                            } else {
+                                position.line_index + 1
+                            },
+                            end: position.line_index + text.as_lines().len(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            prev_start = selection.start();
+            prev_adjusted_start = adjusted_start;
+            prev_edit_start = edit_start;
+        }
+        self.autoindent(
+            &line_ranges,
+            settings.use_soft_tabs,
+            settings.tab_column_count,
+            settings.indent_column_count,
+            &mut edits,
+        );
+        self.apply_edits(session_id, None, &edits);
+    }
+
     fn edit(
         &mut self,
         origin_id: SessionId,
@@ -796,7 +917,7 @@ impl Document {
         mut f: impl FnMut(&String, usize, bool) -> (Length, bool, Option<Text>, Option<Text>),
     ) {
         self.history
-            .push_or_extend_edit_group(origin_id, kind, selections);
+            .push_or_extend_group(origin_id, kind, selections);
         let mut edits = Vec::new();
         let mut line_ranges = Vec::new();
         let mut point = Position::zero();
@@ -819,7 +940,7 @@ impl Document {
                     drift: Drift::Before,
                 };
                 edits.push(edit.clone());
-                self.history.edit(edit);
+                self.history.apply_edit(edit);
             }
             let (delete_extent_before, delete_after, insert_text_before, insert_text_after) = f(
                 &self.history.as_text().as_lines()[point.line_index],
@@ -839,7 +960,7 @@ impl Document {
                     drift: Drift::Before,
                 };
                 edits.push(edit.clone());
-                self.history.edit(edit);
+                self.history.apply_edit(edit);
             }
             if delete_after {
                 let delete_extent_after = if let Some(grapheme) = self.history.as_text().as_lines()
@@ -865,7 +986,7 @@ impl Document {
                         drift: Drift::Before,
                     };
                     edits.push(edit.clone());
-                    self.history.edit(edit);
+                    self.history.apply_edit(edit);
                 }
             }
             if let Some(insert_text_before) = insert_text_before {
@@ -889,7 +1010,7 @@ impl Document {
                 };
                 point += extent;
                 edits.push(edit.clone());
-                self.history.edit(edit);
+                self.history.apply_edit(edit);
             }
             if let Some(insert_text_after) = insert_text_after {
                 let line_count = insert_text_after.as_lines().len();
@@ -912,7 +1033,7 @@ impl Document {
                 };
                 point += extent;
                 edits.push(edit.clone());
-                self.history.edit(edit);
+                self.history.apply_edit(edit);
             }
             prev_range_end = range.end();
         }
@@ -932,7 +1053,7 @@ impl Document {
         use_soft_tabs: bool,
         tab_column_count: usize,
         indent_column_count: usize,
-        changes: &mut Vec<Edit>,
+        edits: &mut Vec<Edit>,
     ) {
         fn next_line_indentation_column_count(
             line: &str,
@@ -974,7 +1095,8 @@ impl Document {
                 }
             })
         {
-            let mut desired_indentation_column_count = self.history.as_text().as_lines()[..line_range.start]
+            let mut desired_indentation_column_count = self.history.as_text().as_lines()
+                [..line_range.start]
                 .iter()
                 .rev()
                 .find_map(|line| {
@@ -997,7 +1119,7 @@ impl Document {
                 {
                     desired_indentation_column_count -= 4;
                 }
-                self.edit_lines_internal(line, changes, |line| {
+                self.edit_lines_internal(line, edits, |line| {
                     reindent(line, use_soft_tabs, tab_column_count, |_| {
                         desired_indentation_column_count
                     })
@@ -1022,7 +1144,7 @@ impl Document {
     ) {
         let mut edits = Vec::new();
         self.history
-            .push_or_extend_edit_group(origin_id, kind, selections);
+            .push_or_extend_group(origin_id, kind, selections);
         for line_range in selections
             .iter()
             .copied()
@@ -1064,7 +1186,7 @@ impl Document {
                 drift: Drift::Before,
             };
             edits.push(edit.clone());
-            self.history.edit(edit);
+            self.history.apply_edit(edit);
         }
         if !insert_text.is_empty() {
             let edit = Edit {
@@ -1078,12 +1200,12 @@ impl Document {
                 drift: Drift::Before,
             };
             edits.push(edit.clone());
-            self.history.edit(edit);
+            self.history.apply_edit(edit);
         }
     }
 
-    fn force_new_edit_group(&mut self) {
-        self.history.force_new_edit_group()
+    fn force_new_group(&mut self) {
+        self.history.force_new_group()
     }
 
     fn undo(&mut self, origin_id: SessionId, selections: &SelectionSet) -> bool {
@@ -1117,7 +1239,8 @@ impl Document {
             self.apply_change_to_inline_inlays(&edit.change, edit.drift);
             self.tokenizer.apply_change(&edit.change);
         }
-        self.tokenizer.update(self.history.as_text(), &mut self.tokens);
+        self.tokenizer
+            .update(self.history.as_text(), &mut self.tokens);
         for (&session_id, edit_sender) in &self.edit_senders {
             if session_id == origin_id {
                 edit_sender
@@ -1333,6 +1456,19 @@ impl Document {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct Editor<'a> {
+    history: &'a mut History,
+    edits: &'a mut Vec<Edit>,
+}
+
+impl<'a> Editor<'a> {
+    pub fn apply_edit(&mut self, edit: Edit) {
+        self.history.apply_edit(edit.clone());
+        self.edits.push(edit);
     }
 }
 
