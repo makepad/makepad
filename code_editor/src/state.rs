@@ -223,30 +223,28 @@ impl Session {
     }
 
     pub fn move_left(&mut self, reset_anchor: bool) {
-        self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor| {
-                move_ops::move_left(session.document.as_text().as_lines(), cursor)
-            })
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| move_ops::move_left(cursor, layout))
         });
     }
 
     pub fn move_right(&mut self, reset_anchor: bool) {
-        self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor| {
-                move_ops::move_right(session.document.as_text().as_lines(), cursor)
-            })
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| move_ops::move_right(cursor, layout))
         });
     }
 
     pub fn move_up(&mut self, reset_anchor: bool) {
-        self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor| move_ops::move_up(session, cursor))
+        let tab_column_count = self.settings.tab_column_count;
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| move_ops::move_up(cursor, layout, tab_column_count))
         });
     }
 
     pub fn move_down(&mut self, reset_anchor: bool) {
-        self.modify_selections(reset_anchor, |session, selection| {
-            selection.update_cursor(|cursor| move_ops::move_down(session, cursor))
+        let tab_column_count = self.settings.tab_column_count;
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| move_ops::move_down(cursor, layout, tab_column_count))
         });
     }
 
@@ -573,7 +571,7 @@ impl Session {
                 let layout = self.layout();
                 let line = layout.line(line);
                 wrap::compute_wrap_data(line, wrap_column, self.settings.tab_column_count)
-            },
+            }
             None => WrapData::default(),
         };
         self.layout.borrow_mut().wrap_data[line] = Some(wrap_data);
@@ -584,19 +582,23 @@ impl Session {
     fn modify_selections(
         &mut self,
         reset_anchor: bool,
-        mut f: impl FnMut(&Session, Selection) -> Selection,
+        mut f: impl FnMut(Selection, &Layout) -> Selection,
     ) {
-        // TODO: This should not be needed!!!
-        let mut selections = mem::take(&mut self.selections);
+        let layout = Layout {
+            text: self.document.as_text(),
+            document_layout: self.document.layout(),
+            session_layout: self.layout.borrow(),
+        };
         self.pending_selection_index =
-            selections.update_all_selections(self.pending_selection_index, |selection| {
-                let mut selection = f(&self, selection);
-                if reset_anchor {
-                    selection = selection.reset_anchor();
-                }
-                selection
-            });
-        self.selections = selections;
+            self.selections
+                .update_all_selections(self.pending_selection_index, |selection| {
+                    let mut selection = f(selection, &layout);
+                    if reset_anchor {
+                        selection = selection.reset_anchor();
+                    }
+                    selection
+                });
+        drop(layout);
         self.delimiter_stack.clear();
         self.document.force_new_group();
     }
@@ -611,12 +613,21 @@ impl Session {
                     if line_count > 0 {
                         let line = point.line_index + 1;
                         self.layout.borrow_mut().y.truncate(line);
-                        self.layout.borrow_mut().column_count
+                        self.layout
+                            .borrow_mut()
+                            .column_count
                             .splice(line..line, (0..line_count).map(|_| None));
-                        self.layout.borrow_mut().fold_column
+                        self.layout
+                            .borrow_mut()
+                            .fold_column
                             .splice(line..line, (0..line_count).map(|_| 0));
-                        self.layout.borrow_mut().scale.splice(line..line, (0..line_count).map(|_| 1.0));
-                        self.layout.borrow_mut().wrap_data
+                        self.layout
+                            .borrow_mut()
+                            .scale
+                            .splice(line..line, (0..line_count).map(|_| 1.0));
+                        self.layout
+                            .borrow_mut()
+                            .wrap_data
                             .splice(line..line, (0..line_count).map(|_| None));
                     }
                 }
@@ -628,10 +639,19 @@ impl Session {
                         let start_line = start.line_index + 1;
                         let end_line = start_line + line_count;
                         self.layout.borrow_mut().y.truncate(start_line);
-                        self.layout.borrow_mut().column_count.drain(start_line..end_line);
-                        self.layout.borrow_mut().fold_column.drain(start_line..end_line);
+                        self.layout
+                            .borrow_mut()
+                            .column_count
+                            .drain(start_line..end_line);
+                        self.layout
+                            .borrow_mut()
+                            .fold_column
+                            .drain(start_line..end_line);
                         self.layout.borrow_mut().scale.drain(start_line..end_line);
-                        self.layout.borrow_mut().wrap_data.drain(start_line..end_line);
+                        self.layout
+                            .borrow_mut()
+                            .wrap_data
+                            .drain(start_line..end_line);
                     }
                 }
             }
@@ -690,11 +710,10 @@ impl Document {
             tokenizer: RefCell::new(Tokenizer::new(line_count)),
             edit_senders: RefCell::new(HashMap::new()),
         }));
-        session
-            .0
-            .tokenizer
-            .borrow_mut()
-            .update(&session.0.history.borrow().as_text(), &mut session.0.layout.borrow_mut().tokens);
+        session.0.tokenizer.borrow_mut().update(
+            &session.0.history.borrow().as_text(),
+            &mut session.0.layout.borrow_mut().tokens,
+        );
         session
     }
 
@@ -714,10 +733,7 @@ impl Document {
         settings: &Settings,
         mut f: impl FnMut(Editor<'_>, Position, Length),
     ) {
-        let mut history = self
-            .0
-            .history
-            .borrow_mut();
+        let mut history = self.0.history.borrow_mut();
         history.push_or_extend_group(session_id, kind, selections);
         let mut edits = Vec::new();
         let mut line_ranges = Vec::new();
@@ -820,7 +836,8 @@ impl Document {
                 }
             })
         {
-            let mut desired_indentation_column_count = self.as_text().as_lines()[..line_range.start]
+            let mut desired_indentation_column_count = self.as_text().as_lines()
+                [..line_range.start]
                 .iter()
                 .rev()
                 .find_map(|line| {
@@ -867,7 +884,9 @@ impl Document {
         mut f: impl FnMut(&str) -> (usize, usize, String),
     ) {
         let mut edits = Vec::new();
-        self.0.history.borrow_mut()
+        self.0
+            .history
+            .borrow_mut()
             .push_or_extend_group(origin_id, kind, selections);
         for line_range in selections
             .iter()
@@ -961,10 +980,10 @@ impl Document {
             self.apply_change_to_inline_inlays(&edit.change, edit.drift);
             self.0.tokenizer.borrow_mut().apply_change(&edit.change);
         }
-        self.0
-            .tokenizer
-            .borrow_mut()
-            .update(self.0.history.borrow().as_text(), &mut self.0.layout.borrow_mut().tokens);
+        self.0.tokenizer.borrow_mut().update(
+            self.0.history.borrow().as_text(),
+            &mut self.0.layout.borrow_mut().tokens,
+        );
         for (&session_id, edit_sender) in &*self.0.edit_senders.borrow() {
             if session_id == origin_id {
                 edit_sender
@@ -1035,8 +1054,7 @@ impl Document {
                         .last_mut()
                         .unwrap()
                         .splice(..0, tokens[point.line_index][index..].iter().copied());
-                    tokens
-                        .splice(point.line_index..point.line_index + 1, new_tokens);
+                    tokens.splice(point.line_index..point.line_index + 1, new_tokens);
                 }
             }
             Change::Delete(start, length) => {
@@ -1103,8 +1121,7 @@ impl Document {
                         .copied()
                         .collect::<Vec<_>>();
                     new_tokens.extend(tokens[end.line_index][end_token..].iter().copied());
-                    tokens
-                        .splice(start.line_index..end.line_index + 1, iter::once(new_tokens));
+                    tokens.splice(start.line_index..end.line_index + 1, iter::once(new_tokens));
                 }
             }
         }
@@ -1140,12 +1157,13 @@ impl Document {
                         .splice(..0, inline_inlays[point.line_index].drain(..index));
                     new_inline_inlays.last_mut().unwrap().splice(
                         ..0,
-                        inline_inlays[point.line_index].drain(..).map(
-                            |(byte, inline_inlay)| (byte + text.length().byte_count, inline_inlay),
-                        ),
+                        inline_inlays[point.line_index]
+                            .drain(..)
+                            .map(|(byte, inline_inlay)| {
+                                (byte + text.length().byte_count, inline_inlay)
+                            }),
                     );
-                    inline_inlays
-                        .splice(point.line_index..point.line_index + 1, new_inline_inlays);
+                    inline_inlays.splice(point.line_index..point.line_index + 1, new_inline_inlays);
                 }
             }
             Change::Delete(start, length) => {
@@ -1167,16 +1185,14 @@ impl Document {
                     let mut new_inline_inlays = inline_inlays[start.line_index]
                         .drain(..start_inlay)
                         .collect::<Vec<_>>();
-                        new_inline_inlays.extend(
-                        inline_inlays[end.line_index].drain(end_inlay..).map(
-                            |(byte, inline_inlay)| {
-                                (
-                                    start.byte_index + byte - end.byte_index.min(byte),
-                                    inline_inlay,
-                                )
-                            },
-                        ),
-                    );
+                    new_inline_inlays.extend(inline_inlays[end.line_index].drain(end_inlay..).map(
+                        |(byte, inline_inlay)| {
+                            (
+                                start.byte_index + byte - end.byte_index.min(byte),
+                                inline_inlay,
+                            )
+                        },
+                    ));
                     inline_inlays.splice(
                         start.line_index..end.line_index + 1,
                         iter::once(new_inline_inlays),
