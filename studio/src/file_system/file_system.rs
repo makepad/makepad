@@ -163,7 +163,7 @@ impl FileSystem {
         // ifnot, we create a new one
         if let Some(path) = self.tab_id_to_path.get(&tab_id){
             if let Some(Some(doc)) = self.open_documents.get(path){
-                let text = doc.text().to_string();
+                let text = doc.as_text().to_string();
                 self.file_client.send_request(FileRequest::SaveFile(path.clone(), text));
             }
         };

@@ -1,4 +1,4 @@
-use crate::{char::CharExt, line::Inline, str::StrExt, Line};
+use crate::{char::CharExt, layout::Inline, str::StrExt, Line};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct WrapData {

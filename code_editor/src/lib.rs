@@ -6,7 +6,7 @@ pub mod code_editor;
 pub mod history;
 pub mod inlays;
 pub mod iter;
-pub mod line;
+pub mod layout;
 pub mod move_ops;
 pub mod selection;
 pub mod settings;
@@ -21,7 +21,7 @@ pub mod wrap;
 pub use self::{
     code_editor::CodeEditor,
     history::History,
-    line::Line,
+    layout::Line,
     selection::Selection,
     settings::Settings,
     state::{Document, Session},
