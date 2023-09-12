@@ -7,6 +7,7 @@ use {
         makepad_math::*,
         makepad_objc_sys::runtime::{ObjcId, nil},
         os::{
+            apple::apple_util::str_to_nsstring,
             apple::apple_sys::*,
             ios::{
                 ios_delegates::*,
@@ -16,6 +17,9 @@ use {
         },
         area::Area,
         event::{
+            KeyCode,
+            KeyEvent,
+            TextInputEvent,
             KeyModifiers,
             TouchUpdateEvent,
             TouchState,
@@ -62,7 +66,8 @@ pub struct IosTimer {
 pub struct IosClasses {
     pub app_delegate: *const Class,
     pub mtk_view: *const Class,
-    pub mtk_view_dlg: *const Class,
+    pub mtk_view_delegate: *const Class,
+    pub textfield_delegate: *const Class,
     pub timer_delegate: *const Class,
 }
 impl IosClasses {
@@ -70,7 +75,8 @@ impl IosClasses {
         Self {
             app_delegate: define_ios_app_delegate(),
             mtk_view: define_mtk_view(),
-            mtk_view_dlg: define_mtk_view_dlg(),
+            mtk_view_delegate: define_mtk_view_delegate(),
+            textfield_delegate: define_textfield_delegate(),
             timer_delegate: define_ios_timer_delegate()
         }
     }
@@ -85,6 +91,7 @@ pub struct IosApp {
     metal_device: ObjcId,
     first_draw: bool,
     pub mtk_view: Option<ObjcId>,
+    pub textfield: Option<ObjcId>,
     event_callback: Option<Box<dyn FnMut(&mut IosApp, IosEvent) -> EventFlow >>,
     event_flow: EventFlow,
 }
@@ -100,6 +107,7 @@ impl IosApp {
                 metal_device,
                 first_draw: true,
                 mtk_view: None,
+                textfield: None,
                 time_start: Instant::now(),
                 timer_delegate_instance: msg_send![get_ios_class_global().timer_delegate, new],
                 timers: Vec::new(),
@@ -120,7 +128,7 @@ impl IosApp {
             let mtk_view_obj: ObjcId = msg_send![get_ios_class_global().mtk_view, alloc];
             let mtk_view_obj: ObjcId = msg_send![mtk_view_obj, initWithFrame: screen_rect];
             
-            let mtk_view_dlg_obj: ObjcId = msg_send![get_ios_class_global().mtk_view_dlg, alloc];
+            let mtk_view_dlg_obj: ObjcId = msg_send![get_ios_class_global().mtk_view_delegate, alloc];
             let mtk_view_dlg_obj: ObjcId = msg_send![mtk_view_dlg_obj, init];
             
             let view_ctrl_obj: ObjcId = msg_send![class!(UIViewController), alloc];
@@ -133,33 +141,51 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setDevice: self.metal_device];
             let () = msg_send![mtk_view_obj, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, setAutoResizeDrawable: YES];
-           let () = msg_send![mtk_view_obj, setMultipleTouchEnabled: YES];
- 
+            let () = msg_send![mtk_view_obj, setMultipleTouchEnabled: YES];
+            
+            let textfield_dlg: ObjcId = msg_send![get_ios_class_global().textfield_delegate, alloc];
+            let textfield_dlg: ObjcId= msg_send![textfield_dlg, init];
+            
+            let textfield: ObjcId = msg_send![class!(UITextField), alloc];
+            let textfield: ObjcId =  msg_send![textfield, initWithFrame: NSRect {origin: NSPoint {x: 10.0, y: 10.0}, size: NSSize {width: 100.0, height: 50.0}}];
+            let () = msg_send![textfield, setAutocapitalizationType: 0]; // UITextAutocapitalizationTypeNone
+            let () = msg_send![textfield, setAutocorrectionType: 1]; // UITextAutocorrectionTypeNo
+            let () = msg_send![textfield, setSpellCheckingType: 1]; // UITextSpellCheckingTypeNo
+            let () = msg_send![textfield, setHidden: YES];
+            let () = msg_send![textfield, setDelegate: textfield_dlg];
+            // to make backspce work - with empty text there is no event on text removal
+            let () = msg_send![textfield, setText: str_to_nsstring("x")];
+            let () = msg_send![mtk_view_obj, addSubview: textfield];
+            
+            let notification_center: ObjcId = msg_send![class!(NSNotificationCenter), defaultCenter];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWasShown:) name: UIKeyboardDidShowNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillBeHidden:) name: UIKeyboardWillHideNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidChangeFrame:) name: UIKeyboardDidChangeFrameNotification object: nil];
             
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
-
+            
             let () = msg_send![view_ctrl_obj, beginAppearanceTransition: true animated: false];
             let () = msg_send![view_ctrl_obj, endAppearanceTransition];
             
             let () = msg_send![window_obj, makeKeyAndVisible];
             
-            
+            self.textfield = Some(textfield);
             self.mtk_view = Some(mtk_view_obj);
         }
     }
     
-    pub fn draw_size_will_change(&mut self){
+    pub fn draw_size_will_change(&mut self) {
         self.check_window_geom();
     }
     
-    pub fn check_window_geom(&mut self){
+    pub fn check_window_geom(&mut self) {
         let main_screen: ObjcId = unsafe {msg_send![class!(UIScreen), mainScreen]};
         let screen_rect: NSRect = unsafe {msg_send![main_screen, bounds]};
         let dpi_factor: f64 = unsafe {msg_send![main_screen, scale]};
         let new_size = dvec2(screen_rect.size.width as f64, screen_rect.size.height as f64);
-
+        
         let new_geom = WindowGeom {
             xr_is_presenting: false,
             is_topmost: false,
@@ -195,34 +221,34 @@ impl IosApp {
         self.do_callback(IosEvent::Paint);
     }
     
-    pub fn update_touch(&mut self, uid: u64, abs:DVec2, state:TouchState){
-        if let Some(touch) = self.touches.iter_mut().find(|v| v.uid == uid){
+    pub fn update_touch(&mut self, uid: u64, abs: DVec2, state: TouchState) {
+        if let Some(touch) = self.touches.iter_mut().find( | v | v.uid == uid) {
             touch.state = state;
             touch.abs = abs;
         }
-        else{
-            self.touches.push(TouchPoint{
+        else {
+            self.touches.push(TouchPoint {
                 state,
                 abs,
                 uid,
-                rotation_angle:0.0,
-                force:0.0,
-                radius:dvec2(0.0,0.0),
+                rotation_angle: 0.0,
+                force: 0.0,
+                radius: dvec2(0.0, 0.0),
                 handled: Cell::new(Area::Empty),
                 sweep_lock: Cell::new(Area::Empty)
             })
         }
     }
     
-    pub fn send_touch_update(&mut self){
-        self.do_callback(IosEvent::TouchUpdate(TouchUpdateEvent{
+    pub fn send_touch_update(&mut self) {
+        self.do_callback(IosEvent::TouchUpdate(TouchUpdateEvent {
             time: self.time_now(),
             window_id: CxWindowPool::id_zero(),
             modifiers: KeyModifiers::default(),
             touches: self.touches.clone()
         }));
         // remove the stopped touches
-        self.touches.retain(|v| if let TouchState::Stop = v.state{false}else{true});
+        self.touches.retain( | v | if let TouchState::Stop = v.state {false}else {true});
     }
     
     pub fn time_now(&self) -> f64 {
@@ -241,14 +267,22 @@ impl IosApp {
         }
     }
     
+    pub fn show_keyboard(&mut self) {
+        let () = unsafe {msg_send![self.textfield.unwrap(), becomeFirstResponder]};
+    }
+
+    pub fn hide_keyboard(&mut self){
+        let () = unsafe {msg_send![self.textfield.unwrap(), resignFirstResponder]};
+    }
+    
     pub fn do_callback(&mut self, event: IosEvent) {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, event);
-            if let EventFlow::Wait = self.event_flow{
-                let () = unsafe{msg_send![self.mtk_view.unwrap(), setPaused: YES]};
+            if let EventFlow::Wait = self.event_flow {
+                let () = unsafe {msg_send![self.mtk_view.unwrap(), setPaused: YES]};
             }
-            else{
-                let () = unsafe{msg_send![self.mtk_view.unwrap(), setPaused: NO]};
+            else {
+                let () = unsafe {msg_send![self.mtk_view.unwrap(), setPaused: NO]};
             }
             self.event_callback = Some(callback);
             
@@ -289,6 +323,29 @@ impl IosApp {
                 return;
             }
         }
+    }
+    
+    pub fn send_text_input(&mut self, input: String, replace_last: bool) {
+        self.do_callback(IosEvent::TextInput(TextInputEvent {
+            input: input,
+            was_paste: false,
+            replace_last: replace_last
+        }))
+    }
+    
+    pub fn send_backspace(&mut self) {
+        self.do_callback(IosEvent::KeyDown(KeyEvent {
+            key_code: KeyCode::Backspace,
+            is_repeat: false,
+            modifiers: Default::default(),
+            time: self.time_now(),
+        }));
+        self.do_callback(IosEvent::KeyUp(KeyEvent {
+            key_code: KeyCode::Backspace,
+            is_repeat: false,
+            modifiers: Default::default(),
+            time: self.time_now(),
+        }));
     }
     
     pub fn send_timer_received(&mut self, nstimer: ObjcId) {
