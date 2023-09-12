@@ -57,7 +57,6 @@ public class MakepadNetwork {
                 connection.setRequestMethod(method);
 
                 String[] headerPairs = headers.split("\r\n");
-                Log.w("SAPP", "despues de headers");
 
                 for (String headerPair : headerPairs) {
                     String[] parts = headerPair.split(":");
@@ -68,7 +67,6 @@ public class MakepadNetwork {
                     }
                 }
 
-Log.w("SAPP", "antes de body");
                 if (body != null) {
                     connection.setDoOutput(true);
                     try (OutputStream outputStream = connection.getOutputStream()) {
@@ -76,10 +74,7 @@ Log.w("SAPP", "antes de body");
                     }
                 }
 
-                Log.w("SAPP", "despues de body");
-
                 int statusCode = connection.getResponseCode();
-                Log.w("SAPP", "statusCode {" + statusCode + "}");
 
                 byte[] responseBody;
                 if (statusCode >= 400) {
