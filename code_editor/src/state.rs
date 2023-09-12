@@ -390,13 +390,13 @@ impl Session {
                     change: Change::Delete(position, length),
                     drift: Drift::Before,
                 });
-                if let Some(uninject_char) = uninject_delimiter {
+                if let Some(uninject_delimiter) = uninject_delimiter {
                     editor.apply_edit(Edit {
                         change: Change::Delete(
                             position,
                             Length {
                                 line_count: 0,
-                                byte_count: uninject_char.len_utf8(),
+                                byte_count: uninject_delimiter.len_utf8(),
                             },
                         ),
                         drift: Drift::Before,
@@ -406,9 +406,9 @@ impl Session {
                     change: Change::Insert(position, text.clone()),
                     drift: Drift::Before,
                 });
-                if let Some(inject_char) = inject_delimiter {
+                if let Some(inject_delimiter) = inject_delimiter {
                     editor.apply_edit(Edit {
-                        change: Change::Insert(position + text.length(), Text::from(inject_char)),
+                        change: Change::Insert(position + text.length(), Text::from(inject_delimiter)),
                         drift: Drift::After,
                     })
                 }
