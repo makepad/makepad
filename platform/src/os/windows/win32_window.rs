@@ -16,6 +16,9 @@ use {
         event::DragItem,
         windows::{
             core::PCWSTR,
+            core::IntoParam,
+            core::Result as coreResult,
+            core::HRESULT,
             Win32::{
                 Foundation::{
                     HWND,
@@ -37,8 +40,8 @@ use {
                     },
                     Ole::{
                         CF_UNICODETEXT,
-                        RegisterDragDrop,
-                        IDropTarget,
+                        //RegisterDragDrop,
+                        //IDropTarget,
                     },
                     WindowsProgramming::GMEM_DDESHARE,
                     DataExchange::{
@@ -258,13 +261,23 @@ use {
                 get_win32_app_global,
             },
             win32_event::*,
-            win32_droptarget::*,
+            droptarget::*,
         },
         window::WindowId,
         cx::*,
         cursor::MouseCursor,
     },
 };
+
+// Copied from Microsoft so it refers to the right IDropTarget
+pub unsafe fn RegisterDragDrop<P0, P1>(hwnd: P0, pdroptarget: P1) -> coreResult<()>
+where
+    P0: IntoParam<HWND>,
+    P1: IntoParam<IDropTarget>,
+{
+    ::windows_targets::link!("ole32.dll" "system" fn RegisterDragDrop(hwnd : HWND, pdroptarget : * mut::core::ffi::c_void) -> HRESULT);
+    RegisterDragDrop(hwnd.into_param().abi(), pdroptarget.into_param().abi()).ok()
+}
 
 //#[derive(Clone)]
 pub struct Win32Window {
@@ -663,7 +676,7 @@ impl Win32Window {
             // inform that the user left the window, dragging an object
             WM_DROPTARGET_DRAGLEAVE => {
 
-                //log!("WM_DROPTARGET_DRAGLEAVE");
+                log!("WM_DROPTARGET_DRAGLEAVE");
 
                 window.do_callback(Win32Event::DragEnd);
 
@@ -686,7 +699,7 @@ impl Win32Window {
                 else { DragResponse::None };
 
                 let drag_item = window.drag_item.borrow().clone();
-                //log!("WM_DROPTARGET_DRAGOVER {},{} 0x{:04X} {:?} drag_item: {:?}",x,y,dtf,response,drag_item);
+                log!("WM_DROPTARGET_DRAGOVER {},{} 0x{:04X} {:?} drag_item: {:?}",point.x,point.y,dtf,response,drag_item);
 
                 // send to makepad
                 window.do_callback(

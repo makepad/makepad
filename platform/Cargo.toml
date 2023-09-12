@@ -81,3 +81,6 @@ features = [
     "Storage_Streams",
     "implement"
 ]
+
+[target.'cfg(windows)'.dependencies.windows-targets]
+version = "0.48.3"

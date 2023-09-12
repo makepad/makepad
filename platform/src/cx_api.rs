@@ -4,6 +4,7 @@ use {
         rc::Rc,
     },
     crate::{
+        log,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
         makepad_math::{DVec2, Rect},

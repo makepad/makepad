@@ -5,85 +5,120 @@ use {
         mem,
     },
     crate::{
+        log,
+        error,
         windows::{
             core::HRESULT,
             core::PCWSTR,
             core::PCSTR,
-            Win32::UI::WindowsAndMessaging::{
-                WNDCLASSEXW,
-                PM_REMOVE,
-                LoadIconW,
-                RegisterClassExW,
-                IsGUIThread,
-                GetMessageW,
-                TranslateMessage,
-                DispatchMessageW,
-                PeekMessageW,
-                SetTimer,
-                KillTimer,
-                ShowCursor,
-                SetCursor,
-                LoadCursorW,
-                IsProcessDPIAware,
-                IDC_ARROW,
-                IDC_CROSS,
-                IDC_HAND,
-                IDC_SIZEALL,
-                IDC_IBEAM,
-                IDC_HELP,
-                IDC_NO,
-                IDC_SIZEWE,
-                IDC_SIZENS,
-                IDC_SIZENESW,
-                IDC_SIZENWSE,
-                WM_QUIT,
-                CS_HREDRAW,
-                CS_VREDRAW,
-                CS_OWNDC,
-                IDI_WINLOGO,
+            core::IntoParam,
+            Win32::{
+                UI::{
+                    WindowsAndMessaging::{
+                        WNDCLASSEXW,
+                        PM_REMOVE,
+                        LoadIconW,
+                        RegisterClassExW,
+                        IsGUIThread,
+                        GetMessageW,
+                        TranslateMessage,
+                        DispatchMessageW,
+                        PeekMessageW,
+                        SetTimer,
+                        KillTimer,
+                        ShowCursor,
+                        SetCursor,
+                        LoadCursorW,
+                        IsProcessDPIAware,
+                        IDC_ARROW,
+                        IDC_CROSS,
+                        IDC_HAND,
+                        IDC_SIZEALL,
+                        IDC_IBEAM,
+                        IDC_HELP,
+                        IDC_NO,
+                        IDC_SIZEWE,
+                        IDC_SIZENS,
+                        IDC_SIZENESW,
+                        IDC_SIZENWSE,
+                        WM_QUIT,
+                        CS_HREDRAW,
+                        CS_VREDRAW,
+                        CS_OWNDC,
+                        IDI_WINLOGO,
+                    },
+                    HiDpi::{
+                        PROCESS_DPI_AWARENESS,
+                        DPI_AWARENESS_CONTEXT,
+                        MONITOR_DPI_TYPE,
+                        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
+                        PROCESS_PER_MONITOR_DPI_AWARE,
+                        MDT_EFFECTIVE_DPI
+                    },
+                },
+                Graphics::Gdi::{
+                    CreateSolidBrush,
+                    HMONITOR,
+                    GetDC,
+                    MonitorFromWindow,
+                    GetDeviceCaps,
+                    MONITOR_DEFAULTTONEAREST,
+                    LOGPIXELSX
+                },
+                Foundation::{
+                    COLORREF,
+                    S_OK,
+                    HWND,
+                    BOOL,
+                    FARPROC,
+                    GlobalFree,
+                },
+                System::{
+                    Threading::ExitProcess,
+                    LibraryLoader::{
+                        GetModuleHandleW,
+                        LoadLibraryA,
+                        GetProcAddress,
+                    },
+                    Performance::{
+                        QueryPerformanceCounter,
+                        QueryPerformanceFrequency,
+                    },
+                    //Com::IDataObject,
+                    Ole::{
+                        OleInitialize,
+                        //DoDragDrop,
+                        IDropSource,
+                        DROPEFFECT,
+                        DROPEFFECT_COPY,
+                        DROPEFFECT_MOVE,
+                    },
+                    Memory::{
+                        GlobalAlloc,
+                        GMEM_ZEROINIT,
+                        GMEM_FIXED,
+                        GlobalLock,
+                        GlobalUnlock,
+                    },
+                },
             },
-            Win32::Graphics::Gdi::{
-                CreateSolidBrush,
-                HMONITOR,
-                GetDC,
-                MonitorFromWindow,
-                GetDeviceCaps,
-                MONITOR_DEFAULTTONEAREST,
-                LOGPIXELSX
-            },
-            Win32::Foundation::{
-                COLORREF,
-                S_OK,
-                HWND,
-                BOOL,
-                FARPROC,
-            },
-            Win32::UI::HiDpi::{
-                PROCESS_DPI_AWARENESS,
-                DPI_AWARENESS_CONTEXT,
-                MONITOR_DPI_TYPE,
-                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
-                PROCESS_PER_MONITOR_DPI_AWARE,
-                MDT_EFFECTIVE_DPI
-            },
-            Win32::System::Threading::ExitProcess,
-            Win32::System::LibraryLoader::{
-                GetModuleHandleW,
-                LoadLibraryA,
-                GetProcAddress,
-            },
-            Win32::System::Performance::{
-                QueryPerformanceCounter,
-                QueryPerformanceFrequency,
-            },
-            Win32::System::Ole::OleInitialize,
         },
-        event::TimerEvent,
+        event::{
+            TimerEvent,
+            DragItem,
+        },
         cursor::MouseCursor,
-        os::cx_native::EventFlow,
-        os::windows::win32_event::Win32Event,
-        os::windows::win32_window::Win32Window,
+        os::{
+            cx_native::EventFlow,
+            windows::{
+                dropsource::*,
+                droptarget::*,
+                dataobject::*,
+                win32_event::Win32Event,
+                win32_window::Win32Window,
+            },
+        },
     },
 };
 pub const FALSE: BOOL = BOOL(0);
@@ -101,6 +136,16 @@ pub fn init_win32_app_global(event_callback: Box<dyn FnMut(&mut Win32App, Win32E
     unsafe {
         WIN32_APP = Box::into_raw(Box::new(Win32App::new(event_callback)));
     }
+}
+
+// copied from Microsoft so it refers to the right IDataObject
+pub unsafe fn DoDragDrop<P0, P1>(pdataobj: P0, pdropsource: P1, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT
+where
+    P0: IntoParam<IDataObject>,
+    P1: IntoParam<IDropSource>,
+{
+    ::windows_targets::link!("ole32.dll" "system" fn DoDragDrop(pdataobj : * mut::core::ffi::c_void, pdropsource : * mut::core::ffi::c_void, dwokeffects : DROPEFFECT, pdweffect : *mut DROPEFFECT) -> HRESULT);
+    DoDragDrop(pdataobj.into_param().abi(), pdropsource.into_param().abi(), dwokeffects, pdweffect)
 }
 
 pub struct Win32App {
@@ -336,6 +381,87 @@ impl Win32App {
             if let Win32Timer::Resize {win32_id} = self.timers[slot] {
                 self.timers[slot] = Win32Timer::Free;
                 unsafe { KillTimer(None, win32_id).unwrap(); }
+            }
+        }
+    }
+
+    pub fn start_dragging(&self,items: Vec<DragItem>) {
+
+        if items.len() > 1 {
+            error!("multi-item drag/drop operation not supported");
+        }
+        for item in items.iter() {
+            match item {
+                DragItem::FilePath { path,internal_id, } => {
+
+                    log!("about to drag {} with internal ID {:?}",path,internal_id);
+
+                    // only drag if something is there
+                    if (path.len() > 0) || internal_id.is_some() {
+
+                        // encode filename
+                        let mut encoded_filename: Vec<u16> = path.encode_utf16().collect();
+                        encoded_filename.push(0);
+
+                        // only one filename
+                        encoded_filename.push(0);
+
+                        // create a Windows global memory buffer that can contain DROPFILES, the live id and this filename with zeros
+                        let size_in_bytes = 28 + encoded_filename.len() * 2;
+                        log!("size_in_bytes = {}",size_in_bytes);
+
+                        let hglobal = unsafe { GlobalAlloc(GMEM_ZEROINIT | GMEM_FIXED,size_in_bytes) }.unwrap();
+                        log!("hglobal = {:?}",hglobal);
+
+                        let hglobal_raw_ptr = unsafe { GlobalLock(hglobal) };
+                        log!("hglobal_raw_ptr = {:p}",hglobal_raw_ptr);
+
+                        // initialize the DROPFILES part
+                        let i32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut i32,5) };
+                        i32_slice[0] = 28;  // offset to filename
+                        i32_slice[1] = 0;
+                        i32_slice[2] = 0;
+                        i32_slice[3] = 0;
+                        i32_slice[4] = 1;  // not 0 because 16-bit characters in the filename
+                        log!("i32_slice = {:?}",i32_slice);
+
+                        // then append the LiveId
+                        let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
+                        u64_slice[0] = if let Some(actual_internal_id) = internal_id { actual_internal_id.0 } else { 0 };
+                        log!("u64_slice = {:?}",u64_slice);
+
+                        // and then append the encoded filename
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                encoded_filename.as_ptr(),
+                                (hglobal_raw_ptr as *mut u8).offset(28) as *mut u16,
+                                encoded_filename.len(),
+                            )
+                        };
+
+                        // ready
+                        unsafe { GlobalUnlock(hglobal) }.unwrap();
+
+                        // create COM data object
+                        let data_object: IDataObject = DataObject { hglobal, }.into();
+
+                        // create COM drop source
+                        let drop_source: IDropSource = DropSource { }.into();
+
+                        log!("about to go into DoDragDrop...");
+
+                        // DoDragDrop is synchronous, so this thread will block until the file was dropped somewhere... let's see how that works out...
+                        let mut effect = DROPEFFECT(0);
+                        match unsafe { DoDragDrop(&data_object,&drop_source,DROPEFFECT_COPY | DROPEFFECT_MOVE,&mut effect) } {
+                            DRAGDROP_S_DROP => { log!("drag/drop succesful") },
+                            DRAGDROP_S_CANCEL => { log!("drag/drop canceled") },
+                            E_UNSPEC => { log!("drag/drop failed for some reason") },
+                        }
+                    }
+                },
+                _ => {
+                    error!("Only DragItem::FilePath supported");
+                }
             }
         }
     }
