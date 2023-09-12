@@ -60,7 +60,7 @@ fn main() {
     let args:Vec<String> = std::env::args().collect();
 
     // Skip the first argument if it's the binary path or 'cargo'
-    let args = if args.len() > 1 && (args[0].ends_with("cargo-makepad") || args[0] == "cargo") {
+    let args = if args.len() > 1 && (args[0].ends_with("cargo-makepad") || args[0] == "cargo" || args[0].ends_with("cargo-makepad.exe")) {
         // If it's 'cargo makepad', then skip the second argument as well
         if args.len() > 2 && args[1] == "makepad" {
             args[2..].to_vec()
