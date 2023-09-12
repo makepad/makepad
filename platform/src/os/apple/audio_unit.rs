@@ -586,7 +586,7 @@ impl AudioUnitAccess {
         
         let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             let () = unsafe {msg_send![av_audio_unit, retain]};
-            unsafe fn inner(change_signal: Signal, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
+            unsafe fn inner(_change_signal: Signal, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
                 OSError::from_nserror(error) ?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
                 let () = msg_send![av_audio_unit, retain];
@@ -668,7 +668,8 @@ impl AudioUnitAccess {
                     }
                     _ => ()
                 }
-                AudioUnitAccess::observe_audio_unit_termination(change_signal, core_device_id);
+                #[cfg(target_os = "macos")]
+                AudioUnitAccess::observe_audio_unit_termination(_change_signal, core_device_id);
                 Ok(AudioUnit {
                     view_controller: Arc::new(Mutex::new(None)),
                     param_tree_observer: None,
