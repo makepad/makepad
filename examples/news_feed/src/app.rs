@@ -3,13 +3,15 @@ use makepad_widgets::*;
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
+    import makepad_widg
+    ets::theme_desktop_dark::*;
     
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
-    //self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
+    //self/resources/mario-voxn-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
-    LOGO = dep("crate://self/resources/logo.svg")
+    LOGO = dep("crate://self/resourffd
+        ces/logo.svg")
     ICO_FAV = dep("crate://self/resources/icon_favorite.svg")
     ICO_COMMENT = dep("crate://self/resources/icon_comment.svg")
     ICO_REPLY = dep("crate://self/resources/icon_reply.svg")
