@@ -75,7 +75,18 @@ impl Text {
         Text { lines }
     }
 
-    pub fn insert(&mut self, point: Position, mut text: Self) {
+    pub fn apply_change(&mut self, change: Change) {
+        match change {
+            Change::Insert(position, text) => self.insert(position, text),
+            Change::Delete(start, length) => self.delete(start, length),
+        }
+    }
+
+    pub fn into_lines(self) -> Vec<String> {
+        self.lines
+    }
+
+    fn insert(&mut self, point: Position, mut text: Self) {
         if text.length().line_count == 0 {
             self.lines[point.line_index].replace_range(
                 point.byte_index..point.byte_index,
@@ -95,7 +106,7 @@ impl Text {
         }
     }
 
-    pub fn delete(&mut self, start: Position, length: Length) {
+    fn delete(&mut self, start: Position, length: Length) {
         let end = start + length;
         if start.line_index == end.line_index {
             self.lines[start.line_index].replace_range(start.byte_index..end.byte_index, "");
@@ -105,17 +116,6 @@ impl Text {
             self.lines
                 .splice(start.line_index..end.line_index + 1, iter::once(line));
         }
-    }
-
-    pub fn apply_change(&mut self, change: Change) {
-        match change {
-            Change::Insert(position, text) => self.insert(position, text),
-            Change::Delete(start, length) => self.delete(start, length),
-        }
-    }
-
-    pub fn into_lines(self) -> Vec<String> {
-        self.lines
     }
 }
 
