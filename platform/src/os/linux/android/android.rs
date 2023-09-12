@@ -206,16 +206,25 @@ impl Cx {
                     FromJavaMessage::ResizeTextIME {keyboard_height} => {
                         self.panning_adjust_for_text_ime(keyboard_height);
                     }
-                    FromJavaMessage::HttpResponse {request_id, status_code, headers, body} => {
+                    FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
                         let e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpResponse(HttpResponse::new(
-                                    LiveId(request_id),
+                                    LiveId(metadata_id),
                                     status_code,
                                     headers,
                                     Some(body)
                                 ))
+                            }
+                        ]);
+                        self.call_event_handler(&e);
+                    }
+                    FromJavaMessage::HttpRequestError {request_id, error, ..} => {
+                        let e = Event::NetworkResponses(vec![
+                            NetworkResponseEvent {
+                                request_id: LiveId(request_id),
+                                response: NetworkResponse::HttpRequestError(error)
                             }
                         ]);
                         self.call_event_handler(&e);
