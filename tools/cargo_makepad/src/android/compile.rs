@@ -89,7 +89,6 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
             "rustc",
             "--lib",
             "--crate-type=cdylib",
-            "--release",
             &target_opt
         ]; 
         let mut args_out = Vec::new();
@@ -292,9 +291,10 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget]) -> Result<(), String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args:&[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
-
+    let is_release = args.iter().find(|v| v == &"--release").is_some();
+    
     for android_target in android_targets {
         let abi = android_target.abi_identifier();
         mkdir(&build_paths.out_dir.join(format!("lib/{abi}"))) ?;
@@ -302,7 +302,12 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
         let android_target_dir = android_target.toolchain();
         let binary_path = format!("lib/{abi}/libmakepad.so");
 
-        let src_lib = cwd.join(format!("target/{android_target_dir}/release/lib{underscore_target}.so"));
+        let src_lib = if is_release{
+            cwd.join(format!("target/{android_target_dir}/release/lib{underscore_target}.so"))
+        }
+        else{
+            cwd.join(format!("target/{android_target_dir}/debug/lib{underscore_target}.so"))
+        };
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false) ?;
 
@@ -428,7 +433,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     println!("Building APK");
     build_dex(sdk_dir, &build_paths)?;
     build_unaligned_apk(sdk_dir, &build_paths)?;
-    add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets)?;
+    add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args)?;
     add_resources(sdk_dir, build_crate, &build_paths)?;
     build_zipaligned_apk(sdk_dir, &build_paths)?;
     sign_apk(sdk_dir, &build_paths)?;
