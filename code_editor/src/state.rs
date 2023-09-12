@@ -408,7 +408,10 @@ impl Session {
                 });
                 if let Some(inject_delimiter) = inject_delimiter {
                     editor.apply_edit(Edit {
-                        change: Change::Insert(position + text.length(), Text::from(inject_delimiter)),
+                        change: Change::Insert(
+                            position + text.length(),
+                            Text::from(inject_delimiter),
+                        ),
                         drift: Drift::After,
                     })
                 }
@@ -417,56 +420,74 @@ impl Session {
     }
 
     pub fn enter(&mut self) {
-        self.document.borrow_mut().edit(
+        self.document.borrow_mut().edit_selections(
             self.id,
             EditKind::Other,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |line, index, _| {
-                (
-                    if line[..index].chars().all(|char| char.is_whitespace()) {
-                        Length {
-                            line_count: 0,
-                            byte_count: index,
+            &self.settings,
+            |mut editor, position, length| {
+                let line = &editor.as_text().as_lines()[position.line_index];
+                let delete_whitespace = line.chars().all(|char| char.is_whitespace());
+                let inject_newline = line[..position.byte_index]
+                    .chars()
+                    .rev()
+                    .find_map(|char| {
+                        if char.is_opening_delimiter() {
+                            return Some(true);
                         }
-                    } else {
-                        Length::zero()
-                    },
-                    false,
-                    Some(Text::newline()),
-                    if line[..index]
+                        if char.is_closing_delimiter() {
+                            return Some(false);
+                        }
+                        None
+                    })
+                    .unwrap_or(false)
+                    && line[position.byte_index..]
                         .chars()
-                        .rev()
                         .find_map(|char| {
-                            if char.is_opening_delimiter() {
+                            if char.is_closing_delimiter() {
                                 return Some(true);
                             }
-                            if char.is_closing_delimiter() {
+                            if !char.is_whitespace() {
                                 return Some(false);
                             }
                             None
                         })
-                        .unwrap_or(false)
-                        && line[index..]
-                            .chars()
-                            .find_map(|char| {
-                                if char.is_closing_delimiter() {
-                                    return Some(true);
-                                }
-                                if !char.is_whitespace() {
-                                    return Some(false);
-                                }
-                                None
-                            })
-                            .unwrap_or(false)
-                    {
-                        Some(Text::newline())
-                    } else {
-                        None
-                    },
-                )
+                        .unwrap_or(false);
+                if delete_whitespace {
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(
+                            Position {
+                                line_index: position.line_index,
+                                byte_index: 0,
+                            },
+                            Length {
+                                line_count: 0,
+                                byte_count: position.byte_index,
+                            },
+                        ),
+                        drift: Drift::Before,
+                    });
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                editor.apply_edit(Edit {
+                    change: Change::Insert(position, Text::newline()),
+                    drift: Drift::Before,
+                });
+                if inject_newline {
+                    editor.apply_edit(Edit {
+                        change: Change::Insert(
+                            Position {
+                                line_index: position.line_index + 1,
+                                byte_index: 0,
+                            },
+                            Text::newline(),
+                        ),
+                        drift: Drift::After,
+                    });
+                }
             },
         );
     }
@@ -512,46 +533,59 @@ impl Session {
     }
 
     pub fn delete(&mut self) {
-        self.document.borrow_mut().edit(
+        self.document.borrow_mut().edit_selections(
             self.id,
             EditKind::Delete,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |_, _, is_empty| (Length::zero(), is_empty, None, None),
+            &self.settings,
+            |mut editor, position, length| {
+                let mut length = length;
+                if length == Length::zero() {
+                    let lines = editor.as_text().as_lines();
+                    if position.byte_index < lines[position.line_index].len() {
+                        length.byte_count += 1;
+                    } else if position.line_index < lines.len() {
+                        length.line_count += 1;
+                        length.byte_count = 0;
+                    }
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+            },
         );
     }
 
     pub fn backspace(&mut self) {
-        self.document.borrow_mut().edit(
+        self.document.borrow_mut().edit_selections(
             self.id,
             EditKind::Delete,
             &self.selections,
-            self.settings.use_soft_tabs,
-            self.settings.tab_column_count,
-            self.settings.indent_column_count,
-            |line, index, is_empty| {
-                (
-                    if is_empty {
-                        if index == 0 {
-                            Length {
-                                line_count: 1,
-                                byte_count: 0,
-                            }
-                        } else {
-                            Length {
-                                line_count: 0,
-                                byte_count: line[..index].graphemes().next_back().unwrap().len(),
-                            }
-                        }
-                    } else {
-                        Length::zero()
-                    },
-                    false,
-                    None,
-                    None,
-                )
+            &self.settings,
+            |mut editor, position, length| {
+                let mut position = position;
+                let mut length = length;
+                if length == Length::zero() {
+                    let lines = editor.as_text().as_lines();
+                    if position.byte_index > 0 {
+                        let byte_count = lines[position.line_index]
+                            .graphemes()
+                            .next_back()
+                            .unwrap()
+                            .len();
+                        position.byte_index -= byte_count;
+                        length.byte_count += byte_count;
+                    } else if position.line_index > 0 {
+                        position.line_index -= 1;
+                        position.byte_index = lines[position.line_index].len();
+                        length.line_count += 1;
+                    }
+                }
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
             },
         );
     }
@@ -904,147 +938,6 @@ impl Document {
             &mut edits,
         );
         self.apply_edits(session_id, None, &edits);
-    }
-
-    fn edit(
-        &mut self,
-        origin_id: SessionId,
-        kind: EditKind,
-        selections: &SelectionSet,
-        use_soft_tabs: bool,
-        tab_column_count: usize,
-        indent_column_count: usize,
-        mut f: impl FnMut(&String, usize, bool) -> (Length, bool, Option<Text>, Option<Text>),
-    ) {
-        self.history
-            .push_or_extend_group(origin_id, kind, selections);
-        let mut edits = Vec::new();
-        let mut line_ranges = Vec::new();
-        let mut point = Position::zero();
-        let mut prev_range_end = Position::zero();
-        for range in selections
-            .iter()
-            .copied()
-            .merge(
-                |selection_0, selection_1| match selection_0.merge_with(selection_1) {
-                    Some(selection) => Ok(selection),
-                    None => Err((selection_0, selection_1)),
-                },
-            )
-            .map(|selection| selection.range())
-        {
-            point += range.start() - prev_range_end;
-            if !range.is_empty() {
-                let edit = Edit {
-                    change: Change::Delete(point, range.extent()),
-                    drift: Drift::Before,
-                };
-                edits.push(edit.clone());
-                self.history.apply_edit(edit);
-            }
-            let (delete_extent_before, delete_after, insert_text_before, insert_text_after) = f(
-                &self.history.as_text().as_lines()[point.line_index],
-                point.byte_index,
-                range.is_empty(),
-            );
-            if delete_extent_before != Length::zero() {
-                if delete_extent_before.line_count == 0 {
-                    point.byte_index -= delete_extent_before.byte_count;
-                } else {
-                    point.line_index -= delete_extent_before.line_count;
-                    point.byte_index = self.history.as_text().as_lines()[point.line_index].len()
-                        - delete_extent_before.byte_count;
-                }
-                let edit = Edit {
-                    change: Change::Delete(point, delete_extent_before),
-                    drift: Drift::Before,
-                };
-                edits.push(edit.clone());
-                self.history.apply_edit(edit);
-            }
-            if delete_after {
-                let delete_extent_after = if let Some(grapheme) = self.history.as_text().as_lines()
-                    [point.line_index][point.byte_index..]
-                    .graphemes()
-                    .next()
-                {
-                    Some(Length {
-                        line_count: 0,
-                        byte_count: grapheme.len(),
-                    })
-                } else if point.line_index < self.history.as_text().as_lines().len() - 1 {
-                    Some(Length {
-                        line_count: 1,
-                        byte_count: 0,
-                    })
-                } else {
-                    None
-                };
-                if let Some(delete_extent_after) = delete_extent_after {
-                    let edit = Edit {
-                        change: Change::Delete(point, delete_extent_after),
-                        drift: Drift::Before,
-                    };
-                    edits.push(edit.clone());
-                    self.history.apply_edit(edit);
-                }
-            }
-            if let Some(insert_text_before) = insert_text_before {
-                let line_count = insert_text_before.as_lines().len();
-                if line_count > 1 {
-                    line_ranges.push(
-                        (if self.history.as_text().as_lines()[point.line_index][..point.byte_index]
-                            .chars()
-                            .all(|char| char.is_whitespace())
-                        {
-                            point.line_index
-                        } else {
-                            point.line_index + 1
-                        })..point.line_index + line_count,
-                    );
-                }
-                let extent = insert_text_before.length();
-                let edit = Edit {
-                    change: Change::Insert(point, insert_text_before),
-                    drift: Drift::Before,
-                };
-                point += extent;
-                edits.push(edit.clone());
-                self.history.apply_edit(edit);
-            }
-            if let Some(insert_text_after) = insert_text_after {
-                let line_count = insert_text_after.as_lines().len();
-                if line_count > 1 {
-                    line_ranges.push(
-                        (if self.history.as_text().as_lines()[point.line_index][..point.byte_index]
-                            .chars()
-                            .all(|char| char.is_whitespace())
-                        {
-                            point.line_index
-                        } else {
-                            point.line_index + 1
-                        })..point.line_index + line_count,
-                    );
-                }
-                let extent = insert_text_after.length();
-                let edit = Edit {
-                    change: Change::Insert(point, insert_text_after),
-                    drift: Drift::After,
-                };
-                point += extent;
-                edits.push(edit.clone());
-                self.history.apply_edit(edit);
-            }
-            prev_range_end = range.end();
-        }
-        self.autoindent(
-            &line_ranges,
-            use_soft_tabs,
-            tab_column_count,
-            indent_column_count,
-            &mut edits,
-        );
-        self.apply_edits(origin_id, None, &edits);
     }
 
     fn autoindent(
@@ -1466,7 +1359,11 @@ struct Editor<'a> {
 }
 
 impl<'a> Editor<'a> {
-    pub fn apply_edit(&mut self, edit: Edit) {
+    fn as_text(&mut self) -> &Text {
+        self.history.as_text()
+    }
+
+    fn apply_edit(&mut self, edit: Edit) {
         self.history.apply_edit(edit.clone());
         self.edits.push(edit);
     }
