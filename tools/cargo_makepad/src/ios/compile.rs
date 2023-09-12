@@ -280,16 +280,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     if identities.len() > 1 {
         // if there are multiple signing identies, prompt the user which one to select
         println!("\nMultiple signing identities found, please select one:\n{:}", security_result);
-        let mut input_str = String::new();
-        io::stdin()
-            .read_line(&mut input_str)
-            .expect("Failed to read line");
-        
-        let index: usize = input_str
-            .trim()
-            .parse()
-            .expect("Invalid input, try again");
-
+        let index = prompt_selection();
         selected_identity = &identities[index - 1][5..45];
         println!("Selected signing identity: {:}", identities[index - 1]);
 
@@ -324,37 +315,18 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         for (i, profile) in provisioning_profiles.iter().enumerate() {
             println!("{:}) team: {:}, devices: {:?}", i + 1,  profile.team, profile.devices);
         }
-
-        let mut input_str = String::new();
-        io::stdin()
-            .read_line(&mut input_str)
-            .expect("Failed to read line");
-        
-        let index: usize = input_str
-            .trim()
-            .parse()
-            .expect("Invalid input, try again");
-
+        let index = prompt_selection();
         provision = &provisioning_profiles[index - 1];
         println!("Selected provisioning profile {}: {}", index, provision.team);
     }
 
     let selected_device = &provision.devices[0];
     if provision.devices.len() > 1 {
-        println!("Multiple devices found in provisioning profile, please select one:\n{:?}", provision.devices);
+        println!("\nMultiple devices found in provisioning profile, please select one:\n");
         for (i, uuid) in provision.devices.iter().enumerate() {
             println!("{:}) UUID: {:}", i + 1, uuid);
         }
-        let mut input_str = String::new();
-        io::stdin()
-            .read_line(&mut input_str)
-            .expect("Failed to read line");
-        
-        let index: usize = input_str
-            .trim()
-            .parse()
-            .expect("Invalid input, try again");
-
+        let index = prompt_selection();
         let device = &provision.devices[index - 1];
         println!("Selected device with UUID: {}", device);
     }
@@ -418,4 +390,18 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     ]) ?; 
     
     Ok(())
+}
+
+fn prompt_selection() -> usize {
+    let mut input_str = String::new();
+    io::stdin()
+        .read_line(&mut input_str)
+        .expect("Failed to read line");
+
+    let index: usize = input_str
+        .trim()
+        .parse()
+        .expect("Invalid input, try again");
+
+    index
 }
