@@ -1,8 +1,9 @@
 use {
     crate::{
+        document::DocumentLayout,
         inlays::{BlockInlay, InlineInlay},
         selection::Affinity,
-        state::{DocumentLayout, SessionLayout},
+        state::SessionLayout,
         str::StrExt,
         text::Text,
         widgets::{BlockWidget, InlineWidget},

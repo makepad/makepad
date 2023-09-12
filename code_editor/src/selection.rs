@@ -1,5 +1,9 @@
 use {
-    crate::{layout::Layout, str::StrExt, text::{Edit, Length, Position, Range}},
+    crate::{
+        layout::Layout,
+        str::StrExt,
+        text::{Edit, Length, Position, Range},
+    },
     std::{ops, ops::Deref, slice::Iter},
 };
 
@@ -245,28 +249,26 @@ impl Cursor {
     pub fn is_at_first_line(self) -> bool {
         self.position.line_index == 0
     }
-    
+
     pub fn is_at_last_line(self, line_count: usize) -> bool {
         self.position.line_index == line_count
     }
-    
+
     pub fn is_at_start_of_line(self) -> bool {
         self.position.byte_index == 0
     }
-    
+
     pub fn is_at_end_of_line(self, lines: &[String]) -> bool {
         self.position.byte_index == lines[self.position.line_index].len()
     }
-    
+
     pub fn is_at_first_row_of_line(self, layout: &Layout<'_>, tab_column_count: usize) -> bool {
-        let (row, _) = layout.line(self.position.line_index).logical_to_visual_position(
-            self.position.byte_index,
-            self.affinity,
-            tab_column_count,
-        );
+        let (row, _) = layout
+            .line(self.position.line_index)
+            .logical_to_visual_position(self.position.byte_index, self.affinity, tab_column_count);
         row == 0
     }
-    
+
     pub fn is_at_last_row_of_line(self, layout: &Layout<'_>, tab_column_count: usize) -> bool {
         let line = layout.line(self.position.line_index);
         let (row, _) = line.logical_to_visual_position(
@@ -286,7 +288,7 @@ impl Cursor {
         }
         self
     }
-    
+
     pub fn move_right(self, lines: &[String]) -> Self {
         if !self.is_at_end_of_line(lines) {
             return self.move_to_next_grapheme(lines);
@@ -296,7 +298,7 @@ impl Cursor {
         }
         self
     }
-    
+
     pub fn move_up(self, layout: &Layout<'_>, tab_column_count: usize) -> Self {
         if !self.is_at_first_row_of_line(layout, tab_column_count) {
             return self.move_to_prev_row_of_line(layout, tab_column_count);
@@ -306,7 +308,7 @@ impl Cursor {
         }
         self
     }
-    
+
     pub fn move_down(self, layout: &Layout<'_>, tab_column_count: usize) -> Self {
         if !self.is_at_last_row_of_line(layout, tab_column_count) {
             return self.move_to_next_row_of_line(layout, tab_column_count);
@@ -316,13 +318,12 @@ impl Cursor {
         }
         self
     }
-    
+
     pub fn move_to_prev_grapheme(self, lines: &[String]) -> Self {
         Self {
             position: Position {
                 line_index: self.position.line_index,
-                byte_index: lines[self.position.line_index]
-                    [..self.position.byte_index]
+                byte_index: lines[self.position.line_index][..self.position.byte_index]
                     .grapheme_indices()
                     .next_back()
                     .map(|(index, _)| index)
@@ -332,7 +333,7 @@ impl Cursor {
             preferred_column_index: None,
         }
     }
-    
+
     pub fn move_to_next_grapheme(self, lines: &[String]) -> Self {
         let line = &lines[self.position.line_index];
         Self {
@@ -348,7 +349,7 @@ impl Cursor {
             preferred_column_index: None,
         }
     }
-    
+
     pub fn move_to_end_of_prev_line(self, lines: &[String]) -> Self {
         let prev_line_index = self.position.line_index - 1;
         Self {
@@ -360,7 +361,7 @@ impl Cursor {
             preferred_column_index: None,
         }
     }
-    
+
     pub fn move_to_start_of_next_line(self) -> Self {
         Self {
             position: Position {
@@ -371,12 +372,8 @@ impl Cursor {
             preferred_column_index: None,
         }
     }
-    
-    pub fn move_to_prev_row_of_line(
-        self,
-        layout: &Layout<'_>,
-        tab_column_count: usize,
-    ) -> Self {
+
+    pub fn move_to_prev_row_of_line(self, layout: &Layout<'_>, tab_column_count: usize) -> Self {
         let line = layout.line(self.position.line_index);
         let (row_index, mut column_index) = line.logical_to_visual_position(
             self.position.byte_index,
@@ -388,7 +385,7 @@ impl Cursor {
         }
         let (byte_index, affinity) =
             line.visual_to_logical_position(row_index - 1, column_index, tab_column_count);
-            Self {
+        Self {
             position: Position {
                 line_index: self.position.line_index,
                 byte_index,
@@ -397,12 +394,8 @@ impl Cursor {
             preferred_column_index: Some(column_index),
         }
     }
-    
-    pub fn move_to_next_row_of_line(
-        self,
-        layout: &Layout<'_>,
-        tab_column_count: usize,
-    ) -> Self {
+
+    pub fn move_to_next_row_of_line(self, layout: &Layout<'_>, tab_column_count: usize) -> Self {
         let line = layout.line(self.position.line_index);
         let (row_index, mut column_index) = line.logical_to_visual_position(
             self.position.byte_index,
@@ -423,7 +416,7 @@ impl Cursor {
             preferred_column_index: Some(column_index),
         }
     }
-    
+
     pub fn move_to_last_row_of_prev_line(
         self,
         layout: &Layout<'_>,
@@ -453,7 +446,7 @@ impl Cursor {
             preferred_column_index: Some(column_index),
         }
     }
-    
+
     pub fn move_to_first_row_of_next_line(
         self,
         layout: &Layout<'_>,
@@ -480,7 +473,7 @@ impl Cursor {
             preferred_column_index: Some(column_index),
         }
     }
-    
+
     pub fn apply_edit(self, edit: &Edit) -> Self {
         Self {
             position: self.position.apply_edit(edit),
