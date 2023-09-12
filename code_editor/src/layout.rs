@@ -1,9 +1,13 @@
 use {
     crate::{
-        inlays::{BlockInlay, InlineInlay}, selection::Affinity, str::StrExt, widgets::{BlockWidget, InlineWidget},
-        wrap::WrapData, Token,
-        state::{SessionLayout, DocumentLayout},
+        inlays::{BlockInlay, InlineInlay},
+        selection::Affinity,
+        state::{DocumentLayout, SessionLayout},
+        str::StrExt,
         text::Text,
+        widgets::{BlockWidget, InlineWidget},
+        wrap::WrapData,
+        Token,
     },
     std::{cell::Ref, slice::Iter},
 };
@@ -16,6 +20,10 @@ pub struct Layout<'a> {
 }
 
 impl<'a> Layout<'a> {
+    pub fn as_text(&self) -> &Text {
+        &self.text
+    }
+
     pub fn width(&self) -> f64 {
         let mut width: f64 = 0.0;
         for line in self.lines(0, self.line_count()) {
@@ -65,7 +73,9 @@ impl<'a> Layout<'a> {
 
     pub fn lines(&self, start: usize, end: usize) -> Lines<'_> {
         Lines {
-            y: self.session_layout.y[start.min(self.session_layout.y.len())..end.min(self.session_layout.y.len())].iter(),
+            y: self.session_layout.y
+                [start.min(self.session_layout.y.len())..end.min(self.session_layout.y.len())]
+                .iter(),
             column_count: self.session_layout.column_count[start..end].iter(),
             fold: self.session_layout.fold_column[start..end].iter(),
             scale: self.session_layout.scale[start..end].iter(),
@@ -92,7 +102,6 @@ impl<'a> Layout<'a> {
         }
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Lines<'a> {
@@ -157,17 +166,17 @@ impl<'a> Line<'a> {
         self.column_to_x(self.column_count())
     }
 
-    pub fn byte_affinity_to_row_column(
+    pub fn logical_to_visual_position(
         &self,
-        byte: usize,
+        byte_index: usize,
         affinity: Affinity,
         tab_column_count: usize,
     ) -> (usize, usize) {
-        let mut current_byte = 0;
-        let mut row = 0;
-        let mut column = 0;
-        if current_byte == byte && affinity == Affinity::Before {
-            return (row, column);
+        let mut current_byte_index = 0;
+        let mut current_row_index = 0;
+        let mut current_column_index = 0;
+        if current_byte_index == byte_index && affinity == Affinity::Before {
+            return (current_row_index, current_column_index);
         }
         for element in self.wrapped_elements() {
             match element {
@@ -176,13 +185,13 @@ impl<'a> Line<'a> {
                     text,
                 } => {
                     for grapheme in text.graphemes() {
-                        if current_byte == byte && affinity == Affinity::After {
-                            return (row, column);
+                        if current_byte_index == byte_index && affinity == Affinity::After {
+                            return (current_row_index, current_column_index);
                         }
-                        current_byte += grapheme.len();
-                        column += grapheme.column_count(tab_column_count);
-                        if current_byte == byte && affinity == Affinity::Before {
-                            return (row, column);
+                        current_byte_index += grapheme.len();
+                        current_column_index += grapheme.column_count(tab_column_count);
+                        if current_byte_index == byte_index && affinity == Affinity::Before {
+                            return (current_row_index, current_column_index);
                         }
                     }
                 }
@@ -190,32 +199,32 @@ impl<'a> Line<'a> {
                     is_inlay: true,
                     text,
                 } => {
-                    column += text.column_count(tab_column_count);
+                    current_column_index += text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(widget) => {
-                    column += widget.column_count;
+                    current_column_index += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    row += 1;
-                    column = self.wrap_indent_column_count();
+                    current_row_index += 1;
+                    current_column_index = self.wrap_indent_column_count();
                 }
             }
         }
-        if current_byte == byte && affinity == Affinity::After {
-            return (row, column);
+        if current_byte_index == byte_index && affinity == Affinity::After {
+            return (current_row_index, current_column_index);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_affinity(
+    pub fn visual_to_logical_position(
         &self,
-        row: usize,
-        column: usize,
+        row_index: usize,
+        column_index: usize,
         tab_column_count: usize,
     ) -> (usize, Affinity) {
-        let mut current_row = 0;
-        let mut current_column = 0;
-        let mut byte = 0;
+        let mut current_row_index = 0;
+        let mut current_column_index = 0;
+        let mut current_byte_index = 0;
         for element in self.wrapped_elements() {
             match element {
                 WrappedElement::Text {
@@ -223,38 +232,43 @@ impl<'a> Line<'a> {
                     text,
                 } => {
                     for grapheme in text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if current_row == row && (current_column..next_column).contains(&column) {
-                            return (byte, Affinity::After);
+                        let next_column =
+                            current_column_index + grapheme.column_count(tab_column_count);
+                        if current_row_index == row_index
+                            && (current_column_index..next_column).contains(&column_index)
+                        {
+                            return (current_byte_index, Affinity::After);
                         }
-                        byte += grapheme.len();
-                        current_column = next_column;
+                        current_byte_index += grapheme.len();
+                        current_column_index = next_column;
                     }
                 }
                 WrappedElement::Text {
                     is_inlay: true,
                     text,
                 } => {
-                    let next_column = current_column + text.column_count(tab_column_count);
-                    if current_row == row && (current_column..next_column).contains(&column) {
-                        return (byte, Affinity::Before);
+                    let next_column = current_column_index + text.column_count(tab_column_count);
+                    if current_row_index == row_index
+                        && (current_column_index..next_column).contains(&column_index)
+                    {
+                        return (current_byte_index, Affinity::Before);
                     }
-                    current_column = next_column;
+                    current_column_index = next_column;
                 }
                 WrappedElement::Widget(widget) => {
-                    current_column += widget.column_count;
+                    current_column_index += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    if current_row == row {
-                        return (byte, Affinity::Before);
+                    if current_row_index == row_index {
+                        return (current_byte_index, Affinity::Before);
                     }
-                    current_row += 1;
-                    current_column = self.wrap_indent_column_count();
+                    current_row_index += 1;
+                    current_column_index = self.wrap_indent_column_count();
                 }
             }
         }
-        if current_row == row {
-            return (byte, Affinity::After);
+        if current_row_index == row_index {
+            return (current_byte_index, Affinity::After);
         }
         panic!()
     }
@@ -408,7 +422,6 @@ pub enum WrappedElement<'a> {
     Widget(InlineWidget),
     Wrap,
 }
-
 
 #[derive(Clone, Debug)]
 pub struct BlockElements<'a> {
