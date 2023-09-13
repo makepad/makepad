@@ -267,10 +267,10 @@ fn idataobject_to_dragitem(data_object: &IDataObject) -> Option<DragItem> {
                 filename = String::new();
             }
         }
-
+/*
         for filename in filenames.iter() {
             log!("    \"{}\"",filename);
-        }
+        }*/
 
         // we don't need the Microsoft objects here anymore
         let _ = unsafe { GlobalUnlock(medium.u.hGlobal) };
@@ -372,7 +372,7 @@ impl IDropTarget_Impl for DropTarget {
 
     fn Drop(&self,_p_data_obj: Option<&IDataObject>, _grf_key_state: MODIFIERKEYS_FLAGS, _pt: &POINTL,_pdweffect: *mut DROPEFFECT) -> core::Result<()> {
 
-        log!("DropTarget::Drop");
+        //log!("DropTarget::Drop");
 
         // ignore null pointer
         if let None = _p_data_obj {
