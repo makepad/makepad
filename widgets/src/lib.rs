@@ -29,7 +29,7 @@ pub mod tab_bar;
 pub mod tab_close_button;
 pub mod list_view;
 pub mod desktop_button;
-pub mod desktop_window;
+pub mod window;
 pub mod scroll_shadow;
 pub mod rotated_image;
 pub mod slide_panel;
@@ -69,7 +69,7 @@ pub use crate::{
     list_view::*,
     page_flip::*,
     slide_panel::*,
-    desktop_window::*,
+    window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
@@ -114,7 +114,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::scroll_shadow::live_design(cx);
     crate::button::live_design(cx);
     crate::desktop_button::live_design(cx);
-    crate::desktop_window::live_design(cx);
+    crate::window::live_design(cx);
     crate::window_menu::live_design(cx);
     crate::scroll_bar::live_design(cx);
     crate::scroll_bars::live_design(cx);

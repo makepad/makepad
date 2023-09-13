@@ -510,7 +510,7 @@ live_design!{
     
     App = {{App}} {
         ui: <MultiWindow> {
-            <DesktopWindow> {
+            <Window> {
                 window: {inner_size: vec2(2000, 1024)},
                 caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
                 hide_caption_on_fullscreen: true,
@@ -854,7 +854,7 @@ live_design!{
                     }
                 }
             }
-            <DesktopWindow> {
+            <Window> {
                 window: {inner_size: vec2(960, 540)},
                 second_image = <RectView> {
                     draw_bg: {color: #0}
