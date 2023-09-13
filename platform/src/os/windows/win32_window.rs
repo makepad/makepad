@@ -4,7 +4,6 @@ use {
             RefCell,
             Cell,
         },
-        sync::Arc,
         rc::Rc,
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
@@ -13,7 +12,6 @@ use {
     
     crate::{
         log,
-        event::DragItem,
         windows::{
             core::PCWSTR,
             core::IntoParam,
@@ -47,15 +45,11 @@ use {
                         DROPEFFECT_COPY,
                         DROPEFFECT_MOVE,
                         DROPEFFECT_LINK,
-                        DROPEFFECT_SCROLL,
                     },
                     SystemServices::{
                         MODIFIERKEYS_FLAGS,
                         MK_CONTROL,
                         MK_SHIFT,
-                        MK_LBUTTON,
-                        MK_MBUTTON,
-                        MK_RBUTTON,
                     },
                     WindowsProgramming::GMEM_DDESHARE,
                     DataExchange::{
@@ -127,7 +121,6 @@ use {
                         WM_EXITSIZEMOVE,
                         WM_SIZE,
                         WM_DPICHANGED,
-                        WM_DROPFILES,
                         WM_DESTROY,
                         HTTOPLEFT,
                         HTBOTTOMLEFT,

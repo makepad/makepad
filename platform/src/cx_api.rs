@@ -4,7 +4,6 @@ use {
         rc::Rc,
     },
     crate::{
-        log,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
         makepad_math::{DVec2, Rect},
@@ -17,22 +16,14 @@ use {
             NextFrame,
             HttpRequest,
         },
-        draw_list::{
-            DrawListId
-        },
-        window::{
-            WindowId
-        },
-        cursor::{
-            MouseCursor
-        },
+        draw_list::DrawListId,
+        window::WindowId,
+        cursor::MouseCursor,
         area::{
             Area, 
             //DrawListArea
         },
-        menu::{
-            Menu,
-        },
+        menu::Menu,
         pass::{
             PassId,
             CxPassRect,

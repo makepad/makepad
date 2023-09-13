@@ -2,7 +2,6 @@ use {
     std::cell::Cell,
     std::rc::Rc,
     crate::{
-        log,
         makepad_live_id::*,
         makepad_math::*,
         event::{
