@@ -9,10 +9,9 @@ use {
     self::super::{
         android_media::CxAndroidMedia,
         jni_sys::jobject,
-        android_jni,
+        android_jni::{self,*},
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
-        android_jni::*,
         ndk_sys,
     },
     self::super::super::{
@@ -48,13 +47,6 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
-
-// Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
-const ANDROID_META_CTRL_MASK: u32 = 28672;
-// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_SHIFT_MASK
-const ANDROID_META_SHIFT_MASK: u32 = 193;
-// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
-const ANDROID_META_ALT_MASK: u32 = 50;
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
@@ -229,6 +221,9 @@ impl Cx {
                         ]);
                         self.call_event_handler(&e);
                     }
+                    FromJavaMessage::MidiDeviceOpened{name,midi_device}=>{
+                        self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
+                    }
                     FromJavaMessage::Pause => {
                         self.call_event_handler(&Event::Pause);
                     }
@@ -360,225 +355,6 @@ impl Cx {
     }
     
     /*
-    /// Called when EGL is initialized.
-    pub fn from_java_on_init(&mut self, params: AndroidParams, to_java: AndroidToJava) {
-        // lets load dependencies here.
-        self.android_load_dependencies(&to_java);
-        
-        self.os.dpi_factor = params.density;
-        self.os_type = OsType::Android(params);
-        self.gpu_info.performance = GpuPerformance::Tier1;
-        self.call_event_handler(&Event::Construct);
-    }
-    
-    pub fn from_java_on_pause(&mut self, _to_java: AndroidToJava) {
-        self.call_event_handler(&Event::Pause);
-    }
-    
-    pub fn from_java_on_resume(&mut self, _to_java: AndroidToJava) {
-        self.call_event_handler(&Event::Resume);
-        let window_id = CxWindowPool::id_zero();
-        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
-            self.redraw_pass_and_child_passes(main_pass_id);
-        }
-        self.redraw_all();
-        self.reinitialise_media();
-    }*/
-    /*
-    pub fn from_java_on_new_gl(&mut self, to_java: AndroidToJava) {
-        // init GL
-        self.redraw_all();
-        
-        to_java.schedule_timeout(0, 0);
-        to_java.schedule_redraw();
-        self.after_every_event(&to_java);
-    }
-    
-    pub fn from_java_on_free_gl(&mut self, _to_java: AndroidToJava) {
-        // lets destroy all of our gl resources
-        for texture in &mut self.textures.0.pool {
-            texture.os.free_resources();
-        }
-        // delete all geometry buffers
-        for geometry in &mut self.geometries.0.pool {
-            geometry.os.free_resources();
-        }
-        
-        for pass in &mut self.passes.0.pool {
-            pass.os.free_resources();
-        }
-        // ok now we walk the views and remove all vaos and indexbuffers
-        for draw_list in &mut self.draw_lists.0.pool {
-            for item in &mut draw_list.draw_items.buffer {
-                item.os.free_resources();
-            }
-        }
-        
-        for shader in &mut self.draw_shaders.os_shaders {
-            shader.free_resources();
-        }
-    }*/
-    
-    pub fn android_load_dependencies(&mut self) {
-        for (path, dep) in &mut self.dependencies {
-            if let Some(data) = unsafe {to_java_load_asset(path)} {
-                dep.data = Some(Ok(Rc::new(data)))
-            }
-            else {
-                let message = format!("cannot load dependency {}", path);
-                crate::makepad_error_log::error!("Android asset failed: {}", message);
-                dep.data = Some(Err(message));
-            }
-        }
-    }
-    
-    /// Called when the MakepadSurface is resized.
-    /*
-    pub fn from_java_on_resize(&mut self, width: i32, height: i32, to_java: AndroidToJava) {
-        self.os.display_size = dvec2(width as f64, height as f64);
-        let window_id = CxWindowPool::id_zero();
-        let window = &mut self.windows[window_id];
-        let old_geom = window.window_geom.clone();
-        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-        let size = self.os.display_size / dpi_factor;
-        window.window_geom = WindowGeom {
-            dpi_factor,
-            can_fullscreen: false,
-            xr_is_presenting: false,
-            is_fullscreen: true,
-            is_topmost: true,
-            position: dvec2(0.0, 0.0),
-            inner_size: size,
-            outer_size: size,
-        };
-        let new_geom = window.window_geom.clone();
-        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-            window_id,
-            new_geom,
-            old_geom
-        }));
-        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
-            self.redraw_pass_and_child_passes(main_pass_id);
-        }
-        self.redraw_all();
-        self.os.first_after_resize = true;
-        self.after_every_event(&to_java);
-    }*/
-    
-    
-    /// Called when a touch event happened on the software keyword
-    /*
-    pub fn from_java_on_key_down(&mut self, keycode: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
-        let e: Event;
-        
-        match characters {
-            Some(input) => {
-                e = Event::TextInput(
-                    TextInputEvent {
-                        input: input,
-                        replace_last: false,
-                        was_paste: false,
-                    }
-                );
-                self.call_event_handler(&e);
-            }
-            None => {
-                let key_code = android_to_makepad_key_code(keycode);
-                if !key_code.is_unknown() {
-                    let control = meta_state & ANDROID_META_CTRL_MASK != 0;
-                    let alt = meta_state & ANDROID_META_ALT_MASK != 0;
-                    let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
-                    let ch = key_code.to_char(shift);
-                    let is_shortcut = control || alt;
-                    let is_return = key_code == KeyCode::ReturnKey;
-                    if ch.is_some() && !is_shortcut && !is_return {
-                        let input = ch.unwrap().to_string();
-                        e = Event::TextInput(
-                            TextInputEvent {
-                                input,
-                                replace_last: false,
-                                was_paste: false,
-                            }
-                        );
-                        self.call_event_handler(&e);
-                    } else if is_shortcut {
-                        if key_code == KeyCode::KeyC {
-                            let response = Rc::new(RefCell::new(None));
-                            e = Event::TextCopy(TextClipboardEvent {
-                                response: response.clone()
-                            });
-                            self.call_event_handler(&e);
-                            let response = response.borrow();
-                            if let Some(response) = response.as_ref() {
-                                to_java.copy_to_clipboard(response);
-                            }
-                        } else if key_code == KeyCode::KeyX {
-                            let response = Rc::new(RefCell::new(None));
-                            let e = Event::TextCut(TextClipboardEvent {
-                                response: response.clone()
-                            });
-                            self.call_event_handler(&e);
-                            let response = response.borrow();
-                            if let Some(response) = response.as_ref() {
-                                to_java.copy_to_clipboard(response);
-                            }
-                        } else if key_code == KeyCode::KeyV {
-                            to_java.paste_from_clipboard();
-                        }
-                    } else {
-                        e = Event::KeyDown(
-                            KeyEvent {
-                                key_code,
-                                is_repeat: false,
-                                modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
-                                time: self.os.time_now()
-                            }
-                        );
-                        self.call_event_handler(&e);
-                    }
-                    self.after_every_event(&to_java);
-                }
-            }
-        }
-    }*/
-    
-    /// Called when a timeout expired.
-    /*
-    pub fn from_java_on_timeout(&mut self, timer_id: i64) {
-        //let dt = crate::profile_start();
-        if timer_id == 0 {
-            if Signal::check_and_clear_ui_signal() {
-                self.handle_media_signals(&to_java);
-                self.call_event_handler(&Event::Signal);
-            }
-            to_java.schedule_timeout(0, 16);
-        }
-        else {
-            self.call_event_handler(&Event::Timer(TimerEvent {timer_id: timer_id as u64}))
-        }
-        self.after_every_event(&to_java);
-        //crate::profile_end!(dt);
-    }
-    
-    fn after_every_event(&mut self) {
-        self.handle_platform_ops(&to_java);
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
-            to_java.schedule_redraw();
-        }
-    }
-    
-    pub fn from_java_on_midi_device_opened(&mut self, name: String, midi_device: jobject, to_java: AndroidToJava) {
-        self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
-    }
-    
-    pub fn from_java_on_hide_text_ime(&mut self) {
-        let dt = crate::profile_start();
-        self.text_ime_was_dismissed();
-        self.redraw_all();
-        self.after_every_event(&to_java);
-        crate::profile_end!(dt);
-    }
-    
     pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32) {
         let dt = crate::profile_start();
         self.os.keyboard_visible = true;
@@ -611,34 +387,21 @@ impl Cx {
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
-    
-    pub fn from_java_on_http_response(&mut self, request_id: u64, metadata_id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
-        let e = Event::NetworkResponses(vec![
-            NetworkResponseEvent {
-                request_id: LiveId(request_id),
-                response: NetworkResponse::HttpResponse(HttpResponse::new(
-                    LiveId(metadata_id),
-                    status_code,
-                    headers,
-                    Some(body)
-                ))
+   */
+
+    pub fn android_load_dependencies(&mut self) {
+        for (path, dep) in &mut self.dependencies {
+            if let Some(data) = unsafe {to_java_load_asset(path)} {
+                dep.data = Some(Ok(Rc::new(data)))
             }
-        ]);
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
+            else {
+                let message = format!("cannot load dependency {}", path);
+                crate::makepad_error_log::error!("Android asset failed: {}", message);
+                dep.data = Some(Err(message));
+            }
+        }
     }
-    
-    pub fn from_java_on_http_request_error(&mut self, request_id: u64, _metadata_id: u64, error: String, to_java: AndroidToJava) {
-        let e = Event::NetworkResponses(vec![
-            NetworkResponseEvent {
-                request_id: LiveId(request_id),
-                response: NetworkResponse::HttpRequestError(error)
-            }
-        ]);
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
-    }*/
-    
+        
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
@@ -777,26 +540,17 @@ impl Cx {
                 },
                 CxOsOp::ShowTextIME(area, _pos) => {
                     self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
-                    unsafe {
-                        let env = attach_jni_env();
-                        android_jni::to_java_show_keyboard(env, true);
-                    }
+                    unsafe {android_jni::to_java_show_keyboard(true);}
                 },
                 CxOsOp::HideTextIME => {
                     self.os.keyboard_visible = false;
-                    unsafe {
-                        let env = attach_jni_env();
-                        android_jni::to_java_show_keyboard(env, false);
-                    }
+                    unsafe {android_jni::to_java_show_keyboard(false);}
                 },
                 CxOsOp::ShowClipboardActions(_selected) => {
                     //to_java.show_clipboard_actions(selected.as_str());
                 },
                 CxOsOp::HttpRequest {request_id, request} => {
-                    unsafe {
-                        let env = attach_jni_env();
-                        android_jni::to_java_http_request(env, request_id, request);
-                    }
+                    unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
                 _ => ()
             }
