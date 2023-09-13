@@ -353,6 +353,11 @@ impl CodeEditor {
             Hit::TextCopy(ce) => {
                 *ce.response.borrow_mut() = Some(session.copy());
             }
+			Hit::TextCut(ce) => {
+				*ce.response.borrow_mut() = Some(session.copy());
+				session.delete();
+                cx.redraw_all();
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
                 modifiers:
