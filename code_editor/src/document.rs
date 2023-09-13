@@ -35,7 +35,7 @@ impl Document {
         let session = Self(Rc::new(DocumentInner {
             history: RefCell::new(History::from(text)),
             layout: RefCell::new(DocumentLayout {
-				indent_state: (0..line_count).map(|_| None).collect(),
+                indent_state: (0..line_count).map(|_| None).collect(),
                 tokens,
                 inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
                 block_inlays: Vec::new(),
@@ -43,7 +43,7 @@ impl Document {
             tokenizer: RefCell::new(Tokenizer::new(line_count)),
             edit_senders: RefCell::new(HashMap::new()),
         }));
-		session.update_indent_state();
+        session.update_indent_state();
         session.0.tokenizer.borrow_mut().update(
             &session.0.history.borrow().as_text(),
             &mut session.0.layout.borrow_mut().tokens,
@@ -116,18 +116,16 @@ impl Document {
         self.update_after_edit(session_id, None, &edits);
     }
 
-    pub fn edit_lines(
+    pub fn edit_linewise(
         &self,
         origin_id: SessionId,
         kind: EditKind,
         selections: &SelectionSet,
-        mut f: impl FnMut(&str) -> (usize, usize, String),
+        mut f: impl FnMut(Editor, usize),
     ) {
+        let mut history = self.0.history.borrow_mut();
+        history.push_or_extend_group(origin_id, kind, selections);
         let mut edits = Vec::new();
-        self.0
-            .history
-            .borrow_mut()
-            .push_or_extend_group(origin_id, kind, selections);
         for line_range in selections
             .iter()
             .copied()
@@ -140,10 +138,17 @@ impl Document {
                 }
             })
         {
-            for line in line_range {
-                self.edit_lines_internal(line, &mut edits, &mut f);
+            for line_index in line_range {
+                f(
+                    Editor {
+                        history: &mut *history,
+                        edits: &mut edits,
+                    },
+                    line_index,
+                );
             }
         }
+        drop(history);
         self.update_after_edit(origin_id, None, &edits);
     }
 
@@ -312,34 +317,36 @@ impl Document {
         selections: Option<SelectionSet>,
         edits: &[Edit],
     ) {
-		let mut layout = self.0.layout.borrow_mut();
-		for edit in edits {
-			match edit.change {
-				Change::Insert(position, ref text) => {
-					layout.indent_state[position.line_index] = None;
-					let line_count = text.length().line_count;
-					if line_count > 0 {
-						let line_index = position.line_index + 1;
-						layout.indent_state.splice(line_index..line_index, (0..line_count).map(|_| None));
-					}
-				}
-				Change::Delete(start, length) => {
-					layout.indent_state[start.line_index] = None;
-					if length.line_count > 0 {
-						let line_start = start.line_index + 1;
-						let line_end = line_start + length.line_count;
-						layout.indent_state.drain(line_start..line_end);
-					}
-				}
-			}
-		}
-		drop(layout);
+        let mut layout = self.0.layout.borrow_mut();
         for edit in edits {
-			self.apply_change_to_tokens(&edit.change);
-            self.apply_change_to_inline_inlays(&edit.change, edit.drift);
-			self.0.tokenizer.borrow_mut().apply_change(&edit.change);
+            match edit.change {
+                Change::Insert(position, ref text) => {
+                    layout.indent_state[position.line_index] = None;
+                    let line_count = text.length().line_count;
+                    if line_count > 0 {
+                        let line_index = position.line_index + 1;
+                        layout
+                            .indent_state
+                            .splice(line_index..line_index, (0..line_count).map(|_| None));
+                    }
+                }
+                Change::Delete(start, length) => {
+                    layout.indent_state[start.line_index] = None;
+                    if length.line_count > 0 {
+                        let line_start = start.line_index + 1;
+                        let line_end = line_start + length.line_count;
+                        layout.indent_state.drain(line_start..line_end);
+                    }
+                }
+            }
         }
-		self.update_indent_state();
+        drop(layout);
+        for edit in edits {
+            self.apply_change_to_tokens(&edit.change);
+            self.apply_change_to_inline_inlays(&edit.change, edit.drift);
+            self.0.tokenizer.borrow_mut().apply_change(&edit.change);
+        }
+        self.update_indent_state();
         self.0.tokenizer.borrow_mut().update(
             self.0.history.borrow().as_text(),
             &mut self.0.layout.borrow_mut().tokens,
@@ -574,33 +581,31 @@ impl Document {
                     current_indent_column_count = next_indent_column_count;
                 }
                 _ => {
-                    indent_state[line_index] = Some(
-						match lines[line_index].indent() {
-							Some(indent) => {
-								let indent_column_count = indent.column_count();
-								let mut next_indent_column_count = indent_column_count;
-								if lines[line_index]
-									.chars()
-									.rev()
-									.find_map(|char| {
-										if char.is_opening_delimiter() {
-											return Some(true);
-										}
-										if char.is_closing_delimiter() {
-											return Some(false);
-										}
-										None
-									})
-									.unwrap_or(false)
-								{
-									next_indent_column_count += 4;
-								}
-								current_indent_column_count = next_indent_column_count;
-								IndentState::NonEmpty(indent_column_count, next_indent_column_count)
-							}
-							None => IndentState::Empty(current_indent_column_count)
-						}
-					)
+                    indent_state[line_index] = Some(match lines[line_index].indent() {
+                        Some(indent) => {
+                            let indent_column_count = indent.column_count();
+                            let mut next_indent_column_count = indent_column_count;
+                            if lines[line_index]
+                                .chars()
+                                .rev()
+                                .find_map(|char| {
+                                    if char.is_opening_delimiter() {
+                                        return Some(true);
+                                    }
+                                    if char.is_closing_delimiter() {
+                                        return Some(false);
+                                    }
+                                    None
+                                })
+                                .unwrap_or(false)
+                            {
+                                next_indent_column_count += 4;
+                            }
+                            current_indent_column_count = next_indent_column_count;
+                            IndentState::NonEmpty(indent_column_count, next_indent_column_count)
+                        }
+                        None => IndentState::Empty(current_indent_column_count),
+                    })
                 }
             }
         }
