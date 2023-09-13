@@ -77,4 +77,7 @@ After the build is complete, run the following command to start our web server:
 After starting the web server, the web build of Ironfish should be available here:
 http://127.0.0.1:61234/examples/ironfish/src/index.html
 
+### Android
+
+See [the Android README](tools/android/README.md) for instructions on how to build and run the Android version of Ironfish.
 

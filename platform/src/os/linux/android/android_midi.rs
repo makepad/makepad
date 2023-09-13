@@ -2,7 +2,7 @@
 use {
     std::sync::{Arc, Mutex, mpsc},
     super::{
-        android_jni::*,
+        android_jni::attach_jni_env,
         jni_sys::jobject,
         amidi_sys::*,
     },
@@ -289,7 +289,7 @@ impl AndroidMidiAccess {
         }
     }
     
-    pub fn midi_device_opened(&mut self, device_name: String, java_device: jobject, to_java: &AndroidToJava) {
+    pub fn midi_device_opened(&mut self, device_name: String, java_device: jobject) {
         
         unsafe {
             if self.devices.iter().find( | v | v.device_name == device_name).is_some() {
@@ -297,7 +297,8 @@ impl AndroidMidiAccess {
                 return
             }
             let mut amidi_device = std::ptr::null_mut();
-            AMidiDevice_fromJava(to_java.get_env(), java_device, &mut amidi_device);
+            let env = attach_jni_env();
+            AMidiDevice_fromJava(env, java_device, &mut amidi_device);
             // how dow e check if we already had this device
             if amidi_device == std::ptr::null_mut() {
                 crate::log!("Received null midi device");
@@ -334,16 +335,16 @@ impl AndroidMidiAccess {
         
     } 
     
-    pub fn get_updated_descs(&mut self, to_java: &AndroidToJava) -> Option<Vec<MidiPortDesc >> {
+    pub fn get_updated_descs(&mut self) -> Option<Vec<MidiPortDesc >> {
         match self.state{
             AndroidMidiState::OpenAllDevices=>{
-                to_java.open_all_midi_devices(0);
+                //to_java.open_all_midi_devices(0);
                 self.state = AndroidMidiState::Ready;
                 None
             }
             AndroidMidiState::OnErrorReload=>{
                 self.midi_disconnect();
-                to_java.open_all_midi_devices(1000);
+                //to_java.open_all_midi_devices(1000);
                 self.state = AndroidMidiState::Ready;
                 None
             }

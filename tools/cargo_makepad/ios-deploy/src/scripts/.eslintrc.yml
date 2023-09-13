@@ -1,0 +1,18 @@
+rules:
+  # common src exception:
+  camelcase: off
+
+  # FUTURE TBD:
+  no-unused-vars:
+    - error
+    - args: none
+
+  # TBD easy fix:
+  padded-blocks: off
+
+  # FUTURE TBD:
+  handle-callback-err: off
+  indent: off
+  no-multiple-empty-lines: off
+  no-tabs: off
+  one-var: off

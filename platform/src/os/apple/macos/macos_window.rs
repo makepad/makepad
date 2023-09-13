@@ -424,7 +424,7 @@ impl MacosWindow {
     #[cfg(target_os = "macos")]
     pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DragItem>) {
         let mut dragged_files = Vec::new();
-        for item in items{
+        for item in items{ 
             match item{
                 DragItem::FilePath{path, internal_id}=>{
                     let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};

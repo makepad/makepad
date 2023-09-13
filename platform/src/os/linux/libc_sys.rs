@@ -21,7 +21,7 @@ pub type time_t = c_ulong;
 pub type suseconds_t = c_ulong;
 
 type c_int =  std::os::raw::c_int;
-type c_uint =  std::os::raw::c_uint;
+//type c_uint =  std::os::raw::c_uint;
 type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
 type c_char = std::os::raw::c_char;
@@ -36,9 +36,13 @@ pub struct fd_set {
     fds_bits: [c_ulong; FD_SETSIZE / ULONG_SIZE],
 }
 
-pub type nfds_t = c_uint;
-
+pub const RTLD_LAZY: c_int = 1;
+pub const RTLD_LOCAL: c_int = 0;
+    
 extern "C"{
+    pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+    pub fn dlclose(handle: *mut c_void) -> c_int;
+    pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn free(arg1: *mut c_void);

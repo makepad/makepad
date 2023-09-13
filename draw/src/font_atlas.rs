@@ -50,7 +50,7 @@ impl CxFontsAtlas {
             texture_id,
             clear_buffer: false,
             alloc: CxFontsAtlasAlloc {
-                texture_size: DVec2 {x: 4096.0, y: 4096.0},
+                texture_size: DVec2 {x: 2048.0, y: 4096.0},
                 xpos: 0.0,
                 ypos: 0.0,
                 hmax: 0.0,
@@ -104,7 +104,9 @@ impl LiveHook for Font {
 
 impl CxFontsAtlas {
     pub fn get_font_by_path(&mut self, cx: &Cx, path: &str) -> usize {
-         
+        if path.len() == 0{
+            return 0
+        }
         if let Some(item) = self.path_to_font_id.get(path) {
             return *item;
         }

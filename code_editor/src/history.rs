@@ -1,10 +1,15 @@
-use crate::{state::SessionId, Change, Selection, Text};
+use crate::{
+    selection::SelectionSet,
+    state::SessionId,
+    text::{Edit, Text},
+};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct History {
-    current_edit: Option<(SessionId, EditKind)>,
-    undos: Vec<(Vec<Selection>, Vec<Change>)>,
-    redos: Vec<(Vec<Selection>, Vec<Change>)>,
+    text: Text,
+    current_desc: Option<GroupDesc>,
+    undo_stack: Stack,
+    redo_stack: Stack,
 }
 
 impl History {
@@ -12,59 +17,88 @@ impl History {
         Self::default()
     }
 
-    pub fn force_new_edit_group(&mut self) {
-        self.current_edit = None;
+    pub fn as_text(&self) -> &Text {
+        &self.text
     }
 
-    pub fn edit(
+    pub fn force_new_group(&mut self) {
+        self.current_desc = None;
+    }
+
+    pub fn push_or_extend_group(
         &mut self,
-        origin_id: SessionId,
-        kind: EditKind,
-        selections: &[Selection],
-        inverted_changes: Vec<Change>,
+        session_id: SessionId,
+        edit_kind: EditKind,
+        selections: &SelectionSet,
     ) {
-        if self
-            .current_edit
-            .map_or(false, |(current_origin_id, current_kind)| current_origin_id == origin_id && current_kind.can_merge(kind))
+        let desc = GroupDesc {
+            session_id,
+            edit_kind,
+        };
+        if !self
+            .current_desc
+            .map_or(false, |current_desc| current_desc.can_merge_with(desc))
         {
-            self.undos.last_mut().unwrap().1.extend(inverted_changes);
-        } else {
-            self.current_edit = Some((origin_id, kind));
-            self.undos.push((selections.to_vec(), inverted_changes));
+            self.undo_stack.push_group(selections.clone());
+            self.current_desc = Some(desc);
         }
-        self.redos.clear();
     }
 
-    pub fn undo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<Change>)> {
-        if let Some((selections, mut inverted_changes)) = self.undos.pop() {
-            self.current_edit = None;
-            let mut changes = Vec::new();
-            inverted_changes.reverse();
-            for inverted_change in inverted_changes.iter().cloned() {
-                let change = inverted_change.clone().invert(&text);
-                text.apply_change(inverted_change);
-                changes.push(change);
+    pub fn apply_edit(&mut self, edit: Edit) {
+        let inverted_edit = edit.clone().invert(&self.text);
+        self.text.apply_change(edit.change);
+        self.undo_stack.push_edit(inverted_edit);
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(
+        &mut self,
+        selections: &SelectionSet,
+        edits: &mut Vec<Edit>,
+    ) -> Option<SelectionSet> {
+        if let Some(new_selections) = self.undo_stack.pop_group(edits) {
+            self.redo_stack.push_group(selections.clone());
+            for edit in edits {
+                let inverted_edit = edit.clone().invert(&self.text);
+                self.text.apply_change(edit.change.clone());
+                self.redo_stack.push_edit(inverted_edit);
             }
-            changes.reverse();
-            self.redos.push((selections.clone(), changes.clone()));
-            Some((selections, inverted_changes))
+            self.current_desc = None;
+            Some(new_selections)
         } else {
             None
         }
     }
 
-    pub fn redo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<Change>)> {
-        if let Some((selections, changes)) = self.redos.pop() {
-            self.current_edit = None;
-            let mut inverted_changes = Vec::new();
-            for change in changes.iter().cloned() {
-                inverted_changes.push(change.clone().invert(&text));
-                text.apply_change(change);
+    pub fn redo(
+        &mut self,
+        selections: &SelectionSet,
+        edits: &mut Vec<Edit>,
+    ) -> Option<SelectionSet> {
+        if let Some(new_selections) = self.redo_stack.pop_group(edits) {
+            self.undo_stack.push_group(selections.clone());
+            for edit in edits {
+                let inverted_edit = edit.clone().invert(&self.text);
+                self.text.apply_change(edit.change.clone());
+                self.undo_stack.push_edit(inverted_edit);
             }
-            self.undos.push((selections.clone(), inverted_changes));
-            Some((selections, changes))
+            self.current_desc = None;
+            Some(new_selections)
         } else {
             None
+        }
+    }
+
+    pub fn into_text(self) -> Text {
+        self.text
+    }
+}
+
+impl From<Text> for History {
+    fn from(text: Text) -> Self {
+        Self {
+            text,
+            ..Self::default()
         }
     }
 }
@@ -72,15 +106,15 @@ impl History {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EditKind {
     Insert,
+    InsertSpace,
     Delete,
     Indent,
     Outdent,
-    Space,
-    Other
+    Other,
 }
 
 impl EditKind {
-    fn can_merge(self, other: Self) -> bool {
+    fn can_merge_with(self, other: Self) -> bool {
         if self == Self::Other {
             return false;
         }
@@ -88,8 +122,54 @@ impl EditKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct GroupDesc {
+    session_id: SessionId,
+    edit_kind: EditKind,
+}
+
+impl GroupDesc {
+    fn can_merge_with(self, other: GroupDesc) -> bool {
+        self.session_id == other.session_id && self.edit_kind.can_merge_with(other.edit_kind)
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+struct Stack {
+    groups: Vec<Group>,
+    edits: Vec<Edit>,
+}
+
+impl Stack {
+    fn push_group(&mut self, selections: SelectionSet) {
+        self.groups.push(Group {
+            selections,
+            edit_start: self.edits.len(),
+        });
+    }
+
+    fn push_edit(&mut self, edit: Edit) {
+        self.edits.push(edit);
+    }
+
+    fn pop_group(&mut self, edits: &mut Vec<Edit>) -> Option<SelectionSet> {
+        match self.groups.pop() {
+            Some(group) => {
+                edits.extend(self.edits.drain(group.edit_start..).rev());
+                Some(group.selections)
+            }
+            None => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.groups.clear();
+        self.edits.clear();
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct EditGroup {
-    pub selections: Vec<Selection>,
-    pub changes: Vec<Change>,
+struct Group {
+    selections: SelectionSet,
+    edit_start: usize,
 }
