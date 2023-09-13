@@ -12,6 +12,7 @@ use {
         wrap::WrapData,
         Selection, Settings,
     },
+	
     std::{
         cell::RefCell,
         collections::HashSet,
@@ -116,8 +117,8 @@ impl Session {
         let text = self.document.as_text();
         let lines = text.as_lines();
         for line in 0..lines.len() {
-            let indent_level = lines[line].indent().unwrap_or("").column_count()
-                / self.settings.tab_column_count;
+            let indent_level =
+                lines[line].indent().unwrap_or("").column_count() / self.settings.tab_column_count;
             if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
                 self.layout.borrow_mut().fold_column[line] =
                     self.settings.fold_level * self.settings.tab_column_count;
@@ -258,6 +259,7 @@ impl Session {
             &self.selections,
             &self.settings,
             |mut editor, position, length| {
+				let mut position = position;
                 editor.apply_edit(Edit {
                     change: Change::Delete(position, length),
                     drift: Drift::Before,
@@ -278,10 +280,11 @@ impl Session {
                     change: Change::Insert(position, text.clone()),
                     drift: Drift::Before,
                 });
+				position += text.length();
                 if let Some(inject_delimiter) = inject_delimiter {
                     editor.apply_edit(Edit {
                         change: Change::Insert(
-                            position + text.length(),
+                            position,
                             Text::from(inject_delimiter),
                         ),
                         drift: Drift::After,
@@ -299,7 +302,7 @@ impl Session {
             &self.settings,
             |mut editor, position, length| {
                 let line = &editor.as_text().as_lines()[position.line_index];
-                let delete_whitespace = line.chars().all(|char| char.is_whitespace());
+                let delete_whitespace = !line.is_empty() && line.chars().all(|char| char.is_whitespace());
                 let inject_newline = line[..position.byte_index]
                     .chars()
                     .rev()
@@ -325,6 +328,7 @@ impl Session {
                             None
                         })
                         .unwrap_or(false);
+				let mut position = position;
                 if delete_whitespace {
                     editor.apply_edit(Edit {
                         change: Change::Delete(
@@ -339,6 +343,7 @@ impl Session {
                         ),
                         drift: Drift::Before,
                     });
+					position.byte_index = 0;
                 }
                 editor.apply_edit(Edit {
                     change: Change::Delete(position, length),
@@ -348,13 +353,11 @@ impl Session {
                     change: Change::Insert(position, Text::newline()),
                     drift: Drift::Before,
                 });
+				position.line_index += 1;
                 if inject_newline {
                     editor.apply_edit(Edit {
                         change: Change::Insert(
-                            Position {
-                                line_index: position.line_index + 1,
-                                byte_index: 0,
-                            },
+                            position,
                             Text::newline(),
                         ),
                         drift: Drift::After,

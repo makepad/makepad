@@ -2,7 +2,7 @@ use {
     crate::{
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
-		settings::Settings,
+        settings::Settings,
         state::Session,
         str::StrExt,
         text::Position,
@@ -103,10 +103,10 @@ live_design! {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
         }
-		draw_indent_guide: {
-			draw_depth: 2.0,
-			color: #C0C0C0,
-		}
+        draw_indent_guide: {
+            draw_depth: 2.0,
+            color: #C0C0C0,
+        }
         draw_selection: {
             draw_depth: 3.0,
         }
@@ -129,8 +129,8 @@ pub struct CodeEditor {
     draw_text: DrawText,
     #[live]
     token_colors: TokenColors,
-	#[live]
-	draw_indent_guide: DrawIndentGuide,
+    #[live]
+    draw_indent_guide: DrawIndentGuide,
     #[live]
     draw_selection: DrawSelection,
     #[live]
@@ -212,7 +212,7 @@ impl CodeEditor {
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
         self.draw_text_layer(cx, session);
-		self.draw_indent_guide_layer(cx, session);
+        self.draw_indent_guide_layer(cx, session);
         self.draw_selection_layer(cx, session);
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
@@ -509,16 +509,13 @@ impl CodeEditor {
             .layout()
             .block_elements(self.line_start, self.line_end)
         {
-			let Settings {
-				tab_column_count,
-				..
-			} = **session.settings();
+            let Settings {
+                tab_column_count, ..
+            } = **session.settings();
             match element {
                 BlockElement::Line { line, .. } => {
-                    let indent_column_count: usize =
-                        line.text.indent().unwrap_or("").column_count();
                     for row_index in 0..line.row_count() {
-                        for column_index in (0..indent_column_count).step_by(tab_column_count) {
+                        for column_index in (0..line.indent_column_count()).step_by(tab_column_count) {
                             let (x, y) = line.grid_to_normalized_position(row_index, column_index);
                             self.draw_indent_guide.draw_abs(
                                 cx,
@@ -962,8 +959,8 @@ struct TokenColors {
 pub struct DrawIndentGuide {
     #[deref]
     draw_super: DrawQuad,
-	#[live]
-	color: Vec4,
+    #[live]
+    color: Vec4,
 }
 
 #[derive(Live, LiveHook)]
