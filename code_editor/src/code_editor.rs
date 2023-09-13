@@ -308,6 +308,23 @@ impl CodeEditor {
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                ..
+            }) => {
+                session.delete();
+                cx.redraw_all();
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                session.backspace();
+                cx.redraw_all();
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
+            }
+
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::RBracket,
                 modifiers: KeyModifiers { logo: true, .. },
                 ..
@@ -322,22 +339,6 @@ impl CodeEditor {
                 ..
             }) => {
                 session.outdent();
-                cx.redraw_all();
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
-            }
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::Delete,
-                ..
-            }) => {
-                session.delete();
-                cx.redraw_all();
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
-            }
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::Backspace,
-                ..
-            }) => {
-                session.backspace();
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
