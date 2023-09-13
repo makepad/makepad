@@ -32,23 +32,6 @@ impl PlistValues{
               <string>{4}</string>
               <key>UILaunchStoryboardName</key>
               <string></string>
-             	<key>UIRequiredDeviceCapabilities</key>
-                	<array>
-                		<string>armv7</string>
-                	</array>
-            	<key>UISupportedInterfaceOrientations</key>
-            	<array>
-            		<string>UIInterfaceOrientationPortrait</string>
-            		<string>UIInterfaceOrientationLandscapeLeft</string>
-            		<string>UIInterfaceOrientationLandscapeRight</string>
-            	</array>
-            	<key>UISupportedInterfaceOrientations~ipad</key>
-            	<array>
-            		<string>UIInterfaceOrientationPortrait</string>
-            		<string>UIInterfaceOrientationPortraitUpsideDown</string>
-            		<string>UIInterfaceOrientationLandscapeLeft</string>
-            		<string>UIInterfaceOrientationLandscapeRight</string>
-            	</array>
             </dict>
             </plist>"#,
             self.identifier,
@@ -143,7 +126,6 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
         cwd.join(format!("target/{}/release/{build_crate}", ios_target.toolchain()))
     }
     else{
-        println!("WARNING: Building debug build, this creates a very slow application. Use --release if this is not what you want.");
         cwd.join(format!("target/{}/debug/{build_crate}", ios_target.toolchain()))
     };
     let dst_bin = app_dir.join(build_crate.to_string());
@@ -393,6 +375,7 @@ pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<S
         "--generate-entitlement-der",
         &app_dir
     ]) ?;  
+    
     
     let cwd = std::env::current_dir().unwrap();
     let ios_deploy = cwd.join(format!("{}/ios-deploy/build/Release/", env!("CARGO_MANIFEST_DIR")));

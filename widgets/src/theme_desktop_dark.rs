@@ -674,7 +674,7 @@ live_design!{
         }
     }
     
-    DesktopWindow = <DesktopWindowBase> {
+    Window = <WindowBase> {
         pass: {clear_color: (THEME_COLOR_CLEAR)}
         flow: Down
         nav_control: <NavControl> {}
