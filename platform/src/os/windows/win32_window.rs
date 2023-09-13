@@ -262,6 +262,7 @@ use {
         area::Area,
         os::windows::{
             win32_app::{
+                Win32App,
                 encode_wide,
                 FALSE,
                 get_win32_app_global,
@@ -507,7 +508,7 @@ impl Win32Window {
             },
             WM_LBUTTONDOWN => {
                 // hack for drag/drop: save which window was last clicked on in win32_app
-                get_win32_app_global().currently_clicked_window_id.replace(Some(window.window_id));
+                get_win32_app_global().currently_clicked_window_id = Some(window.window_id);
                 window.send_mouse_down(0, Self::get_key_modifiers());
             },
             WM_LBUTTONUP => window.send_mouse_up(0, Self::get_key_modifiers()),
@@ -650,7 +651,7 @@ impl Win32Window {
                 match *message {
 
                     DropTargetMessage::Enter(flags,mut point,effect,drag_item) => {
-                         // crate::log!("DRAG ENTER");
+                         /*// crate::log!("DRAG ENTER");
                         // decode message
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
                         let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
@@ -683,14 +684,14 @@ impl Win32Window {
                                     response: Rc::new(Cell::new(response)),
                                 }
                             )
-                        );
+                        );*/
                     },
 
                     DropTargetMessage::Leave => {
                         // make sure there is no more internal drag item
                        // get_win32_app_global().current_internal_drag_item.replace(None);
                         // send to makepad
-                        window.do_callback(Win32Event::DragEnd);
+                        //window.do_callback(Win32Event::DragEnd);
                     },
 
                     DropTargetMessage::Over(flags,mut point,effect,drag_item) => {
@@ -703,9 +704,9 @@ impl Win32Window {
                         else { DragResponse::None };
 
                         // if there is a current internal drag item, use that one instead of what came with the message
-                        let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
-                        let drag_item = if let Some(internal_drag_item) = current_internal_drag_item {
-                            get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
+                        //let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
+                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.clone() {
+                            //get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
                             internal_drag_item
                         } else {
                             drag_item
@@ -736,8 +737,7 @@ impl Win32Window {
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
 
                         // if there is a current internal drag item, use that one instead of what came with the message
-                        let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
-                        let drag_item = if let Some(internal_drag_item) = current_internal_drag_item {
+                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.take() {
                             // leave the current internal drag item empty
                             internal_drag_item
                         } else {
@@ -1010,7 +1010,7 @@ impl Win32Window {
     }
     
     pub fn do_callback(&mut self, event: Win32Event) {
-        get_win32_app_global().do_callback(event);
+        Win32App::do_callback(event);
     }
     
     pub fn send_change_event(&mut self) {
