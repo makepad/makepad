@@ -11,7 +11,6 @@ use {
     },
     
     crate::{
-        log,
         windows::{
             core::PCWSTR,
             core::IntoParam,
@@ -624,19 +623,6 @@ impl Win32Window {
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
             },
-            /*WM_USER => { 
-                let signals = if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
-                    let mut signals = HashSet::new();
-                    std::mem::swap(&mut *sigs, &mut signals);
-                    signals
-                }
-                else{
-                    panic!()
-                };
-                window.do_callback(vec![
-                    Win32Event::Signal(SignalEvent {signals})
-                ]);
-            }, */
             WM_CLOSE => { // close requested
                 let accept_close = Rc::new(Cell::new(true));
                 window.do_callback(Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
@@ -664,7 +650,7 @@ impl Win32Window {
                 match *message {
 
                     DropTargetMessage::Enter(flags,mut point,effect,drag_item) => {
-                        
+                         // crate::log!("DRAG ENTER");
                         // decode message
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
                         let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
@@ -701,16 +687,14 @@ impl Win32Window {
                     },
 
                     DropTargetMessage::Leave => {
-
                         // make sure there is no more internal drag item
-                        get_win32_app_global().current_internal_drag_item.replace(None);
-
+                       // get_win32_app_global().current_internal_drag_item.replace(None);
                         // send to makepad
                         window.do_callback(Win32Event::DragEnd);
                     },
 
                     DropTargetMessage::Over(flags,mut point,effect,drag_item) => {
-
+                        
                         // decode message
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
                         let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
@@ -746,14 +730,10 @@ impl Win32Window {
                         );        
                     },
 
-                    DropTargetMessage::Drop(flags,mut point,effect,drag_item) => {
+                    DropTargetMessage::Drop(flags,mut point,_effect,drag_item) => {
 
                         // decode message
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
-                        let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
-                        else if (effect & DROPEFFECT_MOVE) != DROPEFFECT(0) { DragResponse::Move }
-                        else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
-                        else { DragResponse::None };
 
                         // if there is a current internal drag item, use that one instead of what came with the message
                         let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
@@ -764,7 +744,7 @@ impl Win32Window {
                             drag_item
                         };
                         
-                        log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,flags.0,response,drag_item);
+                        //log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,flags.0,response,drag_item);
 
                         // send to makepad
                         window.do_callback(
@@ -781,6 +761,9 @@ impl Win32Window {
                                     items: Rc::new(vec![drag_item]),
                                 }
                             )
+                        );
+                        window.do_callback(
+                            Win32Event::DragEnd
                         );        
                     },
                 }
