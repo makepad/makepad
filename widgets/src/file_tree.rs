@@ -382,6 +382,9 @@ impl FileTree {
         items: Vec<DragItem>,
     ) {
         self.dragging_node_id = Some(node_id);
+
+        log!("makepad: start_dragging_file_node");
+
         cx.start_dragging(items);
     }
     
@@ -511,6 +514,9 @@ impl FileTreeRef{
     
     
     pub fn file_start_drag(&self, cx: &mut Cx, _file_id: FileNodeId, item: DragItem) {
+
+        log!("makepad: file_start_drag");
+
         cx.start_dragging(vec![item]);
     }
 }
