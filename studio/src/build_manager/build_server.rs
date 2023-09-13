@@ -87,6 +87,7 @@ impl BuildConnection {
         let args = [
             "run",
             "nightly",
+            "cargo",
             "run",
             "-p",
             what,
