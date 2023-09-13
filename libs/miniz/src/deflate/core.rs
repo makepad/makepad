@@ -427,8 +427,8 @@ impl CompressorOxide {
         CompressorOxide {
             lz: LZOxide::new(),
             params: ParamsOxide::new(flags),
-            /// Put HuffmanOxide on the heap with default trick to avoid
-            /// excessive stack copies.
+            // Put HuffmanOxide on the heap with default trick to avoid
+            // excessive stack copies.
             huff: Box::default(),
             dict: DictOxide::new(flags),
         }
@@ -522,8 +522,8 @@ impl Default for CompressorOxide {
         CompressorOxide {
             lz: LZOxide::new(),
             params: ParamsOxide::new(DEFAULT_FLAGS),
-            /// Put HuffmanOxide on the heap with default trick to avoid
-            /// excessive stack copies.
+            // Put HuffmanOxide on the heap with default trick to avoid
+            // excessive stack copies.
             huff: Box::default(),
             dict: DictOxide::new(DEFAULT_FLAGS),
         }

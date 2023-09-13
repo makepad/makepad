@@ -19,12 +19,12 @@ import java.lang.ref.WeakReference;
 
 import android.util.Log;
 
+import dev.makepad.android.MakepadNative;
+
 public class VideoDecoder {
-    public VideoDecoder(long cx, MakepadSurfaceView view, long videoId, Activity activity, BlockingQueue<ByteBuffer> videoFrameQueue) {
-        mCx = cx;
-        mVideoId = videoId;
-        mView = view;
+    public VideoDecoder(Activity activity, long videoId, BlockingQueue<ByteBuffer> videoFrameQueue) {
         mActivityReference = new WeakReference<>(activity);
+        mVideoId = videoId;
         mVideoFrameQueue = videoFrameQueue;
     }
 
@@ -51,7 +51,7 @@ public class VideoDecoder {
             String mime = format.getString(MediaFormat.KEY_MIME);
 
             MediaCodecInfo[] codecInfos = new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos();
-            String videoMimeType = "video/avc";  // Example MIME type for H.264.
+            String videoMimeType = "video/avc";  // MIME type for H.264.
 
             String selectedCodecName = null;
             boolean isHWCodec = false;
@@ -108,14 +108,13 @@ public class VideoDecoder {
             Activity activity = mActivityReference.get();
             if (activity != null) {
                 activity.runOnUiThread(() -> {
-                    Makepad.onVideoDecodingInitialized(mCx, 
+                    MakepadNative.onVideoDecodingInitialized( 
                         mVideoId,
                         mFrameRate,
                         mVideoWidth,
                         mVideoHeight,
                         colorFormatString,
-                        duration,
-                        (Makepad.Callback)mView.getContext());
+                        duration);
                 });
             }
         } catch (Exception e) {
@@ -242,7 +241,7 @@ public class VideoDecoder {
                 Activity activity = mActivityReference.get();
                 if (activity != null) {
                     activity.runOnUiThread(() -> {
-                        Makepad.onVideoChunkDecoded(mCx, mVideoId, (Makepad.Callback)mView.getContext());
+                        MakepadNative.onVideoChunkDecoded(mVideoId);
                     });
                 }
             }
@@ -320,6 +319,4 @@ public class VideoDecoder {
 
     // context
     private WeakReference<Activity> mActivityReference;
-    MakepadSurfaceView mView;
-    private long mCx;
 }

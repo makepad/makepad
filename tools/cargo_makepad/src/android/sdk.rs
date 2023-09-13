@@ -2,8 +2,8 @@
 use makepad_miniz::zip_file::*;
 use std::{
     path::{Path},
-    fs::File,
-    io::Write,
+    fs::{File, OpenOptions},
+    io::{Write, Read, Seek},
 };
 
 use crate::{
@@ -242,6 +242,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                     (copy_map(SYS_IN, SYS_OUT, "libEGL.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libdl.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libaaudio.so"), false),
+                    (copy_map(SYS_IN, SYS_OUT, "libandroid.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libamidi.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
@@ -252,6 +253,32 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
             }
             let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
             unzip(4, src_dir, sdk_dir, URL_NDK_33_WINDOWS, &ndk_extract) ?;
+            // patch the .cmd file to stop complaining
+            {
+                let cmd_file_path = sdk_dir.join("NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd");
+
+                // Open the file for reading
+                let mut ndk_cmd = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&cmd_file_path)
+                    .map_err(|_| format!("Can't open file {:?}", cmd_file_path))?;
+
+                // Read the file into a String
+                let mut ndk_cmd_data = String::new();
+                ndk_cmd.read_to_string(&mut ndk_cmd_data)
+                    .map_err(|_| format!("Can't read file {:?}", cmd_file_path))?;
+
+                // Replace occurrences of `"%1"` with `%1`
+                let ndk_cmd_data_modified = ndk_cmd_data.replace("\"%1\"", "%1");
+
+                // Write the modified String back to the file
+                ndk_cmd.set_len(0).map_err(|_| "failed to truncate")?; // Truncate the file
+                ndk_cmd.seek(std::io::SeekFrom::Start(0)).map_err(|_| "failed to seek")?; // Reset the cursor position
+                ndk_cmd.write_all(ndk_cmd_data_modified.as_bytes())
+                    .map_err(|_| format!("Can't write to file {:?}", cmd_file_path))?;
+            }
+
             
             const JDK_IN: &str = "jdk-17.0.2";
             const JDK_OUT: &str = "openjdk";
@@ -319,6 +346,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                     (copy_map(SYS_IN, SYS_OUT, "libEGL.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libdl.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libaaudio.so"), false),
+                    (copy_map(SYS_IN, SYS_OUT, "libandroid.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libamidi.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
@@ -401,6 +429,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                     (copy_map(SYS_IN, SYS_OUT, "libEGL.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libdl.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libaaudio.so"), false),
+                    (copy_map(SYS_IN, SYS_OUT, "libandroid.so"), false),                    
                     (copy_map(SYS_IN, SYS_OUT, "libamidi.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
