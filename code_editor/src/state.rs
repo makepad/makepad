@@ -391,35 +391,6 @@ impl Session {
         );
     }
 
-    pub fn indent(&mut self) {
-        self.document.edit_lines(
-            self.id,
-            EditKind::Indent,
-            &self.selection_state.borrow().selections,
-            |line| {
-                reindent(line, |indentation_column_count| {
-                    (indentation_column_count + self.settings.tab_column_count)
-                        / self.settings.tab_column_count
-                        * self.settings.tab_column_count
-                })
-            },
-        );
-    }
-
-    pub fn outdent(&mut self) {
-        self.document.edit_lines(
-            self.id,
-            EditKind::Outdent,
-            &self.selection_state.borrow().selections,
-            |line| {
-                reindent(line, |indentation_column_count| {
-                    indentation_column_count.saturating_sub(1) / self.settings.tab_column_count
-                        * self.settings.tab_column_count
-                })
-            },
-        );
-    }
-
     pub fn delete(&mut self) {
         self.document.edit_selections(
             self.id,
@@ -457,13 +428,38 @@ impl Session {
                 if length == Length::zero() {
                     let lines = editor.as_text().as_lines();
                     if position.byte_index > 0 {
-                        let byte_count = lines[position.line_index]
-                            .graphemes()
-                            .next_back()
-                            .unwrap()
-                            .len();
-                        position.byte_index -= byte_count;
-                        length.byte_count += byte_count;
+						if lines[position.line_index][..position.byte_index].chars().all(|char| char.is_whitespace()) {
+							let indent_column_count = editor.as_text().as_lines()[position.line_index]
+								.indent()
+								.unwrap_or("")
+								.len();
+							let column_count = indent_column_count.min(
+								(indent_column_count + self.settings.tab_column_count - 1)
+									% self.settings.tab_column_count
+									+ 1,
+							);
+							editor.apply_edit(Edit {
+								change: Change::Delete(
+									Position {
+										line_index: position.line_index,
+										byte_index: indent_column_count - column_count,
+									},
+									Length {
+										line_count: 0,
+										byte_count: column_count,
+									},
+								),
+								drift: Drift::Before,
+							});
+						} else {
+							let byte_count = lines[position.line_index]
+								.graphemes()
+								.next_back()
+								.unwrap()
+								.len();
+							position.byte_index -= byte_count;
+							length.byte_count += byte_count;
+						}
                     } else if position.line_index > 0 {
                         position.line_index -= 1;
                         position.byte_index = lines[position.line_index].len();
@@ -472,6 +468,64 @@ impl Session {
                 }
                 editor.apply_edit(Edit {
                     change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+            },
+        );
+    }
+
+    pub fn indent(&mut self) {
+        self.document.edit_linewise(
+            self.id,
+            EditKind::Other,
+            &self.selection_state.borrow().selections,
+            |mut editor, line_index| {
+                let indent_column_count = editor.as_text().as_lines()[line_index]
+                    .indent()
+                    .unwrap_or("")
+                    .len();
+                let column_count = self.settings.tab_column_count
+                    - indent_column_count % self.settings.tab_column_count;
+                editor.apply_edit(Edit {
+                    change: Change::Insert(
+                        Position {
+                            line_index,
+                            byte_index: indent_column_count,
+                        },
+                        iter::repeat(' ').take(column_count).collect(),
+                    ),
+                    drift: Drift::Before,
+                });
+            },
+        );
+    }
+
+    pub fn outdent(&mut self) {
+        self.document.edit_linewise(
+            self.id,
+            EditKind::Other,
+            &self.selection_state.borrow().selections,
+            |mut editor, line_index| {
+                let indent_column_count = editor.as_text().as_lines()[line_index]
+                    .indent()
+                    .unwrap_or("")
+					.len();
+                let column_count = indent_column_count.min(
+                    (indent_column_count + self.settings.tab_column_count - 1)
+                        % self.settings.tab_column_count
+                        + 1,
+                );
+                editor.apply_edit(Edit {
+                    change: Change::Delete(
+                        Position {
+                            line_index,
+                            byte_index: indent_column_count - column_count,
+                        },
+                        Length {
+                            line_count: 0,
+                            byte_count: column_count,
+                        },
+                    ),
                     drift: Drift::Before,
                 });
             },
