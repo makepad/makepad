@@ -14,24 +14,15 @@ pub trait StrExt {
 
 impl StrExt for str {
     fn column_count(&self) -> usize {
-        self.chars()
-            .map(|char| char.column_count())
-            .sum()
+        self.chars().map(|char| char.column_count()).sum()
     }
 
     fn indent_level(&self, indent_column_count: usize) -> usize {
-        self.leading_whitespace()
-            .unwrap_or("")
-            .column_count()
-            / indent_column_count
+        self.leading_whitespace().unwrap_or("").column_count() / indent_column_count
     }
 
     fn next_indent_level(&self, indent_column_count: usize) -> usize {
-        (self
-            .leading_whitespace()
-            .unwrap_or("")
-            .column_count()
-            + indent_column_count)
+        (self.leading_whitespace().unwrap_or("").column_count() + indent_column_count)
             / indent_column_count
     }
 
