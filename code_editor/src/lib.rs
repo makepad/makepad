@@ -3,11 +3,11 @@ use makepad_widgets::*;
 
 pub mod char;
 pub mod code_editor;
+pub mod document;
 pub mod history;
 pub mod inlays;
 pub mod iter;
-pub mod line;
-pub mod move_ops;
+pub mod layout;
 pub mod selection;
 pub mod settings;
 pub mod state;
@@ -19,14 +19,8 @@ pub mod widgets;
 pub mod wrap;
 
 pub use self::{
-    code_editor::CodeEditor,
-    history::History,
-    line::Line,
-    selection::Selection,
-    settings::Settings,
-    state::{Document, Session},
-    token::Token,
-    tokenizer::Tokenizer,
+    code_editor::CodeEditor, document::Document, history::History, layout::Line,
+    selection::Selection, settings::Settings, state::Session, token::Token, tokenizer::Tokenizer,
 };
 
 pub fn live_design(cx: &mut Cx) {

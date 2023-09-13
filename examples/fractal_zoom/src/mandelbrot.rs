@@ -23,18 +23,18 @@ live_design!{
             let magsq = (fractal.w * 256 + fractal.x - 127);
             
             // create a nice palette index
-            let index = abs((1.0 * iter / self.max_iter * 8.0) - 0.1 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter * 8.0) - .2 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq2(index + self.color_cycle), 1.0);
+            return vec4(Pal::iq4(index + self.color_cycle), 1.0);
         }
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 400,
+        max_iter: 2400,
     }
 }
 
