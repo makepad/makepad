@@ -155,15 +155,20 @@ impl<'a> Line<'a> {
         self.column_count.unwrap()
     }
 
+    pub fn width(&self) -> f64 {
+        let mut width: f64 = 0.0;
+        for row_index in 0..self.row_count() {
+            let (x, _) = self.grid_to_normalized_position(row_index, self.column_count());
+            width = width.max(x);
+        }
+        width
+    }
+
     pub fn height(&self) -> f64 {
         self.row_count() as f64 * self.scale
     }
 
-    pub fn width(&self) -> f64 {
-        self.column_to_x(self.column_count())
-    }
-
-    pub fn logical_to_visual_position(
+    pub fn logical_to_grid_position(
         &self,
         byte_index: usize,
         affinity: Affinity,
@@ -212,7 +217,7 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn visual_to_logical_position(
+    pub fn grid_to_logical_position(
         &self,
         row_index: usize,
         column_index: usize,
@@ -227,8 +232,7 @@ impl<'a> Line<'a> {
                     text,
                 } => {
                     for grapheme in text.graphemes() {
-                        let next_column =
-                            current_column_index + grapheme.column_count();
+                        let next_column = current_column_index + grapheme.column_count();
                         if current_row_index == row_index
                             && (current_column_index..next_column).contains(&column_index)
                         {
@@ -268,10 +272,13 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let before_fold = column.min(self.fold);
-        let after_fold = column - before_fold;
-        before_fold as f64 + after_fold as f64 * self.scale
+    pub fn grid_to_normalized_position(&self, row_index: usize, column_index: usize) -> (f64, f64) {
+        let before_fold = column_index.min(self.fold);
+        let after_fold = column_index - before_fold;
+        (
+            before_fold as f64 + after_fold as f64 * self.scale,
+            row_index as f64 * self.scale,
+        )
     }
 
     pub fn fold(&self) -> usize {

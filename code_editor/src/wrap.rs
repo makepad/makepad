@@ -18,10 +18,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize) -> WrapData {
         match inline {
             InlineElement::Text { text, .. } => {
                 for string in text.split_whitespace_boundaries() {
-                    let column_count: usize = string
-                        .chars()
-                        .map(|char| char.column_count())
-                        .sum();
+                    let column_count: usize = string.chars().map(|char| char.column_count()).sum();
                     if indent_column_count + column_count > wrap_column {
                         indent_column_count = 0;
                         break;
@@ -36,32 +33,29 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize) -> WrapData {
             }
         }
     }
-    let mut byte = 0;
-    let mut column = 0;
+    let mut byte_index = 0;
+    let mut column_index = 0;
     let mut wraps = Vec::new();
-    for inline in line.inline_elements() {
-        match inline {
+    for element in line.inline_elements() {
+        match element {
             InlineElement::Text { text, .. } => {
                 for string in text.split_whitespace_boundaries() {
-                    let column_count: usize = string
-                        .chars()
-                        .map(|char| char.column_count())
-                        .sum();
-                    if column + column_count > wrap_column {
-                        column = indent_column_count;
-                        wraps.push(byte);
+                    let column_count: usize = string.chars().map(|char| char.column_count()).sum();
+                    if column_index + column_count > wrap_column {
+                        column_index = indent_column_count;
+                        wraps.push(byte_index);
                     }
-                    column += column_count;
-                    byte += string.len();
+                    column_index += column_count;
+                    byte_index += string.len();
                 }
             }
             InlineElement::Widget(widget) => {
-                if column + widget.column_count > wrap_column {
-                    column = indent_column_count;
-                    wraps.push(byte);
+                if column_index + widget.column_count > wrap_column {
+                    column_index = indent_column_count;
+                    wraps.push(byte_index);
                 }
-                column += widget.column_count;
-                byte += 1;
+                column_index += widget.column_count;
+                byte_index += 1;
             }
         }
     }

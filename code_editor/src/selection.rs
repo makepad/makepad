@@ -265,16 +265,13 @@ impl Cursor {
     pub fn is_at_first_row_of_line(self, layout: &Layout<'_>) -> bool {
         let (row, _) = layout
             .line(self.position.line_index)
-            .logical_to_visual_position(self.position.byte_index, self.affinity);
+            .logical_to_grid_position(self.position.byte_index, self.affinity);
         row == 0
     }
 
     pub fn is_at_last_row_of_line(self, layout: &Layout<'_>) -> bool {
         let line = layout.line(self.position.line_index);
-        let (row, _) = line.logical_to_visual_position(
-            self.position.byte_index,
-            self.affinity,
-        );
+        let (row, _) = line.logical_to_grid_position(self.position.byte_index, self.affinity);
         row == line.row_count() - 1
     }
 
@@ -374,15 +371,12 @@ impl Cursor {
 
     pub fn move_to_prev_row_of_line(self, layout: &Layout<'_>) -> Self {
         let line = layout.line(self.position.line_index);
-        let (row_index, mut column_index) = line.logical_to_visual_position(
-            self.position.byte_index,
-            self.affinity,
-        );
+        let (row_index, mut column_index) =
+            line.logical_to_grid_position(self.position.byte_index, self.affinity);
         if let Some(preferred_column_index) = self.preferred_column_index {
             column_index = preferred_column_index;
         }
-        let (byte_index, affinity) =
-            line.visual_to_logical_position(row_index - 1, column_index);
+        let (byte_index, affinity) = line.grid_to_logical_position(row_index - 1, column_index);
         Self {
             position: Position {
                 line_index: self.position.line_index,
@@ -395,15 +389,12 @@ impl Cursor {
 
     pub fn move_to_next_row_of_line(self, layout: &Layout<'_>) -> Self {
         let line = layout.line(self.position.line_index);
-        let (row_index, mut column_index) = line.logical_to_visual_position(
-            self.position.byte_index,
-            self.affinity,
-        );
+        let (row_index, mut column_index) =
+            line.logical_to_grid_position(self.position.byte_index, self.affinity);
         if let Some(preferred_column_index) = self.preferred_column_index {
             column_index = preferred_column_index;
         }
-        let (byte, affinity) =
-            line.visual_to_logical_position(row_index + 1, column_index);
+        let (byte, affinity) = line.grid_to_logical_position(row_index + 1, column_index);
         Self {
             position: Position {
                 line_index: self.position.line_index,
@@ -414,23 +405,16 @@ impl Cursor {
         }
     }
 
-    pub fn move_to_last_row_of_prev_line(
-        self,
-        layout: &Layout<'_>,
-    ) -> Self {
+    pub fn move_to_last_row_of_prev_line(self, layout: &Layout<'_>) -> Self {
         let line = layout.line(self.position.line_index);
-        let (_, mut column_index) = line.logical_to_visual_position(
-            self.position.byte_index,
-            self.affinity,
-        );
+        let (_, mut column_index) =
+            line.logical_to_grid_position(self.position.byte_index, self.affinity);
         if let Some(preferred_column_index) = self.preferred_column_index {
             column_index = preferred_column_index;
         }
         let prev_line = layout.line(self.position.line_index - 1);
-        let (byte_index, affinity) = prev_line.visual_to_logical_position(
-            prev_line.row_count() - 1,
-            column_index,
-        );
+        let (byte_index, affinity) =
+            prev_line.grid_to_logical_position(prev_line.row_count() - 1, column_index);
         Self {
             position: Position {
                 line_index: self.position.line_index - 1,
@@ -441,21 +425,15 @@ impl Cursor {
         }
     }
 
-    pub fn move_to_first_row_of_next_line(
-        self,
-        layout: &Layout<'_>,
-    ) -> Self {
+    pub fn move_to_first_row_of_next_line(self, layout: &Layout<'_>) -> Self {
         let line = layout.line(self.position.line_index);
-        let (_, mut column_index) = line.logical_to_visual_position(
-            self.position.byte_index,
-            self.affinity,
-        );
+        let (_, mut column_index) =
+            line.logical_to_grid_position(self.position.byte_index, self.affinity);
         if let Some(preferred_column_index) = self.preferred_column_index {
             column_index = preferred_column_index;
         }
         let next_line = layout.line(self.position.line_index + 1);
-        let (byte_index, affinity) =
-            next_line.visual_to_logical_position(0, column_index);
+        let (byte_index, affinity) = next_line.grid_to_logical_position(0, column_index);
         Self {
             position: Position {
                 line_index: self.position.line_index + 1,

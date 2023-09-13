@@ -110,11 +110,7 @@ impl Document {
             prev_edit_start = edit_start;
         }
         drop(history);
-        self.autoindent(
-            &line_ranges,
-            settings.indent_column_count,
-            &mut edits,
-        );
+        self.autoindent(&line_ranges, settings.indent_column_count, &mut edits);
         self.apply_edits(session_id, None, &edits);
     }
 
@@ -213,9 +209,7 @@ impl Document {
                 [..line_range.start]
                 .iter()
                 .rev()
-                .find_map(|line| {
-                    next_line_indentation_column_count(line, indent_column_count)
-                })
+                .find_map(|line| next_line_indentation_column_count(line, indent_column_count))
                 .unwrap_or(0);
             for line in line_range {
                 if self.as_text().as_lines()[line]
@@ -234,9 +228,7 @@ impl Document {
                     desired_indentation_column_count -= 4;
                 }
                 self.edit_lines_internal(line, edits, |line| {
-                    crate::state::reindent(line, |_| {
-                        desired_indentation_column_count
-                    })
+                    crate::state::reindent(line, |_| desired_indentation_column_count)
                 });
                 if let Some(next_line_indentation_column_count) = next_line_indentation_column_count(
                     &self.as_text().as_lines()[line],

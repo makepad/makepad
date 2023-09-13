@@ -126,9 +126,9 @@ pub struct CodeEditor {
     #[rust]
     cell_size: DVec2,
     #[rust]
-    start_line: usize,
+    line_start: usize,
     #[rust]
-    end_line: usize,
+    line_end: usize,
 }
 
 impl LiveHook for CodeEditor {
@@ -193,10 +193,10 @@ impl CodeEditor {
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
-        self.start_line = session
+        self.line_start = session
             .layout()
             .find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
-        self.end_line = session.layout().find_first_line_starting_after_y(
+        self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
         self.draw_text(cx, session);
@@ -369,7 +369,8 @@ impl CodeEditor {
             }) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
-                    if alt {
+					println!("PENIS {:?}", cursor);
+					if alt {
                         session.push_cursor(cursor, affinity);
                     } else {
                         session.set_cursor(cursor, affinity);
@@ -389,16 +390,17 @@ impl CodeEditor {
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
-        let mut y = session.layout().line(self.start_line).y();
-        for block in session.layout().blocks(self.start_line, self.end_line) {
+        let mut origin_y = session.layout().line(self.line_start).y();
+        for block in session.layout().blocks(self.line_start, self.line_end) {
             match block {
                 BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = line.scale();
                     let mut token_iter = line.tokens().iter().copied();
                     let mut token_slot = token_iter.next();
-                    let mut column = 0;
-                    for wrapped in line.wrapped_elements() {
-                        match wrapped {
+                    let mut row_index = 0;
+                    let mut column_index = 0;
+                    for element in line.wrapped_elements() {
+                        match element {
                             WrappedElement::Text {
                                 is_inlay: false,
                                 mut text,
@@ -442,47 +444,43 @@ impl CodeEditor {
                                         TokenKind::Typename => self.token_colors.typename,
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
+                                    let (x, y) =
+                                        line.grid_to_normalized_position(row_index, column_index);
                                     self.draw_text.draw_abs(
                                         cx,
-                                        DVec2 {
-                                            x: line.column_to_x(column),
-                                            y,
-                                        } * self.cell_size
+                                        DVec2 { x, y: origin_y + y } * self.cell_size
                                             + self.viewport_rect.pos,
                                         text_0,
                                     );
-                                    column +=
-                                        text_0.column_count();
+                                    column_index += text_0.column_count();
                                 }
                             }
                             WrappedElement::Text {
                                 is_inlay: true,
                                 text,
                             } => {
+                                let (x, y) = line.grid_to_normalized_position(row_index, column_index);
                                 self.draw_text.draw_abs(
                                     cx,
-                                    DVec2 {
-                                        x: line.column_to_x(column),
-                                        y,
-                                    } * self.cell_size
+                                    DVec2 { x, y: origin_y + y } * self.cell_size
                                         + self.viewport_rect.pos,
                                     text,
                                 );
-                                column += text.column_count();
+                                column_index += text.column_count();
                             }
                             WrappedElement::Widget(widget) => {
-                                column += widget.column_count;
+                                column_index += widget.column_count;
                             }
                             WrappedElement::Wrap => {
-                                column = line.wrap_indent_column_count();
-                                y += line.scale();
+                                column_index = line.wrap_indent_column_count();
+                                row_index += 1;
                             }
                         }
                     }
-                    y += line.scale();
+                    origin_y += line.height();
                 }
                 BlockElement::Widget(widget) => {
-                    y += widget.height;
+                    origin_y += widget.height;
                 }
             }
         }
@@ -492,12 +490,12 @@ impl CodeEditor {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
         while selections.as_slice().first().map_or(false, |selection| {
-            selection.end().line_index < self.start_line
+            selection.end().line_index < self.line_start
         }) {
             selections.next().unwrap();
         }
         if selections.as_slice().first().map_or(false, |selection| {
-            selection.start().line_index < self.start_line
+            selection.start().line_index < self.line_start
         }) {
             active_selection = Some(ActiveSelection {
                 selection: *selections.next().unwrap(),
@@ -512,129 +510,139 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &Session, point: DVec2) -> Option<(Position, Affinity)> {
-        let point = (point - self.viewport_rect.pos) / self.cell_size;
-        let mut line = session.layout().find_first_line_ending_after_y(point.y);
-        let mut y = session.layout().line(line).y();
-        for block in session.layout().blocks(line, line + 1) {
+    fn pick(&self, session: &Session, position: DVec2) -> Option<(Position, Affinity)> {
+        let position = (position - self.viewport_rect.pos) / self.cell_size;
+		let mut line_index = session.layout().find_first_line_ending_after_y(position.y);
+        let mut origin_y = session.layout().line(line_index).y();
+        for block in session.layout().blocks(line_index, line_index + 1) {
             match block {
                 BlockElement::Line {
                     is_inlay: false,
-                    line: line_ref,
+                    line,
                 } => {
-                    let mut byte = 0;
-                    let mut column = 0;
-                    for wrapped in line_ref.wrapped_elements() {
-                        match wrapped {
+                    let mut byte_index = 0;
+                    let mut row_index = 0;
+                    let mut column_index = 0;
+                    for element in line.wrapped_elements() {
+                        match element {
                             WrappedElement::Text {
                                 is_inlay: false,
                                 text,
                             } => {
                                 for grapheme in text.graphemes() {
-                                    let next_byte = byte + grapheme.len();
-                                    let next_column = column
-                                        + grapheme
-                                            .column_count();
-                                    let next_y = y + line_ref.scale();
-                                    let x = line_ref.column_to_x(column);
-                                    let next_x = line_ref.column_to_x(next_column);
-                                    let mid_x = (x + next_x) / 2.0;
-                                    if (y..=next_y).contains(&point.y) {
-                                        if (x..=mid_x).contains(&point.x) {
+                                    let (start_x, y) =
+                                        line.grid_to_normalized_position(row_index, column_index);
+                                    let start_y = origin_y + y;
+                                    let (end_x, _) = line.grid_to_normalized_position(
+                                        row_index,
+                                        column_index + grapheme.column_count(),
+                                    );
+                                    let end_y = start_y + line.scale();
+                                    if (start_y..=end_y).contains(&position.y) {
+                                        let mid_x = (start_x + end_x) / 2.0;
+                                        if (start_x..=mid_x).contains(&position.x) {
                                             return Some((
                                                 Position {
-                                                    line_index: line,
-                                                    byte_index: byte,
+                                                    line_index,
+                                                    byte_index,
                                                 },
                                                 Affinity::After,
                                             ));
                                         }
-                                        if (mid_x..=next_x).contains(&point.x) {
+                                        if (mid_x..=end_x).contains(&position.x) {
                                             return Some((
                                                 Position {
-                                                    line_index: line,
-                                                    byte_index: next_byte,
+                                                    line_index,
+                                                    byte_index: byte_index + grapheme.len(),
                                                 },
                                                 Affinity::Before,
                                             ));
                                         }
                                     }
-                                    byte = next_byte;
-                                    column = next_column;
+                                    byte_index += grapheme.len();
+                                    column_index += grapheme.column_count();
                                 }
                             }
                             WrappedElement::Text {
                                 is_inlay: true,
                                 text,
                             } => {
-                                let next_column =
-                                    column + text.column_count();
-                                let next_y = y + line_ref.scale();
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
-                                if (y..=next_y).contains(&point.y)
-                                    && (x..=next_x).contains(&point.x)
+                                let (start_x, y) =
+                                    line.grid_to_normalized_position(row_index, column_index);
+                                let start_y = origin_y + y;
+                                let (end_x, _) = line.grid_to_normalized_position(
+                                    row_index,
+                                    column_index + text.column_count(),
+                                );
+                                let end_y = origin_y + line.scale();
+                                if (start_y..=end_y).contains(&position.y)
+                                    && (start_x..=end_x).contains(&position.x)
                                 {
                                     return Some((
                                         Position {
-                                            line_index: line,
-                                            byte_index: byte,
+                                            line_index,
+                                            byte_index,
                                         },
                                         Affinity::Before,
                                     ));
                                 }
-                                column = next_column;
+                                column_index += text.column_count();
                             }
                             WrappedElement::Widget(widget) => {
-                                column += widget.column_count;
+                                column_index += widget.column_count;
                             }
                             WrappedElement::Wrap => {
-                                let next_y = y + line_ref.scale();
-                                if (y..=next_y).contains(&point.y) {
+                                let (_, y) = line.grid_to_normalized_position(row_index, column_index);
+                                let start_y = origin_y + y;
+                                let end_y = start_y + line.scale();
+                                if (start_y..=end_y).contains(&position.y) {
                                     return Some((
                                         Position {
-                                            line_index: line,
-                                            byte_index: byte,
+                                            line_index,
+                                            byte_index,
                                         },
                                         Affinity::Before,
                                     ));
                                 }
-                                column = line_ref.wrap_indent_column_count();
-                                y = next_y;
+                                column_index = line.wrap_indent_column_count();
+                                row_index += 1;
                             }
                         }
                     }
-                    let next_y = y + line_ref.scale();
-                    if (y..=y + next_y).contains(&point.y) {
+                    let (_, y) = line.grid_to_normalized_position(row_index, column_index);
+                    let start_y = origin_y + y;
+                    let end_y = start_y + line.scale();
+                    if (start_y..=end_y).contains(&position.y) {
                         return Some((
                             Position {
-                                line_index: line,
-                                byte_index: byte,
+                                line_index,
+                                byte_index,
                             },
                             Affinity::After,
                         ));
                     }
-                    line += 1;
-                    y = next_y;
+                    line_index += 1;
+                    origin_y += line.height();
                 }
                 BlockElement::Line {
                     is_inlay: true,
-                    line: line_ref,
+                    line,
                 } => {
-                    let next_y = y + line_ref.height();
-                    if (y..=next_y).contains(&point.y) {
+                    let start_y = origin_y;
+                    let end_y = start_y + line.height();
+                    if (start_y..=end_y).contains(&position.y) {
                         return Some((
                             Position {
-                                line_index: line,
+                                line_index,
                                 byte_index: 0,
                             },
                             Affinity::Before,
                         ));
                     }
-                    y = next_y;
+                    origin_y += line.height();
                 }
                 BlockElement::Widget(widget) => {
-                    y += widget.height;
+                    origin_y += widget.height;
                 }
             }
         }
@@ -655,22 +663,32 @@ struct DrawSelections<'a> {
 
 impl<'a> DrawSelections<'a> {
     fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
-        let mut line = self.code_editor.start_line;
-        let mut y = session.layout().line(line).y();
+        let mut line_index = self.code_editor.line_start;
+        let mut origin_y = session.layout().line(line_index).y();
         for block in session
             .layout()
-            .blocks(self.code_editor.start_line, self.code_editor.end_line)
+            .blocks(self.code_editor.line_start, self.code_editor.line_end)
         {
             match block {
                 BlockElement::Line {
                     is_inlay: false,
-                    line: line_ref,
+                    line,
                 } => {
-                    let mut byte = 0;
-                    let mut column = 0;
-                    self.handle_event(cx, line, line_ref, byte, Affinity::Before, y, column);
-                    for wrapped in line_ref.wrapped_elements() {
-                        match wrapped {
+                    let mut byte_index = 0;
+                    let mut row_index = 0;
+                    let mut column_index = 0;
+                    self.handle_event(
+                        cx,
+                        line_index,
+                        line,
+                        byte_index,
+                        Affinity::Before,
+                        origin_y,
+                        row_index,
+                        column_index,
+                    );
+                    for element in line.wrapped_elements() {
+                        match element {
                             WrappedElement::Text {
                                 is_inlay: false,
                                 text,
@@ -678,24 +696,25 @@ impl<'a> DrawSelections<'a> {
                                 for grapheme in text.graphemes() {
                                     self.handle_event(
                                         cx,
+                                        line_index,
                                         line,
-                                        line_ref,
-                                        byte,
+                                        byte_index,
                                         Affinity::After,
-                                        y,
-                                        column,
+                                        origin_y,
+                                        row_index,
+                                        column_index,
                                     );
-                                    byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count();
+                                    byte_index += grapheme.len();
+                                    column_index += grapheme.column_count();
                                     self.handle_event(
                                         cx,
+                                        line_index,
                                         line,
-                                        line_ref,
-                                        byte,
+                                        byte_index,
                                         Affinity::Before,
-                                        y,
-                                        column,
+                                        origin_y,
+                                        row_index,
+                                        column_index,
                                     );
                                 }
                             }
@@ -703,36 +722,45 @@ impl<'a> DrawSelections<'a> {
                                 is_inlay: true,
                                 text,
                             } => {
-                                column += text.column_count();
+                                column_index += text.column_count();
                             }
                             WrappedElement::Widget(widget) => {
-                                column += widget.column_count;
+                                column_index += widget.column_count;
                             }
                             WrappedElement::Wrap => {
                                 if self.active_selection.is_some() {
-                                    self.draw_selection(cx, line_ref, y, column);
+                                    self.draw_selection(cx, line, origin_y, row_index, column_index);
                                 }
-                                column = line_ref.wrap_indent_column_count();
-                                y += line_ref.scale();
+                                column_index = line.wrap_indent_column_count();
+                                row_index += 1;
                             }
                         }
                     }
-                    self.handle_event(cx, line, line_ref, byte, Affinity::After, y, column);
-                    column += 1;
+                    self.handle_event(
+                        cx,
+                        line_index,
+                        line,
+                        byte_index,
+                        Affinity::After,
+                        origin_y,
+                        row_index,
+                        column_index,
+                    );
+                    column_index += 1;
                     if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref, y, column);
+                        self.draw_selection(cx, line, origin_y, row_index, column_index);
                     }
-                    line += 1;
-                    y += line_ref.scale();
+                    line_index += 1;
+                    origin_y += line.height();
                 }
                 BlockElement::Line {
                     is_inlay: true,
-                    line: line_ref,
+                    line,
                 } => {
-                    y += line_ref.height();
+                    origin_y += line.height();
                 }
                 BlockElement::Widget(widget) => {
-                    y += widget.height;
+                    origin_y += widget.height;
                 }
             }
         }
@@ -744,25 +772,26 @@ impl<'a> DrawSelections<'a> {
     fn handle_event(
         &mut self,
         cx: &mut Cx2d,
-        line: usize,
-        line_ref: Line<'_>,
-        byte: usize,
+        line_index: usize,
+        line: Line<'_>,
+        byte_index: usize,
         affinity: Affinity,
-        y: f64,
-        column: usize,
+        origin_y: f64,
+        row_index: usize,
+        column_index: usize,
     ) {
-        let point = Position {
-            line_index: line,
-            byte_index: byte,
+        let position = Position {
+            line_index,
+            byte_index,
         };
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == point && selection.selection.end_affinity() == affinity
+            selection.selection.end() == position && selection.selection.end_affinity() == affinity
         }) {
-            self.draw_selection(cx, line_ref, y, column);
+            self.draw_selection(cx, line, origin_y, row_index, column_index);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor.position == point && selection.cursor.affinity == affinity {
-                self.draw_cursor(cx, line_ref, y, column);
+            if selection.cursor.position == position && selection.cursor.affinity == affinity {
+                self.draw_cursor(cx, line, origin_y, row_index, column_index);
             }
         }
         if self
@@ -770,46 +799,60 @@ impl<'a> DrawSelections<'a> {
             .as_slice()
             .first()
             .map_or(false, |selection| {
-                selection.start() == point && selection.start_affinity() == affinity
+                selection.start() == position && selection.start_affinity() == affinity
             })
         {
             let selection = *self.selections.next().unwrap();
-            if selection.cursor.position == point && selection.cursor.affinity == affinity {
-                self.draw_cursor(cx, line_ref, y, column);
+            if selection.cursor.position == position && selection.cursor.affinity == affinity {
+                self.draw_cursor(cx, line, origin_y, row_index, column_index);
             }
             if !selection.is_empty() {
-                self.active_selection = Some(ActiveSelection {
-                    selection,
-                    start_x: line_ref.column_to_x(column),
-                });
+                let (start_x, _) = line.grid_to_normalized_position(row_index, column_index);
+                self.active_selection = Some(ActiveSelection { selection, start_x });
             }
             self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d, line: Line<'_>, y: f64, column: usize) {
+    fn draw_selection(
+        &mut self,
+        cx: &mut Cx2d,
+        line: Line<'_>,
+        origin_y: f64,
+        row_index: usize,
+        column_index: usize,
+    ) {
         let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        let (x, y) = line.grid_to_normalized_position(row_index, column_index);
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
-                pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
+                pos: DVec2 {
+                    x: start_x,
+                    y: origin_y + y,
+                } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
-                    x: line.column_to_x(column) - start_x,
+                    x: x - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
             },
         );
     }
 
-    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column: usize) {
+    fn draw_cursor(
+        &mut self,
+        cx: &mut Cx2d<'_>,
+        line: Line<'_>,
+        origin_y: f64,
+        row_index: usize,
+        column_index: usize,
+    ) {
+		let (x, y) = line.grid_to_normalized_position(row_index, column_index);
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
-                    x: line.column_to_x(column),
-                    y,
-                } * self.code_editor.cell_size
+                pos: DVec2 { x, y: origin_y + y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: 2.0,
