@@ -15,20 +15,20 @@ use {
     }
 };
 
-pub struct Window(PoolId);
+pub struct WindowHandle(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct WindowId(usize, u64);
 
-impl Window {
+impl WindowHandle {
     pub fn window_id(&self) -> WindowId {WindowId(self.0.id, self.0.generation)}
 }
 
 #[derive(Default)]
 pub struct CxWindowPool(IdPool<CxWindow>);
 impl CxWindowPool {
-    fn alloc(&mut self) -> Window {
-        Window(self.0.alloc())
+    fn alloc(&mut self) -> WindowHandle {
+        WindowHandle(self.0.alloc())
     }
     
     pub fn id_zero()->WindowId{
@@ -57,8 +57,8 @@ impl std::ops::IndexMut<WindowId> for CxWindowPool {
     }
 }
 
-impl LiveHook for Window {}
-impl LiveNew for Window {
+impl LiveHook for WindowHandle {}
+impl LiveNew for WindowHandle {
     fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
@@ -80,7 +80,7 @@ impl LiveNew for Window {
         }
     }
 }
-impl LiveApply for Window {
+impl LiveApply for WindowHandle {
     //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
@@ -124,7 +124,7 @@ impl LiveApply for Window {
 }
 
 
-impl Window {
+impl WindowHandle {
     pub fn set_pass(&self, cx: &mut Cx, pass: &Pass) {
         cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());

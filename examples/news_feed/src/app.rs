@@ -295,7 +295,7 @@ live_design!{
     
     
     App = {{App}} {
-        ui: <DesktopWindow> {
+        ui: <Window> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
             
