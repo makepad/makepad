@@ -24,7 +24,7 @@ live_design!{
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return mix(#3, #1, self.geom_pos.y);
+                    return mix(#3, #1, self.pos.y);
                 }
             }
             

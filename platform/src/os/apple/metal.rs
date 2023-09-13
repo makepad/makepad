@@ -286,20 +286,11 @@ impl Cx {
             return
         }
         
-        
-        /*let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
-            override_dpi_factor
-        }
-        else {
-            dpi_factor
-        };*/
-        
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         if let DrawPassMode::MTKView(_) = mode{
             let color_attachments:ObjcId = unsafe{msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment:ObjcId = unsafe{msg_send![color_attachments, objectAtIndexedSubscript: 0]};
-            
             let color = self.passes[pass_id].clear_color;
             unsafe {
                 let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
@@ -753,13 +744,14 @@ impl MetalBuffer {
             //println!("Buffer write {} buf {} data {:?}", command_buffer as *const _ as u64, inner.buffer.as_id() as *const _ as u64, data);
             
             std::ptr::copy(data.as_ptr() as *const u8, contents, len);
+            /*
             let _: () = msg_send![
                 inner.buffer.as_id(),
                 didModifyRange: NSRange {
                     location: 0,
                     length: len as u64
                 }
-            ];
+            ];*/
         }
     }
 }
