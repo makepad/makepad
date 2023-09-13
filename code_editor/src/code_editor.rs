@@ -199,8 +199,8 @@ impl CodeEditor {
         self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-        self.draw_text(cx, session);
-        self.draw_selections(cx, session);
+        self.draw_text_layer(cx, session);
+        self.draw_selection_layer(cx, session);
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
             session.layout().height() * self.cell_size.y,
@@ -369,7 +369,6 @@ impl CodeEditor {
             }) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
-					println!("PENIS {:?}", cursor);
 					if alt {
                         session.push_cursor(cursor, affinity);
                     } else {
@@ -389,10 +388,10 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut origin_y = session.layout().line(self.line_start).y();
-        for block in session.layout().blocks(self.line_start, self.line_end) {
-            match block {
+        for element in session.layout().block_elements(self.line_start, self.line_end) {
+            match element {
                 BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = line.scale();
                     let mut token_iter = line.tokens().iter().copied();
@@ -444,15 +443,17 @@ impl CodeEditor {
                                         TokenKind::Typename => self.token_colors.typename,
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
-                                    let (x, y) =
-                                        line.grid_to_normalized_position(row_index, column_index);
-                                    self.draw_text.draw_abs(
-                                        cx,
-                                        DVec2 { x, y: origin_y + y } * self.cell_size
-                                            + self.viewport_rect.pos,
-                                        text_0,
-                                    );
-                                    column_index += text_0.column_count();
+									for grapheme in text_0.graphemes() {
+										let (x, y) =
+											line.grid_to_normalized_position(row_index, column_index);
+										self.draw_text.draw_abs(
+											cx,
+											DVec2 { x, y: origin_y + y } * self.cell_size
+												+ self.viewport_rect.pos,
+											grapheme,
+										);
+                                    	column_index += grapheme.column_count();
+									}
                                 }
                             }
                             WrappedElement::Text {
@@ -486,7 +487,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
         while selections.as_slice().first().map_or(false, |selection| {
@@ -502,19 +503,19 @@ impl CodeEditor {
                 start_x: 0.0,
             });
         }
-        DrawSelections {
+        DrawSelectionLayer {
             code_editor: self,
             active_selection,
             selections,
         }
-        .draw_selections(cx, session)
+        .draw_selection_layer(cx, session)
     }
 
     fn pick(&self, session: &Session, position: DVec2) -> Option<(Position, Affinity)> {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
 		let mut line_index = session.layout().find_first_line_ending_after_y(position.y);
         let mut origin_y = session.layout().line(line_index).y();
-        for block in session.layout().blocks(line_index, line_index + 1) {
+        for block in session.layout().block_elements(line_index, line_index + 1) {
             match block {
                 BlockElement::Line {
                     is_inlay: false,
@@ -655,19 +656,19 @@ pub enum CodeEditorAction {
     TextDidChange,
 }
 
-struct DrawSelections<'a> {
+struct DrawSelectionLayer<'a> {
     code_editor: &'a mut CodeEditor,
     active_selection: Option<ActiveSelection>,
     selections: Iter<'a, Selection>,
 }
 
-impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
+impl<'a> DrawSelectionLayer<'a> {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line_index = self.code_editor.line_start;
         let mut origin_y = session.layout().line(line_index).y();
         for block in session
             .layout()
-            .blocks(self.code_editor.line_start, self.code_editor.line_end)
+            .block_elements(self.code_editor.line_start, self.code_editor.line_end)
         {
             match block {
                 BlockElement::Line {

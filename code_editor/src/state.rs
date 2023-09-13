@@ -492,7 +492,7 @@ impl Session {
             line.y() + line.height()
         };
         let mut ys = mem::take(&mut self.layout.borrow_mut().y);
-        for block in self.layout().blocks(start, end) {
+        for block in self.layout().block_elements(start, end) {
             match block {
                 BlockElement::Line { is_inlay, line } => {
                     if !is_inlay {
