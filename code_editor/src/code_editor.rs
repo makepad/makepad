@@ -382,7 +382,7 @@ impl CodeEditor {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
-                        session.push_cursor(cursor, affinity);
+                        session.add_cursor(cursor, affinity);
                     } else {
                         session.set_cursor(cursor, affinity);
                     }
@@ -515,7 +515,9 @@ impl CodeEditor {
             match element {
                 BlockElement::Line { line, .. } => {
                     for row_index in 0..line.row_count() {
-                        for column_index in (0..line.indent_column_count()).step_by(tab_column_count) {
+                        for column_index in
+                            (0..line.indent_column_count()).step_by(tab_column_count)
+                        {
                             let (x, y) = line.grid_to_normalized_position(row_index, column_index);
                             self.draw_indent_guide.draw_abs(
                                 cx,
@@ -541,7 +543,8 @@ impl CodeEditor {
 
     fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_selection = None;
-        let mut selections = session.selections().iter();
+        let selections = session.selections();
+        let mut selections = selections.iter();
         while selections.as_slice().first().map_or(false, |selection| {
             selection.end().line_index < self.line_start
         }) {

@@ -130,6 +130,10 @@ impl SelectionSet {
         Self::default()
     }
 
+    pub fn as_selections(&self) -> &[Selection] {
+        &self.selections
+    }
+
     pub fn update_selection(
         &mut self,
         index: usize,
@@ -191,7 +195,7 @@ impl SelectionSet {
         }
     }
 
-    pub fn push_selection(&mut self, selection: Selection) -> usize {
+    pub fn add_selection(&mut self, selection: Selection) -> usize {
         match self
             .selections
             .binary_search_by_key(&selection.start(), |selection| selection.start())
