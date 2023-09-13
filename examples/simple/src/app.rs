@@ -65,14 +65,13 @@ live_design!{
             // Because the child widgets flow downward, vertical alignment works somewhat
             // differently. In this case, children are centered vertically with respect to the
             // remainder of the frame after the previous children have been drawn.
-            <View>{
+            body = <View>{
                  
-                    flow: Down,
-                    spacing: 20,
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    
+                flow: Down,
+                spacing: 20,
+                align: {
+                    x: 0.5,
+                    y: 0.5
                 },
                 button1 = <Button> {
                     draw_icon:{
