@@ -116,15 +116,13 @@ class MakepadSurface
             return;
         }
 
-        if (insets.isVisible(WindowInsets.Type.ime())) {
-            Rect r = new Rect();
-            this.getWindowVisibleDisplayFrame(r);
-            int screenHeight = this.getRootView().getHeight();
-            int visibleHeight = r.height();
-            int keyboardHeight = screenHeight - visibleHeight;
+        Rect r = new Rect();
+        this.getWindowVisibleDisplayFrame(r);
+        int screenHeight = this.getRootView().getHeight();
+        int visibleHeight = r.height();
+        int keyboardHeight = screenHeight - visibleHeight;
 
-            MakepadNative.surfaceOnResizeTextIME(keyboardHeight);
-        }
+        MakepadNative.surfaceOnResizeTextIME(keyboardHeight, insets.isVisible(WindowInsets.Type.ime()));
     }
 
     // docs says getCharacters are deprecated
