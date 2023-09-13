@@ -1,5 +1,6 @@
 mod compile;
 mod sdk;
+use compile::*;
 
 #[allow(dead_code)]
 #[allow(non_camel_case_types)]
@@ -21,8 +22,39 @@ impl IosTarget {
 }
 
 
-pub fn handle_ios(args: &[String]) -> Result<(), String> {
-    
+pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
+    let mut signing_identity  = None;
+    let mut provisioning_profile = None;
+    let mut device_uuid = None;
+    let mut product = None;
+    let mut org = None;
+    let mut ios_version = None;
+    for i in 0..args.len() {
+        let v = &args[i];
+        if let Some(opt) = v.strip_prefix("--signing-identity=") {
+            signing_identity = Some(opt.to_string());
+        } 
+        else if let Some(opt) = v.strip_prefix("--provisioning-profile=") {
+            provisioning_profile = Some(opt.to_string());
+        } 
+        else if let Some(opt) = v.strip_prefix("--device-uuid=") {
+            device_uuid = Some(opt.to_string());
+        } 
+        else if let Some(opt) = v.strip_prefix("--product=") {
+            product = Some(opt.to_string());
+        } 
+        else if let Some(opt) = v.strip_prefix("--org=") {
+            org = Some(opt.to_string());
+        } 
+        else if let Some(opt) = v.strip_prefix("--ios-version=") {
+            ios_version = Some(opt.to_string());
+        } 
+        else {
+            args = &args[i..];
+            break
+        }
+    }
+
     match args[0].as_ref() {
         "toolchain-install" | "install-toolchain"=>{
             #[cfg(target_arch = "x86_64")]
@@ -32,7 +64,14 @@ pub fn handle_ios(args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install(&toolchains)
         }
         "run-real" =>{
-            compile::run_real(&args[1], &args[2..], IosTarget::aarch64)?;
+            compile::run_real(SigningArgs{
+                signing_identity, 
+                provisioning_profile, 
+                device_uuid, 
+                product,
+                org,
+                ios_version
+            },&args[1..], IosTarget::aarch64)?;
             Ok(())
         }
         "run-sim" =>{
@@ -40,7 +79,15 @@ pub fn handle_ios(args: &[String]) -> Result<(), String> {
             let toolchain = IosTarget::x86_64_sim;
             #[cfg(target_arch = "aarch64")]
             let toolchain = IosTarget::aarch64_sim; 
-            compile::run_sim(&args[1], &args[2..], toolchain)?;
+            compile::run_sim(SigningArgs{
+                ios_version,
+                signing_identity, 
+                provisioning_profile, 
+                device_uuid, 
+                product,
+                org
+            },
+            &args[1..], toolchain)?;
             Ok(())
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))

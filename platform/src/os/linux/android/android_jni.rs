@@ -10,7 +10,7 @@ use {
     crate::{
         makepad_live_id::*,
         area::Area,
-        event::{KeyCode, TouchPoint, TouchState, HttpRequest},
+        event::{TouchPoint, TouchState, HttpRequest},
         cx::AndroidParams,
     },
 };
@@ -54,10 +54,11 @@ pub enum FromJavaMessage {
         meta_state: u32,
     },
     KeyUp {
-        keycode: KeyCode,
+        keycode: u32,
     },
     ResizeTextIME {
         keyboard_height: u32,
+        is_open: bool
     },
     HttpResponse {
         request_id: u64,
@@ -70,6 +71,10 @@ pub enum FromJavaMessage {
         request_id: u64,
         metadata_id: u64,
         error: String,
+    },
+    MidiDeviceOpened{
+        name: String,
+        midi_device: jni_sys::jobject
     },
     Pause,
     Resume,
@@ -88,6 +93,13 @@ fn send_from_java_message(message: FromJavaMessage) {
         tx.as_mut().unwrap().send(message).unwrap();
     })
 }
+
+// Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
+pub const ANDROID_META_CTRL_MASK: u32 = 28672;
+// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_SHIFT_MASK
+pub const ANDROID_META_SHIFT_MASK: u32 = 193;
+// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
+pub const ANDROID_META_ALT_MASK: u32 = 50;
 
 static mut ACTIVITY: jni_sys::jobject = std::ptr::null_mut();
 static mut VM: *mut jni_sys::JavaVM = std::ptr::null_mut();
@@ -209,38 +221,17 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
     _: jni_sys::jclass,
     event: jni_sys::jobject,
 ) {
-    let action_masked = unsafe {
-        ndk_utils::call_int_method!(env, event, "getActionMasked", "()I")
-    };
-    let action_index = unsafe {
-        ndk_utils::call_int_method!(env, event, "getActionIndex", "()I")
-    };
-    
-    let touch_count = unsafe {
-        ndk_utils::call_int_method!(env, event, "getPointerCount", "()I")
-    };
+    let action_masked = unsafe {ndk_utils::call_int_method!(env, event, "getActionMasked", "()I")};
+    let action_index = unsafe {ndk_utils::call_int_method!(env, event, "getActionIndex", "()I")};
+    let touch_count = unsafe {ndk_utils::call_int_method!(env, event, "getPointerCount", "()I")};
     
     let mut touches = Vec::with_capacity(touch_count as usize);
     for touch_index in 0..touch_count {
-        let id = unsafe {
-            ndk_utils::call_int_method!(env, event, "getPointerId", "(I)I", touch_index)
-        };
-        
-        let x = unsafe {
-            ndk_utils::call_float_method!(env, event, "getX", "(I)F", touch_index)
-        };
-        
-        let y = unsafe {
-            ndk_utils::call_float_method!(env, event, "getY", "(I)F", touch_index)
-        };
-        
-        let rotation_angle = unsafe {
-            ndk_utils::call_float_method!(env, event, "getOrientation", "(I)F", touch_index)
-        } as f64;
-        
-        let force = unsafe {
-            ndk_utils::call_float_method!(env, event, "getPressure", "(I)F", touch_index)
-        } as f64;
+        let id = unsafe {ndk_utils::call_int_method!(env, event, "getPointerId", "(I)I", touch_index)};
+        let x = unsafe {ndk_utils::call_float_method!(env, event, "getX", "(I)F", touch_index)};
+        let y = unsafe {ndk_utils::call_float_method!(env, event, "getY", "(I)F", touch_index)};
+        let rotation_angle = unsafe {ndk_utils::call_float_method!(env, event, "getOrientation", "(I)F", touch_index)} as f64;
+        let force = unsafe {ndk_utils::call_float_method!(env, event, "getPressure", "(I)F", touch_index)} as f64;
         
         touches.push(TouchPoint {
             state: {
@@ -285,11 +276,9 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyDown(
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyUp(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
-    _keycode: jni_sys::jint,
+    keycode: jni_sys::jint,
 ) {
-    /*let keycode = keycodes::translate_keycode(keycode as _);
-
-    send_message(Message::KeyUp { keycode });*/
+    send_from_java_message(FromJavaMessage::KeyUp { keycode: keycode as u32});
 }
 
 #[no_mangle]
@@ -308,15 +297,17 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     keyboard_height: jni_sys::jint,
+    is_open: jni_sys::jboolean,
 ) {
     send_from_java_message(FromJavaMessage::ResizeTextIME {
         keyboard_height: keyboard_height as u32,
+        is_open: is_open != 0
     });
 }
 
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
-    _: *mut jni_sys::JNIEnv,
+    env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     request_id: jni_sys::jlong,
     metadata_id: jni_sys::jlong,
@@ -324,7 +315,6 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
     headers: jni_sys::jstring,
     body: jni_sys::jobject,
 ) {
-    let env = unsafe { attach_jni_env() };
     let headers = unsafe { jstring_to_string(env, headers) };
     let body = unsafe { java_byte_array_to_vec(env, body) };
 
@@ -338,19 +328,32 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
 }
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
-    _: *mut jni_sys::JNIEnv,
+    env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     request_id: jni_sys::jlong,
     metadata_id: jni_sys::jlong,
     error: jni_sys::jstring,
 ) {
-    let env = unsafe { attach_jni_env() };
     let error = unsafe { jstring_to_string(env, error) };
 
     send_from_java_message(FromJavaMessage::HttpRequestError {
         request_id: request_id as u64,
         metadata_id: metadata_id as u64,
         error,
+    });
+}
+
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onMidiDeviceOpened(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    name: jni_sys::jstring,
+    midi_device: jni_sys::jobject,
+) {
+    send_from_java_message(FromJavaMessage::MidiDeviceOpened {
+        name: jstring_to_string(env, name),
+        midi_device
     });
 }
 
@@ -361,7 +364,7 @@ unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jst
     rust_string
 }
 
-unsafe fn _java_string_array_to_vec(env: *mut jni_sys::JNIEnv, object_array: jni_sys::jobject) -> Vec<String> {
+unsafe fn java_string_array_to_vec(env: *mut jni_sys::JNIEnv, object_array: jni_sys::jobject) -> Vec<String> {
     if object_array == std::ptr::null_mut() {
         return Vec::new();
     }
@@ -420,11 +423,13 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
 }
 
 
-pub unsafe fn to_java_show_keyboard(env: *mut jni_sys::JNIEnv, visible: bool) {
+pub unsafe fn to_java_show_keyboard(visible: bool) {
+    let env = attach_jni_env();
     ndk_utils::call_void_method!(env, ACTIVITY, "showKeyboard", "(Z)V", visible as i32);
 }
 
-pub unsafe fn to_java_http_request(env: *mut jni_sys::JNIEnv, request_id: LiveId, request: HttpRequest) {
+pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
+    let env = attach_jni_env();
     let url = CString::new(request.url.clone()).unwrap();
     let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
 
@@ -462,4 +467,19 @@ pub unsafe fn to_java_http_request(env: *mut jni_sys::JNIEnv, request_id: LiveId
         headers,
         java_body as jni_sys::jobject
     );
+}
+
+pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
+    unsafe {
+        let env = attach_jni_env();
+        let string_array = ndk_utils::call_object_method!(env, ACTIVITY, "getAudioDevices", "(J)[Ljava/lang/String;", flag);
+        return java_string_array_to_vec(env, string_array);
+    }
+}
+  
+pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
+    unsafe {
+        let env = attach_jni_env();
+        ndk_utils::call_void_method!(env, ACTIVITY, "openAllMidiDevices", "(J)V", delay);
+    }  
 }

@@ -144,7 +144,7 @@ impl Play {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Live, LiveHook)]
+#[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 pub enum Ease {
     #[pick] Linear,
     #[live] None,

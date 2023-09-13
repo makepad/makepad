@@ -19,8 +19,22 @@ import android.view.MotionEvent;
 import android.view.KeyEvent;
 import android.view.inputmethod.InputMethodManager;
 
+import android.media.midi.MidiManager;
+import android.media.midi.MidiDeviceInfo;
+import android.media.midi.MidiDevice;
+import android.media.midi.MidiReceiver;
+import android.media.AudioManager;
+import android.media.midi.MidiOutputPort;
+import android.media.AudioDeviceInfo;
+
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+
 import android.content.Context;
 import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -33,6 +47,8 @@ import android.view.WindowInsets;
 import android.graphics.Rect;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.ArrayList;
+import java.util.Set;
 
 import dev.makepad.android.MakepadNative;
 
@@ -100,15 +116,13 @@ class MakepadSurface
             return;
         }
 
-        if (insets.isVisible(WindowInsets.Type.ime())) {
-            Rect r = new Rect();
-            this.getWindowVisibleDisplayFrame(r);
-            int screenHeight = this.getRootView().getHeight();
-            int visibleHeight = r.height();
-            int keyboardHeight = screenHeight - visibleHeight;
+        Rect r = new Rect();
+        this.getWindowVisibleDisplayFrame(r);
+        int screenHeight = this.getRootView().getHeight();
+        int visibleHeight = r.height();
+        int keyboardHeight = screenHeight - visibleHeight;
 
-            MakepadNative.surfaceOnResizeTextIME(keyboardHeight);
-        }
+        MakepadNative.surfaceOnResizeTextIME(keyboardHeight, insets.isVisible(WindowInsets.Type.ime()));
     }
 
     // docs says getCharacters are deprecated
@@ -182,10 +196,12 @@ class ResizingLayout
     }
 }
 
-public class MakepadActivity extends Activity {
+public class MakepadActivity extends Activity implements 
+MidiManager.OnDeviceOpenedListener{
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
+    Handler mHandler;
 
     static {
         System.loadLibrary("makepad");
@@ -315,6 +331,94 @@ public class MakepadActivity extends Activity {
             });
         } catch (Exception e) {
             MakepadNative.onHttpRequestError(id, metadataId, e.toString());
+        }
+    }
+
+    public String[] getAudioDevices(long flag){
+        try{
+          
+            AudioManager am = (AudioManager)this.getSystemService(Context.AUDIO_SERVICE);
+            AudioDeviceInfo[] devices = null;
+            ArrayList<String> out = new ArrayList<String>();
+            if(flag == 0){
+                devices = am.getDevices(AudioManager.GET_DEVICES_INPUTS);
+            }
+            else{
+                devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+            }
+            for(AudioDeviceInfo device: devices){
+                int[] channel_counts = device.getChannelCounts();
+                for(int cc: channel_counts){
+                    out.add(String.format(
+                        "%d$$%d$$%d$$%s", 
+                        device.getId(), 
+                        device.getType(), 
+                        cc,
+                        device.getProductName().toString()
+                    ));
+                }
+            }
+            return out.toArray(new String[0]);
+        }
+        catch(Exception e){
+            Log.e("Makepad", "exception: " + e.getMessage());             
+            Log.e("Makepad", "exception: " + e.toString());
+            return null;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    public void openAllMidiDevices(long delay){
+        Runnable runnable = () -> {
+            try{                                
+                BluetoothManager bm = (BluetoothManager) this.getSystemService(Context.BLUETOOTH_SERVICE);
+                BluetoothAdapter ba = bm.getAdapter();   
+                Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
+                ArrayList<String> bt_names = new ArrayList<String>();
+                MidiManager mm = (MidiManager)this.getSystemService(Context.MIDI_SERVICE);
+                for(BluetoothDevice device: bluetooth_devices){
+                    if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
+                        String name =device.getName();
+                        bt_names.add(name);
+                        mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
+                    }
+                }
+                // this appears to give you nonworking BLE midi devices. So we skip those by name (not perfect but ok)
+                for (MidiDeviceInfo info : mm.getDevices()){
+                    String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
+                    boolean found = false;
+                    for (String bt_name : bt_names){
+                        if (bt_name.equals(name)){
+                            found = true;
+                            break;
+                        }
+                    }
+                    if(!found){
+                        mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+                    }
+                }
+            }
+            catch(Exception e){
+                Log.e("Makepad", "exception: " + e.getMessage());             
+                Log.e("Makepad", "exception: " + e.toString());
+            }
+        };
+        if(delay != 0){
+            mHandler.postDelayed(runnable, delay);
+        }
+        else{ // run now
+            runnable.run();
+        }
+    }
+
+    public void onDeviceOpened(MidiDevice device) {
+        if(device == null){
+            return;
+        }
+        MidiDeviceInfo info = device.getInfo();
+        if(info != null){
+            String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
+            MakepadNative.onMidiDeviceOpened(name, device);
         }
     }
 }
