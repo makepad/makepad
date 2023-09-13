@@ -58,6 +58,7 @@ pub enum FromJavaMessage {
     },
     ResizeTextIME {
         keyboard_height: u32,
+        is_open: bool
     },
     HttpResponse {
         request_id: u64,
@@ -296,9 +297,11 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     keyboard_height: jni_sys::jint,
+    is_open: jni_sys::jboolean,
 ) {
     send_from_java_message(FromJavaMessage::ResizeTextIME {
         keyboard_height: keyboard_height as u32,
+        is_open: is_open != 0
     });
 }
 
