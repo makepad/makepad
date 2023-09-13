@@ -379,7 +379,7 @@ fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
 
 #[derive(Default)]
 pub struct SigningArgs {
-    pub ios17: bool,
+    pub ios_version: Option<String>,
     pub signing_identity: Option<String>,
     pub provisioning_profile: Option<String>,
     pub device_uuid: Option<String>,
@@ -475,7 +475,6 @@ pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) ->
         app_id: format!("{}.{}.{}", provision.team_ident, org, product),
         team_id: provision.team_ident.to_string()
     };
-    println!("{}", scent.to_scent_file());
     
     let scent_file = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.scent", ios_target.toolchain()));
     write_text(&scent_file, &scent.to_scent_file()) ?;
@@ -511,7 +510,9 @@ pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) ->
     let ios_deploy = cwd.join(format!("{}/ios-deploy/build/Release/", env!("CARGO_MANIFEST_DIR")));
     
     // kill previous lldb
-    if signing.ios17 {
+    let ios_version = signing.ios_version.unwrap_or("16".to_string());
+    
+    if ios_version == "17"  {
         let answer = shell_env_cap(&[], &cwd, "xcrun", &[
             "devicectl",
             "device",
@@ -521,7 +522,7 @@ pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) ->
             &selected_device,
             &app_dir
         ])?;
-        println!("{}", answer);
+        println!("TODO: We need to fish out LONGID from the answer {}", answer);
         shell_env(&[], &cwd, "xcrun", &[
             "devicectl",
             "device",
@@ -529,7 +530,7 @@ pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) ->
             "launch",
             "--device",
             &selected_device,
-            &format!("file:///private/var/containers/Bundle/Application/")
+            &format!("file:///private/var/containers/Bundle/Application/<LONGID>/{build_crate}.app")
         ])?;
         
         //xcrun devicectl device install app --device 00008110-001XXXXXXXXXX ./xgen/Build/Products/Release-iphoneos/nilo.app
