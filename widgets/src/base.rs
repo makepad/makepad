@@ -6,7 +6,7 @@ live_design!{
     import crate::dock::DockBase;
     import crate::splitter::SplitterBase;
     import crate::desktop_button::DesktopButtonBase;
-    import crate::desktop_window::DesktopWindowBase;
+    import crate::window::WindowBase;
     import crate::multi_window::MultiWindowBase;
     import crate::drop_down::DropDownBase;
     import crate::file_tree::FileTreeBase;
@@ -39,6 +39,7 @@ live_design!{
     import crate::text_input::TextInputBase;
     import crate::scroll_shadow::DrawScrollShadowBase;
     import crate::page_flip::PageFlipBase;
+    import crate::keyboard_view::KeyboardViewBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
@@ -570,16 +571,17 @@ live_design!{
     }
     MultiWindow = <MultiWindowBase>{}
     PageFlip = <PageFlipBase>{}
-
+    KeyboardView = <KeyboardViewBase>{}
     // todo fix this by allowing reexporting imports
     // for now this works too
+    KeyboardViewBase = <KeyboardViewBase>{}
     PageFlipBase = <PageFlipBase>{}
     ViewBase = <ViewBase>{}
     ButtonBase = <ButtonBase>{}
     CheckBoxBase = <CheckBoxBase>{}
     DockBase = <DockBase>{}
     MultiWindowBase = <MultiWindowBase>{}
-    DesktopWindowBase = <DesktopWindowBase> {}
+    WindowBase = <WindowBase> {}
     DesktopButtonBase = <DesktopButtonBase> {}
     DropDownBase = <DropDownBase> {}
     FileTreeBase = <FileTreeBase> {}

@@ -3,7 +3,7 @@ use {
     crate::{
         widget::*,
         makepad_derive_widget::*,
-        desktop_window::*,
+        window::*,
         makepad_draw::*,
     }
 };
@@ -15,7 +15,7 @@ live_design!{
 #[derive(Live)]
 pub struct MultiWindow {
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] windows: ComponentMap<LiveId, DesktopWindow>,
+    #[rust] windows: ComponentMap<LiveId, Window>,
 }
 
 impl LiveHook for MultiWindow {
@@ -31,7 +31,7 @@ impl LiveHook for MultiWindow {
                     if cx.os_type().is_single_window() && id != live_id!(mobile){
                         return nodes.skip_node(index);
                     }
-                    return self.windows.get_or_insert(cx, id, | cx | {DesktopWindow::new(cx)})
+                    return self.windows.get_or_insert(cx, id, | cx | {Window::new(cx)})
                         .apply(cx, from, index, nodes);
                 }
                 else {

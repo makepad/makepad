@@ -76,9 +76,17 @@ extern {
 #[cfg(target_os = "ios")]
 #[link(name = "UIKit", kind = "framework")]
 extern "C" {
-    pub static UIKeyboardDidShowNotification: ObjcId;
+    pub static UIKeyboardFrameBeginUserInfoKey: ObjcId;
+    pub static UIKeyboardFrameEndUserInfoKey: ObjcId;
+    pub static UIKeyboardWillShowNotification: ObjcId;
     pub static UIKeyboardWillHideNotification: ObjcId;
+    pub static UIKeyboardDidShowNotification: ObjcId;
+    pub static UIKeyboardDidHideNotification: ObjcId;
     pub static UIKeyboardDidChangeFrameNotification: ObjcId;
+    pub static UIKeyboardWillChangeFrameNotification: ObjcId;
+    pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
+    pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
+    
     pub fn UIApplicationMain(
         argc: i32,
         argv: *mut *mut i8,

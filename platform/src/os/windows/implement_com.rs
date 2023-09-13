@@ -44,6 +44,7 @@ macro_rules!implement_com{
                 &self.this
             }
             
+            #[allow(non_snake_case)]
             unsafe fn QueryInterface(&self, iid: &crate::windows::core::GUID, interface: *mut *const ::core ::ffi ::c_void) -> crate::windows::core::HRESULT {
                 *interface =
                 if iid == &<crate::windows::core::IUnknown as crate::windows::core::ComInterface> ::IID ||
@@ -73,8 +74,10 @@ macro_rules!implement_com{
                 }
             }
             
+            #[allow(non_snake_case)]
             fn AddRef(&self) -> u32 {self.count.add_ref()}
             
+            #[allow(non_snake_case)]
             unsafe fn Release(&self) -> u32 {
                 let remaining = self.count.release();
                 if remaining == 0 {

@@ -85,7 +85,9 @@ impl BuildConnection {
         }
         
         let args = [
-            "+nightly",
+            "run",
+            "nightly",
+            "cargo",
             "run",
             "-p",
             what,
@@ -96,7 +98,7 @@ impl BuildConnection {
             &format!("--stdin-loop"),
         ];
         let env = [("MAKEPAD", "lines")];
-        let process = ChildProcess::start("cargo", &args, path, &env).expect("Cannot start process");
+        let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
 
         shared.write().unwrap().processes.insert(
             what.to_string(),

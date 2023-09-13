@@ -79,6 +79,7 @@ pub struct Cx {
     
     pub keyboard: CxKeyboard,
     pub fingers: CxFingers,
+    pub (crate) ime_area: Area,
     pub (crate) drag_drop: CxDragDrop,
     
     pub (crate) platform_ops: Vec<CxOsOp>,
@@ -233,7 +234,7 @@ impl Cx {
             keyboard: Default::default(),
             fingers: Default::default(),
             drag_drop: Default::default(),
-            
+            ime_area: Default::default(),
             platform_ops: Default::default(),
             
             
