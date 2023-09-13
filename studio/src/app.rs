@@ -44,7 +44,7 @@ live_design!{
     App = {{App}} {
         ui: <Window> { 
             caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
-            dock = <Dock> {
+            body = {dock = <Dock> {
                 height: Fill, width: Fill
                 
                 root = Splitter {
@@ -133,7 +133,7 @@ live_design!{
                 FileTree = <FileTree> {}
                 LogList = <LogList> {}
             }
-        }
+        }}
     }
 }
 
