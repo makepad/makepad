@@ -3,10 +3,10 @@ use crate::{
     debug_view::DebugView,
     makepad_draw::*,
     nav_control::NavControl,
-    // window_menu::*,
     button::*,
-    widget::*,
+    // window_menu::*,
     view::*,
+    widget::*,
 };
 
 live_design!{
@@ -21,10 +21,9 @@ pub struct DesktopWindow {
     
     #[live] cursor_draw_list: DrawList2d,
     #[live] draw_cursor: DrawQuad,
-    
     #[live] debug_view: DebugView,
     #[live] nav_control: NavControl,
-    #[live] window: Window,
+    #[live] window: WindowHandle,
     #[live] overlay: Overlay,
     #[live] main_draw_list: DrawList2d,
     #[live] pass: Pass,
@@ -63,13 +62,13 @@ impl LiveHook for DesktopWindow {
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
             // lets show a VR button
-            self.view.view(id!(web_xr)).set_visible(true);
+            self.view(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
         match cx.os_type() {
             OsType::Windows => {
-                self.view.view(id!(caption_bar)).set_visible(true);
-                self.view.view(id!(windows_buttons)).set_visible(true);
+                self.view(id!(caption_bar)).set_visible(true);
+                self.view(id!(windows_buttons)).set_visible(true);
             }
             OsType::Macos => {
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
@@ -117,12 +116,12 @@ impl DesktopWindow {
                         OsType::Macos => {
                             if self.hide_caption_on_fullscreen{
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    self.view.view(id!(caption_bar)).set_visible(false);
-                                    self.view.redraw(cx);
+                                    self.view(id!(caption_bar)).set_visible(false);
+                                    self.redraw(cx);
                                 }
                                 else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view.view(id!(caption_bar)).set_visible(true);
-                                    self.view.redraw(cx);
+                                    self.view(id!(caption_bar)).set_visible(true);
+                                    self.redraw(cx);
                                 };
                             }
                         }
@@ -162,10 +161,10 @@ impl DesktopWindow {
         else {
             let actions = self.view.handle_widget_event(cx, event);
             if actions.not_empty() {
-                if self.view.button(id!(min)).clicked(&actions) {
+                if self.button(id!(min)).clicked(&actions) {
                     self.window.minimize(cx);
                 }
-                if self.view.button(id!(max)).clicked(&actions) {
+                if self.button(id!(max)).clicked(&actions) {
                     if self.window.is_fullscreen(cx) {
                         self.window.restore(cx);
                     }
@@ -173,10 +172,10 @@ impl DesktopWindow {
                         self.window.maximize(cx);
                     }
                 }
-                if self.view.button(id!(close)).clicked(&actions) {
+                if self.button(id!(close)).clicked(&actions) {
                     self.window.close(cx);
                 }
-                if self.view.button(id!(xr_on)).clicked(&actions) {
+                if self.button(id!(xr_on)).clicked(&actions) {
                     cx.xr_start_presenting();
                 }
                 dispatch_action(cx, DesktopWindowAction::ViewActions(actions));
