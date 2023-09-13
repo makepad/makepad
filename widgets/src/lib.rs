@@ -34,6 +34,7 @@ pub mod scroll_shadow;
 pub mod rotated_image;
 pub mod slide_panel;
 pub mod page_flip;
+pub mod keyboard_view;
 
 pub mod file_tree;
 pub mod slides_view;
@@ -134,4 +135,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::file_tree::live_design(cx);
     crate::slides_view::live_design(cx);
     crate::tab_close_button::live_design(cx);
+    crate::keyboard_view::live_design(cx);
 }

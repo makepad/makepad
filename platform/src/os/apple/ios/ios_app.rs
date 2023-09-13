@@ -17,6 +17,7 @@ use {
         },
         area::Area,
         event::{
+            VirtualKeyboardEvent,
             KeyCode,
             KeyEvent,
             TextInputEvent,
@@ -84,6 +85,7 @@ impl IosClasses {
 
 pub struct IosApp {
     pub time_start: Instant,
+    pub virtual_keyboard_event:  Option<VirtualKeyboardEvent>,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<IosTimer>,
     touches: Vec<TouchPoint>,
@@ -102,6 +104,7 @@ impl IosApp {
             
             // Construct the bits that are shared between windows
             IosApp {
+                virtual_keyboard_event: None,
                 touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
                 metal_device,
@@ -158,16 +161,19 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, addSubview: textfield];
             
             let notification_center: ObjcId = msg_send![class!(NSNotificationCenter), defaultCenter];
-            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWasShown:) name: UIKeyboardDidShowNotification object: nil];
-            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillBeHidden:) name: UIKeyboardWillHideNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidChangeFrame:) name: UIKeyboardDidChangeFrameNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillChangeFrame:) name: UIKeyboardWillChangeFrameNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidShow:) name: UIKeyboardDidShowNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillShow:) name: UIKeyboardWillShowNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidHide:) name: UIKeyboardDidHideNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillHide:) name: UIKeyboardWillHideNotification object: nil];
             
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
             
-            let () = msg_send![view_ctrl_obj, beginAppearanceTransition: true animated: false];
-            let () = msg_send![view_ctrl_obj, endAppearanceTransition];
+            //let () = msg_send![view_ctrl_obj, beginAppearanceTransition: true animated: false];
+            //let () = msg_send![view_ctrl_obj, endAppearanceTransition];
             
             let () = msg_send![window_obj, makeKeyAndVisible];
             
@@ -210,7 +216,7 @@ impl IosApp {
                     window_id: CxWindowPool::id_zero(),
                     old_geom,
                     new_geom
-                }),
+                }), 
             );
         }
     }
@@ -273,6 +279,7 @@ impl IosApp {
 
     pub fn hide_keyboard(&mut self){
         let () = unsafe {msg_send![self.textfield.unwrap(), resignFirstResponder]};
+
     }
     
     pub fn do_callback(&mut self, event: IosEvent) {
@@ -285,7 +292,6 @@ impl IosApp {
                 let () = unsafe {msg_send![self.mtk_view.unwrap(), setPaused: NO]};
             }
             self.event_callback = Some(callback);
-            
         }
     }
     
@@ -313,6 +319,14 @@ impl IosApp {
         }
     }
     
+    pub fn send_virtual_keyboard_event(&mut self, event:VirtualKeyboardEvent){
+        self.do_callback(IosEvent::VirtualKeyboard(event));
+    }
+    
+    pub fn queue_virtual_keyboard_event(&mut self, event:VirtualKeyboardEvent){
+        self.virtual_keyboard_event = Some(event);
+    }
+
     pub fn stop_timer(&mut self, timer_id: u64) {
         for i in 0..self.timers.len() {
             if self.timers[i].timer_id == timer_id {

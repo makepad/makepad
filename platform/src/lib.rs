@@ -135,6 +135,7 @@ pub use {
         menu::MenuCommand,
         thread::Signal,
         event::{
+            VirtualKeyboardEvent,
             HttpRequest,
             HttpResponse,
             HttpMethod,
