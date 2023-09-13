@@ -6,7 +6,7 @@ live_design!{
     import crate::dock::DockBase;
     import crate::splitter::SplitterBase;
     import crate::desktop_button::DesktopButtonBase;
-    import crate::desktop_window::DesktopWindowBase;
+    import crate::window::WindowBase;
     import crate::multi_window::MultiWindowBase;
     import crate::drop_down::DropDownBase;
     import crate::file_tree::FileTreeBase;
@@ -526,7 +526,7 @@ live_design!{
     CheckBoxBase = <CheckBoxBase>{}
     DockBase = <DockBase>{}
     MultiWindowBase = <MultiWindowBase>{}
-    DesktopWindowBase = <DesktopWindowBase> {}
+    WindowBase = <WindowBase> {}
     DesktopButtonBase = <DesktopButtonBase> {}
     DropDownBase = <DropDownBase> {}
     FileTreeBase = <FileTreeBase> {}
