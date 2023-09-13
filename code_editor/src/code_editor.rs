@@ -307,6 +307,14 @@ impl CodeEditor {
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
+			Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Tab,
+                ..
+            }) => {
+                session.tab();
+                cx.redraw_all();
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..

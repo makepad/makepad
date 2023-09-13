@@ -391,6 +391,31 @@ impl Session {
         );
     }
 
+	pub fn tab(&mut self) {
+		self.document.edit_selections(
+            self.id,
+            EditKind::Insert,
+            &self.selection_state.borrow().selections,
+            &self.settings,
+            |mut editor, position, length| {
+				let lines = editor.as_text().as_lines();
+				let column_index = lines[position.line_index][..position.byte_index].column_count();
+				let column_count = self.settings.tab_column_count - column_index % self.settings.tab_column_count;
+				editor.apply_edit(Edit {
+					change: Change::Delete(position, length),
+					drift: Drift::Before,
+				});
+				editor.apply_edit(Edit {
+                    change: Change::Insert(
+                        position,
+                        iter::repeat(' ').take(column_count).collect(),
+                    ),
+                    drift: Drift::Before,
+                });
+			}
+		);
+	}
+
     pub fn delete(&mut self) {
         self.document.edit_selections(
             self.id,
@@ -429,12 +454,9 @@ impl Session {
                     let lines = editor.as_text().as_lines();
                     if position.byte_index > 0 {
 						if lines[position.line_index][..position.byte_index].chars().all(|char| char.is_whitespace()) {
-							let indent_column_count = editor.as_text().as_lines()[position.line_index]
-								.indent()
-								.unwrap_or("")
-								.len();
-							let column_count = indent_column_count.min(
-								(indent_column_count + self.settings.tab_column_count - 1)
+							let column_index = editor.as_text().as_lines()[position.line_index][..position.byte_index].len();
+							let column_count = column_index.min(
+								(column_index + self.settings.tab_column_count - 1)
 									% self.settings.tab_column_count
 									+ 1,
 							);
@@ -442,7 +464,7 @@ impl Session {
 								change: Change::Delete(
 									Position {
 										line_index: position.line_index,
-										byte_index: indent_column_count - column_count,
+										byte_index: column_index - column_count,
 									},
 									Length {
 										line_count: 0,
