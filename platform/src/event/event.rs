@@ -17,6 +17,7 @@ use {
             network::*,
             video_decoding::*,
         },
+        animator::Ease,
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
         video::VideoInputsEvent,
@@ -45,7 +46,7 @@ pub enum Event {
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
-
+    VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
     
     MouseDown(MouseDownEvent),
@@ -177,6 +178,15 @@ impl DrawEvent{
         }
         false
     }
+}
+
+
+#[derive(Clone, Debug)]
+pub enum VirtualKeyboardEvent{
+    WillShow{time:f64, height:f64, duration:f64, ease:Ease},
+    WillHide{time:f64, height:f64, duration:f64, ease:Ease},
+    DidShow{time:f64, height:f64},
+    DidHide{time:f64},
 }
 
 #[derive(Clone, Default, Debug)]

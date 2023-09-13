@@ -29,7 +29,7 @@ pub mod tab_bar;
 pub mod tab_close_button;
 pub mod list_view;
 pub mod desktop_button;
-pub mod desktop_window;
+pub mod window;
 pub mod scroll_shadow;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
@@ -37,6 +37,7 @@ pub mod video;
 pub mod rotated_image;
 pub mod slide_panel;
 pub mod page_flip;
+pub mod keyboard_view;
 
 pub mod file_tree;
 pub mod slides_view;
@@ -73,7 +74,7 @@ pub use crate::{
     list_view::*,
     page_flip::*,
     slide_panel::*,
-    desktop_window::*,
+    window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
@@ -119,7 +120,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::scroll_shadow::live_design(cx);
     crate::button::live_design(cx);
     crate::desktop_button::live_design(cx);
-    crate::desktop_window::live_design(cx);
+    crate::window::live_design(cx);
     crate::window_menu::live_design(cx);
     crate::scroll_bar::live_design(cx);
     crate::scroll_bars::live_design(cx);
@@ -139,4 +140,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::file_tree::live_design(cx);
     crate::slides_view::live_design(cx);
     crate::tab_close_button::live_design(cx);
+    crate::keyboard_view::live_design(cx);
 }

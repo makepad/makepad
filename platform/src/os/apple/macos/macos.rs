@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{RefCell},
+        cell::RefCell,
     },
     makepad_objc_sys::{
         msg_send,
@@ -27,14 +27,12 @@ use {
                 apple_classes::init_apple_classes_global,
                 ns_url_session::{make_http_request, web_socket_open},
             }, 
-            metal_xpc::{
-                start_xpc_service,
-            },
+            metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,
             apple_decoding::CxAppleDecoding,
             metal::{MetalCx, DrawPassMode},
         },
-        pass::{CxPassParent},
+        pass::CxPassParent,
         thread::Signal,
         window::WindowId,
         event::{

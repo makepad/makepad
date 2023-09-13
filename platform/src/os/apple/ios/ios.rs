@@ -144,6 +144,9 @@ impl Cx {
             }
             IosEvent::Timer(te) => {
                 if te.timer_id == 0 {
+                    if let Some(vk) = ios_app.virtual_keyboard_event.take(){
+                        self.call_event_handler(&Event::VirtualKeyboard(vk));
+                    }
                     // check signals
                     if Signal::check_and_clear_ui_signal(){
                         self.handle_media_signals();
@@ -163,6 +166,9 @@ impl Cx {
         
         //self.process_desktop_pre_event(&mut event);
         match event {
+            IosEvent::VirtualKeyboard(vk)=>{
+                self.call_event_handler(&Event::VirtualKeyboard(vk));
+            }
             IosEvent::Init=>{
                 get_ios_app_global().start_timer(0, 0.008, true);
                 self.call_event_handler(&Event::Construct);
@@ -287,8 +293,10 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
+                    ios_app.show_keyboard();
                 },
                 CxOsOp::HideTextIME => {
+                    ios_app.hide_keyboard();
                 },
                 CxOsOp::SetCursor(_cursor) => { 
                 },
