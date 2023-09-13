@@ -12403,6 +12403,10 @@ impl ::windows_core::TypeKind for BOOL {
 
 pub type FARPROC = ::core::option::Option<unsafe extern "system" fn() -> isize>;
 
+pub const DRAGDROP_S_DROP: ::windows_core::HRESULT = ::windows_core::HRESULT(262400i32);
+
+pub const DRAGDROP_S_CANCEL: ::windows_core::HRESULT = ::windows_core::HRESULT(262401i32);
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HANDLE(pub isize);
 impl HANDLE {
     pub fn is_invalid(&self) -> bool {
@@ -12995,8 +12999,6 @@ impl ::core::fmt::Debug for DECIMAL_1_0 {
 impl ::windows_core::TypeKind for DECIMAL_1_0 {
     type TypeKind = ::windows_core::CopyType;
 }
-
-pub const DRAGDROP_S_DROP: ::windows_core::HRESULT = ::windows_core::HRESULT(262400i32);
 
 pub const DRAGDROP_S_USEDEFAULTCURSORS: ::windows_core::HRESULT = ::windows_core::HRESULT(262402i32);
 

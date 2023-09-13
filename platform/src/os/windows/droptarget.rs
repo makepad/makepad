@@ -8,19 +8,16 @@ use {
         log,
         implement_com,
         event::DragItem,
-        live_id::LiveId,
         windows::{
             core,
             Win32::{
                 System::{
                     Ole::{
                         DROPEFFECT,
-                        ReleaseStgMedium,
                         CF_HDROP,
                     },
                     Com::{
                         FORMATETC,
-                        STGMEDIUM,
                         DATADIR_GET,
                     },
                     SystemServices::MODIFIERKEYS_FLAGS,
