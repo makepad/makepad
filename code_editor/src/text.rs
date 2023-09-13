@@ -165,6 +165,15 @@ impl From<String> for Text {
     }
 }
 
+impl FromIterator<char> for Text {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = char>,
+    {
+        Text::from(iter.into_iter().collect::<String>())
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Edit {
     pub change: Change,

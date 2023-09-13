@@ -119,6 +119,7 @@ impl Cx {
     
     pub fn show_text_ime(&mut self, area: Area, pos: DVec2) {
         if !self.keyboard.text_ime_dismissed {
+            self.ime_area = area;
             self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
         }
     }
@@ -323,12 +324,17 @@ impl Cx {
         self.new_draw_event.draw_lists_and_children.push(draw_list_id);
     }
     
+    pub fn get_ime_area_rect(&self)->Rect{
+        self.ime_area.get_rect(self)
+    }
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty {
             return new_area
         }
-        
+        if self.ime_area == old_area {
+            self.ime_area = new_area;
+        }
         self.fingers.update_area(old_area, new_area);
         self.drag_drop.update_area(old_area, new_area);
         self.keyboard.update_area(old_area, new_area);
