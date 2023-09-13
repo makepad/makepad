@@ -370,28 +370,21 @@ impl Session {
     pub fn indent(&mut self) {
         self.document
             .edit_lines(self.id, EditKind::Indent, &self.selections, |line| {
-                reindent(
-                    line,
-                    |indentation_column_count| {
-                        (indentation_column_count + self.settings.indent_column_count)
-                            / self.settings.indent_column_count
-                            * self.settings.indent_column_count
-                    },
-                )
+                reindent(line, |indentation_column_count| {
+                    (indentation_column_count + self.settings.indent_column_count)
+                        / self.settings.indent_column_count
+                        * self.settings.indent_column_count
+                })
             });
     }
 
     pub fn outdent(&mut self) {
         self.document
             .edit_lines(self.id, EditKind::Outdent, &self.selections, |line| {
-                reindent(
-                    line,
-                    |indentation_column_count| {
-                        indentation_column_count.saturating_sub(1)
-                            / self.settings.indent_column_count
-                            * self.settings.indent_column_count
-                    },
-                )
+                reindent(line, |indentation_column_count| {
+                    indentation_column_count.saturating_sub(1) / self.settings.indent_column_count
+                        * self.settings.indent_column_count
+                })
             });
     }
 
@@ -671,16 +664,11 @@ pub struct SessionLayout {
     pub wrap_data: Vec<Option<WrapData>>,
 }
 
-pub fn reindent(
-    string: &str,
-    f: impl FnOnce(usize) -> usize,
-) -> (usize, usize, String) {
+pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, String) {
     let indentation = string.leading_whitespace().unwrap_or("");
     let indentation_column_count = indentation.column_count();
     let new_indentation_column_count = f(indentation_column_count);
-    let new_indentation = new_indentation(
-        new_indentation_column_count,
-    );
+    let new_indentation = new_indentation(new_indentation_column_count);
     let len = indentation.longest_common_prefix(&new_indentation).len();
     (
         len,
