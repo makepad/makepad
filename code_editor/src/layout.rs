@@ -83,7 +83,7 @@ impl<'a> Layout<'a> {
         }
     }
 
-    pub fn blocks(&self, line_start: usize, line_end: usize) -> BlockElements<'_> {
+    pub fn block_elements(&self, line_start: usize, line_end: usize) -> BlockElements<'_> {
         let mut block_inlays = self.document_layout.block_inlays.iter();
         while block_inlays
             .as_slice()
