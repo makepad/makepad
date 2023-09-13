@@ -479,6 +479,10 @@ impl Win32Window {
                 return LRESULT(1)
             },
             WM_MOUSEMOVE => {
+                if get_win32_app_global().current_internal_drag_item.is_some() || 
+                    get_win32_app_global().start_dragging_items.is_some(){
+                    return LRESULT(0)
+                }
                 if !window.track_mouse_event {
                     window.track_mouse_event = true;
                     let mut tme = TRACKMOUSEEVENT {
@@ -495,6 +499,10 @@ impl Win32Window {
                 )
             },
             WM_MOUSELEAVE => {
+                if get_win32_app_global().current_internal_drag_item.is_some() || 
+                    get_win32_app_global().start_dragging_items.is_some(){
+                    return LRESULT(0)
+                }
                 window.track_mouse_event = false;
                 window.send_mouse_move(
                     window.last_mouse_pos,
@@ -650,7 +658,7 @@ impl Win32Window {
 
                 match *message {
 
-                    DropTargetMessage::Enter(flags,mut point,effect,drag_item) => {
+                    //DropTargetMessage::Enter(_flags,mut _point,_effect,_drag_item) => {
                          /*// crate::log!("DRAG ENTER");
                         // decode message
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
@@ -685,15 +693,17 @@ impl Win32Window {
                                 }
                             )
                         );*/
-                    },
+                   // },
 
                     DropTargetMessage::Leave => {
+                        // If anything we should send a drag with an out of window coordinate.
+                        
                         // make sure there is no more internal drag item
                        // get_win32_app_global().current_internal_drag_item.replace(None);
                         // send to makepad
                         //window.do_callback(Win32Event::DragEnd);
                     },
-
+                    DropTargetMessage::Enter(flags,mut point,effect,drag_item) |
                     DropTargetMessage::Over(flags,mut point,effect,drag_item) => {
                         
                         // decode message
@@ -729,7 +739,7 @@ impl Win32Window {
                                 }
                             )
                         );        
-                    },
+                    }, 
 
                     DropTargetMessage::Drop(flags,mut point,_effect,drag_item) => {
 
@@ -737,7 +747,7 @@ impl Win32Window {
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
 
                         // if there is a current internal drag item, use that one instead of what came with the message
-                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.take() {
+                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.clone() {
                             // leave the current internal drag item empty
                             internal_drag_item
                         } else {
@@ -762,9 +772,12 @@ impl Win32Window {
                                 }
                             )
                         );
-                        window.do_callback(
-                            Win32Event::DragEnd
-                        );        
+                        if get_win32_app_global().current_internal_drag_item.is_some(){
+                            get_win32_app_global().current_internal_drag_item = None;
+                            window.do_callback(
+                                Win32Event::DragEnd
+                            );        
+                        }
                     },
                 }
             },

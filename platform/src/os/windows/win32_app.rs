@@ -458,11 +458,11 @@ impl Win32App {
                         // DoDragDrop is synchronous, so this thread will block until the file was dropped somewhere... let's see how that works out...
                         let mut effect = DROPEFFECT(0);
                         match unsafe {DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect)} {
-                            DRAGDROP_S_DROP => {log!("DoDragDrop: succesful")},
-                            DRAGDROP_S_CANCEL => {log!("DoDragDrop: canceled")},
+                            DRAGDROP_S_DROP => {/*log!("DoDragDrop: succesful")*/},
+                            DRAGDROP_S_CANCEL => {/*log!("DoDragDrop: canceled")*/},
                             _ => {log!("DoDragDrop: failed for some reason")},
                         }
-                        //get_win32_app_global().current_internal_drag_item = None;
+                        get_win32_app_global().current_internal_drag_item = None;
                     }
                 },
                 _ => {
