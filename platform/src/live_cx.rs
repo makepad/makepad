@@ -182,8 +182,8 @@ impl Cx {
         self.live_file_changes = Some(recv);
         let mut file_list:Vec<(String,String, Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
-            if let Some(start) = file.file_name.find("/src/"){
-                let path = format!("{}{}", file.cargo_manifest_path, &file.file_name[start..]);
+            if let Some(start) = file.file_name.find("src/"){
+                let path = format!("{}/{}", file.cargo_manifest_path, &file.file_name[start..]);
                 file_list.push((path, file.file_name.clone(), None));
             }
         }
