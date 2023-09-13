@@ -2,6 +2,7 @@ use {
     crate::{
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
+		settings::Settings,
         state::Session,
         str::StrExt,
         text::Position,
@@ -15,6 +16,7 @@ use {
 live_design! {
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme_desktop_dark::*;
+
     TokenColors = {{TokenColors}} {
         unknown: #808080,
         branch_keyword: #C485BE,
@@ -27,6 +29,16 @@ live_design! {
         string: #CC917B,
         typename: #56C9B1;
         whitespace: #6E6E6E,
+    }
+
+    DrawIndentGuide = {{DrawIndentGuide}} {
+        fn pixel(self) -> vec4 {
+            let thickness = 0.8 + self.dpi_dilate * 0.5;
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.move_to(1., -1.);
+            sdf.line_to(1., self.rect_size.y + 1.);
+            return sdf.stroke(self.color, thickness);
+        }
     }
 
     DrawSelection = {{DrawSelection}} {
@@ -79,7 +91,6 @@ live_design! {
     }
 
     CodeEditor = {{CodeEditor}} {
-
         width: Fill,
         height: Fill,
         margin: 0,
@@ -89,14 +100,18 @@ live_design! {
             color:#3
         }
         draw_text: {
-            draw_depth: 0.5,
+            draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
         }
+		draw_indent_guide: {
+			draw_depth: 2.0,
+			color: #C0C0C0,
+		}
         draw_selection: {
-            draw_depth: 1.0,
+            draw_depth: 3.0,
         }
         draw_cursor: {
-            draw_depth: 2.0,
+            draw_depth: 4.0,
             color: #C0C0C0,
         }
     }
@@ -114,6 +129,8 @@ pub struct CodeEditor {
     draw_text: DrawText,
     #[live]
     token_colors: TokenColors,
+	#[live]
+	draw_indent_guide: DrawIndentGuide,
     #[live]
     draw_selection: DrawSelection,
     #[live]
@@ -148,11 +165,6 @@ impl Widget for CodeEditor {
         _event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
     ) {
-        //let uid = self.widget_uid();
-        /*self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });*/
-        //self.handle_event
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -200,6 +212,7 @@ impl CodeEditor {
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
         self.draw_text_layer(cx, session);
+		self.draw_indent_guide_layer(cx, session);
         self.draw_selection_layer(cx, session);
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
@@ -273,7 +286,6 @@ impl CodeEditor {
                 session.move_up(!shift);
                 cx.redraw_all();
             }
-
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers { shift, .. },
@@ -369,7 +381,7 @@ impl CodeEditor {
             }) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
-					if alt {
+                    if alt {
                         session.push_cursor(cursor, affinity);
                     } else {
                         session.set_cursor(cursor, affinity);
@@ -390,7 +402,10 @@ impl CodeEditor {
 
     fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut origin_y = session.layout().line(self.line_start).y();
-        for element in session.layout().block_elements(self.line_start, self.line_end) {
+        for element in session
+            .layout()
+            .block_elements(self.line_start, self.line_end)
+        {
             match element {
                 BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = line.scale();
@@ -443,24 +458,25 @@ impl CodeEditor {
                                         TokenKind::Typename => self.token_colors.typename,
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
-									for grapheme in text_0.graphemes() {
-										let (x, y) =
-											line.grid_to_normalized_position(row_index, column_index);
-										self.draw_text.draw_abs(
-											cx,
-											DVec2 { x, y: origin_y + y } * self.cell_size
-												+ self.viewport_rect.pos,
-											grapheme,
-										);
-                                    	column_index += grapheme.column_count();
-									}
+                                    for grapheme in text_0.graphemes() {
+                                        let (x, y) = line
+                                            .grid_to_normalized_position(row_index, column_index);
+                                        self.draw_text.draw_abs(
+                                            cx,
+                                            DVec2 { x, y: origin_y + y } * self.cell_size
+                                                + self.viewport_rect.pos,
+                                            grapheme,
+                                        );
+                                        column_index += grapheme.column_count();
+                                    }
                                 }
                             }
                             WrappedElement::Text {
                                 is_inlay: true,
                                 text,
                             } => {
-                                let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+                                let (x, y) =
+                                    line.grid_to_normalized_position(row_index, column_index);
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 { x, y: origin_y + y } * self.cell_size
@@ -476,6 +492,45 @@ impl CodeEditor {
                                 column_index = line.wrap_indent_column_count();
                                 row_index += 1;
                             }
+                        }
+                    }
+                    origin_y += line.height();
+                }
+                BlockElement::Widget(widget) => {
+                    origin_y += widget.height;
+                }
+            }
+        }
+    }
+
+    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+        let mut origin_y = session.layout().line(self.line_start).y();
+        for element in session
+            .layout()
+            .block_elements(self.line_start, self.line_end)
+        {
+			let Settings {
+				tab_column_count,
+				..
+			} = **session.settings();
+            match element {
+                BlockElement::Line { line, .. } => {
+                    let indent_column_count: usize =
+                        line.text.indent().unwrap_or("").column_count();
+                    for row_index in 0..line.row_count() {
+                        for column_index in (0..indent_column_count).step_by(tab_column_count) {
+                            let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+                            self.draw_indent_guide.draw_abs(
+                                cx,
+                                Rect {
+                                    pos: DVec2 { x, y: origin_y + y } * self.cell_size
+                                        + self.viewport_rect.pos,
+                                    size: DVec2 {
+                                        x: 2.0,
+                                        y: line.scale() * self.cell_size.y,
+                                    },
+                                },
+                            );
                         }
                     }
                     origin_y += line.height();
@@ -513,7 +568,7 @@ impl CodeEditor {
 
     fn pick(&self, session: &Session, position: DVec2) -> Option<(Position, Affinity)> {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
-		let mut line_index = session.layout().find_first_line_ending_after_y(position.y);
+        let mut line_index = session.layout().find_first_line_ending_after_y(position.y);
         let mut origin_y = session.layout().line(line_index).y();
         for block in session.layout().block_elements(line_index, line_index + 1) {
             match block {
@@ -593,7 +648,8 @@ impl CodeEditor {
                                 column_index += widget.column_count;
                             }
                             WrappedElement::Wrap => {
-                                let (_, y) = line.grid_to_normalized_position(row_index, column_index);
+                                let (_, y) =
+                                    line.grid_to_normalized_position(row_index, column_index);
                                 let start_y = origin_y + y;
                                 let end_y = start_y + line.scale();
                                 if (start_y..=end_y).contains(&position.y) {
@@ -730,7 +786,13 @@ impl<'a> DrawSelectionLayer<'a> {
                             }
                             WrappedElement::Wrap => {
                                 if self.active_selection.is_some() {
-                                    self.draw_selection(cx, line, origin_y, row_index, column_index);
+                                    self.draw_selection(
+                                        cx,
+                                        line,
+                                        origin_y,
+                                        row_index,
+                                        column_index,
+                                    );
                                 }
                                 column_index = line.wrap_indent_column_count();
                                 row_index += 1;
@@ -849,7 +911,7 @@ impl<'a> DrawSelectionLayer<'a> {
         row_index: usize,
         column_index: usize,
     ) {
-		let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+        let (x, y) = line.grid_to_normalized_position(row_index, column_index);
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
@@ -893,6 +955,15 @@ struct TokenColors {
     typename: Vec4,
     #[live]
     whitespace: Vec4,
+}
+
+#[derive(Live, LiveHook)]
+#[repr(C)]
+pub struct DrawIndentGuide {
+    #[deref]
+    draw_super: DrawQuad,
+	#[live]
+	color: Vec4,
 }
 
 #[derive(Live, LiveHook)]
