@@ -28,7 +28,7 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
     let mut device_uuid = None;
     let mut product = None;
     let mut org = None;
-    
+    let mut ios17 = false;
     for i in 0..args.len() {
         let v = &args[i];
         if let Some(opt) = v.strip_prefix("--signing-identity=") {
@@ -45,6 +45,9 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
         } 
         else if let Some(opt) = v.strip_prefix("--org=") {
             org = Some(opt.to_string());
+        } 
+        else if let Some(_) = v.strip_prefix("--ios17=") {
+            ios17 = true
         } 
         else {
             args = &args[i..];
@@ -66,7 +69,8 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
                 provisioning_profile, 
                 device_uuid, 
                 product,
-                org
+                org,
+                ios17
             },&args[1..], IosTarget::aarch64)?;
             Ok(())
         }
@@ -76,6 +80,7 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
             #[cfg(target_arch = "aarch64")]
             let toolchain = IosTarget::aarch64_sim; 
             compile::run_sim(SigningArgs{
+                ios17,
                 signing_identity, 
                 provisioning_profile, 
                 device_uuid, 
