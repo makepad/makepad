@@ -21,7 +21,7 @@ impl CharExt for char {
     }
 
     fn column_count(self) -> usize {
-		1
+        1
     }
 
     fn opposite_delimiter(&self) -> Option<char> {
