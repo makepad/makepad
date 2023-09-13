@@ -29,6 +29,7 @@ use {
                     LRESULT,
                     RECT,
                     POINT,
+                    POINTL,
                 },
                 System::{
                     Memory::{
@@ -42,6 +43,19 @@ use {
                         CF_UNICODETEXT,
                         //RegisterDragDrop,
                         //IDropTarget,
+                        DROPEFFECT,
+                        DROPEFFECT_COPY,
+                        DROPEFFECT_MOVE,
+                        DROPEFFECT_LINK,
+                        DROPEFFECT_SCROLL,
+                    },
+                    SystemServices::{
+                        MODIFIERKEYS_FLAGS,
+                        MK_CONTROL,
+                        MK_SHIFT,
+                        MK_LBUTTON,
+                        MK_MBUTTON,
+                        MK_RBUTTON,
                     },
                     WindowsProgramming::GMEM_DDESHARE,
                     DataExchange::{
@@ -270,6 +284,7 @@ use {
 };
 
 // Copied from Microsoft so it refers to the right IDropTarget
+#[allow(non_snake_case)]
 pub unsafe fn RegisterDragDrop<P0, P1>(hwnd: P0, pdroptarget: P1) -> coreResult<()>
 where
     P0: IntoParam<HWND>,
@@ -292,8 +307,6 @@ pub struct Win32Window {
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
-
-    pub drag_item: Arc<RefCell<Option<DragItem>>>,
 }
 
 impl Win32Window {
@@ -339,11 +352,8 @@ impl Win32Window {
             None,
         ) };
 
-        // create data item placeholder for drag&drop
-        let drag_item: Arc<RefCell<Option<DragItem>>> = Arc::new(RefCell::new(None));
-
         // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
-        let drop_target: IDropTarget = DropTarget { drag_item: Arc::clone(&drag_item),hwnd, }.into();
+        let drop_target: IDropTarget = DropTarget { drag_item: RefCell::new(None),hwnd, }.into();
         unsafe { RegisterDragDrop(hwnd, &drop_target).unwrap() };
 
         Win32Window {
@@ -357,7 +367,6 @@ impl Win32Window {
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
-            drag_item,
         }
     }
 
@@ -504,7 +513,11 @@ impl Win32Window {
                 let delta = (wparam.0 >> 16) as u16 as i16 as f64;
                 window.send_scroll(DVec2 {x: 0.0, y: -delta}, Self::get_key_modifiers(), true);
             },
-            WM_LBUTTONDOWN => window.send_mouse_down(0, Self::get_key_modifiers()),
+            WM_LBUTTONDOWN => {
+                // hack for drag/drop: save which window was last clicked on in win32_app
+                get_win32_app_global().currently_clicked_window_id.replace(Some(window.window_id));
+                window.send_mouse_down(0, Self::get_key_modifiers());
+            },
             WM_LBUTTONUP => window.send_mouse_up(0, Self::get_key_modifiers()),
             WM_RBUTTONDOWN => window.send_mouse_down(1, Self::get_key_modifiers()),
             WM_RBUTTONUP => window.send_mouse_up(1, Self::get_key_modifiers()),
@@ -649,129 +662,135 @@ impl Win32Window {
                 );
             },
 
-            WM_DROPFILES => { // one or more files are being dropped onto the window
-                
-                log!("WM_DROPFILES {:?}",wparam);
-            },
+            // from DropTarget
+            WM_DROPTARGET => {
 
-            // inform that the user enters the window, dragging an object
-            WM_DROPTARGET_DRAGENTER => {
+                // restore the Box<>
+                let message = unsafe { Box::from_raw(lparam.0 as *mut DropTargetMessage) };
 
-                // decode message
-                let mut point = POINT {
-                    x: (lparam.0 & 0xFFFF) as i16 as i32,
-                    y: (lparam.0 >> 16) as i32,
-                };
-                unsafe { ScreenToClient(window.hwnd,&mut point) };
-                let dtf = wparam.0 as u32;
-                let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
-                else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
-                else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
-                else { DragResponse::None };
+                match *message {
 
-                let drag_item = window.drag_item.borrow().clone();
-                log!("starting drag at ({},{}), dtf: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,dtf,response,drag_item);
-            },
+                    DropTargetMessage::Enter(flags,mut point,effect,drag_item) => {
+                        
+                        // decode message
+                        unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
+                        let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
+                        else if (effect & DROPEFFECT_MOVE) != DROPEFFECT(0) { DragResponse::Move }
+                        else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
+                        else { DragResponse::None };
 
-            // inform that the user left the window, dragging an object
-            WM_DROPTARGET_DRAGLEAVE => {
+                        // if there is a current internal drag item, use that one instead of what came with the message
+                        let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
+                        let drag_item = if let Some(internal_drag_item) = current_internal_drag_item {
+                            get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
+                            internal_drag_item
+                        } else {
+                            drag_item
+                        };
 
-                log!("WM_DROPTARGET_DRAGLEAVE");
-
-                window.do_callback(Win32Event::DragEnd);
-
-                // TODO: also call mouse up
-            },
-
-            // inform that the user is dragging an object over the window
-            WM_DROPTARGET_DRAGOVER => {
-
-                // decode message
-                let mut point = POINT {
-                    x: (lparam.0 & 0xFFFF) as i16 as i32,
-                    y: (lparam.0 >> 16) as i32,
-                };
-                unsafe { ScreenToClient(window.hwnd,&mut point) };
-                let dtf = wparam.0 as u32;
-                let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
-                else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
-                else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
-                else { DragResponse::None };
-
-                let drag_item = window.drag_item.borrow().clone();
-                log!("WM_DROPTARGET_DRAGOVER {},{} 0x{:04X} {:?} drag_item: {:?}",point.x,point.y,dtf,response,drag_item);
-
-                // send to makepad
-                window.do_callback(
-                    Win32Event::Drag(
-                        DragEvent {
-                            modifiers: KeyModifiers {
-                                shift: (dtf & DTF_SHIFT) != 0,
-                                control: (dtf & DTF_CONTROL) != 0,
-                                alt: (dtf & DTF_ALT) != 0,
-                                logo: false,
-                            },
-                            handled: Cell::new(false),
-                            abs: DVec2 { x: point.x as f64,y: point.y as f64, },
-                            items: Rc::new(
-                                if let Some(drag_item) = drag_item {
-                                    vec![drag_item]
-                                } else {
-                                    Vec::new()
+                        // send to makepad
+                        window.do_callback(
+                            Win32Event::Drag(
+                                DragEvent {
+                                    modifiers: KeyModifiers {
+                                        shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
+                                        control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
+                                        alt: false,  // TODO
+                                        logo: false,  // Windows doesn't have a logo button
+                                    },
+                                    handled: Cell::new(false),
+                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    items: Rc::new(vec![drag_item]),
+                                    response: Rc::new(Cell::new(response)),
                                 }
-                            ),
-                            response: Rc::new(Cell::new(response)),
-                        }
-                    )
-                );
-            },
+                            )
+                        );
+                    },
 
-            // inform that the user drops an object on the window somewhere
-            WM_DROPTARGET_DROP => {
+                    DropTargetMessage::Leave => {
 
-                // decode message
-                let mut point = POINT {
-                    x: (lparam.0 & 0xFFFF) as i16 as i32,
-                    y: (lparam.0 >> 16) as i32,
-                };
-                unsafe { ScreenToClient(window.hwnd,&mut point) };
-                let dtf = wparam.0 as u32;
-                let response = if (dtf & DTF_LINK) != 0 { DragResponse::Link }
-                else if (dtf & DTF_MOVE) != 0 { DragResponse::Move }
-                else if (dtf & DTF_COPY) != 0 { DragResponse::Copy }
-                else { DragResponse::None };
+                        // make sure there is no more internal drag item
+                        get_win32_app_global().current_internal_drag_item.replace(None);
 
-                // take the drag item here
-                let drag_item = window.drag_item.take();
-                
-                // automatic dropping of data_object at the end of this block
-                // should also call COM Release on the inner IDataObject
+                        // send to makepad
+                        window.do_callback(Win32Event::DragEnd);
+                    },
 
-                // this might need to be verified
+                    DropTargetMessage::Over(flags,mut point,effect,drag_item) => {
 
-                log!("dropping at ({},{}), dtf: {:04X}, repsonse: {:?}, drag_item: {:?}",point.x,point.y,dtf,response,drag_item);
+                        // decode message
+                        unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
+                        let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
+                        else if (effect & DROPEFFECT_MOVE) != DROPEFFECT(0) { DragResponse::Move }
+                        else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
+                        else { DragResponse::None };
 
-                window.do_callback(
-                    Win32Event::Drop(
-                        DropEvent {
-                            modifiers: KeyModifiers {
-                                shift: (dtf & DTF_SHIFT) != 0,
-                                control: (dtf & DTF_CONTROL) != 0,
-                                alt: (dtf & DTF_ALT) != 0,
-                                logo: false,
-                            },
-                            handled: Cell::new(false),
-                            abs: DVec2 { x: point.x as f64,y: point.y as f64, },
-                            items: Rc::new(
-                                if let Some(drag_item) = drag_item {
-                                    vec![drag_item]
-                                } else {
-                                    Vec::new()
+                        // if there is a current internal drag item, use that one instead of what came with the message
+                        let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
+                        let drag_item = if let Some(internal_drag_item) = current_internal_drag_item {
+                            get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
+                            internal_drag_item
+                        } else {
+                            drag_item
+                        };
+                        
+                        // send to makepad
+                        window.do_callback(
+                            Win32Event::Drag(
+                                DragEvent {
+                                    modifiers: KeyModifiers {
+                                        shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
+                                        control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
+                                        alt: false,  // TODO
+                                        logo: false,  // Windows doesn't have a logo button
+                                    },
+                                    handled: Cell::new(false),
+                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    items: Rc::new(vec![drag_item]),
+                                    response: Rc::new(Cell::new(response)),
                                 }
-                            ),
-                        }
-                    )
-                );
+                            )
+                        );        
+                    },
+
+                    DropTargetMessage::Drop(flags,mut point,effect,drag_item) => {
+
+                        // decode message
+                        unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
+                        let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
+                        else if (effect & DROPEFFECT_MOVE) != DROPEFFECT(0) { DragResponse::Move }
+                        else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
+                        else { DragResponse::None };
+
+                        // if there is a current internal drag item, use that one instead of what came with the message
+                        let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
+                        let drag_item = if let Some(internal_drag_item) = current_internal_drag_item {
+                            // leave the current internal drag item empty
+                            internal_drag_item
+                        } else {
+                            drag_item
+                        };
+                        
+                        log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,flags.0,response,drag_item);
+
+                        // send to makepad
+                        window.do_callback(
+                            Win32Event::Drop(
+                                DropEvent {
+                                    modifiers: KeyModifiers {
+                                        shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
+                                        control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
+                                        alt: false,  // TODO
+                                        logo: false,  // Windows doesn't have a logo button
+                                    },
+                                    handled: Cell::new(false),
+                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    items: Rc::new(vec![drag_item]),
+                                }
+                            )
+                        );        
+                    },
+                }
             },
 
             _ => {
