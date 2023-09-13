@@ -183,8 +183,7 @@ pub fn define_textfield_delegate() -> *const Class {
         }
         NO
     }
-    extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
-    }
+
     unsafe {
         /*decl.add_method(
             sel!(drawInMTKView:),
