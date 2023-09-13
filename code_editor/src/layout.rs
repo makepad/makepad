@@ -62,7 +62,7 @@ impl<'a> Layout<'a> {
             fold: self.session_layout.fold_column[index],
             scale: self.session_layout.scale[index],
             text: &self.text.as_lines()[index],
-			indent_state: self.document_layout.indent_state[index],
+            indent_state: self.document_layout.indent_state[index],
             tokens: &self.document_layout.tokens[index],
             inlays: &self.document_layout.inline_inlays[index],
             wrap_data: self.session_layout.wrap_data[index].as_ref(),
@@ -109,7 +109,7 @@ pub struct Lines<'a> {
     fold: Iter<'a, usize>,
     scale: Iter<'a, f64>,
     text: Iter<'a, String>,
-	indent_state: Iter<'a, Option<IndentState>>,
+    indent_state: Iter<'a, Option<IndentState>>,
     tokens: Iter<'a, Vec<Token>>,
     inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
     wrap_data: Iter<'a, Option<WrapData>>,
@@ -126,7 +126,7 @@ impl<'a> Iterator for Lines<'a> {
             fold: *self.fold.next().unwrap(),
             scale: *self.scale.next().unwrap(),
             text,
-			indent_state: *self.indent_state.next().unwrap(),
+            indent_state: *self.indent_state.next().unwrap(),
             tokens: self.tokens.next().unwrap(),
             inlays: self.inline_inlays.next().unwrap(),
             wrap_data: self.wrap_data.next().unwrap().as_ref(),
@@ -141,7 +141,7 @@ pub struct Line<'a> {
     pub fold: usize,
     pub scale: f64,
     pub text: &'a str,
-	pub indent_state: Option<IndentState>,
+    pub indent_state: Option<IndentState>,
     pub tokens: &'a [Token],
     pub inlays: &'a [(usize, InlineInlay)],
     pub wrap_data: Option<&'a WrapData>,
@@ -302,12 +302,12 @@ impl<'a> Line<'a> {
         self.text
     }
 
-	pub fn indent_column_count(&self) -> usize {
-		match self.indent_state.unwrap() {
-			IndentState::Empty(indent_column_count) => indent_column_count,
-			IndentState::NonEmpty(indent_column_count, _) => indent_column_count,
-		}
-	}
+    pub fn indent_column_count(&self) -> usize {
+        match self.indent_state.unwrap() {
+            IndentState::Empty(indent_column_count) => indent_column_count,
+            IndentState::NonEmpty(indent_column_count, _) => indent_column_count,
+        }
+    }
 
     pub fn tokens(&self) -> &[Token] {
         self.tokens
