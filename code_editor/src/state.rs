@@ -255,9 +255,17 @@ impl Session {
                 edit_kind = EditKind::InsertSpace;
             }
             Some(char) if char.is_opening_delimiter() => {
-                let char = char.opposite_delimiter().unwrap();
-                inject_delimiter = Some(char);
-                selection_state.delimiter_stack.push(char);
+                if selection_state.selections.iter().all(|selection| {
+                    !selection.is_empty()
+                        || self.document.as_text().as_lines()[selection.cursor.position.line_index]
+                            [selection.cursor.position.byte_index..]
+                            .chars()
+                            .all(|char| char.is_whitespace())
+                }) {
+                    let char = char.opposite_delimiter().unwrap();
+                    inject_delimiter = Some(char);
+                    selection_state.delimiter_stack.push(char);
+                }
             }
             Some(char)
                 if selection_state
@@ -277,10 +285,14 @@ impl Session {
             &self.settings,
             |mut editor, position, length| {
                 let mut position = position;
-                editor.apply_edit(Edit {
-                    change: Change::Delete(position, length),
-                    drift: Drift::Before,
-                });
+                let mut length = length;
+                if inject_delimiter.is_none() {
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(position, length),
+                        drift: Drift::Before,
+                    });
+                    length = Length::zero();
+                }
                 if let Some(uninject_delimiter) = uninject_delimiter {
                     editor.apply_edit(Edit {
                         change: Change::Delete(
@@ -300,7 +312,7 @@ impl Session {
                 position += text.length();
                 if let Some(inject_delimiter) = inject_delimiter {
                     editor.apply_edit(Edit {
-                        change: Change::Insert(position, Text::from(inject_delimiter)),
+                        change: Change::Insert(position + length, Text::from(inject_delimiter)),
                         drift: Drift::After,
                     })
                 }
