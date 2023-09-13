@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+#![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
 use crate::{
     log,
     implement_com,
@@ -26,9 +28,7 @@ use crate::{
     },
 };
 
-pub struct DropSource {
-
-}
+pub struct DropSource { }
 
 implement_com!{
     for_struct: DropSource,
@@ -40,19 +40,24 @@ implement_com!{
     }
 }
 
-#[allow(non_snake_case)]
+// IDropSource implementation for DropSource, which validates a drop on left mouse button up
+
 impl IDropSource_Impl for DropSource {
-    fn QueryContinueDrag(&self, fescapepressed: BOOL, grfkeystate: MODIFIERKEYS_FLAGS) -> core::HRESULT {
+
+    fn QueryContinueDrag(&self, _: BOOL, grfkeystate: MODIFIERKEYS_FLAGS) -> core::HRESULT {
+
+        // if the left mousebutton is not pressed anymore, drop that item
         if (grfkeystate & MK_LBUTTON) == MODIFIERKEYS_FLAGS(0) {
             DRAGDROP_S_DROP
         }
+
         else {
             S_OK
         }
     }
 
-    fn GiveFeedback(&self, dweffect: DROPEFFECT) -> core::HRESULT {
-        //log!("DropSource::GiveFeedback");
+    fn GiveFeedback(&self, _: DROPEFFECT) -> core::HRESULT {
+
         DRAGDROP_S_USEDEFAULTCURSORS
     }
 }

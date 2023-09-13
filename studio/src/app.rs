@@ -274,6 +274,9 @@ impl AppMain for App {
         }
         
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
+
+            log!("makepad: should_tab_start_drag({:?})",actions);
+
             dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
                 path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
                 internal_id: Some(tab_id)
@@ -281,6 +284,9 @@ impl AppMain for App {
         }
         
         if let Some(drag) = dock.should_accept_drag(&actions) {
+
+            log!("makepad: should_accept_drag({:?})",actions);
+
             if drag.items.len() == 1 {
                 if drag.modifiers.logo {
                     dock.accept_drag(cx, drag, DragResponse::Copy);
@@ -292,6 +298,9 @@ impl AppMain for App {
         }
         
         if let Some(drop) = dock.has_drop(&actions) {
+
+            log!("makepad: has_drop({:?})",actions);
+
             if let DragItem::FilePath {path, internal_id} = &drop.items[0] {
                 if let Some(internal_id) = internal_id { // from inside the dock
                     if drop.modifiers.logo {
@@ -308,6 +317,9 @@ impl AppMain for App {
         }
         
         if let Some(file_id) = file_tree.should_file_start_drag(&actions) {
+
+            log!("makepad: should_file_start_drag({:?})",actions);
+
             let path = self.file_system.file_nodes.get(&file_id).unwrap().name.clone();
             file_tree.file_start_drag(cx, file_id, DragItem::FilePath {
                 path,

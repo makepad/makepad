@@ -20,6 +20,7 @@ use {
         },
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
+        window::CxWindowPool,
     }
 };
 
@@ -166,13 +167,52 @@ impl Cx {
                 self.call_event_handler(&Event::TextInput(e))
             }
             Win32Event::Drag(e) => {
-                self.call_event_handler(&Event::Drag(e))
-            }
+
+                log!("Drag");
+                
+                self.call_event_handler(&Event::Drag(e));
+
+                self.drag_drop.cycle_drag();
+            },
             Win32Event::Drop(e) => {
-                self.call_event_handler(&Event::Drop(e))
-            }
+
+                log!("Drop");
+                
+                self.call_event_handler(&Event::Drop(e));
+
+                // also send MouseUp
+                self.call_event_handler(&Event::MouseUp(MouseUpEvent{
+                    abs: dvec2(-100000.0,-100000.0),
+                    button: 0,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0
+                }));
+
+                // and DragEnd
+                self.call_event_handler(&Event::DragEnd);
+
+                // and cycle drag?
+                self.drag_drop.cycle_drag();
+            },
             Win32Event::DragEnd => {
-                self.call_event_handler(&Event::DragEnd)
+
+                log!("DragEnd");
+
+                // send MouseUp
+                self.call_event_handler(&Event::MouseUp(MouseUpEvent{
+                    abs: dvec2(-100000.0,-100000.0),
+                    button: 0,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0
+                }));                
+
+                // and DragEnd
+                self.call_event_handler(&Event::DragEnd);
+
+                // and cycle drag?
+                self.drag_drop.cycle_drag();
             }
             Win32Event::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
