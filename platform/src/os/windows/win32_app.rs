@@ -3,7 +3,7 @@ use {
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
-        cell::Cell,
+        cell::RefCell,
     },
     crate::{
         log,
@@ -123,17 +123,17 @@ use {
 pub const FALSE: BOOL = BOOL(0);
 pub const TRUE: BOOL = BOOL(1);
 
-static mut WIN32_APP: *mut Win32App = 0 as *mut _;
+static mut WIN32_APP: Option<RefCell<Win32App>> = None;
 
-pub fn get_win32_app_global() -> &'static mut Win32App {
+pub fn get_win32_app_global() -> std::cell::RefMut<'static, Win32App> {
     unsafe {
-        &mut *(WIN32_APP)
+        WIN32_APP.as_mut().unwrap().borrow_mut()
     }
 }
 
-pub fn init_win32_app_global(event_callback: Box<dyn FnMut(&mut Win32App, Win32Event) -> EventFlow>) {
+pub fn init_win32_app_global(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) {
     unsafe {
-        WIN32_APP = Box::into_raw(Box::new(Win32App::new(event_callback)));
+        WIN32_APP = Some(RefCell::new(Win32App::new(event_callback)));
     }
 }
 
@@ -151,7 +151,7 @@ P1: IntoParam<IDropSource>,
 pub struct Win32App {
     pub time_start: i64,
     pub time_freq: i64,
-    event_callback: Option<Box<dyn FnMut(&mut Win32App, Win32Event) -> EventFlow >>,
+    event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow >>,
     pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
@@ -159,8 +159,8 @@ pub struct Win32App {
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: MouseCursor,
-    pub current_internal_drag_item: Cell<Option<DragItem >>,
-    pub currently_clicked_window_id: Cell<Option<WindowId >>,
+    pub current_internal_drag_item: Option<DragItem >,
+    pub currently_clicked_window_id: Option<WindowId >,
     pub start_dragging_items: Option<Vec<DragItem >>
 }
 
@@ -174,7 +174,7 @@ pub enum Win32Timer {
 }
 
 impl Win32App {
-    pub fn new(event_callback: Box<dyn FnMut(&mut Win32App, Win32Event) -> EventFlow>) -> Win32App {
+    pub fn new(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) -> Win32App {
         
         let window_class_name = encode_wide("MakepadWindow\0");
         let class = WNDCLASSEXW {
@@ -223,18 +223,19 @@ impl Win32App {
             timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
             current_cursor: MouseCursor::Default,
-            current_internal_drag_item: Cell::new(None),
-            currently_clicked_window_id: Cell::new(None),
+            current_internal_drag_item: None,
+            currently_clicked_window_id: None,
         };
         win32_app.dpi_functions.become_dpi_aware();
         
         win32_app
     }
     
-    pub fn event_loop(&mut self) {
+    pub fn event_loop() {
         unsafe {
             loop {
-                match self.event_flow {
+                let event_flow = get_win32_app_global().event_flow.clone();
+                match event_flow {
                     EventFlow::Wait => {
                         let mut msg = std::mem::MaybeUninit::uninit();
                         let ret = GetMessageW(msg.as_mut_ptr(), None, 0, 0);
@@ -242,13 +243,13 @@ impl Win32App {
                         if ret == FALSE {
                             // Only happens if the message is `WM_QUIT`.
                             debug_assert_eq!(msg.message, WM_QUIT);
-                            self.event_flow = EventFlow::Exit;
+                            get_win32_app_global().event_flow = EventFlow::Exit;
                         }
                         else {
                             TranslateMessage(&msg);
                             DispatchMessageW(&msg);
-                            if !self.was_signal_poll() {
-                                self.do_callback(Win32Event::Paint);
+                            if !get_win32_app_global().was_signal_poll() {
+                                Win32App::do_callback(Win32Event::Paint);
                             }
                         }
                     }
@@ -257,7 +258,7 @@ impl Win32App {
                         let ret = PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE);
                         let msg = msg.assume_init();
                         if ret == FALSE {
-                            self.do_callback(Win32Event::Paint)
+                            Win32App::do_callback(Win32Event::Paint)
                         }
                         else {
                             TranslateMessage(&msg);
@@ -266,66 +267,70 @@ impl Win32App {
                     }
                     EventFlow::Exit => panic!()
                 }
-                self.poll_start_drag_drop();
+                Win32App::poll_start_drag_drop();
             }
         }
     }
     
-    pub fn do_callback(&mut self, event: Win32Event) {
-        if let Some(mut callback) = self.event_callback.take() {
-            self.event_flow = callback(self, event);
-            if let EventFlow::Exit = self.event_flow {
+    pub fn do_callback(event: Win32Event) {
+        let cb = get_win32_app_global().event_callback.take();
+        if let Some(mut callback) = cb {
+            let event_flow = callback(event);
+            get_win32_app_global().event_flow = event_flow;
+            if let EventFlow::Exit = get_win32_app_global().event_flow {
                 unsafe {ExitProcess(0);}
             }
-            self.event_callback = Some(callback);
+            get_win32_app_global().event_callback = Some(callback);
         }
     }
     
     pub unsafe extern "system" fn timer_proc(_hwnd: HWND, _arg1: u32, in_win32_id: usize, _arg2: u32) {
-        let win32_app = get_win32_app_global();
         let hit_timer = {
-            let mut hit_timer = None;
-            for slot in 0..win32_app.timers.len() {
-                match win32_app.timers[slot] {
-                    Win32Timer::Timer {win32_id, repeats, ..} => if win32_id == in_win32_id {
-                        hit_timer = Some(win32_app.timers[slot].clone());
-                        if !repeats {
-                            KillTimer(None, in_win32_id).unwrap();
-                            win32_app.timers[slot] = Win32Timer::Free;
+            let mut win32_app = get_win32_app_global();
+            {
+                let mut hit_timer = None;
+                for slot in 0..win32_app.timers.len() {
+                    match win32_app.timers[slot] {
+                        Win32Timer::Timer {win32_id, repeats, ..} => if win32_id == in_win32_id {
+                            hit_timer = Some(win32_app.timers[slot].clone());
+                            if !repeats {
+                                KillTimer(None, in_win32_id).unwrap();
+                                win32_app.timers[slot] = Win32Timer::Free;
+                            }
+                            break;
+                        },
+                        Win32Timer::DragDrop {win32_id, ..} => if win32_id == in_win32_id {
+                            hit_timer = Some(win32_app.timers[slot].clone());
+                            break;
+                        },
+                        Win32Timer::Resize {win32_id, ..} => if win32_id == in_win32_id {
+                            hit_timer = Some(win32_app.timers[slot].clone());
+                            break;
+                        },
+                        Win32Timer::SignalPoll {win32_id, ..} => if win32_id == in_win32_id {
+                            hit_timer = Some(win32_app.timers[slot].clone());
+                            break;
                         }
-                        break;
-                    },
-                    Win32Timer::DragDrop {win32_id, ..} => if win32_id == in_win32_id {
-                        hit_timer = Some(win32_app.timers[slot].clone());
-                        break;
-                    },
-                    Win32Timer::Resize {win32_id, ..} => if win32_id == in_win32_id {
-                        hit_timer = Some(win32_app.timers[slot].clone());
-                        break;
-                    },
-                    Win32Timer::SignalPoll {win32_id, ..} => if win32_id == in_win32_id {
-                        hit_timer = Some(win32_app.timers[slot].clone());
-                        break;
+                        _ => ()
                     }
-                    _ => ()
-                }
-            };
-            hit_timer
+                };
+                hit_timer
+            }
         };
         // call the dependencies
         if let Some(hit_timer) = hit_timer {
             match hit_timer {
                 Win32Timer::Timer {timer_id, ..} => {
-                    win32_app.do_callback(Win32Event::Timer(TimerEvent {timer_id: timer_id}));
+                    Win32App::do_callback(Win32Event::Timer(TimerEvent {timer_id: timer_id}));
                 },
                 Win32Timer::Resize {..} => {
-                    win32_app.do_callback(Win32Event::Paint);
+                    Win32App::do_callback(Win32Event::Paint);
                 },
                 Win32Timer::DragDrop {..} => {
-                    win32_app.do_callback(Win32Event::Paint);
+                    Win32App::do_callback(Win32Event::Paint);
                 },
                 Win32Timer::SignalPoll {..} => {
-                    get_win32_app_global().do_callback(
+                    Win32App::do_callback(
                         Win32Event::Signal
                     );
                     get_win32_app_global().was_signal_poll = true;
@@ -346,9 +351,9 @@ impl Win32App {
     }
     
     pub fn get_free_timer_slot(&mut self) -> usize {
-        let win32_app = get_win32_app_global();
-        for slot in 0..win32_app.timers.len() {
-            if let Win32Timer::Free = win32_app.timers[slot] {
+        //let win32_app = get_win32_app_global();
+        for slot in 0..self.timers.len() {
+            if let Win32Timer::Free = self.timers[slot] {
                 return slot
             }
         }
@@ -385,11 +390,15 @@ impl Win32App {
         self.timers[slot] = Win32Timer::Resize {win32_id: win32_id};
     }
     
-    pub fn poll_start_drag_drop(&mut self) {
-        if let Some(items) = self.start_dragging_items.take() {
-            let slot = self.get_free_timer_slot();
-            let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
-            self.timers[slot] = Win32Timer::DragDrop {win32_id: win32_id};
+    pub fn poll_start_drag_drop() {
+        let items = get_win32_app_global().start_dragging_items.take();
+        if let Some(items) = items {
+            {
+                let mut win32_app = get_win32_app_global();
+                let slot = win32_app.get_free_timer_slot();
+                let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
+                win32_app.timers[slot] = Win32Timer::DragDrop {win32_id: win32_id};
+            }
             
             if items.len() > 1 {
                 error!("multi-item drag/drop operation not supported");
@@ -403,7 +412,10 @@ impl Win32App {
                     if (path.len() > 0) || internal_id.is_some() {
                         
                         // save this drag item
-                        self.current_internal_drag_item.replace(Some(DragItem::FilePath {path: path.clone(), internal_id: internal_id.clone(),}));
+                        get_win32_app_global().current_internal_drag_item = Some(DragItem::FilePath {
+                            path: path.clone(),
+                            internal_id: internal_id.clone(),
+                        });
                         
                         // encode filename
                         let mut encoded_filename: Vec<u16> = path.encode_utf16().collect();
@@ -450,18 +462,20 @@ impl Win32App {
                             DRAGDROP_S_CANCEL => {log!("DoDragDrop: canceled")},
                             _ => {log!("DoDragDrop: failed for some reason")},
                         }
-                        get_win32_app_global().current_internal_drag_item.replace(None);
+                        //get_win32_app_global().current_internal_drag_item = None;
                     }
                 },
                 _ => {
                     error!("Only DragItem::FilePath supported");
                 }
             }
-            
-             for slot in 0..self.timers.len() {
-                if let Win32Timer::DragDrop {win32_id} = self.timers[slot] {
-                    self.timers[slot] = Win32Timer::Free;
-                    unsafe {KillTimer(None, win32_id).unwrap();}
+            {
+                let mut win32_app = get_win32_app_global();
+                for slot in 0..win32_app.timers.len() {
+                    if let Win32Timer::DragDrop {win32_id} = win32_app.timers[slot] {
+                       win32_app.timers[slot] = Win32Timer::Free;
+                       unsafe {KillTimer(None, win32_id).unwrap();}
+                    }
                 }
             }
         }
