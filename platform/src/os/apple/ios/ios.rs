@@ -36,7 +36,6 @@ use {
     }
 };
 
-const KEEP_ALIVE_COUNT: usize = 5;
 
 impl Cx {
     
@@ -141,15 +140,12 @@ impl Cx {
             IosEvent::KeyDown(_) |
             IosEvent::KeyUp(_) |
             IosEvent::TextInput(_) => {
-                self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
             }
             IosEvent::Timer(te) => {
                 if te.timer_id == 0 {
-                    if self.os.keep_alive_counter>0 {
-                        self.os.keep_alive_counter -= 1;
-                        self.repaint_windows();
+                    if let Some(vk) = ios_app.virtual_keyboard_event.take(){
+                        self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
-
                     // check signals
                     if Signal::check_and_clear_ui_signal(){
                         self.handle_media_signals();
@@ -169,6 +165,9 @@ impl Cx {
         
         //self.process_desktop_pre_event(&mut event);
         match event {
+            IosEvent::VirtualKeyboard(vk)=>{
+                self.call_event_handler(&Event::VirtualKeyboard(vk));
+            }
             IosEvent::Init=>{
                 get_ios_app_global().start_timer(0, 0.008, true);
                 self.call_event_handler(&Event::Construct);
@@ -293,8 +292,10 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
+                    ios_app.show_keyboard();
                 },
                 CxOsOp::HideTextIME => {
+                    ios_app.hide_keyboard();
                 },
                 CxOsOp::SetCursor(_cursor) => { 
                 },
@@ -360,7 +361,6 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) keep_alive_counter: usize,
     pub (crate) media: CxAppleMedia,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,

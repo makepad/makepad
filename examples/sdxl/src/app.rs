@@ -510,11 +510,11 @@ live_design!{
     
     App = {{App}} {
         ui: <MultiWindow> {
-            <DesktopWindow> {
+            <Window> {
                 window: {inner_size: vec2(2000, 1024)},
                 caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
                 hide_caption_on_fullscreen: true,
-                <View> {
+                body = <View> {
                     
                     flow: Overlay,
                     
@@ -854,34 +854,36 @@ live_design!{
                     }
                 }
             }
-            <DesktopWindow> {
+            <Window> {
                 window: {inner_size: vec2(960, 540)},
-                second_image = <RectView> {
-                    draw_bg: {color: #0}
-                    height: Fill,
-                    width: Fill
-                    flow: Overlay,
-                    align: {x: 0.5, y: 0.5}
-                    image1 = <Image> {
-                        fit: Smallest,
-                        width: Fill,
-                        height: Fill
-                    }
-                    prompt_frame = <View> {
-                        width: Fill,
-                        height: Fill
-                        align: {y: 1.0}
-                        padding: {left: 120, bottom: 40, right: 120}
-                        prompt = <Label> {
+                body = {
+                    second_image = <RectView> {
+                        draw_bg: {color: #0}
+                        height: Fill,
+                        width: Fill
+                        flow: Overlay,
+                        align: {x: 0.5, y: 0.5}
+                        image1 = <Image> {
+                            fit: Smallest,
                             width: Fill,
-                            height: Fit
-                            draw_text: {
-                                wrap: Word
-                                text_style: <TEXT_BOLD> {font_size: 20}
-                                
-                                color: #c
-                            },
-                            text: "HELLO WORLD"
+                            height: Fill
+                        }
+                        prompt_frame = <View> {
+                            width: Fill,
+                            height: Fill
+                            align: {y: 1.0}
+                            padding: {left: 120, bottom: 40, right: 120}
+                            prompt = <Label> {
+                                width: Fill,
+                                height: Fit
+                                draw_text: {
+                                    wrap: Word
+                                    text_style: <TEXT_BOLD> {font_size: 20}
+                                    
+                                    color: #c
+                                },
+                                text: "HELLO WORLD"
+                            }
                         }
                     }
                 }

@@ -2,13 +2,13 @@ use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 
-const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const OPENAI_BASE_URL: &str = "https://makepad.nl/v1";
 
 live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     App = {{App}} {
-        ui: <DesktopWindow> {
+        ui: <Window> {body = {
             
             show_bg: true
             
@@ -16,7 +16,7 @@ live_design!{
             spacing: 20,
             align: {
                 x: 0.5,
-                y: 0.5
+                y: 1.0
             },
             
             width: Fill,
@@ -48,7 +48,7 @@ live_design!{
                 icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                 text: "send"
             }
-        }
+        }}
     }
 }
 
