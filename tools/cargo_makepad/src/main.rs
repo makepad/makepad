@@ -36,7 +36,7 @@ fn show_help(err: &str){
     println!(" run-real optional args: --signing-identity=");
     println!("                         --provisioning-profile=");
     println!("                         --device-uuid=");
-    println!("                         --ios17");
+    println!("                         --ios=17");
     println!();     
     println!("Android commands:");
     println!();
