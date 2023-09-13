@@ -116,18 +116,16 @@ impl Document {
         self.update_after_edit(session_id, None, &edits);
     }
 
-    pub fn edit_lines(
+    pub fn edit_linewise(
         &self,
         origin_id: SessionId,
         kind: EditKind,
         selections: &SelectionSet,
-        mut f: impl FnMut(&str) -> (usize, usize, String),
+        mut f: impl FnMut(Editor, usize),
     ) {
+        let mut history = self.0.history.borrow_mut();
+        history.push_or_extend_group(origin_id, kind, selections);
         let mut edits = Vec::new();
-        self.0
-            .history
-            .borrow_mut()
-            .push_or_extend_group(origin_id, kind, selections);
         for line_range in selections
             .iter()
             .copied()
@@ -140,10 +138,17 @@ impl Document {
                 }
             })
         {
-            for line in line_range {
-                self.edit_lines_internal(line, &mut edits, &mut f);
+            for line_index in line_range {
+                f(
+                    Editor {
+                        history: &mut *history,
+                        edits: &mut edits,
+                    },
+                    line_index,
+                );
             }
         }
+        drop(history);
         self.update_after_edit(origin_id, None, &edits);
     }
 
