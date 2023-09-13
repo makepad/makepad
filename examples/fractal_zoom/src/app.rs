@@ -8,7 +8,7 @@ live_design!{
     
     import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
     App = {{App}} {
-        ui: <DesktopWindow> {
+        ui: <Window> {
             <Mandelbrot> {
                 width: Fill, height: Fill
             }

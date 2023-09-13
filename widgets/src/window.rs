@@ -10,11 +10,11 @@ use crate::{
 };
 
 live_design!{
-    DesktopWindowBase = {{DesktopWindow}} {}
+    WindowBase = {{Window}} {}
 }
 
 #[derive(Live)]
-pub struct DesktopWindow {
+pub struct Window {
     #[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
     #[live] mouse_cursor_size: DVec2,
@@ -51,9 +51,9 @@ enum DrawState {
     Drawing,
 }
 
-impl LiveHook for DesktopWindow {
+impl LiveHook for Window {
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, DesktopWindow)
+        register_widget!(cx, Window)
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
@@ -87,7 +87,7 @@ impl LiveHook for DesktopWindow {
 }
 
 #[derive(Clone, WidgetAction)]
-pub enum DesktopWindowAction {
+pub enum WindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
@@ -95,8 +95,8 @@ pub enum DesktopWindowAction {
     None
 }
 
-impl DesktopWindow {
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowAction)) {
+impl Window {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WindowAction)) {
         
         self.debug_view.handle_event(cx, event);
         self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
@@ -106,7 +106,7 @@ impl DesktopWindow {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    return dispatch_action(cx, DesktopWindowAction::WindowClosed)
+                    return dispatch_action(cx, WindowAction::WindowClosed)
                 }
                 true
             }
@@ -128,7 +128,7 @@ impl DesktopWindow {
                         _ => ()
                     }
                     
-                    return dispatch_action(cx, DesktopWindowAction::WindowGeomChange(ev.clone()))
+                    return dispatch_action(cx, WindowAction::WindowGeomChange(ev.clone()))
                 }
                 true
             },
@@ -156,7 +156,7 @@ impl DesktopWindow {
         };
         
         if is_for_other_window {
-            return dispatch_action(cx, DesktopWindowAction::EventForOtherWindow)
+            return dispatch_action(cx, WindowAction::EventForOtherWindow)
         }
         else {
             let actions = self.view.handle_widget_event(cx, event);
@@ -178,7 +178,7 @@ impl DesktopWindow {
                 if self.button(id!(xr_on)).clicked(&actions) {
                     cx.xr_start_presenting();
                 }
-                dispatch_action(cx, DesktopWindowAction::ViewActions(actions));
+                dispatch_action(cx, WindowAction::ViewActions(actions));
             }
         }
         
@@ -237,7 +237,7 @@ impl DesktopWindow {
     }
 }
 
-impl Widget for DesktopWindow {
+impl Widget for Window {
     fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
@@ -246,7 +246,7 @@ impl Widget for DesktopWindow {
     ) {
         let uid = self.widget_uid();
         self.handle_event_with(cx, event, &mut | cx, action | {
-            if let DesktopWindowAction::ViewActions(actions) = action {
+            if let WindowAction::ViewActions(actions) = action {
                 for action in actions {
                     dispatch_action(cx, action)
                 }
