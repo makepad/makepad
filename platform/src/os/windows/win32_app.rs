@@ -8,7 +8,6 @@ use {
     crate::{
         log,
         error,
-        DVec2,
         windows::{
             core::HRESULT,
             core::PCWSTR,
@@ -74,6 +73,8 @@ use {
                     HWND,
                     BOOL,
                     FARPROC,
+                    DRAGDROP_S_DROP,
+                    DRAGDROP_S_CANCEL,
                 },
                 System::{
                     Threading::ExitProcess,
@@ -111,7 +112,6 @@ use {
             cx_native::EventFlow,
             windows::{
                 dropsource::*,
-                droptarget::*,
                 dataobject::*,
                 win32_event::Win32Event,
                 win32_window::Win32Window,
@@ -138,6 +138,7 @@ pub fn init_win32_app_global(event_callback: Box<dyn FnMut(&mut Win32App, Win32E
 }
 
 // copied from Microsoft so it refers to the right IDataObject
+#[allow(non_snake_case)]
 pub unsafe fn DoDragDrop<P0, P1>(pdataobj: P0, pdropsource: P1, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT
 where
     P0: IntoParam<IDataObject>,
@@ -450,7 +451,7 @@ impl Win32App {
                         match unsafe { DoDragDrop(&data_object,&drop_source,DROPEFFECT_COPY | DROPEFFECT_MOVE,&mut effect) } {
                             DRAGDROP_S_DROP => { log!("DoDragDrop: succesful") },
                             DRAGDROP_S_CANCEL => { log!("DoDragDrop: canceled") },
-                            E_UNSPEC => { log!("DoDragDrop: failed for some reason") },
+                            _ => { log!("DoDragDrop: failed for some reason") },
                         }
                     }
                 },

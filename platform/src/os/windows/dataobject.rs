@@ -4,7 +4,6 @@
 use {
     std::cell::RefCell,
     crate::{
-        log,
         implement_com,
         windows::{
             core,
