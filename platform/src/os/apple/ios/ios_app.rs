@@ -1,5 +1,6 @@
 use {
     std::{
+        cell::Cell,
         time::Instant,
     },
     crate::{
@@ -13,7 +14,12 @@ use {
             },
             cx_native::EventFlow,
         },
+        area::Area,
         event::{
+            KeyModifiers,
+            TouchUpdateEvent,
+            TouchState,
+            TouchPoint,
             WindowGeomChangeEvent,
             WindowGeom,
             TimerEvent,
@@ -74,6 +80,7 @@ pub struct IosApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<IosTimer>,
+    touches: Vec<TouchPoint>,
     pub last_window_geom: WindowGeom,
     metal_device: ObjcId,
     first_draw: bool,
@@ -88,6 +95,7 @@ impl IosApp {
             
             // Construct the bits that are shared between windows
             IosApp {
+                touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
                 metal_device,
                 first_draw: true,
@@ -124,23 +132,32 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setDelegate: mtk_view_dlg_obj];
             let () = msg_send![mtk_view_obj, setDevice: self.metal_device];
             let () = msg_send![mtk_view_obj, setUserInteractionEnabled: YES];
+            let () = msg_send![mtk_view_obj, setAutoResizeDrawable: YES];
             
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
+
+            let () = msg_send![view_ctrl_obj, beginAppearanceTransition: true animated: false];
+            let () = msg_send![view_ctrl_obj, endAppearanceTransition];
             
             let () = msg_send![window_obj, makeKeyAndVisible];
+            
             
             self.mtk_view = Some(mtk_view_obj);
         }
     }
     
+    pub fn draw_size_will_change(&mut self){
+        self.check_window_geom();
+    }
     
-    pub fn draw_in_rect(&mut self) {
+    pub fn check_window_geom(&mut self){
         let main_screen: ObjcId = unsafe {msg_send![class!(UIScreen), mainScreen]};
         let screen_rect: NSRect = unsafe {msg_send![main_screen, bounds]};
         let dpi_factor: f64 = unsafe {msg_send![main_screen, scale]};
         let new_size = dvec2(screen_rect.size.width as f64, screen_rect.size.height as f64);
+
         let new_geom = WindowGeom {
             xr_is_presenting: false,
             is_topmost: false,
@@ -168,8 +185,42 @@ impl IosApp {
                 }),
             );
         }
+    }
+    
+    pub fn draw_in_rect(&mut self) {
+        self.check_window_geom();
         self.first_draw = false;
         self.do_callback(IosEvent::Paint);
+    }
+    
+    pub fn update_touch(&mut self, uid: u64, abs:DVec2, state:TouchState){
+        if let Some(touch) = self.touches.iter_mut().find(|v| v.uid == uid){
+            touch.state = state;
+            touch.abs = abs;
+        }
+        else{
+            self.touches.push(TouchPoint{
+                state,
+                abs,
+                uid,
+                rotation_angle:0.0,
+                force:0.0,
+                radius:dvec2(0.0,0.0),
+                handled: Cell::new(Area::Empty),
+                sweep_lock: Cell::new(Area::Empty)
+            })
+        }
+    }
+    
+    pub fn send_touch_update(&mut self){
+        self.do_callback(IosEvent::TouchUpdate(TouchUpdateEvent{
+            time: self.time_now(),
+            window_id: CxWindowPool::id_zero(),
+            modifiers: KeyModifiers::default(),
+            touches: self.touches.clone()
+        }));
+        // remove the stopped touches
+        self.touches.retain(|v| if let TouchState::Stop = v.state{false}else{true});
     }
     
     pub fn time_now(&self) -> f64 {
@@ -191,7 +242,14 @@ impl IosApp {
     pub fn do_callback(&mut self, event: IosEvent) {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, event);
+            if let EventFlow::Wait = self.event_flow{
+                let () = unsafe{msg_send![self.mtk_view.unwrap(), setPaused: YES]};
+            }
+            else{
+                let () = unsafe{msg_send![self.mtk_view.unwrap(), setPaused: NO]};
+            }
             self.event_callback = Some(callback);
+            
         }
     }
     
