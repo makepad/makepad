@@ -382,6 +382,9 @@ impl FileTree {
         items: Vec<DragItem>,
     ) {
         self.dragging_node_id = Some(node_id);
+
+        log!("makepad: start_dragging_file_node");
+
         cx.start_dragging(items);
     }
     

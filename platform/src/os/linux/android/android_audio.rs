@@ -6,7 +6,7 @@ use {
     std::os::raw::{c_int, c_void},
     self::super::{
         aaudio_sys::*,
-       // android_jni::*,
+        android_jni::*,
     },
     crate::{
         makepad_error_log::*,
@@ -365,9 +365,9 @@ impl AndroidAudioAccess {
     }
     
     pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceDesc> {
-        /*
-        let inputs = to_java.get_audio_devices(0);
-        let outputs = to_java.get_audio_devices(1);
+        
+        let inputs = to_java_get_audio_devices(0);
+        let outputs = to_java_get_audio_devices(1);
         self.device_descs.clear();
         
         let name = format!("Default input 2 channels");
@@ -411,8 +411,6 @@ impl AndroidAudioAccess {
             descs.push(device.desc.clone())
         }
         descs
-        */
-        Vec::new()
     }
     
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {

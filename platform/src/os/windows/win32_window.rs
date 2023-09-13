@@ -1,6 +1,9 @@
 use {
     std::{
-        cell::{RefCell, Cell},
+        cell::{
+            RefCell,
+            Cell,
+        },
         rc::Rc,
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
@@ -10,239 +13,281 @@ use {
     crate::{
         windows::{
             core::PCWSTR,
-            Win32::Foundation::{
-                HWND,
-                HANDLE,
-                HGLOBAL,
-                WPARAM,
-                LPARAM,
-                LRESULT,
-                RECT,
+            core::IntoParam,
+            core::Result as coreResult,
+            core::HRESULT,
+            Win32::{
+                Foundation::{
+                    HWND,
+                    HANDLE,
+                    HGLOBAL,
+                    WPARAM,
+                    LPARAM,
+                    LRESULT,
+                    RECT,
+                    POINT,
+                    POINTL,
+                },
+                System::{
+                    Memory::{
+                        GlobalLock,
+                        GlobalAlloc,
+                        GlobalSize,
+                        GlobalUnlock,
+                        GLOBAL_ALLOC_FLAGS,
+                    },
+                    Ole::{
+                        CF_UNICODETEXT,
+                        //RegisterDragDrop,
+                        //IDropTarget,
+                        DROPEFFECT,
+                        DROPEFFECT_COPY,
+                        DROPEFFECT_MOVE,
+                        DROPEFFECT_LINK,
+                    },
+                    SystemServices::{
+                        MODIFIERKEYS_FLAGS,
+                        MK_CONTROL,
+                        MK_SHIFT,
+                    },
+                    WindowsProgramming::GMEM_DDESHARE,
+                    DataExchange::{
+                        OpenClipboard,
+                        EmptyClipboard,
+                        GetClipboardData,
+                        SetClipboardData,
+                        CloseClipboard,
+                    },
+                    LibraryLoader::GetModuleHandleW,
+                },
+                UI::{
+                    WindowsAndMessaging::{
+                        CreateWindowExW,
+                        SetWindowLongPtrW,
+                        GetWindowLongPtrW,
+                        DefWindowProcW,
+                        ShowWindow,
+                        PostMessageW,
+                        GetWindowRect,
+                        DestroyWindow,
+                        SetWindowPos,
+                        GetWindowPlacement,
+                        WINDOWPLACEMENT,
+                        GetClientRect,
+                        MoveWindow,
+                        GWL_EXSTYLE,
+                        HWND_TOPMOST,
+                        HWND_NOTOPMOST,
+                        WS_SIZEBOX,
+                        WS_MAXIMIZEBOX,
+                        WS_MINIMIZEBOX,
+                        WS_POPUP,
+                        WS_CLIPSIBLINGS,
+                        WS_CLIPCHILDREN,
+                        WS_SYSMENU,
+                        WS_EX_WINDOWEDGE,
+                        WS_EX_APPWINDOW,
+                        WS_EX_ACCEPTFILES,
+                        WS_EX_TOPMOST,
+                        CW_USEDEFAULT,
+                        GWLP_USERDATA,
+                        SW_SHOW,
+                        SW_RESTORE,
+                        SW_MAXIMIZE,
+                        SW_MINIMIZE,
+                        SWP_NOMOVE,
+                        SWP_NOSIZE,
+                        WM_ACTIVATE,
+                        WM_NCCALCSIZE,
+                        WM_NCHITTEST,
+                        WA_ACTIVE,
+                        WM_ERASEBKGND,
+                        WM_MOUSEMOVE,
+                        WM_MOUSEWHEEL,
+                        WM_LBUTTONDOWN,
+                        WM_LBUTTONUP,
+                        WM_RBUTTONDOWN,
+                        WM_RBUTTONUP,
+                        WM_MBUTTONDOWN,
+                        WM_MBUTTONUP,
+                        WM_KEYDOWN,
+                        WM_SYSKEYDOWN,
+                        WM_CLOSE,
+                        WM_KEYUP,
+                        WM_SYSKEYUP,
+                        WM_CHAR,
+                        WM_ENTERSIZEMOVE,
+                        WM_EXITSIZEMOVE,
+                        WM_SIZE,
+                        WM_DPICHANGED,
+                        WM_DESTROY,
+                        HTTOPLEFT,
+                        HTBOTTOMLEFT,
+                        HTLEFT,
+                        HTTOPRIGHT,
+                        HTBOTTOMRIGHT,
+                        HTRIGHT,
+                        HTTOP,
+                        HTBOTTOM,
+                        HTCLIENT,
+                        HTCAPTION,
+                        HTSYSMENU
+                    },
+                    Controls::{
+                        MARGINS,
+                        WM_MOUSELEAVE
+                    },
+                    Input::KeyboardAndMouse::{
+                        VIRTUAL_KEY,
+                        ReleaseCapture,
+                        SetCapture,
+                        TrackMouseEvent,
+                        GetKeyState,
+                        TRACKMOUSEEVENT,
+                        TME_LEAVE,
+                        VK_CONTROL,
+                        VK_SHIFT,
+                        VK_MENU,
+                        VK_LWIN,
+                        VK_RWIN,
+                        VK_ESCAPE,
+                        VK_OEM_3,
+                        VK_0,
+                        VK_1,
+                        VK_2,
+                        VK_3,
+                        VK_4,
+                        VK_5,
+                        VK_6,
+                        VK_7,
+                        VK_8,
+                        VK_9,
+                        VK_OEM_MINUS,
+                        VK_OEM_PLUS,
+                        VK_BACK,
+                        VK_TAB,
+                        VK_Q,
+                        VK_W,
+                        VK_E,
+                        VK_R,
+                        VK_T,
+                        VK_Y,
+                        VK_U,
+                        VK_I,
+                        VK_O,
+                        VK_P,
+                        VK_OEM_4,
+                        VK_OEM_6,
+                        VK_RETURN,
+                        VK_A,
+                        VK_S,
+                        VK_D,
+                        VK_F,
+                        VK_G,
+                        VK_H,
+                        VK_J,
+                        VK_K,
+                        VK_L,
+                        VK_OEM_1,
+                        VK_OEM_7,
+                        VK_OEM_5,
+                        VK_Z,
+                        VK_X,
+                        VK_C,
+                        VK_V,
+                        VK_B,
+                        VK_N,
+                        VK_M,
+                        VK_OEM_COMMA,
+                        VK_OEM_PERIOD,
+                        VK_OEM_2,
+                        VK_LCONTROL,
+                        VK_RCONTROL,
+                        VK_LMENU,
+                        VK_RMENU,
+                        VK_LSHIFT,
+                        VK_RSHIFT,
+                        VK_SPACE,
+                        VK_CAPITAL,
+                        VK_F1,
+                        VK_F2,
+                        VK_F3,
+                        VK_F4,
+                        VK_F5,
+                        VK_F6,
+                        VK_F7,
+                        VK_F8,
+                        VK_F9,
+                        VK_F10,
+                        VK_F11,
+                        VK_F12,
+                        VK_SNAPSHOT,
+                        VK_SCROLL,
+                        VK_PAUSE,
+                        VK_INSERT,
+                        VK_DELETE,
+                        VK_HOME,
+                        VK_END,
+                        VK_PRIOR,
+                        VK_NEXT,
+                        VK_NUMPAD0,
+                        VK_NUMPAD1,
+                        VK_NUMPAD2,
+                        VK_NUMPAD3,
+                        VK_NUMPAD4,
+                        VK_NUMPAD5,
+                        VK_NUMPAD6,
+                        VK_NUMPAD7,
+                        VK_NUMPAD8,
+                        VK_NUMPAD9,
+                        VK_SUBTRACT,
+                        VK_ADD,
+                        VK_DECIMAL,
+                        VK_MULTIPLY,
+                        VK_DIVIDE,
+                        VK_NUMLOCK,
+                        VK_UP,
+                        VK_DOWN,
+                        VK_LEFT,
+                        VK_RIGHT,
+                    },
+                },
+                Graphics::{
+                    Dwm::DwmExtendFrameIntoClientArea,
+                    Gdi::ScreenToClient,
+                },
             },
-            Win32::System::Memory::{
-                GlobalLock,
-                GlobalAlloc,
-                GlobalSize,
-                GlobalUnlock,
-                GLOBAL_ALLOC_FLAGS,
-            },
-            Win32::System::Ole::CF_UNICODETEXT,
-            Win32::System::WindowsProgramming::GMEM_DDESHARE,
-            Win32::System::DataExchange::{
-                OpenClipboard,
-                EmptyClipboard,
-                GetClipboardData,
-                SetClipboardData,
-                CloseClipboard,
-            },
-            Win32::UI::WindowsAndMessaging::{
-                CreateWindowExW,
-                SetWindowLongPtrW,
-                GetWindowLongPtrW,
-                DefWindowProcW,
-                ShowWindow,
-                PostMessageW,
-                GetWindowRect,
-                DestroyWindow,
-                SetWindowPos,
-                GetWindowPlacement,
-                WINDOWPLACEMENT,
-                GetClientRect,
-                MoveWindow,
-                GWL_EXSTYLE,
-                HWND_TOPMOST,
-                HWND_NOTOPMOST,
-                WS_SIZEBOX,
-                WS_MAXIMIZEBOX,
-                WS_MINIMIZEBOX,
-                WS_POPUP,
-                WS_CLIPSIBLINGS,
-                WS_CLIPCHILDREN,
-                WS_SYSMENU,
-                WS_EX_WINDOWEDGE,
-                WS_EX_APPWINDOW,
-                WS_EX_ACCEPTFILES,
-                WS_EX_TOPMOST,
-                CW_USEDEFAULT,
-                GWLP_USERDATA,
-                SW_SHOW,
-                SW_RESTORE,
-                SW_MAXIMIZE,
-                SW_MINIMIZE,
-                SWP_NOMOVE,
-                SWP_NOSIZE,
-                WM_ACTIVATE,
-                WM_NCCALCSIZE,
-                WM_NCHITTEST,
-                WA_ACTIVE,
-                WM_ERASEBKGND,
-                WM_MOUSEMOVE,
-                WM_MOUSEWHEEL,
-                WM_LBUTTONDOWN,
-                WM_LBUTTONUP,
-                WM_RBUTTONDOWN,
-                WM_RBUTTONUP,
-                WM_MBUTTONDOWN,
-                WM_MBUTTONUP,
-                WM_KEYDOWN,
-                WM_SYSKEYDOWN,
-                WM_CLOSE,
-                WM_KEYUP,
-                WM_SYSKEYUP,
-                WM_CHAR,
-                WM_ENTERSIZEMOVE,
-                WM_EXITSIZEMOVE,
-                WM_SIZE,
-                WM_DPICHANGED,
-                WM_DROPFILES,
-                WM_DESTROY,
-                HTTOPLEFT,
-                HTBOTTOMLEFT,
-                HTLEFT,
-                HTTOPRIGHT,
-                HTBOTTOMRIGHT,
-                HTRIGHT,
-                HTTOP,
-                HTBOTTOM,
-                HTCLIENT,
-                HTCAPTION,
-                HTSYSMENU
-            },
-            Win32::UI::Controls::{
-                MARGINS,
-                WM_MOUSELEAVE
-            },
-            Win32::UI::Input::KeyboardAndMouse::{
-                VIRTUAL_KEY,
-                ReleaseCapture,
-                SetCapture,
-                TrackMouseEvent,
-                GetKeyState,
-                TRACKMOUSEEVENT,
-                TME_LEAVE,
-                VK_CONTROL,
-                VK_SHIFT,
-                VK_MENU,
-                VK_LWIN,
-                VK_RWIN,
-                VK_ESCAPE,
-                VK_OEM_3,
-                VK_0,
-                VK_1,
-                VK_2,
-                VK_3,
-                VK_4,
-                VK_5,
-                VK_6,
-                VK_7,
-                VK_8,
-                VK_9,
-                VK_OEM_MINUS,
-                VK_OEM_PLUS,
-                VK_BACK,
-                VK_TAB,
-                VK_Q,
-                VK_W,
-                VK_E,
-                VK_R,
-                VK_T,
-                VK_Y,
-                VK_U,
-                VK_I,
-                VK_O,
-                VK_P,
-                VK_OEM_4,
-                VK_OEM_6,
-                VK_RETURN,
-                VK_A,
-                VK_S,
-                VK_D,
-                VK_F,
-                VK_G,
-                VK_H,
-                VK_J,
-                VK_K,
-                VK_L,
-                VK_OEM_1,
-                VK_OEM_7,
-                VK_OEM_5,
-                VK_Z,
-                VK_X,
-                VK_C,
-                VK_V,
-                VK_B,
-                VK_N,
-                VK_M,
-                VK_OEM_COMMA,
-                VK_OEM_PERIOD,
-                VK_OEM_2,
-                VK_LCONTROL,
-                VK_RCONTROL,
-                VK_LMENU,
-                VK_RMENU,
-                VK_LSHIFT,
-                VK_RSHIFT,
-                VK_SPACE,
-                VK_CAPITAL,
-                VK_F1,
-                VK_F2,
-                VK_F3,
-                VK_F4,
-                VK_F5,
-                VK_F6,
-                VK_F7,
-                VK_F8,
-                VK_F9,
-                VK_F10,
-                VK_F11,
-                VK_F12,
-                VK_SNAPSHOT,
-                VK_SCROLL,
-                VK_PAUSE,
-                VK_INSERT,
-                VK_DELETE,
-                VK_HOME,
-                VK_END,
-                VK_PRIOR,
-                VK_NEXT,
-                VK_NUMPAD0,
-                VK_NUMPAD1,
-                VK_NUMPAD2,
-                VK_NUMPAD3,
-                VK_NUMPAD4,
-                VK_NUMPAD5,
-                VK_NUMPAD6,
-                VK_NUMPAD7,
-                VK_NUMPAD8,
-                VK_NUMPAD9,
-                VK_SUBTRACT,
-                VK_ADD,
-                VK_DECIMAL,
-                VK_MULTIPLY,
-                VK_DIVIDE,
-                VK_NUMLOCK,
-                VK_UP,
-                VK_DOWN,
-                VK_LEFT,
-                VK_RIGHT,
-            },
-            Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea,
-            Win32::System::LibraryLoader::GetModuleHandleW,
         },
-        
         event::*,
         area::Area,
-        os::windows::win32_app::encode_wide,
-        os::windows::win32_app::FALSE,
-        os::windows::win32_event::*,
-        os::windows::win32_app::get_win32_app_global,
+        os::windows::{
+            win32_app::{
+                Win32App,
+                encode_wide,
+                FALSE,
+                get_win32_app_global,
+            },
+            win32_event::*,
+            droptarget::*,
+        },
         window::WindowId,
         cx::*,
         cursor::MouseCursor,
     },
 };
 
-#[derive(Clone)]
+// Copied from Microsoft so it refers to the right IDropTarget
+#[allow(non_snake_case)]
+pub unsafe fn RegisterDragDrop<P0, P1>(hwnd: P0, pdroptarget: P1) -> coreResult<()>
+where
+    P0: IntoParam<HWND>,
+    P1: IntoParam<IDropTarget>,
+{
+    ::windows_targets::link!("ole32.dll" "system" fn RegisterDragDrop(hwnd : HWND, pdroptarget : * mut::core::ffi::c_void) -> HRESULT);
+    RegisterDragDrop(hwnd.into_param().abi(), pdroptarget.into_param().abi()).ok()
+}
+
+//#[derive(Clone)]
 pub struct Win32Window {
     pub window_id: WindowId,
     pub last_window_geom: WindowGeom,
@@ -253,28 +298,17 @@ pub struct Win32Window {
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: DVec2,
     pub ignore_wmsize: usize,
-    pub hwnd: Option<HWND>,
-    pub track_mouse_event: bool
+    pub hwnd: HWND,
+    pub track_mouse_event: bool,
 }
 
 impl Win32Window {
     
-    pub fn new(window_id: WindowId) -> Win32Window {
-        Win32Window {
-            window_id,
-            mouse_buttons_down: 0,
-            last_window_geom: WindowGeom::default(),
-            last_key_mod: KeyModifiers::default(),
-            ime_spot: DVec2::default(),
-            current_cursor: MouseCursor::Default,
-            last_mouse_pos: DVec2::default(),
-            ignore_wmsize: 0,
-            hwnd: None,
-            track_mouse_event: false
-        }
-    }
-    
-    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>) {
+    // 2-stage initialization (new and init) to connect GWLP_USERDATA 
+
+    // create window structure and register drag/drop
+    pub fn new(window_id: WindowId,title: &str, position: Option<DVec2>) -> Win32Window {
+
         let title = encode_wide(title);
         
         let style = WS_SIZEBOX
@@ -289,41 +323,55 @@ impl Win32Window {
             | WS_EX_APPWINDOW
             | WS_EX_ACCEPTFILES;
         
-        unsafe {
-            
-            let (x, y) = if let Some(position) = position {
-                (position.x as i32, position.y as i32)
-            }
-            else {
-                (CW_USEDEFAULT, CW_USEDEFAULT)
-            };
-            
-            let hwnd = CreateWindowExW(
-                style_ex,
-                PCWSTR(get_win32_app_global().window_class_name.as_ptr()),
-                PCWSTR(title.as_ptr()),
-                style,
-                x,
-                y,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                None,
-                None,
-                GetModuleHandleW(None).unwrap(),
-                None,
-            );
-            
-            self.hwnd = Some(hwnd);
-            
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const _ as isize);
-
-            //RegisterDragDrop(hwnd, self as *const IDropTarget);
-            
-            self.set_outer_size(size);
-            
-            get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
-            get_win32_app_global().all_windows.push(hwnd);
+        let (x, y) = if let Some(position) = position {
+            (position.x as i32, position.y as i32)
         }
+        else {
+            (CW_USEDEFAULT, CW_USEDEFAULT)
+        };
+
+        let hwnd = unsafe { CreateWindowExW(
+            style_ex,
+            PCWSTR(get_win32_app_global().window_class_name.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            style,
+            x,
+            y,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            None,
+            None,
+            GetModuleHandleW(None).unwrap(),
+            None,
+        ) };
+
+        // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
+        let drop_target: IDropTarget = DropTarget { drag_item: RefCell::new(None),hwnd, }.into();
+        unsafe { RegisterDragDrop(hwnd, &drop_target).unwrap() };
+
+        Win32Window {
+            window_id,
+            mouse_buttons_down: 0,
+            last_window_geom: WindowGeom::default(),
+            last_key_mod: KeyModifiers::default(),
+            ime_spot: DVec2::default(),
+            current_cursor: MouseCursor::Default,
+            last_mouse_pos: DVec2::default(),
+            ignore_wmsize: 0,
+            hwnd,
+            track_mouse_event: false,
+        }
+    }
+
+    // initialize GWLP_USERDATA and registration of global stuff, and set outer size
+    pub fn init(&mut self,size: DVec2) {
+
+        unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, self as *const _ as isize) };
+
+        get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd);
+        get_win32_app_global().all_windows.push(self.hwnd);
+
+        self.set_outer_size(size);
     }
     
     pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
@@ -431,6 +479,10 @@ impl Win32Window {
                 return LRESULT(1)
             },
             WM_MOUSEMOVE => {
+                if get_win32_app_global().current_internal_drag_item.is_some() || 
+                    get_win32_app_global().start_dragging_items.is_some(){
+                    return LRESULT(0)
+                }
                 if !window.track_mouse_event {
                     window.track_mouse_event = true;
                     let mut tme = TRACKMOUSEEVENT {
@@ -447,6 +499,10 @@ impl Win32Window {
                 )
             },
             WM_MOUSELEAVE => {
+                if get_win32_app_global().current_internal_drag_item.is_some() || 
+                    get_win32_app_global().start_dragging_items.is_some(){
+                    return LRESULT(0)
+                }
                 window.track_mouse_event = false;
                 window.send_mouse_move(
                     window.last_mouse_pos,
@@ -458,7 +514,11 @@ impl Win32Window {
                 let delta = (wparam.0 >> 16) as u16 as i16 as f64;
                 window.send_scroll(DVec2 {x: 0.0, y: -delta}, Self::get_key_modifiers(), true);
             },
-            WM_LBUTTONDOWN => window.send_mouse_down(0, Self::get_key_modifiers()),
+            WM_LBUTTONDOWN => {
+                // hack for drag/drop: save which window was last clicked on in win32_app
+                get_win32_app_global().currently_clicked_window_id = Some(window.window_id);
+                window.send_mouse_down(0, Self::get_key_modifiers());
+            },
             WM_LBUTTONUP => window.send_mouse_up(0, Self::get_key_modifiers()),
             WM_RBUTTONDOWN => window.send_mouse_down(1, Self::get_key_modifiers()),
             WM_RBUTTONUP => window.send_mouse_up(1, Self::get_key_modifiers()),
@@ -572,19 +632,6 @@ impl Win32Window {
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
             },
-            /*WM_USER => { 
-                let signals = if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
-                    let mut signals = HashSet::new();
-                    std::mem::swap(&mut *sigs, &mut signals);
-                    signals
-                }
-                else{
-                    panic!()
-                };
-                window.do_callback(vec![
-                    Win32Event::Signal(SignalEvent {signals})
-                ]);
-            }, */
             WM_CLOSE => { // close requested
                 let accept_close = Rc::new(Cell::new(true));
                 window.do_callback(Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
@@ -602,8 +649,137 @@ impl Win32Window {
                     })
                 );
             },
-            WM_DROPFILES => { // one or more files are being dropped onto the window
-                crate::log!("WM_DROPFILES {:?}",wparam);
+
+            // from DropTarget
+            WM_DROPTARGET => {
+
+                // restore the Box<>
+                let message = unsafe { Box::from_raw(lparam.0 as *mut DropTargetMessage) };
+
+                match *message {
+
+                    //DropTargetMessage::Enter(_flags,mut _point,_effect,_drag_item) => {
+                         /*// crate::log!("DRAG ENTER");
+                        // decode message
+                        unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
+                        let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
+                        else if (effect & DROPEFFECT_MOVE) != DROPEFFECT(0) { DragResponse::Move }
+                        else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
+                        else { DragResponse::None };
+
+                        // if there is a current internal drag item, use that one instead of what came with the message
+                        let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
+                        let drag_item = if let Some(internal_drag_item) = current_internal_drag_item {
+                            get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
+                            internal_drag_item
+                        } else {
+                            drag_item
+                        };
+
+                        // send to makepad
+                        window.do_callback(
+                            Win32Event::Drag(
+                                DragEvent {
+                                    modifiers: KeyModifiers {
+                                        shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
+                                        control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
+                                        alt: false,  // TODO
+                                        logo: false,  // Windows doesn't have a logo button
+                                    },
+                                    handled: Cell::new(false),
+                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    items: Rc::new(vec![drag_item]),
+                                    response: Rc::new(Cell::new(response)),
+                                }
+                            )
+                        );*/
+                   // },
+
+                    DropTargetMessage::Leave => {
+                        // If anything we should send a drag with an out of window coordinate.
+                        
+                        // make sure there is no more internal drag item
+                       // get_win32_app_global().current_internal_drag_item.replace(None);
+                        // send to makepad
+                        //window.do_callback(Win32Event::DragEnd);
+                    },
+                    DropTargetMessage::Enter(flags,mut point,effect,drag_item) |
+                    DropTargetMessage::Over(flags,mut point,effect,drag_item) => {
+                        
+                        // decode message
+                        unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
+                        let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
+                        else if (effect & DROPEFFECT_MOVE) != DROPEFFECT(0) { DragResponse::Move }
+                        else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
+                        else { DragResponse::None };
+
+                        // if there is a current internal drag item, use that one instead of what came with the message
+                        //let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
+                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.clone() {
+                            //get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
+                            internal_drag_item
+                        } else {
+                            drag_item
+                        };
+                        
+                        // send to makepad
+                        window.do_callback(
+                            Win32Event::Drag(
+                                DragEvent {
+                                    modifiers: KeyModifiers {
+                                        shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
+                                        control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
+                                        alt: false,  // TODO
+                                        logo: false,  // Windows doesn't have a logo button
+                                    },
+                                    handled: Cell::new(false),
+                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    items: Rc::new(vec![drag_item]),
+                                    response: Rc::new(Cell::new(response)),
+                                }
+                            )
+                        );        
+                    }, 
+
+                    DropTargetMessage::Drop(flags,mut point,_effect,drag_item) => {
+
+                        // decode message
+                        unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
+
+                        // if there is a current internal drag item, use that one instead of what came with the message
+                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.clone() {
+                            // leave the current internal drag item empty
+                            internal_drag_item
+                        } else {
+                            drag_item
+                        };
+                        
+                        //log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,flags.0,response,drag_item);
+
+                        // send to makepad
+                        window.do_callback(
+                            Win32Event::Drop(
+                                DropEvent {
+                                    modifiers: KeyModifiers {
+                                        shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
+                                        control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
+                                        alt: false,  // TODO
+                                        logo: false,  // Windows doesn't have a logo button
+                                    },
+                                    handled: Cell::new(false),
+                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    items: Rc::new(vec![drag_item]),
+                                }
+                            )
+                        );
+                        if get_win32_app_global().current_internal_drag_item.is_some(){
+                            get_win32_app_global().current_internal_drag_item = None;
+                            window.do_callback(
+                                Win32Event::DragEnd
+                            );        
+                        }
+                    },
+                }
             },
 
             _ => {
@@ -664,33 +840,33 @@ impl Win32Window {
     
     pub fn restore(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_RESTORE);
-            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
+            ShowWindow(self.hwnd, SW_RESTORE);
+            PostMessageW(self.hwnd, WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
     
     pub fn maximize(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_MAXIMIZE);
-            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
+            ShowWindow(self.hwnd, SW_MAXIMIZE);
+            PostMessageW(self.hwnd, WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
     
     pub fn close_window(&self) {
         unsafe {
-            DestroyWindow(self.hwnd.unwrap()).unwrap();
+            DestroyWindow(self.hwnd).unwrap();
         }
     }
     
     pub fn show(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_SHOW);
+            ShowWindow(self.hwnd, SW_SHOW);
         }
     }
     
     pub fn minimize(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), SW_MINIMIZE);
+            ShowWindow(self.hwnd, SW_MINIMIZE);
         }
     }
     
@@ -698,7 +874,7 @@ impl Win32Window {
         unsafe {
             if topmost {
                 SetWindowPos(
-                    self.hwnd.unwrap(),
+                    self.hwnd,
                     HWND_TOPMOST,
                     0,
                     0,
@@ -709,7 +885,7 @@ impl Win32Window {
             }
             else {
                 SetWindowPos(
-                    self.hwnd.unwrap(),
+                    self.hwnd,
                     HWND_NOTOPMOST,
                     0,
                     0,
@@ -723,7 +899,7 @@ impl Win32Window {
     
     pub fn get_is_topmost(&self) -> bool {
         unsafe {
-            let ex_style = GetWindowLongPtrW(self.hwnd.unwrap(), GWL_EXSTYLE);
+            let ex_style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
             if ex_style as u32 & WS_EX_TOPMOST.0 != 0 {
                 return true
             }
@@ -749,7 +925,7 @@ impl Win32Window {
             let wp: mem::MaybeUninit<WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
             let mut wp = wp.assume_init();
             wp.length = mem::size_of::<WINDOWPLACEMENT>() as u32;
-            GetWindowPlacement(self.hwnd.unwrap(), &mut wp).unwrap();
+            GetWindowPlacement(self.hwnd, &mut wp).unwrap();
             if wp.showCmd == SW_MAXIMIZE.0 as u32 {
                 return true
             }
@@ -768,7 +944,7 @@ impl Win32Window {
     pub fn get_position(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut rect).unwrap();
+            GetWindowRect(self.hwnd, &mut rect).unwrap();
             DVec2 {x: rect.left as f64, y: rect.top as f64}
         }
     }
@@ -776,7 +952,7 @@ impl Win32Window {
     pub fn get_inner_size(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetClientRect(self.hwnd.unwrap(), &mut rect).unwrap();
+            GetClientRect(self.hwnd, &mut rect).unwrap();
             let dpi = self.get_dpi_factor();
             DVec2 {x: (rect.right - rect.left) as f64 / dpi, y: (rect.bottom - rect.top)as f64 / dpi}
         }
@@ -785,7 +961,7 @@ impl Win32Window {
     pub fn get_outer_size(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut rect).unwrap();
+            GetWindowRect(self.hwnd, &mut rect).unwrap();
             DVec2 {x: (rect.right - rect.left) as f64, y: (rect.bottom - rect.top)as f64}
         }
     }
@@ -793,10 +969,10 @@ impl Win32Window {
     pub fn set_position(&mut self, pos: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
-                self.hwnd.unwrap(),
+                self.hwnd,
                 (pos.x * dpi) as i32,
                 (pos.y * dpi) as i32,
                 window_rect.right - window_rect.left,
@@ -809,10 +985,10 @@ impl Win32Window {
     pub fn set_outer_size(&self, size: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
-                self.hwnd.unwrap(),
+                self.hwnd,
                 window_rect.left,
                 window_rect.top,
                 (size.x * dpi) as i32,
@@ -825,12 +1001,12 @@ impl Win32Window {
     pub fn set_inner_size(&self, size: DVec2) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetWindowRect(self.hwnd.unwrap(), &mut window_rect).unwrap();
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
             let mut client_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-            GetClientRect(self.hwnd.unwrap(), &mut client_rect).unwrap();
+            GetClientRect(self.hwnd, &mut client_rect).unwrap();
             let dpi = self.get_dpi_factor();
             MoveWindow(
-                self.hwnd.unwrap(),
+                self.hwnd,
                 window_rect.left,
                 window_rect.top,
                 (size.x * dpi) as i32
@@ -843,11 +1019,11 @@ impl Win32Window {
     }
     
     pub fn get_dpi_factor(&self) -> f64 {
-        get_win32_app_global().dpi_functions.hwnd_dpi_factor(self.hwnd.unwrap()) as f64
+        get_win32_app_global().dpi_functions.hwnd_dpi_factor(self.hwnd) as f64
     }
     
     pub fn do_callback(&mut self, event: Win32Event) {
-        get_win32_app_global().do_callback(event);
+        Win32App::do_callback(event);
     }
     
     pub fn send_change_event(&mut self) {
@@ -878,7 +1054,7 @@ impl Win32Window {
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
         if self.mouse_buttons_down == 0 {
-            unsafe {SetCapture(self.hwnd.unwrap());}
+            unsafe {SetCapture(self.hwnd);}
         }
         self.mouse_buttons_down += 1;
         self.do_callback(Win32Event::MouseDown(MouseDownEvent {

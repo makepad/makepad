@@ -501,6 +501,9 @@ impl Dock {
     }
     
     fn handle_drop(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, is_move: bool) -> bool {
+
+        log!("handle_drop");
+
         if let Some(pos) = self.find_drop_position(cx, abs) {
             // ok now what
             // we have a pos
@@ -610,6 +613,7 @@ impl Dock {
     
     fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String) {
         // lets add a tab
+
         if self.handle_drop(cx, abs, item, false) {
             self.dock_items.insert(item, DockItem::Tab {
                 name,
@@ -968,6 +972,7 @@ impl DockRef {
     }
     
     pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String) {
+
         if let Some(mut dock) = self.borrow_mut() {
             dock.create_tab(cx, parent, item, kind, name);
         }
@@ -979,7 +984,6 @@ impl DockRef {
         }
     }
     
-    
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }
@@ -987,4 +991,3 @@ impl DockRef {
 
 #[derive(Clone, WidgetSet)]
 pub struct DockSet(WidgetSet);
-

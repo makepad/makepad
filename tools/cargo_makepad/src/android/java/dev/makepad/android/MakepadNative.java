@@ -21,11 +21,14 @@ public class MakepadNative {
     public native static void surfaceOnKeyDown(int keycode, int meta_state);
     public native static void surfaceOnKeyUp(int keycode);
     public native static void surfaceOnCharacter(int character);
-    public native static void surfaceOnResizeTextIME(int keyboard_height);
+    public native static void surfaceOnResizeTextIME(int keyboard_height, boolean is_open);
 
     // networking
     public native static void onHttpResponse(long id, long metadata_id, int status_code, String headers, byte[] body);
     public native static void onHttpRequestError(long id, long metadata_id, String error);
+
+    // midi
+    public native static void onMidiDeviceOpened(String name, Object midi_device);
 
     // video decoding
     public static native void onVideoDecodingInitialized(long videoId, int frameRate, int videoWidth, int videoHeight, String colorFormat, long duration);
