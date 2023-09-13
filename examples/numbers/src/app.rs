@@ -6,7 +6,7 @@ live_design!{
     import makepad_example_numbers::number_grid::NumberGrid
 
     App = {{App}} {
-        ui:<DesktopWindow>{
+        ui:<Window>{
             <ScrollYView>{
                 draw_bg:{color:#5}
                 <NumberGrid>{

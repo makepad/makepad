@@ -11,7 +11,7 @@ live_design!{
     
     FONT_SIZE_H2 = 9.5
     
-    HEIGHT_AUDIOVIZ = 150
+    HEIGHT_AUDIOVIZ = 50
     
     SSPACING_0 = 0.0
     SSPACING_1 = 4.0
