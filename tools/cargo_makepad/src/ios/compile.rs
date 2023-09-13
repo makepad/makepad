@@ -78,7 +78,7 @@ pub struct IosBuildResult{
 }
 
 
-pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosBuildResult, String> {
+pub fn build(org: &str, product:&str, args: &[String], ios_target:IosTarget) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     
     let cwd = std::env::current_dir().unwrap();
@@ -102,9 +102,9 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
     
     // alright lets make the .app file with manifest
     let plist = PlistValues{
-        identifier: app_id.to_string(),//format!("dev.makepad.{}", build_crate),
-        display_name: app_id.split(".").last().unwrap().to_string(),//build_crate.to_string(),
-        name: app_id.split(".").last().unwrap().to_string(),//build_crate.to_string(),
+        identifier: format!("{org}.{product}").to_string(),
+        display_name: product.to_string(),
+        name: product.to_string(),
         executable: build_crate.to_string(),
         version: "1".to_string(),
     };    
@@ -139,9 +139,12 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
     })
 }
 
-pub fn run_sim(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
-
-    let result = build(app_id, args, ios_target)?;
+pub fn run_sim(signing:SigningArgs, args: &[String], ios_target:IosTarget) -> Result<(), String> {
+    if signing.org.is_none() || signing.product.is_none(){
+        return Err("Please set --org=org --product=app on the commandline inbetween ios and run-sim.".to_string());
+    }
+    
+    let result = build(&signing.org.unwrap_or("orgname".to_string()),&signing.product.unwrap_or("productname".to_string()), args, ios_target)?;
 
     let cwd = std::env::current_dir().unwrap();
     shell_env(&[], &cwd ,"xcrun", &[
@@ -164,66 +167,168 @@ pub fn run_sim(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<()
 
 #[derive(Debug)]
 struct ProvisionData{
-    team: String,
+    team_ident: String,
     devices: Vec<String>,
     path: PathBuf,
 }
 
-fn parse_provision(path:PathBuf, app_id:&str)->Option<ProvisionData>{
-    // lets find app_id in the file
-    let bytes = std::fs::read(&path).unwrap();
-    let app_id_bytes = app_id.as_bytes();
-    for i in 0..(bytes.len() - app_id_bytes.len() + 1){
-        if bytes[i..(i+app_id_bytes.len())] == *app_id_bytes{
-            let team_prefix = "<key>ApplicationIdentifierPrefix</key>\n\t<array>\n\t<string>".as_bytes();
-            for i in 0..(bytes.len() - team_prefix.len() + 1){
-                if bytes[i..(i+team_prefix.len())] == *team_prefix{
-                    let team = std::str::from_utf8(&bytes[i+team_prefix.len()..i+team_prefix.len()+10]).unwrap().to_string();
-                    let device_prefix = "<key>ProvisionedDevices</key>\n\t<array>\n\t\t<string>".as_bytes();
-                    let mut devices = Vec::new();
-                    for i in 0..(bytes.len() - device_prefix.len() + 1) {
-                        if bytes[i..(i + device_prefix.len())] == *device_prefix {
-                            // loop through ProvisionedDevices array and add all uuids
-                            for j in i..(bytes.len() - device_prefix.len() + 1) {
-                                // break out of loop at end of array
-                                let array_end = "</array>".as_bytes();
-                                if bytes[j..(j + array_end.len())] == *array_end {
-                                    break;
-                                }   
-                                let str_open = "<string>".as_bytes();
-                                let mut open_idx = 0;
-                                let str_close = "</string>".as_bytes();
-                                let mut close_idx = 0;
-                                if bytes[j..(j+str_open.len())] == *str_open {
-                                    open_idx = j;
+
+
+struct XmlParser<'a>{
+    data: &'a[u8],
+    pos: usize,
+}
+
+#[derive(Debug)]
+enum XmlResult{
+    OpenTag(String),
+    CloseTag(String),
+    SelfCloseTag(String),
+    Data(String),
+}
+
+impl<'a> XmlParser<'a>{
+    fn new(data: &'a[u8])->Self{
+        Self{
+            data,
+            pos:0
+        }
+    }
+    fn next(&mut self)->Result<XmlResult,()>{
+        // consume all whitespaces
+        #[derive(Debug)]
+        enum State{
+            WhiteSpace,
+            TagName(bool, bool, usize),
+            Data(usize),
+        }
+        let mut state = State::WhiteSpace;
+        while self.pos < self.data.len(){
+            match state{
+                State::WhiteSpace=>{
+                    if  self.data[self.pos] == ' ' as u8 || self.data[self.pos] == '\t' as u8 ||  self.data[self.pos] == '\n' as u8{
+                        self.pos += 1;
+                    }
+                    else if  self.data[self.pos] == '<' as u8{
+                        self.pos += 1;
+                        state = State::TagName(false, false, self.pos)
+                    }
+                    else{
+                        state = State::Data(self.pos);
+                        self.pos += 1;
+                    }
+                }
+                State::TagName(is_close, self_closing, start)=>{
+                    if self.data[self.pos] == '/' as u8{
+                        if self.pos == start{
+                            state = State::TagName(true, false, start+1);
+                        }
+                        else{
+                            state = State::TagName(true, true, start);
+                        }
+                        self.pos += 1;
+                    }
+                    else if  self.data[self.pos] == '>' as u8{
+                        let end = if self_closing{self.pos - 1}else{self.pos};
+                        let name = std::str::from_utf8(&self.data[start..end]).unwrap().to_string();
+                        self.pos += 1;
+                        if is_close{
+                            if self_closing{
+                                return Ok(XmlResult::SelfCloseTag(name))
+                            }
+                            else{
+                                return Ok(XmlResult::CloseTag(name))
+                            }
+                        }
+                        else{
+                            return Ok(XmlResult::OpenTag(name))
+                        }
+                    }
+                    else{
+                        self.pos += 1;
+                    }
+                }
+                State::Data(start)=>{
+                    if  self.data[self.pos] == '<' as u8{
+                        let body = std::str::from_utf8(&self.data[start..self.pos]).unwrap().to_string();
+                        return Ok(XmlResult::Data(body))
+                    }
+                    else{
+                        self.pos +=1;
+                    }
+                }
+                
+            }
+        }
+        Err(())
+    }
+}
+impl ProvisionData{
+    fn parse(path:&PathBuf, app_id:&str)->Option<ProvisionData>{
+        let bytes = std::fs::read(&path).unwrap();
+        let mut devices = Vec::new();
+        let mut team_ident = None;
+        fn find_entitlements(bytes:&[u8])->Option<&[u8]>{
+            let head = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">";
+            let start_bytes = head.as_bytes();
+            for i in 0..(bytes.len() - start_bytes.len() + 1){
+                if bytes[i..(i+start_bytes.len())] == *start_bytes{
+                    return Some(&bytes[i+start_bytes.len()..])
+                }
+            }
+            None
+        }
+        
+        if let Some(xml) = find_entitlements(&bytes){
+            let mut xml_parser =  XmlParser::new(xml);
+            let mut stack = Vec::new();
+            let mut last_key = None;
+            while let Ok(xml) = xml_parser.next(){
+                //println!("{:?}", xml);
+                match xml{
+                    XmlResult::SelfCloseTag(_)=>{}
+                    XmlResult::OpenTag(tag)=>{
+                        stack.push(tag);
+                    }
+                    XmlResult::CloseTag(tag)=>{
+                        if stack.pop().unwrap() != tag{
+                            println!("ProvisionData parsing failed xml tag mismatch {}", tag);
+                        }
+                        if stack.len() == 0{
+                            break;
+                        }
+                    }
+                    XmlResult::Data(data)=>{
+                        if stack.last().unwrap() == "key"{
+                            last_key = Some(data);
+                        }
+                        else if let Some(last_key) = &last_key{
+                            match last_key.as_ref(){
+                                "ProvisionedDevices" => if stack.last().unwrap() == "string"{
+                                    devices.push(data);
                                 }
-                                for k in j..(bytes.len()) {
-                                    if bytes[k..(k + str_close.len())] == *str_close {
-                                        close_idx = k;
-                                        break;
+                                "TeamIdentifier" => if stack.last().unwrap() == "string"{
+                                    team_ident= Some(data);
+                                }
+                                "application-identifier"=>if stack.last().unwrap() == "string"{
+                                    if !data.contains(app_id){
+                                        return None
                                     }
                                 }
-                                if open_idx != 0 && close_idx != 0 {
-                                    let uuid = std::str::from_utf8(&bytes[open_idx + str_open.len()..close_idx]).unwrap().to_string();
-                                    devices.push(uuid);
-                                }
+                                _=>()
                             }
                         }
                     }
-
-                    return Some(ProvisionData{
-                        team,
-                        devices,
-                        path,
-                    });
                 }
             }
-            break;
         }
+        Some(ProvisionData{
+            devices,
+            team_ident: team_ident.unwrap(),
+            path: path.clone()
+        })
     }
-    None
 }
-
 
 fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
@@ -273,11 +378,28 @@ fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<String>, device_uuid: Option<String>, app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
-    let build_crate = get_build_crate_from_args(args)?;
-    let result = build(app_id, args, ios_target)?;
-    let cwd = std::env::current_dir().unwrap();
+#[derive(Default)]
+pub struct SigningArgs{
+    pub signing_identity: Option<String>, 
+    pub provisioning_profile: Option<String>, 
+    pub device_uuid: Option<String>,
+    pub org: Option<String>,
+    pub product: Option<String>
+}
 
+pub fn run_real(signing:SigningArgs, args: &[String], ios_target:IosTarget) -> Result<(), String> {
+    
+    if signing.org.is_none() || signing.product.is_none(){
+        return Err("Please set --org=org --product=app on the commandline inbetween ios and run-real, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
+    }
+    let org = signing.org.unwrap();
+    let product = signing.product.unwrap();
+    
+    let build_crate = get_build_crate_from_args(args)?;
+    let result = build(&org, &product, args, ios_target)?;
+    let cwd = std::env::current_dir().unwrap();
+    
+    
     // parse identities for code signing
     let security_result = shell_env_cap(&[], &cwd ,"security", &[
         "find-identity",
@@ -287,33 +409,35 @@ pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<S
 
     // select signing identity
     let found_identities: Vec<&str> = security_result.split("\n").collect();
-    let selected_identity = if let Some(signing_identity) = &signing_identity {
+    let selected_identity = if let Some(signing_identity) = &signing.signing_identity {
         // find passed in identity in security result
         &found_identities.iter().find(|i| i.contains(signing_identity)).unwrap()[5..45]
     } else if let Some(long_hex_id) = security_result.strip_prefix("  1) ") {
         // if no argument passed, take first identity found
         &long_hex_id[0..40]
-    } else {
+    } else { 
         return Err(format!("Error reading the signing identity security result #{}#", security_result)) 
     };
     println!("Selected signing identity {}", selected_identity);
     
     let home = std::env::var("HOME").unwrap();
     let profiles = std::fs::read_dir(format!("{}/Library/MobileDevice/Provisioning Profiles/", home)).unwrap();
+    
+    
     let mut found_profiles = Vec::new();
     for profile in profiles {
         // lets read it
         let profile_path = profile.unwrap().path();
-        if let Some(prov) = parse_provision(profile_path, app_id){
+        if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{product}")){
             found_profiles.push(prov);
         }
-        else if let Some(prov) = parse_provision(profile_path, &format("{}.*", app_id.split(".").first().unwrap().to_string())){
+        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.*", org)){
             found_profiles.push(prov);
         }
     }
 
     // select provisioning profile
-    let provision = if let Some(provisioning_profile) = &provisioning_profile {
+    let provision = if let Some(provisioning_profile) = &signing.provisioning_profile {
         // find passed in provisioning profile
         found_profiles.iter()
             .find(|i| i.path.to_str().unwrap().contains(provisioning_profile))
@@ -323,12 +447,12 @@ pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<S
         // if no argument passed, take first profile found
         &found_profiles[0]
     } else {
-        return Err(format!("Could not find a matching mobile provision profile for name {}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again.", app_id))
+        return Err(format!("Could not find a matching mobile provision profile for name {org}.{product}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again."))
     };
-    println!("Selected provisioning profile {:?}, for team {}", provision.path, provision.team);
+    println!("Selected provisioning profile {:?}, for team_ident {}", provision.path, provision.team_ident);
 
     // select device
-    let selected_device = if let Some(device_uuid) = &device_uuid {
+    let selected_device = if let Some(device_uuid) = &signing.device_uuid {
         // find passed in device in selected profile
         provision.devices.iter()
             .find(|i| i.contains(device_uuid))
@@ -346,8 +470,8 @@ pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<S
     // we can also find the team ids from there to build the scent
     // and the device id as well
     let scent = Scent{
-        app_id: format!("{}.{}", provision.team, app_id),
-        team_id: provision.team.to_string()
+        app_id: format!("{}.{}.{}", provision.team_ident, org, product),
+        team_id: provision.team_ident.to_string()
     };
     
     let scent_file = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.scent", ios_target.toolchain()));
