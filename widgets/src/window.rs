@@ -276,7 +276,19 @@ impl Widget for Window {
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get() {
-            self.view.draw_widget(cx) ?;
+            match self.view.draw_widget(cx){
+                Err(result)=>{
+                    if let Some(step) = self.view.is_in_draw_step(){
+                        log!("IN STEP: {}", step);
+                        self.draw_walk_widget(cx, _walk)?;
+                    }
+                    else{
+                        return Err(result);
+                    }
+                }
+                Ok(_)=>()
+            }
+            
             self.draw_state.end();
             self.end(cx);
         }
