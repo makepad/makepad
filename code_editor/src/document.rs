@@ -35,6 +35,7 @@ impl Document {
         let session = Self(Rc::new(DocumentInner {
             history: RefCell::new(History::from(text)),
             layout: RefCell::new(DocumentLayout {
+				indent_state: (0..line_count).map(|_| None).collect(),
                 tokens,
                 inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
                 block_inlays: Vec::new(),
@@ -42,6 +43,7 @@ impl Document {
             tokenizer: RefCell::new(Tokenizer::new(line_count)),
             edit_senders: RefCell::new(HashMap::new()),
         }));
+		session.update_indent_state();
         session.0.tokenizer.borrow_mut().update(
             &session.0.history.borrow().as_text(),
             &mut session.0.layout.borrow_mut().tokens,
@@ -111,7 +113,7 @@ impl Document {
         }
         drop(history);
         self.autoindent(&line_ranges, settings.tab_column_count, &mut edits);
-        self.apply_edits(session_id, None, &edits);
+        self.update_after_edit(session_id, None, &edits);
     }
 
     pub fn edit_lines(
@@ -142,7 +144,7 @@ impl Document {
                 self.edit_lines_internal(line, &mut edits, &mut f);
             }
         }
-        self.apply_edits(origin_id, None, &edits);
+        self.update_after_edit(origin_id, None, &edits);
     }
 
     pub fn add_session(
@@ -166,12 +168,9 @@ impl Document {
         indent_column_count: usize,
         edits: &mut Vec<Edit>,
     ) {
-        fn next_line_indentation_column_count(
-            line: &str,
-            indent_column_count: usize,
-        ) -> Option<usize> {
-            if let Some(indentation) = line.indent() {
-                let mut indentation_column_count = indentation.column_count();
+        fn next_line_indent_column_count(line: &str, tab_column_count: usize) -> Option<usize> {
+            if let Some(indent) = line.indent() {
+                let mut indent_column_count = indent.column_count();
                 if line
                     .chars()
                     .rev()
@@ -186,9 +185,9 @@ impl Document {
                     })
                     .unwrap_or(false)
                 {
-                    indentation_column_count += indent_column_count;
+                    indent_column_count += tab_column_count;
                 };
-                Some(indentation_column_count)
+                Some(indent_column_count)
             } else {
                 None
             }
@@ -209,7 +208,7 @@ impl Document {
                 [..line_range.start]
                 .iter()
                 .rev()
-                .find_map(|line| next_line_indentation_column_count(line, indent_column_count))
+                .find_map(|line| next_line_indent_column_count(line, indent_column_count))
                 .unwrap_or(0);
             for line in line_range {
                 if self.as_text().as_lines()[line]
@@ -230,7 +229,7 @@ impl Document {
                 self.edit_lines_internal(line, edits, |line| {
                     crate::state::reindent(line, |_| desired_indentation_column_count)
                 });
-                if let Some(next_line_indentation_column_count) = next_line_indentation_column_count(
+                if let Some(next_line_indentation_column_count) = next_line_indent_column_count(
                     &self.as_text().as_lines()[line],
                     indent_column_count,
                 ) {
@@ -289,7 +288,7 @@ impl Document {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().undo(selections, &mut changes);
         if let Some(selections) = selections {
-            self.apply_edits(origin_id, Some(selections), &changes);
+            self.update_after_edit(origin_id, Some(selections), &changes);
             true
         } else {
             false
@@ -300,19 +299,47 @@ impl Document {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().redo(selections, &mut changes);
         if let Some(selections) = selections {
-            self.apply_edits(origin_id, Some(selections), &changes);
+            self.update_after_edit(origin_id, Some(selections), &changes);
             true
         } else {
             false
         }
     }
 
-    fn apply_edits(&self, origin_id: SessionId, selections: Option<SelectionSet>, edits: &[Edit]) {
+    fn update_after_edit(
+        &self,
+        origin_id: SessionId,
+        selections: Option<SelectionSet>,
+        edits: &[Edit],
+    ) {
+		let mut layout = self.0.layout.borrow_mut();
+		for edit in edits {
+			match edit.change {
+				Change::Insert(position, ref text) => {
+					layout.indent_state[position.line_index] = None;
+					let line_count = text.length().line_count;
+					if line_count > 0 {
+						let line_index = position.line_index + 1;
+						layout.indent_state.splice(line_index..line_index, (0..line_count).map(|_| None));
+					}
+				}
+				Change::Delete(start, length) => {
+					layout.indent_state[start.line_index] = None;
+					if length.line_count > 0 {
+						let line_start = start.line_index + 1;
+						let line_end = line_start + length.line_count;
+						layout.indent_state.drain(line_start..line_end);
+					}
+				}
+			}
+		}
+		drop(layout);
         for edit in edits {
-            self.apply_change_to_tokens(&edit.change);
+			self.apply_change_to_tokens(&edit.change);
             self.apply_change_to_inline_inlays(&edit.change, edit.drift);
-            self.0.tokenizer.borrow_mut().apply_change(&edit.change);
+			self.0.tokenizer.borrow_mut().apply_change(&edit.change);
         }
+		self.update_indent_state();
         self.0.tokenizer.borrow_mut().update(
             self.0.history.borrow().as_text(),
             &mut self.0.layout.borrow_mut().tokens,
@@ -534,13 +561,64 @@ impl Document {
             }
         }
     }
+
+    fn update_indent_state(&self) {
+        let mut layout = self.0.layout.borrow_mut();
+        let indent_state = &mut layout.indent_state;
+        let history = self.0.history.borrow();
+        let lines = history.as_text().as_lines();
+        let mut current_indent_column_count = 0;
+        for line_index in 0..lines.len() {
+            match indent_state[line_index] {
+                Some(IndentState::NonEmpty(_, next_indent_column_count)) => {
+                    current_indent_column_count = next_indent_column_count;
+                }
+                _ => {
+                    indent_state[line_index] = Some(
+						match lines[line_index].indent() {
+							Some(indent) => {
+								let indent_column_count = indent.column_count();
+								let mut next_indent_column_count = indent_column_count;
+								if lines[line_index]
+									.chars()
+									.rev()
+									.find_map(|char| {
+										if char.is_opening_delimiter() {
+											return Some(true);
+										}
+										if char.is_closing_delimiter() {
+											return Some(false);
+										}
+										None
+									})
+									.unwrap_or(false)
+								{
+									next_indent_column_count += 4;
+								}
+								current_indent_column_count = next_indent_column_count;
+								IndentState::NonEmpty(indent_column_count, next_indent_column_count)
+							}
+							None => IndentState::Empty(current_indent_column_count)
+						}
+					)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct DocumentLayout {
+    pub indent_state: Vec<Option<IndentState>>,
     pub tokens: Vec<Vec<Token>>,
     pub inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
     pub block_inlays: Vec<(usize, BlockInlay)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum IndentState {
+    Empty(usize),
+    NonEmpty(usize, usize),
 }
 
 #[derive(Debug)]
