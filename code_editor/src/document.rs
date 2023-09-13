@@ -110,7 +110,7 @@ impl Document {
             prev_edit_start = edit_start;
         }
         drop(history);
-        self.autoindent(&line_ranges, settings.indent_column_count, &mut edits);
+        self.autoindent(&line_ranges, settings.tab_column_count, &mut edits);
         self.apply_edits(session_id, None, &edits);
     }
 
@@ -170,7 +170,7 @@ impl Document {
             line: &str,
             indent_column_count: usize,
         ) -> Option<usize> {
-            if let Some(indentation) = line.leading_whitespace() {
+            if let Some(indentation) = line.indent() {
                 let mut indentation_column_count = indentation.column_count();
                 if line
                     .chars()

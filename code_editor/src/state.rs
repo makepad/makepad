@@ -116,14 +116,11 @@ impl Session {
         let text = self.document.as_text();
         let lines = text.as_lines();
         for line in 0..lines.len() {
-            let indent_level = lines[line]
-                .leading_whitespace()
-                .unwrap_or("")
-                .column_count()
-                / self.settings.indent_column_count;
+            let indent_level = lines[line].indent().unwrap_or("").column_count()
+                / self.settings.tab_column_count;
             if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
                 self.layout.borrow_mut().fold_column[line] =
-                    self.settings.fold_level * self.settings.indent_column_count;
+                    self.settings.fold_level * self.settings.tab_column_count;
                 self.unfolding_lines.remove(&line);
                 self.folding_lines.insert(line);
             }
@@ -371,9 +368,9 @@ impl Session {
         self.document
             .edit_lines(self.id, EditKind::Indent, &self.selections, |line| {
                 reindent(line, |indentation_column_count| {
-                    (indentation_column_count + self.settings.indent_column_count)
-                        / self.settings.indent_column_count
-                        * self.settings.indent_column_count
+                    (indentation_column_count + self.settings.tab_column_count)
+                        / self.settings.tab_column_count
+                        * self.settings.tab_column_count
                 })
             });
     }
@@ -382,8 +379,8 @@ impl Session {
         self.document
             .edit_lines(self.id, EditKind::Outdent, &self.selections, |line| {
                 reindent(line, |indentation_column_count| {
-                    indentation_column_count.saturating_sub(1) / self.settings.indent_column_count
-                        * self.settings.indent_column_count
+                    indentation_column_count.saturating_sub(1) / self.settings.tab_column_count
+                        * self.settings.tab_column_count
                 })
             });
     }
@@ -665,7 +662,7 @@ pub struct SessionLayout {
 }
 
 pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, String) {
-    let indentation = string.leading_whitespace().unwrap_or("");
+    let indentation = string.indent().unwrap_or("");
     let indentation_column_count = indentation.column_count();
     let new_indentation_column_count = f(indentation_column_count);
     let new_indentation = new_indentation(new_indentation_column_count);
