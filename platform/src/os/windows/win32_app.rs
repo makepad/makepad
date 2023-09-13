@@ -3,10 +3,12 @@ use {
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
+        cell::Cell,
     },
     crate::{
         log,
         error,
+        DVec2,
         windows::{
             core::HRESULT,
             core::PCWSTR,
@@ -72,7 +74,6 @@ use {
                     HWND,
                     BOOL,
                     FARPROC,
-                    GlobalFree,
                 },
                 System::{
                     Threading::ExitProcess,
@@ -104,10 +105,7 @@ use {
                 },
             },
         },
-        event::{
-            TimerEvent,
-            DragItem,
-        },
+        event::*,
         cursor::MouseCursor,
         os::{
             cx_native::EventFlow,
@@ -119,6 +117,7 @@ use {
                 win32_window::Win32Window,
             },
         },
+        window::WindowId,
     },
 };
 pub const FALSE: BOOL = BOOL(0);
@@ -159,6 +158,8 @@ pub struct Win32App {
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: MouseCursor,
+    pub current_internal_drag_item: Cell<Option<DragItem>>,
+    pub currently_clicked_window_id: Cell<Option<WindowId>>,
 }
 
 #[derive(Clone)]
@@ -218,6 +219,8 @@ impl Win32App {
             timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
             current_cursor: MouseCursor::Default,
+            current_internal_drag_item: Cell::new(None),
+            currently_clicked_window_id: Cell::new(None),
         };
         win32_app.dpi_functions.become_dpi_aware();
         
@@ -394,10 +397,13 @@ impl Win32App {
             match item {
                 DragItem::FilePath { path,internal_id, } => {
 
-                    log!("about to drag {} with internal ID {:?}",path,internal_id);
+                    log!("win32: about to drag path \"{}\" with internal ID {:?}",path,internal_id);
 
                     // only drag if something is there
                     if (path.len() > 0) || internal_id.is_some() {
+
+                        // save this drag item
+                        self.current_internal_drag_item.replace(Some(DragItem::FilePath { path: path.clone(),internal_id: internal_id.clone(), }));
 
                         // encode filename
                         let mut encoded_filename: Vec<u16> = path.encode_utf16().collect();
@@ -406,35 +412,24 @@ impl Win32App {
                         // only one filename
                         encoded_filename.push(0);
 
-                        // create a Windows global memory buffer that can contain DROPFILES, the live id and this filename with zeros
-                        let size_in_bytes = 28 + encoded_filename.len() * 2;
-                        log!("size_in_bytes = {}",size_in_bytes);
-
+                        // create a Windows global memory buffer that can contain DROPFILES and this filename with zeros
+                        let size_in_bytes = 20 + encoded_filename.len() * 2;
                         let hglobal = unsafe { GlobalAlloc(GMEM_ZEROINIT | GMEM_FIXED,size_in_bytes) }.unwrap();
-                        log!("hglobal = {:?}",hglobal);
-
                         let hglobal_raw_ptr = unsafe { GlobalLock(hglobal) };
-                        log!("hglobal_raw_ptr = {:p}",hglobal_raw_ptr);
 
                         // initialize the DROPFILES part
                         let i32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut i32,5) };
-                        i32_slice[0] = 28;  // offset to filename
+                        i32_slice[0] = 20;  // offset to filename
                         i32_slice[1] = 0;
                         i32_slice[2] = 0;
                         i32_slice[3] = 0;
                         i32_slice[4] = 1;  // not 0 because 16-bit characters in the filename
-                        log!("i32_slice = {:?}",i32_slice);
-
-                        // then append the LiveId
-                        let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
-                        u64_slice[0] = if let Some(actual_internal_id) = internal_id { actual_internal_id.0 } else { 0 };
-                        log!("u64_slice = {:?}",u64_slice);
 
                         // and then append the encoded filename
                         unsafe {
                             std::ptr::copy_nonoverlapping(
                                 encoded_filename.as_ptr(),
-                                (hglobal_raw_ptr as *mut u8).offset(28) as *mut u16,
+                                (hglobal_raw_ptr as *mut u8).offset(20) as *mut u16,
                                 encoded_filename.len(),
                             )
                         };
@@ -442,20 +437,20 @@ impl Win32App {
                         // ready
                         unsafe { GlobalUnlock(hglobal) }.unwrap();
 
-                        // create COM data object
+                        // create COM data object that hosts the hglobal
                         let data_object: IDataObject = DataObject { hglobal, }.into();
 
-                        // create COM drop source
+                        // create COM drop source to indicate when to stop dragging
                         let drop_source: IDropSource = DropSource { }.into();
 
-                        log!("about to go into DoDragDrop...");
+                        log!("starting DoDragDrop...");
 
                         // DoDragDrop is synchronous, so this thread will block until the file was dropped somewhere... let's see how that works out...
                         let mut effect = DROPEFFECT(0);
                         match unsafe { DoDragDrop(&data_object,&drop_source,DROPEFFECT_COPY | DROPEFFECT_MOVE,&mut effect) } {
-                            DRAGDROP_S_DROP => { log!("drag/drop succesful") },
-                            DRAGDROP_S_CANCEL => { log!("drag/drop canceled") },
-                            E_UNSPEC => { log!("drag/drop failed for some reason") },
+                            DRAGDROP_S_DROP => { log!("DoDragDrop: succesful") },
+                            DRAGDROP_S_CANCEL => { log!("DoDragDrop: canceled") },
+                            E_UNSPEC => { log!("DoDragDrop: failed for some reason") },
                         }
                     }
                 },
