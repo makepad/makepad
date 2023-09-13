@@ -307,6 +307,9 @@ pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<S
         if let Some(prov) = parse_provision(profile_path, app_id){
             found_profiles.push(prov);
         }
+        else if let Some(prov) = parse_provision(profile_path, &format("{}.*", app_id.split(".").first().unwrap().to_string())){
+            found_profiles.push(prov);
+        }
     }
 
     // select provisioning profile
