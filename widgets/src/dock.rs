@@ -614,8 +614,6 @@ impl Dock {
     fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String) {
         // lets add a tab
 
-        log!("dock.drop_create: abs: ({},{}), item: {}, kind: {},name: {}",abs.x,abs.y,item,kind,name);
-
         if self.handle_drop(cx, abs, item, false) {
             self.dock_items.insert(item, DockItem::Tab {
                 name,
@@ -957,27 +955,18 @@ impl DockRef {
     
     pub fn drop_clone(&self, cx: &mut Cx, abs: DVec2, old_item: LiveId, new_item: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
-
-            log!("dock.drop_clone called from dock?");
-
             dock.drop_clone(cx, abs, old_item, new_item);
         }
     }
     
     pub fn drop_move(&self, cx: &mut Cx, abs: DVec2, item: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
-
-            log!("dock.handle_drop called from drop_move");
-
             dock.handle_drop(cx, abs, item, true);
         }
     }
     
     pub fn drop_create(&self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String) {
         if let Some(mut dock) = self.borrow_mut() {
-
-            log!("dock.drop_create called from drop_create?");
-
             dock.drop_create(cx, abs, item, kind, name);
         }
     }
@@ -996,9 +985,6 @@ impl DockRef {
     }
     
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
-
-        log!("dock calls cx.start_dragging");
-
         cx.start_dragging(vec![item]);
     }
 }

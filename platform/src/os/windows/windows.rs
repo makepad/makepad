@@ -149,6 +149,7 @@ impl Cx {
                 self.fingers.switch_captures();
             }
             Win32Event::MouseUp(e) => {
+                log!("{}", e.button);
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
@@ -167,38 +168,16 @@ impl Cx {
                 self.call_event_handler(&Event::TextInput(e))
             }
             Win32Event::Drag(e) => {
-
-                log!("Drag");
-                
+ 
                 self.call_event_handler(&Event::Drag(e));
 
                 self.drag_drop.cycle_drag();
             },
             Win32Event::Drop(e) => {
-
-                log!("Drop");
-                
                 self.call_event_handler(&Event::Drop(e));
-
-                // also send MouseUp
-                self.call_event_handler(&Event::MouseUp(MouseUpEvent{
-                    abs: dvec2(-100000.0,-100000.0),
-                    button: 0,
-                    window_id: CxWindowPool::id_zero(),
-                    modifiers: Default::default(),
-                    time: 0.0
-                }));
-
-                // and DragEnd
-                self.call_event_handler(&Event::DragEnd);
-
-                // and cycle drag?
                 self.drag_drop.cycle_drag();
             },
             Win32Event::DragEnd => {
-
-                log!("DragEnd");
-
                 // send MouseUp
                 self.call_event_handler(&Event::MouseUp(MouseUpEvent{
                     abs: dvec2(-100000.0,-100000.0),
@@ -207,11 +186,10 @@ impl Cx {
                     modifiers: Default::default(),
                     time: 0.0
                 }));                
-
-                // and DragEnd
+                self.fingers.mouse_up(0);
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                
                 self.call_event_handler(&Event::DragEnd);
-
-                // and cycle drag?
                 self.drag_drop.cycle_drag();
             }
             Win32Event::KeyDown(e) => {
@@ -349,8 +327,9 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     win32_app.stop_timer(timer_id);
                 },
-                CxOsOp::StartDragging(_dragged_item) => {
-                    win32_app.start_dragging(_dragged_item);
+                CxOsOp::StartDragging(dragged_item) => {
+                    
+                    win32_app.start_dragging(dragged_item);
                 },
                 CxOsOp::UpdateMenu(_menu) => {
                 },
