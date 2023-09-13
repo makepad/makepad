@@ -106,7 +106,6 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
         "nightly",
         "cargo",
         "build",
-        "--release",
         &target_opt
     ];
     
@@ -127,13 +126,26 @@ pub fn build(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<IosB
         version: "1".to_string(),
     };    
     
-    let app_dir = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.app", ios_target.toolchain()));
+    let is_release = args.iter().find(|v| v == &"--release").is_some();
+    
+    let app_dir = if is_release{
+        cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.app", ios_target.toolchain()))
+    }
+    else{
+        cwd.join(format!("target/makepad-ios-app/{}/debug/{build_crate}.app", ios_target.toolchain()))
+    };
     mkdir(&app_dir) ?;
     
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file())?;
 
-    let src_bin = cwd.join(format!("target/{}/release/{build_crate}", ios_target.toolchain()));
+    let src_bin = if is_release{
+        cwd.join(format!("target/{}/release/{build_crate}", ios_target.toolchain()))
+    }
+    else{
+        println!("WARNING: Building debug build, this creates a very slow application. Use --release if this is not what you want.");
+        cwd.join(format!("target/{}/debug/{build_crate}", ios_target.toolchain()))
+    };
     let dst_bin = app_dir.join(build_crate.to_string());
     
     cp(&src_bin, &dst_bin, false) ?;
@@ -168,9 +180,10 @@ pub fn run_sim(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<()
     Ok(())
 }
 
+#[derive(Debug)]
 struct ProvisionData{
     team: String,
-    device: String,
+    devices: Vec<String>,
     path: PathBuf,
 }
 
@@ -185,16 +198,42 @@ fn parse_provision(path:PathBuf, app_id:&str)->Option<ProvisionData>{
                 if bytes[i..(i+team_prefix.len())] == *team_prefix{
                     let team = std::str::from_utf8(&bytes[i+team_prefix.len()..i+team_prefix.len()+10]).unwrap().to_string();
                     let device_prefix = "<key>ProvisionedDevices</key>\n\t<array>\n\t\t<string>".as_bytes();
-                    for i in 0..(bytes.len() - device_prefix.len() + 1){
-                        if bytes[i..(i+device_prefix.len())] == *device_prefix{
-                            let device = std::str::from_utf8(&bytes[i+device_prefix.len()..i+device_prefix.len()+25]).unwrap().to_string();
-                            return Some(ProvisionData{
-                                team,
-                                device,
-                                path,
-                            })
+                    let mut devices = Vec::new();
+                    for i in 0..(bytes.len() - device_prefix.len() + 1) {
+                        if bytes[i..(i + device_prefix.len())] == *device_prefix {
+                            // loop through ProvisionedDevices array and add all uuids
+                            for j in i..(bytes.len() - device_prefix.len() + 1) {
+                                // break out of loop at end of array
+                                let array_end = "</array>".as_bytes();
+                                if bytes[j..(j + array_end.len())] == *array_end {
+                                    break;
+                                }   
+                                let str_open = "<string>".as_bytes();
+                                let mut open_idx = 0;
+                                let str_close = "</string>".as_bytes();
+                                let mut close_idx = 0;
+                                if bytes[j..(j+str_open.len())] == *str_open {
+                                    open_idx = j;
+                                }
+                                for k in j..(bytes.len()) {
+                                    if bytes[k..(k + str_close.len())] == *str_close {
+                                        close_idx = k;
+                                        break;
+                                    }
+                                }
+                                if open_idx != 0 && close_idx != 0 {
+                                    let uuid = std::str::from_utf8(&bytes[open_idx + str_open.len()..close_idx]).unwrap().to_string();
+                                    devices.push(uuid);
+                                }
+                            }
                         }
                     }
+
+                    return Some(ProvisionData{
+                        team,
+                        devices,
+                        path,
+                    });
                 }
             }
             break;
@@ -252,41 +291,71 @@ fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
+pub fn run_real(signing_identity: Option<String>, provisioning_profile: Option<String>, device_uuid: Option<String>, app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(), String> {
     let build_crate = get_build_crate_from_args(args)?;
     let result = build(app_id, args, ios_target)?;
     let cwd = std::env::current_dir().unwrap();
-    // ok lets parse these things out
-    let long_hex_id = shell_env_cap(&[], &cwd ,"security", &[
+
+    // parse identities for code signing
+    let security_result = shell_env_cap(&[], &cwd ,"security", &[
         "find-identity",
         "-v",
         "-p",
         "codesigning"])?;
-        
-    let long_hex_id = if let Some(long_hex_id) = long_hex_id.strip_prefix("  1) ") {
+
+    // select signing identity
+    let found_identities: Vec<&str> = security_result.split("\n").collect();
+    let selected_identity = if let Some(signing_identity) = &signing_identity {
+        // find passed in identity in security result
+        &found_identities.iter().find(|i| i.contains(signing_identity)).unwrap()[5..45]
+    } else if let Some(long_hex_id) = security_result.strip_prefix("  1) ") {
+        // if no argument passed, take first identity found
         &long_hex_id[0..40]
-    }
-    else{
-       return Err(format!("Error parsing the security result #{}#", long_hex_id)) 
+    } else {
+        return Err(format!("Error reading the signing identity security result #{}#", security_result)) 
     };
+    println!("Selected signing identity {}", selected_identity);
     
-    //
     let home = std::env::var("HOME").unwrap();
     let profiles = std::fs::read_dir(format!("{}/Library/MobileDevice/Provisioning Profiles/", home)).unwrap();
-    let mut provision = None;
+    let mut found_profiles = Vec::new();
     for profile in profiles {
         // lets read it
         let profile_path = profile.unwrap().path();
         if let Some(prov) = parse_provision(profile_path, app_id){
-            provision = Some(prov);
-            break;
+            found_profiles.push(prov);
         }
     }
-    
-    if provision.is_none(){
+
+    // select provisioning profile
+    let provision = if let Some(provisioning_profile) = &provisioning_profile {
+        // find passed in provisioning profile
+        found_profiles.iter()
+            .find(|i| i.path.to_str().unwrap().contains(provisioning_profile))
+            .unwrap_or_else(|| 
+                panic!("Provisioning profile {} not found", provisioning_profile))
+    } else if found_profiles.len() > 0 {
+        // if no argument passed, take first profile found
+        &found_profiles[0]
+    } else {
         return Err(format!("Could not find a matching mobile provision profile for name {}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again.", app_id))
-    } 
-    let provision = provision.unwrap();
+    };
+    println!("Selected provisioning profile {:?}, for team {}", provision.path, provision.team);
+
+    // select device
+    let selected_device = if let Some(device_uuid) = &device_uuid {
+        // find passed in device in selected profile
+        provision.devices.iter()
+            .find(|i| i.contains(device_uuid))
+            .unwrap_or_else(|| 
+                panic!("Device with UUID {} not found in provisioning profile {:?}", device_uuid, provision.path))
+    } else if provision.devices.len() > 0 {
+        // if no argument passed, take first device found in profile
+        &provision.devices[0]
+    } else {
+        return Err(format!("No devices found in provisioning profile {:?}", provision.path))
+    };
+    println!("Selected device with UUID: {}", selected_device);
     
     // ok lets find the mobile provision for this application
     // we can also find the team ids from there to build the scent
@@ -310,7 +379,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         "--force",
         "--timestamp=none",
         "--sign",
-        long_hex_id, 
+        selected_identity, 
         &result.dst_bin.into_os_string().into_string().unwrap()
     ]) ?; 
     
@@ -318,7 +387,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
         "--force",
         "--timestamp=none",
         "--sign", 
-        long_hex_id,
+        selected_identity, 
         "--entitlements",
         &scent_file.into_os_string().into_string().unwrap(),
         "--generate-entitlement-der",
@@ -339,7 +408,7 @@ pub fn run_real(app_id: &str, args: &[String], ios_target:IosTarget) -> Result<(
     println!("Installing application on device");
     shell_env_filter("Makepad iOS application started.", vec![], &[], &ios_deploy ,"./ios-deploy", &[
         "-i",
-        &provision.device,  
+        &selected_device,  
         "-d",
         "-u",
         "-b",
