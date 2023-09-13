@@ -1,5 +1,4 @@
 use crate::{
-    makepad_derive_widget::*,
     makepad_draw::*,
     view::*,
     widget::*,
@@ -111,8 +110,7 @@ impl Widget for KeyboardView {
                         };
                         self.next_frame = cx.new_next_frame();
                     }
-                    VirtualKeyboardEvent::WillHide{time, height, ease, duration}=>{
-                        log!("WILLHIDE {} {}", height, duration);
+                    VirtualKeyboardEvent::WillHide{time, height:_, ease, duration}=>{
                         self.anim_state = AnimState::Closing{
                             height: self.keyboard_shift,
                             duration: *duration,
@@ -122,8 +120,10 @@ impl Widget for KeyboardView {
                         self.next_frame = cx.new_next_frame();
                     }
                     VirtualKeyboardEvent::DidShow{time:_, height}=>{
+                        if let AnimState::Closed = self.anim_state{
+                            self.keyboard_shift = self.compute_max_height(*height, cx);
+                        }
                         self.anim_state = AnimState::Open;
-                        //self.keyboard_shift = self.compute_max_height(*height, cx);
                         self.redraw(cx);
                     }
                     VirtualKeyboardEvent::DidHide{time:_}=>{
