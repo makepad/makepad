@@ -42,10 +42,6 @@ impl KeyboardView {
     fn compute_max_height(&self, height:f64, cx:&Cx)->f64{
         let self_rect = self.area.get_rect(cx);
         let ime_rect = cx.get_ime_area_rect();
-        // ok so we have a rect of self_rect
-        // and an ime_rect
-        // and a height the keyboard wants to invade with
-        // we need to push 'up' the view by the height of the text input
         let av_height = self_rect.size.y - height;
         let ime_height = ime_rect.size.y + ime_rect.pos.y + self.keyboard_min_shift;
         if  ime_height > av_height {
