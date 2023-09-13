@@ -286,8 +286,10 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
+                    ios_app.show_keyboard();
                 },
                 CxOsOp::HideTextIME => {
+                    ios_app.hide_keyboard();
                 },
                 CxOsOp::SetCursor(_cursor) => { 
                 },

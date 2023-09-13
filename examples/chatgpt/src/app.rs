@@ -2,7 +2,7 @@ use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 
-const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const OPENAI_BASE_URL: &str = "https://makepad.nl/v1";
 
 live_design!{
     import makepad_widgets::theme_desktop_dark::*;

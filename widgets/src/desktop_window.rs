@@ -21,7 +21,6 @@ pub struct DesktopWindow {
     
     #[live] cursor_draw_list: DrawList2d,
     #[live] draw_cursor: DrawQuad,
-    
     #[live] debug_view: DebugView,
     #[live] nav_control: NavControl,
     #[live] window: Window,
