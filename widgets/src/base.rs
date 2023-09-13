@@ -38,6 +38,7 @@ live_design!{
     import crate::text_input::TextInputBase;
     import crate::scroll_shadow::DrawScrollShadowBase;
     import crate::page_flip::PageFlipBase;
+    import crate::keyboard_view::KeyboardViewBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
@@ -517,9 +518,10 @@ live_design!{
     }
     MultiWindow = <MultiWindowBase>{}
     PageFlip = <PageFlipBase>{}
-
+    KeyboardView = <KeyboardViewBase>{}
     // todo fix this by allowing reexporting imports
     // for now this works too
+    KeyboardViewBase = <KeyboardViewBase>{}
     PageFlipBase = <PageFlipBase>{}
     ViewBase = <ViewBase>{}
     ButtonBase = <ButtonBase>{}
