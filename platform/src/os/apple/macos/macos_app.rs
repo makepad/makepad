@@ -561,12 +561,9 @@ impl MacosApp {
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![ns_app, terminate: nil];
                 }
-                println!("EXIT!");
             }
             get_macos_app_global().event_callback = Some(callback);
         }
-        //s(*callback)(self, events);
-        //self.event_recur_block = false;
     }
     /*
     pub fn post_signal(signal: Signal) {
