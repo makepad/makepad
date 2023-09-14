@@ -298,6 +298,8 @@ impl IosApp {
     pub fn do_callback(event: IosEvent) {
         let cb = get_ios_app_global().event_callback.take();
         if let Some(mut callback) = cb {
+            
+            
             let event_flow = callback(event);
             let mtk_view = get_ios_app_global().mtk_view.unwrap();
             get_ios_app_global().event_flow = event_flow;
