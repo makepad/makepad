@@ -143,7 +143,6 @@ impl Cx {
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
             Win32Event::MouseMove(e) => {
-                log!("SEND MOUSEMOVE ");
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
@@ -327,7 +326,6 @@ impl Cx {
                     get_win32_app_global().stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(dragged_item) => {
-                    log!("STARTDRAG ");
                     get_win32_app_global().start_dragging(dragged_item);
                 },
                 CxOsOp::UpdateMenu(_menu) => {
