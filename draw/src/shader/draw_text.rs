@@ -423,8 +423,15 @@ impl DrawText {
                         (subpixel_x_fract * dpi_factor * 7.0) as usize
                     };
                     
-                    let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
-                        //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
+                    let subpixel_map = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
+                        tc
+                    }
+                    else{
+                        atlas_page.atlas_glyphs.insert(glyph_id, [None; crate::font_atlas::ATLAS_SUBPIXEL_SLOTS]);
+                        atlas_page.atlas_glyphs.get_mut(&glyph_id).unwrap()
+                    };
+                    
+                    let tc = if let Some(tc) = &subpixel_map[subpixel_id]{
                         tc
                     }
                     else {
@@ -439,11 +446,10 @@ impl DrawText {
                             subpixel_id
                         });
                         
-                        atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
+                        subpixel_map[subpixel_id] = Some(
                             fonts_atlas.alloc.alloc_atlas_glyph(w, h)
                         );
-                        
-                        atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
+                        subpixel_map[subpixel_id].as_ref().unwrap()
                     };
                     
                     let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;

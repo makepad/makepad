@@ -156,6 +156,7 @@ impl DrawTrapezoidVector {
         //let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         let mut size = 1.0;
         for i in 0..1 {
+            log!("DOING ITEM");
             if i == 1 {
                 size = 0.75;
             }
@@ -175,7 +176,7 @@ impl DrawTrapezoidVector {
                     return
                 }
                 
-                let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
+                let glyphtc = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap()[todo.subpixel_id].unwrap();
                 let tx = glyphtc.t1.x as f64 * fonts_atlas.alloc.texture_size.x + todo.subpixel_x_fract * atlas_page.dpi_factor;
                 let ty = 1.0 + glyphtc.t1.y as f64 * fonts_atlas.alloc.texture_size.y - todo.subpixel_y_fract * atlas_page.dpi_factor;
                 
@@ -452,7 +453,7 @@ pub const ATLAS_SUBPIXEL_SLOTS: usize = 64;
 pub struct CxFontAtlasPage {
     pub dpi_factor: f64,
     pub font_size: f64,
-    pub atlas_glyphs: Vec<[Option<CxFontAtlasGlyph>; ATLAS_SUBPIXEL_SLOTS]>
+    pub atlas_glyphs: HashMap<usize,[Option<CxFontAtlasGlyph>; ATLAS_SUBPIXEL_SLOTS]>
 }
 
 #[derive(Clone, Copy)]
@@ -493,11 +494,11 @@ impl CxFont {
         self.atlas_pages.push(CxFontAtlasPage {
             dpi_factor: dpi_factor,
             font_size: font_size,
-            atlas_glyphs: {
+            atlas_glyphs:HashMap::new(),/* {
                 let mut v = Vec::new();
                 v.resize(self.owned_font_face.with_ref(|face| face.number_of_glyphs() as usize), [None; ATLAS_SUBPIXEL_SLOTS]);
                 v
-            }
+            }*/
         });
         self.atlas_pages.len() - 1
     }
