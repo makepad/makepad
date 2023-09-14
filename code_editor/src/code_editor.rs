@@ -403,6 +403,9 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
+            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
+                cx.set_cursor(MouseCursor::Text);
+            },
             Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
                 cx.set_cursor(MouseCursor::Text);
                 if let Some((cursor, affinity)) = self.pick(session, abs) {

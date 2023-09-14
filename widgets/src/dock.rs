@@ -56,8 +56,49 @@ pub struct Dock {
     
     #[rust] dock_items: ComponentMap<LiveId, DockItem>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<DockItemId, WidgetRef>,
+    #[rust] items: ComponentMap<LiveId, (LiveId,WidgetRef)>,
     #[rust] drop_state: Option<DropPosition>,
+    #[rust] dock_item_iter_stack: Vec<(LiveId,usize)>,
+}
+
+pub struct DockVisibleItemIterator<'a> {
+    stack: &'a mut Vec<(LiveId,usize)>, 
+    dock_items: &'a ComponentMap<LiveId, DockItem>,
+    items: &'a ComponentMap<LiveId, (LiveId,WidgetRef)>,
+}
+
+impl<'a> Iterator for DockVisibleItemIterator<'a> {
+    // We can refer to this type using Self::Item
+    type Item = (LiveId, WidgetRef);
+    fn next(&mut self) -> Option<Self::Item> {
+        // alright so lets fetch the item on the top of the stack
+        while let Some((item_id, index)) = self.stack.pop(){
+            if let Some(dock_item) = self.dock_items.get(&item_id){
+                match dock_item{
+                    DockItem::Splitter{a,b,..}=>{
+                        if index == 0{
+                            self.stack.push((item_id,1));
+                            self.stack.push((*a,0));
+                        }
+                        else{
+                            self.stack.push((*b,0));
+                        }
+                    }
+                    DockItem::Tabs{tabs, selected, ..}=>{
+                        if let Some(tab_id) = tabs.get(*selected){
+                            self.stack.push((*tab_id, 0));
+                        }
+                    }
+                    DockItem::Tab{..}=>{
+                        if let Some((_,widget)) = self.items.get(&item_id){
+                            return Some((item_id,widget.clone()))
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -173,7 +214,7 @@ impl LiveHook for Dock {
                         let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                         self.templates.insert(id, live_ptr);
                         // lets apply this thing over all our childnodes with that template
-                        for (DockItemId {kind, ..}, node) in self.items.iter_mut() {
+                        for (kind, node) in self.items.values_mut() {
                             if *kind == id {
                                 node.apply(cx, from, index, nodes);
                             }
@@ -339,10 +380,10 @@ impl Dock {
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.get_or_insert(cx, DockItemId {id: entry_id, kind: template}, | cx | {
-                WidgetRef::new_from_ptr(cx, Some(*ptr))
+            let entry = self.items.get_or_insert(cx, entry_id, | cx | {
+                (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
             });
-            return Some(entry.clone())
+            return Some(entry.1.clone())
         }
         else{
             log!("ListView template not found {}", template);
@@ -350,12 +391,18 @@ impl Dock {
         None
     }
     
-    pub fn items(&mut self) -> &ComponentMap<DockItemId, WidgetRef> {
+    pub fn items(&mut self) -> &ComponentMap<LiveId, (LiveId, WidgetRef)> {
         &self.items
     }
     
-    pub fn visible_items(&mut self) -> &ComponentMap<DockItemId, WidgetRef> {
-        &self.items
+    pub fn visible_items(&mut self) ->DockVisibleItemIterator{
+        self.dock_item_iter_stack.clear();
+        self.dock_item_iter_stack.push((live_id!(root),0));
+        DockVisibleItemIterator{
+            stack: &mut self.dock_item_iter_stack,
+            dock_items: & self.dock_items,
+            items: &self.items
+        }
     }
     
     fn set_parent_split(&mut self, what_item: LiveId, replace_item: LiveId) {
@@ -380,8 +427,8 @@ impl Dock {
         if let Some(tab_bar) = self.tab_bars.get_mut(&what_item_id) {
             tab_bar.contents_draw_list.redraw(cx);
         }
-        for (item_id, item) in self.items.iter_mut() {
-            if item_id.id == what_item_id {
+        for (item_id, (_kind,item)) in self.items.iter_mut() {
+            if *item_id == what_item_id {
                 item.redraw(cx);
             }
         }
@@ -721,7 +768,7 @@ impl Widget for Dock {
                 }
             };
         }
-        for item in self.items.values_mut() {
+        for (_, item) in self.items.values_mut() {
             item.handle_widget_event_with(cx, event, dispatch_action);
         }
         
@@ -754,18 +801,16 @@ impl Widget for Dock {
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(DockItem::Tab {kind, ..}) = self.dock_items.get(&path[0]) {
-            if let Some(widget) = self.items.get_mut(&DockItemId {id: path[0], kind: *kind}) {
-                if path.len()>1 {
-                    widget.find_widgets(&path[1..], cached, results);
-                }
-                else {
-                    results.push(widget.clone());
-                }
+        if let Some((_,widget)) = self.items.get_mut(&path[0]) {
+            if path.len()>1 {
+                widget.find_widgets(&path[1..], cached, results);
+            }
+            else {
+                results.push(widget.clone());
             }
         }
         else {
-            for widget in self.items.values_mut() {
+            for (_,widget) in self.items.values_mut() {
                 widget.find_widgets(path, cached, results);
             }
         }
@@ -856,8 +901,8 @@ impl Widget for Dock {
                     stack.push(DrawStackItem::Tab {id});
                     if let Some(DockItem::Tab {kind, ..}) = self.dock_items.get(&id) {
                         if let Some(ptr) = self.templates.get(&kind) {
-                            let entry = self.items.get_or_insert(cx, DockItemId {id, kind: *kind}, | cx | {
-                                WidgetRef::new_from_ptr(cx, Some(*ptr))
+                            let (_,entry) = self.items.get_or_insert(cx, id, | cx | {
+                                (*kind, WidgetRef::new_from_ptr(cx, Some(*ptr)))
                             });
                             entry.draw_widget(cx) ?;
                         }
