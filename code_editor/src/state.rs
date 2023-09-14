@@ -328,8 +328,10 @@ impl Session {
             &self.settings,
             |mut editor, position, length| {
                 let line = &editor.as_text().as_lines()[position.line_index];
-                let delete_whitespace =
-                    !line.is_empty() && line[..position.byte_index].chars().all(|char| char.is_whitespace());
+                let delete_whitespace = !line.is_empty()
+                    && line[..position.byte_index]
+                        .chars()
+                        .all(|char| char.is_whitespace());
                 let inject_newline = line[..position.byte_index]
                     .chars()
                     .rev()
@@ -450,66 +452,79 @@ impl Session {
             &self.settings,
             |mut editor, position, length| {
                 if length == Length::zero() {
-					// The selection is empty, so delete backwards.
+                    // The selection is empty, so delete backwards.
                     let lines = editor.as_text().as_lines();
-					if lines[position.line_index][..position.byte_index]
-						.chars()
-						.all(|char| char.is_whitespace())
-					{
-						if position.line_index > 0 && lines[position.line_index - 1].chars().all(|char| char.is_whitespace()) {
-							// The previous line is empty, so simulate deleting backwards and
-							// reindenting by deleting the previous line.
-							editor.apply_edit(Edit {
-								change: Change::Delete(Position {
-									line_index: position.line_index - 1,
-									byte_index: 0,
-								}, Length {
-									line_count: 1,
-									byte_count: 0,
-								}),
-								drift: Drift::Before,
-							});
-						} else {
-							// The previous line is non-empty, so delete backwards until the end
-							// of the previous line.
-							let byte_index = lines[position.line_index - 1].len();
-							editor.apply_edit(Edit {
-								change: Change::Delete(Position {
-									line_index: position.line_index - 1,
-									byte_index,
-								}, Length {
-									line_count: 1,
-									byte_count: position.byte_index,
-								}),
-								drift: Drift::Before,
-							})
-						}
-					} else {
-						// There is at least one non-whitespace character before the cursor, so
-						// delete backwards by a single grapheme.
-						let byte_count = lines[position.line_index]
+                    if lines[position.line_index][..position.byte_index]
+                        .chars()
+                        .all(|char| char.is_whitespace())
+                    {
+                        if position.line_index > 0
+                            && lines[position.line_index - 1]
+                                .chars()
+                                .all(|char| char.is_whitespace())
+                        {
+                            // The previous line is empty, so simulate deleting backwards and
+                            // reindenting by deleting the previous line.
+                            editor.apply_edit(Edit {
+                                change: Change::Delete(
+                                    Position {
+                                        line_index: position.line_index - 1,
+                                        byte_index: 0,
+                                    },
+                                    Length {
+                                        line_count: 1,
+                                        byte_count: 0,
+                                    },
+                                ),
+                                drift: Drift::Before,
+                            });
+                        } else {
+                            // The previous line is non-empty, so delete backwards until the end
+                            // of the previous line.
+                            let byte_index = lines[position.line_index - 1].len();
+                            editor.apply_edit(Edit {
+                                change: Change::Delete(
+                                    Position {
+                                        line_index: position.line_index - 1,
+                                        byte_index,
+                                    },
+                                    Length {
+                                        line_count: 1,
+                                        byte_count: position.byte_index,
+                                    },
+                                ),
+                                drift: Drift::Before,
+                            })
+                        }
+                    } else {
+                        // There is at least one non-whitespace character before the cursor, so
+                        // delete backwards by a single grapheme.
+                        let byte_count = lines[position.line_index]
                             .graphemes()
                             .next_back()
                             .unwrap()
                             .len();
-						editor.apply_edit(Edit {
-							change: Change::Delete(Position {
-								line_index: position.line_index,
-								byte_index: position.byte_index - byte_count,
-							}, Length {
-								line_count: 0,
-								byte_count,
-							}),
-							drift: Drift::Before,
-						});
-					}
+                        editor.apply_edit(Edit {
+                            change: Change::Delete(
+                                Position {
+                                    line_index: position.line_index,
+                                    byte_index: position.byte_index - byte_count,
+                                },
+                                Length {
+                                    line_count: 0,
+                                    byte_count,
+                                },
+                            ),
+                            drift: Drift::Before,
+                        });
+                    }
                 } else {
-					// The selection is non-empty, so delete the selection.
-					editor.apply_edit(Edit {
-						change: Change::Delete(position, length),
-						drift: Drift::Before,
-					});
-				}
+                    // The selection is non-empty, so delete the selection.
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(position, length),
+                        drift: Drift::Before,
+                    });
+                }
             },
         );
     }
