@@ -426,23 +426,67 @@ impl Session {
             &self.selection_state.borrow().selections,
             &self.settings,
             |mut editor, position, length| {
-                let mut length = length;
                 if length == Length::zero() {
-                    // The selection is non-empty, so delete forward.
+                    // The selection is empty, so delete forward.
                     let lines = editor.as_text().as_lines();
                     if lines[position.line_index][position.byte_index..]
                         .chars()
                         .all(|char| char.is_whitespace())
                     {
-
+                        // There are only whitespace characters after the cursor on this line, so
+                        // delete forward until either the first non-whitespace character on the
+                        // next line, if it exists, or otherwise until the end of the text.
+                        if position.line_index < lines.len() - 1 {
+                            // There is a next line, so delete until the first non-whitespace
+                            // character on the next line.
+                            let byte_count = lines[position.line_index + 1]
+                                    .chars()
+                                    .take_while(|char| char.is_whitespace())
+                                    .map(|char| char.len_utf8())
+                                    .sum::<usize>();
+                            editor.apply_edit(Edit {
+                                change: Change::Delete(
+                                    position,
+                                    Length {
+                                        line_count: 1,
+                                        byte_count,
+                                    }
+                                ),
+                                drift: Drift::Before,
+                            });
+                        } else {
+                            // There is no next line, so delete forward until the start of the
+                            // text.
+                            let byte_count = lines[position.line_index].len() - position.byte_index;
+                            editor.apply_edit(Edit {
+                                change: Change::Delete(
+                                    position,
+                                    Length {
+                                        line_count: 0,
+                                        byte_count,
+                                    },
+                                ),
+                                drift: Drift::Before,
+                            });
+                        }
                     } else {
-
-                    }
-                    if position.byte_index < lines[position.line_index].len() {
-                        length.byte_count += 1;
-                    } else if position.line_index < lines.len() {
-                        length.line_count += 1;
-                        length.byte_count = 0;
+                        // There is at least one non-whitespace character before the cursor on the
+                        // current line, so delete forward by a single grapheme.
+                        let byte_count = lines[position.line_index]
+                            .graphemes()
+                            .next()
+                            .unwrap()
+                            .len();
+                        editor.apply_edit(Edit {
+                            change: Change::Delete(
+                                position,
+                                Length {
+                                    line_count: 0,
+                                    byte_count,
+                                },
+                            ),
+                            drift: Drift::Before,
+                        });
                     }
                 } else {
                     // The selection is non-empty, so delete it.
@@ -516,8 +560,8 @@ impl Session {
                                 });
                             }
                         } else {
-                            // There is no previous line, so delete backwards until the start of
-                            // the text.
+                            // There is no previous line, so delete backwards until the start of the
+                            // text.
                             editor.apply_edit(Edit {
                                 change: Change::Delete(
                                     Position::zero(),
