@@ -23,6 +23,7 @@ live_design!{
     FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
+        
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
