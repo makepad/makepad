@@ -274,6 +274,11 @@ impl Cx {
         let home = std::env::var("HOME").unwrap();
         let plist_path = format!("{}/Library/LaunchAgents/dev.makepad.xpc.plist", home);
         let cwd = std::env::current_dir().unwrap();
+        if let Ok(old) = fs::read_to_string(Path::new(&plist_path)){
+            if old == plist_body{
+                return
+            }
+        }
         shell(&cwd, "launchctl",&["unload",&plist_path]).unwrap();
         write_text(Path::new(&plist_path), &plist_body).unwrap();
         shell(&cwd, "launchctl",&["load",&plist_path]).unwrap();

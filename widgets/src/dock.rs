@@ -3,6 +3,7 @@ use crate::{
     widget::*,
     makepad_draw::*,
     splitter::{SplitterAction, Splitter, SplitterAlign},
+    tab::{TabClosable},
     tab_bar::{TabBarAction, TabBar},
 };
 
@@ -183,16 +184,16 @@ pub enum DockItem {
         a: LiveId,
         b: LiveId
     },
-    #[live {tabs: vec![], selected: 0, no_close:false}]
+    #[live {tabs: vec![], selected: 0, closable:false}]
     Tabs {
         tabs: Vec<LiveId>,
         selected: usize,
-        no_close: bool
+        closable: bool
     },
-    #[pick {name: "Tab".to_string(), kind: LiveId(0), no_close: false}]
+    #[pick {name: "Tab".to_string(), kind: LiveId(0), closable: false}]
     Tab {
         name: String,
-        no_close: bool,
+        closable: bool,
         kind: LiveId
     }
 }
@@ -504,12 +505,12 @@ impl Dock {
         // if we are the last tab we need to remove a splitter
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
-                DockItem::Tabs {tabs, selected, no_close} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                DockItem::Tabs {tabs, selected, closable} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
                     // remove from the tabs array
                     let tabs_id = *tabs_id;
                     tabs.remove(pos);
                     if tabs.len() == 0 { // unsplit
-                        if !*no_close{
+                        if *closable{
                             self.unsplit_tabs(cx, tabs_id);
                         }
                         self.area.redraw(cx);
@@ -548,9 +549,6 @@ impl Dock {
     }
     
     fn handle_drop(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, is_move: bool) -> bool {
-
-        log!("handle_drop");
-
         if let Some(pos) = self.find_drop_position(cx, abs) {
             // ok now what
             // we have a pos
@@ -594,7 +592,7 @@ impl Dock {
                     });
                     self.dock_items.insert(new_tabs, DockItem::Tabs {
                         tabs: vec![item],
-                        no_close: false,
+                        closable: true,
                         selected: 0,
                     });
                     return true
@@ -664,7 +662,7 @@ impl Dock {
         if self.handle_drop(cx, abs, item, false) {
             self.dock_items.insert(item, DockItem::Tab {
                 name,
-                no_close: false,
+                closable: true,
                 kind
             });
             self.item(cx, item, kind);
@@ -681,7 +679,7 @@ impl Dock {
             if self.handle_drop(cx, abs, new_item, false) {
                 self.dock_items.insert(new_item, DockItem::Tab {
                     name,
-                    no_close: false,
+                    closable: true,
                     kind
                 });
                 self.item(cx, new_item, kind);
@@ -696,7 +694,7 @@ impl Dock {
             tabs.push(item);
             self.dock_items.insert(item, DockItem::Tab {
                 name,
-                no_close: false,
+                closable: true,
                 kind
             });
             self.select_tab(cx, item);
@@ -881,8 +879,8 @@ impl Widget for Dock {
                     if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get(&id) {
                         let tab_bar = self.tab_bars.get_mut(&id).unwrap();
                         if index < tabs.len() {
-                            if let Some(DockItem::Tab {name, ..}) = self.dock_items.get(&tabs[index]) {
-                                tab_bar.tab_bar.draw_tab(cx, tabs[index].into(), name);
+                            if let Some(DockItem::Tab {name, closable, ..}) = self.dock_items.get(&tabs[index]) {
+                                tab_bar.tab_bar.draw_tab(cx, tabs[index].into(), name, if *closable{TabClosable::Yes}else{TabClosable::No});
                             }
                             stack.push(DrawStackItem::TabLabel {id, index: index + 1});
                         }

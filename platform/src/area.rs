@@ -232,8 +232,11 @@ impl Area {
             },
             Area::Rect(ra) => {
                 let draw_list = &cx.draw_lists[ra.draw_list_id];
-                let rect_area = &draw_list.rect_areas[ra.rect_id];
-                return rect_area.rect;                
+                if draw_list.redraw_id == ra.redraw_id{
+                    let rect_area = &draw_list.rect_areas[ra.rect_id];
+                    return rect_area.rect;                
+                }
+                Rect::default()
             },
             _ => Rect::default(),
         }

@@ -3,8 +3,7 @@ use makepad_widgets::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    import makepad_widgets::theme_desktop_dark::*;
-        
+    import makepad_draw::shader::std::*;
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
@@ -15,15 +14,13 @@ live_design!{
     ICO_HOME = dep("crate://self/resources/icon_home.svg")
     ICO_FIND = dep("crate://self/resources/icon_find.svg")
     ICO_LIKES = dep("crate://self/resources/icon_likes.svg")
-ICO_USER = dep("crate://self/resources/icon_user.svg")
+    ICO_USER = dep("crate://self/resources/icon_user.svg")
     ICO_ADD = dep("crate://self/resources/icon_add.svg")
-    
     
     FONT_SIZE_SUB = 9.5
     FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
-        
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
@@ -47,7 +44,6 @@ ICO_USER = dep("crate://self/resources/icon_user.svg")
     COLOR_P = #x999
     
     FillerY = <View> {width: Fill}
-    
     FillerX = <View> {height: Fill}
     
     Logo = <Button> {
@@ -127,7 +123,6 @@ ICO_USER = dep("crate://self/resources/icon_user.svg")
             margin: {top: 0.0}
             icon_walk: {width: Fit, height: 27.0}
         }
-        
     }
     
     Menu = <RoundedYView> {
@@ -171,8 +166,7 @@ ICO_USER = dep("crate://self/resources/icon_user.svg")
         flow: Down,
         padding: 0.0,
         spacing: 0.0
-        
-            <View> {
+        <View> {
             width: Fill,
             height: Fit,
             margin: 0.0
@@ -299,8 +293,6 @@ ICO_USER = dep("crate://self/resources/icon_user.svg")
         ui: <Window> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
-            
-            
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return (COLOR_BG);
