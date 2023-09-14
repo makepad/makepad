@@ -155,7 +155,7 @@ impl DrawTrapezoidVector {
     fn draw_todo(&mut self, fonts_atlas: &mut CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
         //let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         let mut size = 1.0;
-        for i in 0..3 {
+        for i in 0..1 {
             if i == 1 {
                 size = 0.75;
             }

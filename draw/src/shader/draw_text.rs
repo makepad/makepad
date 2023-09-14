@@ -44,7 +44,7 @@ live_design!{
                 self.font_t2.xy,
                 normalized.xy
             )
-            
+            /*
             self.tex_coord2 = mix(
                 self.font_t1.xy,
                 self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.75,
@@ -56,7 +56,7 @@ live_design!{
                 self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.6,
                 normalized.xy
             )
-            
+            */
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 self.clipped.x,
                 self.clipped.y,
@@ -78,7 +78,7 @@ live_design!{
             // mipmaps are stored in red/green/blue channel
             let s = 1.0;
             
-            if dx > 7.0 {
+            /*if dx > 7.0 {
                 s = 0.7;
             }
             else if dx > 2.75 {
@@ -95,9 +95,9 @@ live_design!{
             else if dx > 1.3 {
                 s = sample2d_rt(self.tex, self.tex_coord2.xy).y;
             }
-            else {
+            else {*/
                 s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
-            }
+            /*}*/
             
             s = pow(s, self.curve);
             let col = self.get_color(); //color!(white);//get_color();
