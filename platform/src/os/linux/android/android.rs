@@ -186,15 +186,21 @@ impl Cx {
                             }
                         }
                     }
-                    FromJavaMessage::KeyUp {keycode: _} => {
-                        /*match keycode {
-                            KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = false,
-                            KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = false,
-                            KeyCode::LeftAlt | KeyCode::RightAlt => self.keymods.alt = false,
-                            KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
-                            _ => {}
-                        }
-                        self.event_handler.key_up_event(keycode, self.keymods);*/
+                    FromJavaMessage::KeyUp {keycode, meta_state} => {
+                        let makepad_keycode = android_to_makepad_key_code(keycode);
+                        let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                        let alt = meta_state & ANDROID_META_ALT_MASK != 0;
+                        let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+
+                        let e = Event::KeyUp(
+                            KeyEvent {
+                                key_code: makepad_keycode,
+                                is_repeat: false,
+                                modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
+                                time: self.os.time_now()
+                            }
+                        );
+                        self.call_event_handler(&e);
                     }
                     FromJavaMessage::ResizeTextIME {keyboard_height, is_open} => {
                         let keyboard_height = (keyboard_height as f64) / self.os.dpi_factor;
