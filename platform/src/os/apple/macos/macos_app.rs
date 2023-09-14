@@ -57,18 +57,19 @@ use {
 // this value will be fetched from multiple threads (post signal uses it)
 pub static mut MACOS_CLASSES: *const MacosClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
-pub static mut MACOS_APP: *mut MacosApp = 0 as *mut _;
 
-pub fn init_macos_app_global(event_callback: Box<dyn FnMut(&mut MacosApp, MacosEvent) -> EventFlow>) {
+pub static mut MACOS_APP: Option<RefCell<MacosApp>> = None;
+
+pub fn get_macos_app_global() -> std::cell::RefMut<'static, MacosApp> {
     unsafe {
-        MACOS_CLASSES = Box::into_raw(Box::new(MacosClasses::new()));
-        MACOS_APP = Box::into_raw(Box::new(MacosApp::new(event_callback)));
+        MACOS_APP.as_mut().unwrap().borrow_mut()
     }
 }
 
-pub fn get_macos_app_global() -> &'static mut MacosApp {
+pub fn init_macos_app_global(event_callback: Box<dyn FnMut(MacosEvent) -> EventFlow>) {
     unsafe {
-        &mut *(MACOS_APP)
+        MACOS_CLASSES = Box::into_raw(Box::new(MacosClasses::new()));
+        MACOS_APP = Some(RefCell::new(MacosApp::new(event_callback)));
     }
 }
 
@@ -126,7 +127,7 @@ pub struct MacosApp {
     #[allow(unused)]
     pasteboard: ObjcId,
     startup_focus_hack_ran: bool,
-    event_callback: Option<Box<dyn FnMut(&mut MacosApp, MacosEvent) -> EventFlow >>,
+    event_callback: Option<Box<dyn FnMut(MacosEvent) -> EventFlow >>,
     event_flow: EventFlow,
     
     pub cursors: HashMap<MouseCursor, ObjcId>,
@@ -135,7 +136,7 @@ pub struct MacosApp {
 }
 
 impl MacosApp {
-    pub fn new(event_callback: Box<dyn FnMut(&mut MacosApp, MacosEvent) -> EventFlow>) -> MacosApp {
+    pub fn new(event_callback: Box<dyn FnMut(MacosEvent) -> EventFlow>) -> MacosApp {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let app_delegate_instance: ObjcId = msg_send![get_macos_class_global().app_delegate, new];
@@ -333,7 +334,7 @@ impl MacosApp {
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
     
-    unsafe fn process_ns_event(&mut self, ns_event: ObjcId) {
+    unsafe fn process_ns_event(ns_event: ObjcId) {
         let ev_type: NSEventType = msg_send![ns_event, type];
         
         let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
@@ -351,13 +352,14 @@ impl MacosApp {
                     let modifiers = get_event_key_modifier(ns_event);
                     //let key_char = get_event_char(ns_event);
                     let is_repeat: bool = msg_send![ns_event, isARepeat];
-                    self.do_callback(
+                    let time = get_macos_app_global().time_now();
+                    MacosApp::do_callback(
                         MacosEvent::KeyUp(KeyEvent {
                             key_code: key_code,
                             //key_char: key_char,
                             is_repeat: is_repeat,
                             modifiers: modifiers,
-                            time: self.time_now()
+                            time
                         })
                     );
                 }
@@ -374,9 +376,10 @@ impl MacosApp {
                     match key_code {
                         KeyCode::KeyV => if modifiers.logo || modifiers.control {
                             // was a paste
-                            let nsstring: ObjcId = msg_send![self.pasteboard, stringForType: NSStringPboardType];
+                            let pasteboard: ObjcId = get_macos_app_global().pasteboard;
+                            let nsstring: ObjcId = msg_send![pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
-                            self.do_callback(
+                            MacosApp::do_callback(
                                 MacosEvent::TextInput(TextInputEvent {
                                     input: string,
                                     was_paste: true,
@@ -385,8 +388,9 @@ impl MacosApp {
                             );
                         },
                         KeyCode::KeyC => if modifiers.logo || modifiers.control {
+                            let pasteboard: ObjcId = get_macos_app_global().pasteboard;
                             let response = Rc::new(RefCell::new(None));
-                            self.do_callback(
+                            MacosApp::do_callback(
                                 MacosEvent::TextCopy(TextClipboardEvent {
                                     response: response.clone()
                                 })
@@ -395,13 +399,14 @@ impl MacosApp {
                             if let Some(response) = response.as_ref() {
                                 let nsstring = str_to_nsstring(&response);
                                 let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
-                                let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
-                                let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
+                                let () = msg_send![pasteboard, declareTypes: array owner: nil];
+                                let () = msg_send![pasteboard, setString: nsstring forType: NSStringPboardType];
                             }
                         },
                         KeyCode::KeyX => if modifiers.logo || modifiers.control {
+                            let pasteboard: ObjcId = get_macos_app_global().pasteboard;
                             let response = Rc::new(RefCell::new(None));
-                            self.do_callback(
+                            MacosApp::do_callback(
                                 MacosEvent::TextCut(TextClipboardEvent {
                                     response: response.clone()
                                 })
@@ -410,19 +415,19 @@ impl MacosApp {
                             if let Some(response) = response.as_ref() {
                                 let nsstring = str_to_nsstring(&response);
                                 let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
-                                let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
-                                let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
+                                let () = msg_send![pasteboard, declareTypes: array owner: nil];
+                                let () = msg_send![pasteboard, setString: nsstring forType: NSStringPboardType];
                             }
                         },
                         _ => {}
                     }
-                    
-                    self.do_callback(
+                    let time = get_macos_app_global().time_now();
+                    MacosApp::do_callback(
                         MacosEvent::KeyDown(KeyEvent {
                             key_code: key_code,
                             is_repeat: is_repeat,
                             modifiers: modifiers,
-                            time: self.time_now()
+                            time
                         })
                     );
                     /*
@@ -442,8 +447,8 @@ impl MacosApp {
             },
             NSEventType::NSFlagsChanged => {
                 let modifiers = get_event_key_modifier(ns_event);
-                let last_key_mod = self.last_key_mod.clone();
-                self.last_key_mod = modifiers.clone();
+                let last_key_mod = get_macos_app_global().last_key_mod.clone();
+                get_macos_app_global().last_key_mod = modifiers.clone();
                 let mut events = Vec::new();
                 fn add_event(time: f64, old: bool, new: bool, modifiers: KeyModifiers, events: &mut Vec<MacosEvent>, key_code: KeyCode) {
                     if old != new {
@@ -462,14 +467,14 @@ impl MacosApp {
                         }
                     }
                 }
-                let time = self.time_now();
+                let time = get_macos_app_global().time_now();
                 add_event(time, last_key_mod.shift, modifiers.shift, modifiers.clone(), &mut events, KeyCode::Shift);
                 add_event(time, last_key_mod.alt, modifiers.alt, modifiers.clone(), &mut events, KeyCode::Alt);
                 add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::Logo);
                 add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::Control);
                 if events.len() >0 {
                     for event in events {
-                        self.do_callback(event);
+                        MacosApp::do_callback(event);
                     }
                 }
             },
@@ -501,18 +506,19 @@ impl MacosApp {
         }
     }
     
-    pub fn event_loop(&mut self) {
+    pub fn event_loop() {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, finishLaunching];
             
             loop {
-                match self.event_flow {
+                let event_flow = get_macos_app_global().event_flow;
+                match event_flow {
                     EventFlow::Exit => {
                         break;
                     }
                     EventFlow::Poll | EventFlow::Wait => {
-                        let event_wait = if let EventFlow::Wait = self.event_flow {true}else {false};
+                        let event_wait = if let EventFlow::Wait = get_macos_app_global().event_flow {true}else {false};
                         let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
                         
                         let ns_until: ObjcId = if event_wait {
@@ -530,11 +536,11 @@ impl MacosApp {
                         ];
                         //self.current_ns_event = Some(ns_event);
                         if ns_event != nil {
-                            self.process_ns_event(ns_event);
+                            MacosApp::process_ns_event(ns_event);
                         }
                         
                         if ns_event == nil || event_wait {
-                            self.do_callback(MacosEvent::Paint);
+                            MacosApp::do_callback(MacosEvent::Paint);
                         }
                         //self.current_ns_event = None;
                         
@@ -545,17 +551,19 @@ impl MacosApp {
         }
     }
     
-    pub fn do_callback(&mut self, event: MacosEvent) {
-        if let Some(mut callback) = self.event_callback.take() {
-            self.event_flow = callback(self, event);
-            if let EventFlow::Exit = self.event_flow {
+    pub fn do_callback(event: MacosEvent) {
+        let cb = get_macos_app_global().event_callback.take();
+        if let Some(mut callback) = cb {
+            let event_flow = callback(event);
+            get_macos_app_global().event_flow = event_flow;
+            if let EventFlow::Exit = event_flow {
                 unsafe {
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![ns_app, terminate: nil];
                 }
                 println!("EXIT!");
             }
-            self.event_callback = Some(callback);
+            get_macos_app_global().event_callback = Some(callback);
         }
         //s(*callback)(self, events);
         //self.event_recur_block = false;
@@ -645,14 +653,17 @@ impl MacosApp {
         }
     }
     
-    pub fn send_timer_received(&mut self, nstimer: ObjcId) {
-        for i in 0..self.timers.len() {
-            if self.timers[i].nstimer == nstimer {
-                let timer_id = self.timers[i].timer_id;
-                if !self.timers[i].repeats {
-                    self.timers.remove(i);
+    pub fn send_timer_received(nstimer: ObjcId) {
+        
+        let len = get_macos_app_global().timers.len() ;
+        for i in 0..len {
+            if get_macos_app_global().timers[i].nstimer == nstimer {
+                let timer_id = get_macos_app_global().timers[i].timer_id;
+                if !get_macos_app_global().timers[i].repeats {
+                    get_macos_app_global().timers.remove(i);
                 }
-                self.do_callback(MacosEvent::Timer(TimerEvent {timer_id: timer_id}));
+                
+                MacosApp::do_callback(MacosEvent::Timer(TimerEvent {timer_id: timer_id}));
                 // break the eventloop if its in blocked mode
                 unsafe {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -692,15 +703,15 @@ impl MacosApp {
         self.do_callback(vec![MacosEvent::Paint]);
     }*/
     
-    pub fn send_command_event(&mut self, command: MenuCommand) {
-        self.do_callback(
+    pub fn send_command_event(command: MenuCommand) {
+        MacosApp::do_callback(
             MacosEvent::MenuCommand(command)
         );
-        self.do_callback(MacosEvent::Paint);
+        MacosApp::do_callback(MacosEvent::Paint);
     }
     
-    pub fn send_paint_event(&mut self) {
-        self.do_callback(MacosEvent::Paint);
+    pub fn send_paint_event() {
+        MacosApp::do_callback(MacosEvent::Paint);
     }
     
     #[cfg(target_os = "macos")]
