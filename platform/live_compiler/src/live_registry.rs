@@ -203,6 +203,13 @@ impl LiveRegistry {
         self.module_id_to_file_id.get(&module_id).cloned()
     }
     
+    pub fn file_id_to_module_id(&self, file_id: LiveFileId) -> Option<LiveModuleId> {
+        if let Some((k,_v)) = self.module_id_to_file_id.iter().find(|(_k,v)| **v == file_id){
+            return Some(*k)
+        }
+        None
+    }
+    
     pub fn live_node_as_string(&self, node: &LiveNode) -> Option<String> {
         match &node.value {
             LiveValue::Str(v) => {
@@ -435,6 +442,7 @@ impl LiveRegistry {
         let mut scratch = String::new();
         let mut tokens = Vec::new();
         let mut line_count = start_pos.line;
+        #[derive(Debug)]
         enum Parse{
             Before,
             After,
@@ -452,6 +460,7 @@ impl LiveRegistry {
             loop {
                 let (next_state, full_token) = state.next(&mut cursor);
                 if let Some(full_token) = full_token {
+                    //log!("PARSE STATE {:?} {:?}", parse, full_token);
                     match parse{
                         Parse::Before=>{
                             if let FullToken::Ident(live_id!(live_design)) = &full_token.token{
@@ -464,11 +473,15 @@ impl LiveRegistry {
                         Parse::Bang=> if let FullToken::Punct(live_id!(!)) = &full_token.token{
                             parse = Parse::Brace;
                         }
+                        else if let FullToken::Whitespace = &full_token.token{
+                        }
                         else{
                             parse = Parse::Before;
                         }
                         Parse::Brace=> if let FullToken::Open(Delim::Brace) = &full_token.token{
                             parse = Parse::Body(0);
+                        }
+                        else if let FullToken::Whitespace = &full_token.token{
                         }
                         else{
                             parse = Parse::Before;
@@ -519,8 +532,8 @@ impl LiveRegistry {
     pub fn process_file_changes(&mut self, changes: Vec<LiveFileChange>, errors:&mut Vec<LiveError >){
         for change in changes {
             let file_id = self.file_name_to_file_id(&change.file_name).unwrap();
+            let module_id = self.file_id_to_module_id(file_id).unwrap();
             let live_file = self.file_id_to_file_mut(file_id);
-            
             match Self::tokenize_from_str_live_design(&change.content, TextPos::default(), file_id, None) {
                 Err(msg) => errors.push(msg), //panic!("Lex error {}", msg),
                 Ok(new_tokens) => {
@@ -530,6 +543,16 @@ impl LiveRegistry {
                             errors.push(msg);
                         },
                         Ok(mut ld) => { // only swap it out when it parses
+                            for node in &mut ld.nodes {
+                                match &mut node.value {
+                                    LiveValue::Import(live_import) => {
+                                        if live_import.module_id.0 == live_id!(crate) { // patch up crate refs
+                                           live_import.module_id.0 = module_id.0
+                                        };
+                                    }
+                                    _=>()
+                                }
+                            }
                             ld.tokens = new_tokens;
                             live_file.original = ld;
                             live_file.reexpand = true;
@@ -725,11 +748,9 @@ impl LiveRegistry {
                 in_file_id: *file_id,
                 errors
             };
-            
             live_document_expander.expand(in_doc, &mut out_doc, self.live_files[file_id.to_index()].generation);
             
             self.live_files[file_id.to_index()].reexpand = false;
-            
             std::mem::swap(&mut out_doc, &mut self.live_files[file_id.to_index()].expanded);
         }
     }

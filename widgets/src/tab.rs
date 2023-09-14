@@ -42,6 +42,11 @@ pub enum TabAction {
     //DragHit(DragHit)
 }
 
+pub enum TabClosable{
+    Yes,
+    No
+}
+
 impl Tab {
     
     pub fn is_selected(&self) -> bool {
@@ -53,11 +58,13 @@ impl Tab {
         self.animator_toggle(cx, is_selected, animate, id!(selected.on), id!(selected.off));
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
+    pub fn draw(&mut self, cx: &mut Cx2d, name: &str, closable:TabClosable) {
         //self.bg_quad.color = self.color(self.is_selected);
         self.draw_bg.begin(cx, self.walk, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);
-        self.close_button.draw(cx);
+        if let TabClosable::Yes = closable{
+            self.close_button.draw(cx);
+        }
         //cx.turtle_align_y();
         self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
         //cx.turtle_align_y();
@@ -112,36 +119,6 @@ impl Tab {
             }
             _ => {}
         }
-        /*
-        match event.drag_hits(cx, self.draw_bg.area()) {
-            DragHit::NoHit => (),
-            hit => dispatch_action(cx, TabAction::DragHit(hit))
-            /*
-            DragHit::Drag(f) => match f.state {
-                DragState::In => {
-                    log!("DRAGSTATE IN");
-                    //self.is_dragged = true;
-                    //self.draw_bg.redraw(cx);
-                    //f.response.set(DragResponse::Copy);
-                }
-                DragState::Out => {
-                    //self.is_dragged = false;
-                    //self.draw_bg.redraw(cx);
-                }
-                DragState::Over => {
-                    //Event::Drag(event) => {
-                    //    event.response.set(DragResponse::Copy);
-                    //}
-                    //_ => panic!(),
-                },
-            },
-            DragHit::Drop(_f) => {
-                //self.is_dragged = false;
-                //self.draw_bg.area().redraw(cx);
-                //dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
-            }
-            _ => {}*/
-        }*/
     }
 }
 
