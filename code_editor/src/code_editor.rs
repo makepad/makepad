@@ -100,6 +100,11 @@ live_design! {
             draw_depth: 0.0,
             color:#3
         }
+        draw_gutter: {
+            draw_depth: 1.0,
+            text_style: <THEME_FONT_CODE> {},
+            color: #C0C0C0,
+        }
         draw_text: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
@@ -120,12 +125,14 @@ live_design! {
 
 #[derive(Live)]
 pub struct CodeEditor {
-    #[live]
-    scroll_bars: ScrollBars,
     #[walk]
     walk: Walk,
+    #[live]
+    scroll_bars: ScrollBars,
     #[rust]
     draw_state: DrawStateWrap<Walk>,
+    #[live]
+    draw_gutter: DrawText,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -140,9 +147,11 @@ pub struct CodeEditor {
     draw_bg: DrawColor,
 
     #[rust]
-    viewport_rect: Rect,
-    #[rust]
     cell_size: DVec2,
+    #[rust]
+    gutter_rect: Rect,
+    #[rust]
+    viewport_rect: Rect,
     #[rust]
     line_start: usize,
     #[rust]
@@ -186,35 +195,62 @@ pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
-        let walk = self.draw_state.get().unwrap();
-
-        self.scroll_bars.begin(cx, walk, Layout::default());
-
-        self.viewport_rect = cx.turtle().rect();
-        let scroll_pos = self.scroll_bars.get_scroll_pos();
-
-        let pad_left_top = dvec2(10., 10.);
-
-        self.viewport_rect.pos += pad_left_top;
-        self.viewport_rect.size -= pad_left_top;
-
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
-
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        let walk = self.draw_state.get().unwrap();
+        self.scroll_bars.begin(cx, walk, Layout::default());
+        let turtle_rect = cx.turtle().rect();
+        let gutter_width = (session
+            .document()
+            .as_text()
+            .as_lines()
+            .len()
+            .to_string()
+            .column_count()
+            + 1) as f64
+            * self.cell_size.x;
+        self.gutter_rect = Rect {
+            pos: turtle_rect.pos,
+            size: DVec2 {
+                x: gutter_width,
+                y: turtle_rect.size.y,
+            },
+        };
+        self.viewport_rect = Rect {
+            pos: DVec2 {
+                x: turtle_rect.pos.x + gutter_width,
+                y: turtle_rect.pos.y,
+            },
+            size: DVec2 {
+                x: turtle_rect.size.x - gutter_width,
+                y: turtle_rect.size.y,
+            },
+        };
+
+        let pad_left_top = dvec2(10., 10.);
+        self.gutter_rect.pos += pad_left_top;
+        self.gutter_rect.size -= pad_left_top;
+        self.viewport_rect.pos += pad_left_top;
+        self.viewport_rect.size -= pad_left_top;
+        
         session.handle_changes();
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
+        let scroll_pos = self.scroll_bars.get_scroll_pos();
         self.line_start = session
             .layout()
             .find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
         self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
+
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        self.draw_gutter(cx, session);
         self.draw_text_layer(cx, session);
         self.draw_indent_guide_layer(cx, session);
         self.draw_selection_layer(cx, session);
+
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
             session.layout().height() * self.cell_size.y,
@@ -412,6 +448,35 @@ impl CodeEditor {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn draw_gutter(&mut self, cx: &mut Cx2d, session: &Session) {
+        let mut line_index = self.line_start;
+        let mut origin_y = session.layout().line(self.line_start).y();
+        for element in session
+            .layout()
+            .block_elements(self.line_start, self.line_end)
+        {
+            match element {
+                BlockElement::Line { line, .. } => {
+                    self.draw_gutter.font_scale = line.scale();
+                    self.draw_gutter.draw_abs(
+                        cx,
+                        DVec2 {
+                            x: 0.0,
+                            y: origin_y,
+                        } * self.cell_size
+                            + self.gutter_rect.pos,
+                        &format!("{}", line_index),
+                    );
+                    line_index += 1;
+                    origin_y += line.height();
+                }
+                BlockElement::Widget(widget) => {
+                    origin_y += widget.height;
+                }
+            }
         }
     }
 
