@@ -64,6 +64,8 @@ impl Cx {
         self.redraw_all();
         
         while !self.os.quit {
+            self.handle_timers();
+            
             while let Ok(msg) = from_java_rx.try_recv() {
                 match msg {
                     FromJavaMessage::SurfaceCreated {window} => unsafe {
@@ -301,8 +303,6 @@ impl Cx {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
             }
-
-            self.handle_timers();
 
             self.handle_platform_ops();
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
@@ -762,7 +762,7 @@ impl CxOs {
     }
 }
 
-struct Timer {
+pub struct Timer {
     pub last_tick: Instant,
     pub interval: Duration,
     pub repeats: bool,
