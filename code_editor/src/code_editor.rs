@@ -307,7 +307,7 @@ impl CodeEditor {
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
-			Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
                 ..
             }) => {
@@ -353,9 +353,9 @@ impl CodeEditor {
             Hit::TextCopy(ce) => {
                 *ce.response.borrow_mut() = Some(session.copy());
             }
-			Hit::TextCut(ce) => {
-				*ce.response.borrow_mut() = Some(session.copy());
-				session.delete();
+            Hit::TextCut(ce) => {
+                *ce.response.borrow_mut() = Some(session.copy());
+                session.delete();
                 cx.redraw_all();
             }
             Hit::KeyDown(KeyEvent {
