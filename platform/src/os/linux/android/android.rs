@@ -214,11 +214,11 @@ impl Cx {
                             }))
                         } 
                         else {
+                            self.text_ime_was_dismissed();
                             self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidHide {
                                 time: self.os.time_now()
                             }))
                         }
-                        //self.panning_adjust_for_text_ime(keyboard_height);
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
                         let e = Event::NetworkResponses(vec![
@@ -376,16 +376,7 @@ impl Cx {
         });
     }
     
-    /*
-    pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32) {
-        let dt = crate::profile_start();
-        self.os.keyboard_visible = true;
-        self.panning_adjust_for_text_ime(ime_height);
-        self.redraw_all();
-        self.after_every_event(&to_java);
-        crate::profile_end!(dt);
-    }
-    
+    /*    
     pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
         if let Some(text) = content {
             let e = Event::TextInput(
@@ -509,27 +500,7 @@ impl Cx {
         
         
     }
-    /*
-    fn panning_adjust_for_text_ime(&mut self, android_ime_height: u32) {
-        self.os.keyboard_visible = true;
-        
-        let screen_height = (self.os.display_size.y / self.os.dpi_factor) as i32;
-        let vertical_offset = self.os.keyboard_trigger_position.y as i32;
-        let ime_height = (android_ime_height as f64 / self.os.dpi_factor) as i32;
-        
-        // Make sure there is some room between the software keyword and the text input or widget that triggered
-        // the TextIME event
-        let vertical_space = ime_height / 3;
-        
-        let should_be_panned = vertical_offset > screen_height - ime_height;
-        if should_be_panned {
-            let panning_offset = vertical_offset - (screen_height - ime_height) + vertical_space;
-            self.os.keyboard_panning_offset = (panning_offset as f64 * self.os.dpi_factor) as i32;
-        } else {
-            self.os.keyboard_panning_offset = 0;
-        }
-    }*/
-    
+
     fn handle_platform_ops(&mut self) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
