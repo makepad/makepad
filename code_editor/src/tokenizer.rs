@@ -174,20 +174,19 @@ impl InitialState {
             }
         }
     }
- 
+
     fn line_comment(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
         cursor.skip(2);
-        while cursor.skip_if( | ch | ch != '\0') {}
+        while cursor.skip_if(|ch| ch != '\0') {}
         (State::Initial(InitialState), TokenKind::Comment)
     }
-    
+
     fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
         cursor.skip(2);
-        BlockCommentTailState {depth: 0}.next(cursor)
+        BlockCommentTailState { depth: 0 }.next(cursor)
     }
-    
 
     fn identifier_or_keyword(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0).is_identifier_start());
