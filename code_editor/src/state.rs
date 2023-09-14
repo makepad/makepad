@@ -449,34 +449,67 @@ impl Session {
             &self.selection_state.borrow().selections,
             &self.settings,
             |mut editor, position, length| {
-                let mut position = position;
-                let mut length = length;
                 if length == Length::zero() {
+					// The selection is empty, so delete backwards.
                     let lines = editor.as_text().as_lines();
-                    if position.byte_index > 0
-                        && !lines[position.line_index][..position.byte_index]
-                            .chars()
-                            .all(|char| char.is_whitespace())
-                    {
-                        let byte_count = lines[position.line_index]
+					if lines[position.line_index][..position.byte_index]
+						.chars()
+						.all(|char| char.is_whitespace())
+					{
+						if position.line_index > 0 && lines[position.line_index - 1].chars().all(|char| char.is_whitespace()) {
+							// The previous line is empty, so simulate deleting backwards and
+							// reindenting by deleting the previous line.
+							editor.apply_edit(Edit {
+								change: Change::Delete(Position {
+									line_index: position.line_index - 1,
+									byte_index: 0,
+								}, Length {
+									line_count: 1,
+									byte_count: 0,
+								}),
+								drift: Drift::Before,
+							});
+						} else {
+							// The previous line is non-empty, so delete backwards until the end
+							// of the previous line.
+							let byte_index = lines[position.line_index - 1].len();
+							editor.apply_edit(Edit {
+								change: Change::Delete(Position {
+									line_index: position.line_index - 1,
+									byte_index,
+								}, Length {
+									line_count: 1,
+									byte_count: position.byte_index,
+								}),
+								drift: Drift::Before,
+							})
+						}
+					} else {
+						// There is at least one non-whitespace character before the cursor, so
+						// delete backwards by a single grapheme.
+						let byte_count = lines[position.line_index]
                             .graphemes()
                             .next_back()
                             .unwrap()
                             .len();
-                        position.byte_index -= byte_count;
-                        length.byte_count += byte_count;
-                    } else if position.line_index > 0 {
-						let byte_count = position.byte_index;
-                        position.line_index -= 1;
-                        position.byte_index = lines[position.line_index].len();
-                        length.line_count += 1;
-                        length.byte_count = byte_count;
-                    }
-                }
-                editor.apply_edit(Edit {
-                    change: Change::Delete(position, length),
-                    drift: Drift::Before,
-                });
+						editor.apply_edit(Edit {
+							change: Change::Delete(Position {
+								line_index: position.line_index,
+								byte_index: position.byte_index - byte_count,
+							}, Length {
+								line_count: 0,
+								byte_count,
+							}),
+							drift: Drift::Before,
+						});
+					}
+                } else {
+					// The selection is non-empty, so delete the selection.
+					editor.apply_edit(Edit {
+						change: Change::Delete(position, length),
+						drift: Drift::Before,
+					});
+				}
             },
         );
     }
