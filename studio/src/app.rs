@@ -253,7 +253,6 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
-        let run_view = self.ui.run_view(id!(run1));
         let log_list = self.ui.list_view(id!(log1));
         
         if let Event::Draw(event) = event {
@@ -269,7 +268,7 @@ impl AppMain for App {
                         &mut *file_tree
                     );
                 }
-                else if let Some(mut run_view) = run_view.has_widget(&next).borrow_mut() {
+                else if let Some(mut run_view) = next.as_run_view().borrow_mut() {
                     run_view.draw(cx, &self.build_manager);
                 }
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
@@ -308,7 +307,7 @@ impl AppMain for App {
             match action {
                 FileSystemAction::RecompileNeeded => {
                     self.build_manager.start_recompile_timer(cx);
-                    run_view.recompile_started(cx);
+                    //run_view.recompile_started(cx);
                 }
                 FileSystemAction::LiveReloadNeeded => {
                     self.build_manager.clear_log();
@@ -317,13 +316,12 @@ impl AppMain for App {
             }
         }
         
-        if let Some(mut run_view) = run_view.borrow_mut() {
-            run_view.handle_event(cx, event, &mut self.build_manager);
-        }
-        
         // lets iterate over the editors and handle events
         for (item_id, item) in dock.borrow_mut().unwrap().visible_items() {
-            if let Some(mut code_editor) = item.as_code_editor().borrow_mut() {
+            if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                run_view.handle_event(cx, event, &mut self.build_manager);
+            }
+            else if let Some(mut code_editor) = item.as_code_editor().borrow_mut() {
                 if let Some(session) = self.file_system.get_session_mut(item_id) {
                     for action in code_editor.handle_event(cx, event, session) {
                         match action {
@@ -343,8 +341,12 @@ impl AppMain for App {
                     // if the log_list is tailing, set the new len
                     log_list.redraw(cx);
                 }
-                BuildManagerAction::StdinToHost {cmd_id, msg} => if let Some(mut run_view) = run_view.borrow_mut() {
-                    run_view.handle_stdin_to_host(cx, cmd_id, msg, &mut self.build_manager);
+                BuildManagerAction::StdinToHost {cmd_id, msg} =>{
+                    for (_item_id, (_templ,item)) in dock.borrow_mut().unwrap().items().iter() {
+                        if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                            run_view.handle_stdin_to_host(cx, cmd_id, &msg, &mut self.build_manager);
+                        }
+                    }
                 }
                 _ => ()
             }
