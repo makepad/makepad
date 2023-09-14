@@ -304,7 +304,9 @@ impl AppMain for App {
                     }
                 }
                 else { // external file, we have to create a new tab
-                    dock.drop_create(cx, drop.abs, LiveId::unique(), live_id!(Empty4), path.clone())
+                    let tab_id = LiveId::unique();
+                    self.file_system.request_open_file(tab_id, path.to_string());
+                    dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), path.clone());
                 }
             }
         }
