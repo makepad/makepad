@@ -150,6 +150,7 @@ impl ListView {
         let vi = self.vec_index;
         let mut at_end = false;
         let mut visible_items = 0;
+        let dpi_factor = cx.current_dpi_factor();
         if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
             if list.len()>0 {
@@ -206,7 +207,7 @@ impl ListView {
                     
                     let mut pos = first_pos.min(min); // lets do a maximum for first scroll
                     for item in list {
-                        let shift = DVec2::from_index_pair(vi, pos, 0.0);
+                        let shift = DVec2::from_index_pair(vi, pos, 0.0).dpi_snap(dpi_factor);;
                         cx.shift_align_range(&item.align_range, shift);
                         pos += item.size.index(vi);
                         visible_items += 1;
@@ -240,7 +241,7 @@ impl ListView {
                         let item = &list[i];
                         let visible = pos > 0.0;
                         pos -= item.size.index(vi);
-                        let shift = DVec2::from_index_pair(vi, pos, 0.0);
+                        let shift = DVec2::from_index_pair(vi, pos, 0.0).dpi_snap(dpi_factor);
                         cx.shift_align_range(&item.align_range, shift);
                         if visible { // move up
                             self.first_scroll = pos;
@@ -255,7 +256,7 @@ impl ListView {
                     let mut pos = start_pos;
                     for i in first_index..list.len() {
                         let item = &list[i];
-                        let shift = DVec2::from_index_pair(vi, pos, 0.0);
+                        let shift = DVec2::from_index_pair(vi, pos, 0.0).dpi_snap(dpi_factor);
                         cx.shift_align_range(&item.align_range, shift);
                         pos += item.size.index(vi);
                         let invisible = pos < 0.0;
