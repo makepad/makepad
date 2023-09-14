@@ -17,10 +17,12 @@ live_design!{
     ICO_USER = dep("crate://self/resources/icon_user.svg")
     ICO_ADD = dep("crate://self/resources/icon_add.svg")
     
+    
     FONT_SIZE_SUB = 9.5
     FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
+        
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
@@ -44,6 +46,7 @@ live_design!{
     COLOR_P = #x999
     
     FillerY = <View> {width: Fill}
+    
     FillerX = <View> {height: Fill}
     
     Logo = <Button> {
@@ -123,6 +126,7 @@ live_design!{
             margin: {top: 0.0}
             icon_walk: {width: Fit, height: 27.0}
         }
+        
     }
     
     Menu = <RoundedYView> {
@@ -166,7 +170,8 @@ live_design!{
         flow: Down,
         padding: 0.0,
         spacing: 0.0
-        <View> {
+        
+            <View> {
             width: Fill,
             height: Fit,
             margin: 0.0
@@ -293,6 +298,8 @@ live_design!{
         ui: <Window> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
+            
+            
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return (COLOR_BG);
@@ -341,11 +348,8 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        for i in 0..100{
-            log!("{i}");
-        }
         crate::makepad_widgets::live_design(cx);
-    }
+    } 
 }
 
 impl AppMain for App {

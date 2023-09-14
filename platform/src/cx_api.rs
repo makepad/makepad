@@ -264,6 +264,29 @@ impl Cx {
         } 
     }
     
+    pub fn get_pass_rect2(&self, pass_id: PassId, dpi:f64) -> Option<Rect> {
+        match self.passes[pass_id].pass_rect {
+            Some(CxPassRect::Area(area)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size: (rect.size * dpi).ceil() / dpi
+                })
+            }
+            Some(CxPassRect::ScaledArea(area, scale)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size:  scale * (rect.size * dpi).ceil() / dpi
+                })
+            }
+            Some(CxPassRect::Size(size)) => {
+                Some(Rect {pos: DVec2::default(), size: (size * dpi).floor() / dpi})
+            }
+            None => None
+        } 
+    }
+    
     pub fn get_pass_name(&self, pass_id: PassId) -> &str {
         &self.passes[pass_id].debug_name
     }

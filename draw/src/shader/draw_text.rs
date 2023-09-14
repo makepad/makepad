@@ -71,12 +71,12 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             
-            let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
-            let dp = 1.0 / 2048.0;
+            //let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
+            //let dp = 1.0 / 2048.0;
             
             // basic hardcoded mipmapping so it stops 'swimming' in VR
             // mipmaps are stored in red/green/blue channel
-            let s = 1.0;
+            //let s = 1.0;
             
             /*if dx > 7.0 {
                 s = 0.7;
@@ -96,7 +96,7 @@ live_design!{
                 s = sample2d_rt(self.tex, self.tex_coord2.xy).y;
             }
             else {*/
-                s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
+                let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
             /*}*/
             
             s = pow(s, self.curve);
