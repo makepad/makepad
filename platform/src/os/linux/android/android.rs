@@ -73,6 +73,7 @@ impl Cx {
                         width,
                         height,
                     } => {
+                        
                         unsafe {
                             self.os.display.as_mut().unwrap().update_surface(window);
                         }
@@ -316,6 +317,7 @@ impl Cx {
                         width,
                         height,
                     }) => {
+                        crate::log!("GOT WIDTH HEIGHT {} {}", width, height);
                         cx.os.display_size = dvec2(width as f64, height as f64);
                         break window;
                     }
