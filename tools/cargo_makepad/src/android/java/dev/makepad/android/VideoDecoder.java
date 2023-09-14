@@ -232,7 +232,7 @@ public class VideoDecoder {
                 }
 
                 if (mInputEos) {
-                    mExtractor.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    mExtractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
                     mCodec.flush();
                     mInputEos = false;
                 };
@@ -246,7 +246,8 @@ public class VideoDecoder {
                 }
             }
         } catch(Exception e) {
-            Log.e("Makepad", "Exception in decodeVideoChunk: ", e);
+            Log.e("Makepad", "Exception in decodeVideoChunk: " + e.getMessage());
+            Log.e("Makepad", "Exception in decodeVideoChunk: " + e.getStackTrace().toString());
         }
     }
 
