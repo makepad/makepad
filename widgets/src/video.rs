@@ -13,24 +13,17 @@ use std::{
     time::Instant,
 };
 
-const MAX_FRAMES_TO_DECODE: usize = 15;
-const FRAME_BUTTER_LOW_WATER_MARK: usize = 10;
+const MAX_FRAMES_TO_DECODE: usize = 30;
+const FRAME_BUTTER_LOW_WATER_MARK: usize = MAX_FRAMES_TO_DECODE / 3;
 
 live_design! {
     VideoBase = {{Video}} {}
 }
 
 // TODO:
-// - Add support for SemiPlanar nv21, currently we assume nv12
-
-// - Test frame rate to make sure it works right on different devices, current solution for ticks is somewhat a hack:
-//     - sporadically some texture updates take longer than desired (5 - 10 ms) which causes subsequent calls create the next timeout a delay.
-//       accumulated delays overtime make for slower playback.
-//     - the current fix is to check for irregularities and compoensate on the next timeout.
-//     - a better solution would be to have a loop on a separate thread in the platform's code, that sends timer events without having to schedule each one through events.
-//       tried this on Java but was missing some polisihng, it was actually too fast.
-//     - a defentivie solution would be to fix the irregualarities, I believ they happen due to waiting for locks on the frame buffer and vec pools.
-//       this can be improved by double buffering. (separate swappable read and write buffers)
+// - Fix second iteration of video running faster than it should (when looping)
+// - Fix support for YUV420Plannar, colors don't show right.
+// - Add support for SemiPlanar nv21, currently we assume that SemiPlanar is nv12
 
 // - Properly cleanup resources after playback is finished
 
@@ -84,15 +77,13 @@ pub struct Video {
 
     // Frame
     #[rust]
-    current_frame_ts: u128,
+    next_frame_ts: u128,
     #[rust]
     frame_ts_interval: f64,
     #[rust]
-    last_update: Option<Instant>,
+    start_time: Option<Instant>,
     #[rust]
     tick: Timer,
-    #[rust]
-    accumulated_time: u128,
     #[rust]
     playback_finished: bool,
 
@@ -105,6 +96,8 @@ pub struct Video {
     vec_pool: SharedVecPool,
     #[rust]
     last_timeout: Option<Instant>,
+    #[rust]
+    available_to_fetch: bool,
 
     #[rust]
     id: LiveId,
@@ -195,34 +188,22 @@ impl Video {
         if let Event::VideoChunkDecoded(video_id) = event {
             if *video_id == self.id {
                 self.decoding_state = DecodingState::Finished;
-                cx.fetch_next_video_frames(self.id, MAX_FRAMES_TO_DECODE);
+                self.available_to_fetch = true;
             }
         }
 
         if self.tick.is_event(event) {
-            let now = Instant::now();
-            let elapsed_time = now.duration_since(self.last_timeout.unwrap()).as_millis();
-
-            let ideal_interval = ((1.0 / self.original_frame_rate as f64) * 1000.0) as u128;
-
-            let adjusted_interval = if elapsed_time > ideal_interval {
-                ideal_interval - (elapsed_time - ideal_interval)
-            } else {
-                ideal_interval
-            };
-
-            self.tick = cx.start_timeout(adjusted_interval as f64);
-
-            self.last_timeout = Some(now);
-
             if self.decoding_state == DecodingState::Finished
-                || self.decoding_state == DecodingState::Decoding
-                    && self.frames_buffer.lock().unwrap().data.len() > 5
+                || (self.decoding_state == DecodingState::Decoding
+                    && self.frames_buffer.lock().unwrap().data.len() > FRAME_BUTTER_LOW_WATER_MARK)
             {
                 self.process_tick(cx);
             }
 
-            if self.should_request_decoding() {
+            if self.should_fetch() {
+                self.available_to_fetch = false;
+                cx.fetch_next_video_frames(self.id, MAX_FRAMES_TO_DECODE);
+            } else if self.should_request_decoding() {
                 cx.decode_next_video_chunk(self.id, MAX_FRAMES_TO_DECODE);
                 self.decoding_state = DecodingState::Decoding;
             }
@@ -259,8 +240,12 @@ impl Video {
 
         self.begin_buffering_thread(cx);
 
-        self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
         self.last_timeout = Some(Instant::now());
+        self.tick = cx.start_interval(8.0);
+    }
+
+    fn should_fetch(&self) -> bool {
+        self.available_to_fetch && self.frames_buffer.lock().unwrap().data.len() < FRAME_BUTTER_LOW_WATER_MARK
     }
 
     fn should_request_decoding(&self) -> bool {
@@ -274,43 +259,39 @@ impl Video {
 
     fn process_tick(&mut self, cx: &mut Cx) {
         let now = Instant::now();
-        match self.last_update {
-            Some(last_update_ts) => {
-                let elapsed = now.duration_since(last_update_ts).as_micros();
-                self.accumulated_time += elapsed;
-            }
-            None => {
-                self.accumulated_time = 0;
-            }
+        let video_time_us = match self.start_time {
+            Some(start_time) => now.duration_since(start_time).as_micros(),
+            None => 0,
         };
-        // block to limit the scope of the lock guard
-        let maybe_current_frame = { self.frames_buffer.lock().unwrap().get() };
-
-        match maybe_current_frame {
-            Some(current_frame) => {
-                if self.accumulated_time >= current_frame.timestamp_us {
+    
+        if video_time_us >= self.next_frame_ts || self.start_time.is_none() {
+            let maybe_current_frame = { self.frames_buffer.lock().unwrap().get() };
+    
+            match maybe_current_frame {
+                Some(current_frame) => {
+                    if self.start_time.is_none() {
+                        self.start_time = Some(now);
+                    }
+    
                     self.update_textures(cx, current_frame.pixel_data);
                     self.redraw(cx);
 
-                    // if at latest frame, restart
-                    if self.current_frame_ts >= self.total_duration {
+                    // if at the latest frame, loop or stop
+                    if self.next_frame_ts >= self.total_duration {
                         if self.is_looping {
-                            self.current_frame_ts = 0;
+                            self.next_frame_ts = 0;
+                            self.start_time = Some(now);
                         } else {
                             self.playback_finished = true;
                             self.cleanup_decoding(cx);
                         }
-                        self.accumulated_time -= current_frame.timestamp_us;
                     } else {
-                        self.current_frame_ts =
-                            (self.current_frame_ts as f64 + self.frame_ts_interval).ceil() as u128;
+                        self.next_frame_ts = current_frame.timestamp_us + self.frame_ts_interval.ceil() as u128;
                     }
+    
                 }
-
-                self.last_update = Some(now);
-            }
-            None => {
-                makepad_error_log::log!("Empty Buffer");
+                // empty buffer, deocder is falling behind
+                None => {}
             }
         }
     }
@@ -347,7 +328,7 @@ impl Video {
             match cx.get_dependency(self.source.as_str()) {
                 Ok(data) => {
                     cx.initialize_video_decoding(self.id, data, 100);
-                    self.decoding_state = DecodingState::Initialized;
+                    self.decoding_state = DecodingState::Initializing;
                 }
                 Err(_e) => {
                     todo!()

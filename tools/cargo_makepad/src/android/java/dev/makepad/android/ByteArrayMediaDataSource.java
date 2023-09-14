@@ -12,8 +12,15 @@ public class ByteArrayMediaDataSource extends MediaDataSource {
 
     @Override
     public int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
-        System.arraycopy(data, (int) position, buffer, offset, size);
-        return size;
+        if (position >= data.length) {
+            return -1;
+        }
+
+        int remaining = data.length - (int) position;
+        int bytesToRead = Math.min(remaining, size);
+
+        System.arraycopy(data, (int) position, buffer, offset, bytesToRead);
+        return bytesToRead;
     }
 
     @Override
