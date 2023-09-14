@@ -3,7 +3,8 @@ use makepad_widgets::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    
+    import makepad_widgets::theme_desktop_dark::*;
+        
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
@@ -14,8 +15,9 @@ live_design!{
     ICO_HOME = dep("crate://self/resources/icon_home.svg")
     ICO_FIND = dep("crate://self/resources/icon_find.svg")
     ICO_LIKES = dep("crate://self/resources/icon_likes.svg")
-    ICO_USER = dep("crate://self/resources/icon_user.svg")
+ICO_USER = dep("crate://self/resources/icon_user.svg")
     ICO_ADD = dep("crate://self/resources/icon_add.svg")
+    
     
     FONT_SIZE_SUB = 9.5
     FONT_SIZE_P = 12.5
