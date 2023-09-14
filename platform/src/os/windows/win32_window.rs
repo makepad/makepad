@@ -721,7 +721,7 @@ impl Win32Window {
                         } else {
                             drag_item
                         };
-                        
+                        let dpi_factor = window.get_dpi_factor();
                         // send to makepad
                         window.do_callback(
                             Win32Event::Drag(
@@ -733,7 +733,7 @@ impl Win32Window {
                                         logo: false,  // Windows doesn't have a logo button
                                     },
                                     handled: Cell::new(false),
-                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    abs: DVec2 { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
                                     items: Rc::new(vec![drag_item]),
                                     response: Rc::new(Cell::new(response)),
                                 }
@@ -755,6 +755,7 @@ impl Win32Window {
                         };
                         
                         //log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,flags.0,response,drag_item);
+                        let dpi_factor = window.get_dpi_factor();
 
                         // send to makepad
                         window.do_callback(
@@ -767,7 +768,7 @@ impl Win32Window {
                                         logo: false,  // Windows doesn't have a logo button
                                     },
                                     handled: Cell::new(false),
-                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
+                                    abs: DVec2 { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
                                     items: Rc::new(vec![drag_item]),
                                 }
                             )
