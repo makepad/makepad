@@ -440,17 +440,17 @@ impl Session {
                             // There is a next line, so delete until the first non-whitespace
                             // character on the next line.
                             let byte_count = lines[position.line_index + 1]
-                                    .chars()
-                                    .take_while(|char| char.is_whitespace())
-                                    .map(|char| char.len_utf8())
-                                    .sum::<usize>();
+                                .chars()
+                                .take_while(|char| char.is_whitespace())
+                                .map(|char| char.len_utf8())
+                                .sum::<usize>();
                             editor.apply_edit(Edit {
                                 change: Change::Delete(
                                     position,
                                     Length {
                                         line_count: 1,
                                         byte_count,
-                                    }
+                                    },
                                 ),
                                 drift: Drift::Before,
                             });
@@ -472,11 +472,8 @@ impl Session {
                     } else {
                         // There is at least one non-whitespace character before the cursor on the
                         // current line, so delete forward by a single grapheme.
-                        let byte_count = lines[position.line_index]
-                            .graphemes()
-                            .next()
-                            .unwrap()
-                            .len();
+                        let byte_count =
+                            lines[position.line_index].graphemes().next().unwrap().len();
                         editor.apply_edit(Edit {
                             change: Change::Delete(
                                 position,
@@ -520,11 +517,11 @@ impl Session {
                             // There is a previous line, so delete until the first non-whitespace
                             // character on the previous line.
                             let byte_count = lines[position.line_index - 1]
-                                    .chars()
-                                    .rev()
-                                    .take_while(|char| char.is_whitespace())
-                                    .map(|char| char.len_utf8())
-                                    .sum::<usize>();
+                                .chars()
+                                .rev()
+                                .take_while(|char| char.is_whitespace())
+                                .map(|char| char.len_utf8())
+                                .sum::<usize>();
                             let byte_index = lines[position.line_index - 1].len() - byte_count;
                             if byte_index == 0 {
                                 // The previous line is empty, so keep the indentation on the
@@ -602,7 +599,7 @@ impl Session {
                         drift: Drift::Before,
                     });
                 }
-            }
+            },
         );
     }
 
