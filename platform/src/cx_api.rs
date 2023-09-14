@@ -37,6 +37,9 @@ pub trait CxOsApi {
     fn init_cx_os(&mut self);
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
+    
+    fn start_stdin_service(&mut self){}
+    fn pre_start()->bool{false}
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/

@@ -150,6 +150,8 @@ impl LiveHook for App {
         crate::makepad_code_editor::live_design(cx);
         crate::build_manager::build_manager::live_design(cx);
         crate::run_view::live_design(cx);
+        // for macos
+        cx.start_stdin_service();
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {

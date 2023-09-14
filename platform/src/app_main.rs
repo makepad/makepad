@@ -11,6 +11,9 @@ macro_rules!app_main {
     ( $ app: ident) => {
         #[cfg(not(any(target_arch = "wasm32", target_os="android")))]
         pub fn app_main() {
+            if Cx::pre_start(){
+                return
+            }
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
                 if let Event::Construct = event {

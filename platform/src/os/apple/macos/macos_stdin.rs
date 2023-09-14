@@ -5,6 +5,10 @@ use {
         io,
         io::prelude::*,
         io::BufReader,
+        path::{Path},
+        io::{Write},
+        fs,
+        process::{Command}
     },
     crate::{
         makepad_live_id::*,
@@ -18,6 +22,7 @@ use {
         live_traits::LiveNew,
         thread::Signal,
         os::{
+            apple_sys::*,
             metal_xpc::{
                 xpc_service_proxy,
                 xpc_service_proxy_poll_run_loop,
@@ -191,6 +196,87 @@ impl Cx {
             self.stdin_handle_platform_ops(metal_cx, &fb_texture);
             xpc_service_proxy_poll_run_loop();
         }
+    }
+    
+    pub(crate)fn start_xpc_service(&mut self){
+        
+        pub fn mkdir(path: &Path) -> Result<(), String> {
+            match fs::create_dir_all(path) { 
+                Err(e) => {
+                    Err(format!("mkdir {:?} failed {:?}", path, e))
+                },
+                Ok(()) => Ok(())
+            }
+        }
+        
+        pub fn shell(cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
+            let mut cmd_build = Command::new(cmd);
+            
+            cmd_build.args(args)
+                .current_dir(cwd);
+            
+            let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
+            
+            let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
+            if !r.success() {
+                return Err(format!("Process {} in dir {:?} returned error exit code ", cmd, cwd));
+            }
+            Ok(())
+        }
+        
+        pub fn write_text(path: &Path, data:&str) -> Result<(), String> {
+            mkdir(path.parent().unwrap()) ?;
+            match fs::File::create(path) { 
+                Err(e) => {
+                    Err(format!("file create {:?} failed {:?}", path, e))
+                },
+                Ok(mut f) =>{
+                    f.write_all(data.as_bytes())
+                        .map_err( | _e | format!("Cant write file {:?}", path))
+                }
+            }
+        }
+        
+        pub fn get_exe_path()->String{
+            let buf = [0u8;1024];
+            let mut len = 1024u32;
+            unsafe{_NSGetExecutablePath(buf.as_ptr() as *mut _, &mut len)};
+            let end = buf.iter().position(|v| *v == 0).unwrap();
+            std::str::from_utf8(&buf[0..end]).unwrap().to_string()
+        }
+        
+        let exe_path = get_exe_path();
+        
+        let plist_body = format!(r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>dev.makepad.metalxpc</string>
+                <key>Program</key>
+                <string>{exe_path}</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>{exe_path}</string>
+                    <string>--metal-xpc</string>
+                </array>
+                <key>MachServices</key>
+                <dict>
+                    <key>dev.makepad.metalxpc</key>
+                    <true/>
+                </dict>
+            </dict>
+            </plist>
+            "#,
+        );
+        // lets write our service
+        let home = std::env::var("HOME").unwrap();
+        let plist_path = format!("{}/Library/LaunchAgents/dev.makepad.xpc.plist", home);
+        let cwd = std::env::current_dir().unwrap();
+        shell(&cwd, "launchctl",&["unload",&plist_path]).unwrap();
+        write_text(Path::new(&plist_path), &plist_body).unwrap();
+        shell(&cwd, "launchctl",&["load",&plist_path]).unwrap();
     }
     
     
