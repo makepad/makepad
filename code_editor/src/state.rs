@@ -383,6 +383,7 @@ impl Session {
                     drift: Drift::Before,
                 });
                 position.line_index += 1;
+                position.byte_index = 0;
                 if inject_newline {
                     editor.apply_edit(Edit {
                         change: Change::Insert(position, Text::newline()),
