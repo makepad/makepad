@@ -15,6 +15,7 @@ use {
             apple::apple_sys::*,
             macos::{
                 macos_app::{
+                    MacosApp,
                     get_macos_app_global
                 },
                 macos_event::{
@@ -52,13 +53,11 @@ use {
 pub fn define_macos_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
-        let ca = get_macos_app_global();
-        ca.send_timer_received(nstimer);
+        MacosApp::send_timer_received(nstimer);
     }
     
     extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        let ca = get_macos_app_global();
-        ca.send_paint_event();
+        MacosApp::send_paint_event();
     }
     
     let superclass = class!(NSObject);
@@ -87,7 +86,6 @@ pub fn define_menu_target_class() -> *const Class {
     
     extern fn menu_action(this: &Object, _sel: Sel, _item: ObjcId) {
         //println!("markedRange");
-        let ca = get_macos_app_global();
         unsafe {
             let command_u64: u64 = *this.get_ivar("command_usize");
             /*let cmd = if let Ok(status_map) = ca.status_map.lock() {
@@ -96,7 +94,7 @@ pub fn define_menu_target_class() -> *const Class {
             else {
                 panic!("Cannot lock cmd_map")
             };*/
-            ca.send_command_event(MenuCommand(LiveId(command_u64)));
+            MacosApp::send_command_event(MenuCommand(LiveId(command_u64)));
         }
     }
     
@@ -456,9 +454,8 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn reset_cursor_rects(this: &Object, _sel: Sel) {
         unsafe {
-            let cocoa_app = get_macos_app_global();
-            let current_cursor = cocoa_app.current_cursor.clone();
-            let cursor_id = *cocoa_app.cursors.entry(current_cursor.clone()).or_insert_with( || {
+            let current_cursor = get_macos_app_global().current_cursor.clone();
+            let cursor_id = *get_macos_app_global().cursors.entry(current_cursor.clone()).or_insert_with( || {
                 load_mouse_cursor(current_cursor.clone())
             });
             let bounds: NSRect = msg_send![this, bounds];
