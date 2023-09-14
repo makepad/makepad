@@ -4,8 +4,9 @@ use {
     std::cell::{RefCell},
     std::ffi::CString,
     std::os::raw::{c_void},
-    std::time::Instant,
+    std::time::{Instant, Duration},
     std::sync::mpsc,
+    std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
         android_decoding::CxAndroidDecoding,
@@ -63,7 +64,6 @@ impl Cx {
         self.redraw_all();
         
         while !self.os.quit {
-            
             while let Ok(msg) = from_java_rx.try_recv() {
                 match msg {
                     FromJavaMessage::SurfaceCreated {window} => unsafe {
@@ -301,7 +301,9 @@ impl Cx {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
             }
-            
+
+            self.handle_timers();
+
             self.handle_platform_ops();
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
                 if self.new_next_frames.len() != 0 {
@@ -320,12 +322,12 @@ impl Cx {
                 self.handle_repaint();
             }
             else {
-                std::thread::sleep(std::time::Duration::from_millis(8));
+                std::thread::sleep(Duration::from_millis(8));
             }
         }
     }
     
-    pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
+    pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {        
         let (from_java_tx, from_java_rx) = mpsc::channel();
         
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
@@ -578,13 +580,11 @@ impl Cx {
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
-                CxOsOp::StartTimer {timer_id: _, interval: _, repeats: _} => {
-                    //android_app.start_timer(timer_id, interval, repeats);
-                    //to_java.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    self.os.timers.insert(timer_id, Timer {interval: Duration::from_secs_f64(interval / 1000.0), repeats, last_tick: Instant::now()});
                 },
-                CxOsOp::StopTimer(_timer_id) => {
-                    //to_java.cancel_timeout(timer_id as i64);
-                    //android_app.stop_timer(timer_id);
+                CxOsOp::StopTimer(timer_id) => {
+                    self.os.timers.remove(&timer_id);
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
                     //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
@@ -623,6 +623,30 @@ impl Cx {
         }
         EventFlow::Poll
     }
+
+    fn handle_timers(&mut self) {
+        let mut to_be_dispatched = Vec::with_capacity(self.os.timers.len());
+        let mut to_be_removed = Vec::with_capacity(self.os.timers.len());
+        let now = Instant::now();
+
+        for (id, timer) in self.os.timers.iter_mut() {
+            if now - timer.last_tick > timer.interval {
+                to_be_dispatched.push(Event::Timer(TimerEvent { timer_id: *id }));
+                if timer.repeats {
+                    timer.last_tick = now;
+                } else {
+                    to_be_removed.push(*id);
+                }
+            }
+        }
+        for id in to_be_removed {
+            self.os.timers.remove(&id);
+        }
+        for event in to_be_dispatched {
+            self.call_event_handler(&event);
+        }
+        self.os.last_time = now;
+    }
 }
 
 impl CxOsApi for Cx {
@@ -653,7 +677,8 @@ impl Default for CxOs {
             decoding: CxAndroidDecoding::default(),
             display: None,
             quit: false,
-            fullscreen: false
+            fullscreen: false,
+            timers: HashMap::new()
         }
     }
 }
@@ -686,8 +711,8 @@ pub struct CxOs {
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
     pub (crate) decoding: CxAndroidDecoding,
+    pub (crate) timers: HashMap<u64, Timer>,
 }
-
 
 impl CxAndroidDisplay {
     unsafe fn destroy_surface(&mut self) {
@@ -729,9 +754,16 @@ impl CxAndroidDisplay {
         assert!(res != 0);
     }
 }
+
 impl CxOs {
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
+}
+
+struct Timer {
+    pub last_tick: Instant,
+    pub interval: Duration,
+    pub repeats: bool,
 }
