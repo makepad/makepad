@@ -1,10 +1,8 @@
 use makepad_widgets::*;
 
 live_design!{
-        import makepad_widgets::base::*;
+    import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    
-    
     
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
