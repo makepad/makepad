@@ -136,17 +136,12 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
-        for arg in std::env::args() {
-            if arg == "--metal-xpc" {
-                return start_xpc_service();
-            }
-        }
+
         
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
-        
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
@@ -523,6 +518,16 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
+    fn pre_start()->bool{
+        for arg in std::env::args() {
+            if arg == "--metal-xpc" {
+                start_xpc_service();
+                return true
+            }
+        }
+        false
+    }
+
     fn init_cx_os(&mut self) {
         self.live_expand();
         self.start_live_file_watcher();
@@ -532,6 +537,10 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
+    }
+
+    fn start_stdin_service(&mut self){
+        self.start_xpc_service()
     }
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
