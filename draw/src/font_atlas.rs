@@ -156,7 +156,6 @@ impl DrawTrapezoidVector {
         //let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         let mut size = 1.0;
         for i in 0..1 {
-            log!("DOING ITEM");
             if i == 1 {
                 size = 0.75;
             }
