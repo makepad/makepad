@@ -239,14 +239,14 @@ impl AppMain for App {
         }
         
         // lets iterate over the editors and handle events
-        for (item_id, item) in dock.borrow_mut().unwrap().items().iter() {
+        for (item_id, item) in dock.borrow_mut().unwrap().visible_items(){
             if let Some(mut code_editor) = item.as_code_editor().borrow_mut() {
-                if let Some(session) = self.file_system.get_session_mut(item_id.id) {
+                if let Some(session) = self.file_system.get_session_mut(item_id) {
                     for action in code_editor.handle_event(cx, event, session) {
                         match action {
                             CodeEditorAction::TextDidChange => {
                                 // lets write the file
-                                self.file_system.request_save_file(item_id.id)
+                                self.file_system.request_save_file(item_id)
                             }
                         }
                     }
