@@ -329,7 +329,7 @@ impl Session {
             |mut editor, position, length| {
                 let line = &editor.as_text().as_lines()[position.line_index];
                 let delete_whitespace =
-                    !line.is_empty() && line.chars().all(|char| char.is_whitespace());
+                    !line.is_empty() && line[..position.byte_index].chars().all(|char| char.is_whitespace());
                 let inject_newline = line[..position.byte_index]
                     .chars()
                     .rev()
@@ -453,32 +453,24 @@ impl Session {
                 let mut length = length;
                 if length == Length::zero() {
                     let lines = editor.as_text().as_lines();
-                    if position.byte_index > 0 {
-                        let byte_count = if lines[position.line_index][..position.byte_index]
+                    if position.byte_index > 0
+                        && !lines[position.line_index][..position.byte_index]
                             .chars()
                             .all(|char| char.is_whitespace())
-                        {
-                            let byte_index = editor.as_text().as_lines()[position.line_index]
-                                [..position.byte_index]
-                                .len();
-                            byte_index.min(
-                                (byte_index + self.settings.tab_column_count - 1)
-                                    % self.settings.tab_column_count
-                                    + 1,
-                            )
-                        } else {
-                            lines[position.line_index]
-                                .graphemes()
-                                .next_back()
-                                .unwrap()
-                                .len()
-                        };
+                    {
+                        let byte_count = lines[position.line_index]
+                            .graphemes()
+                            .next_back()
+                            .unwrap()
+                            .len();
                         position.byte_index -= byte_count;
                         length.byte_count += byte_count;
                     } else if position.line_index > 0 {
+						let byte_count = position.byte_index;
                         position.line_index -= 1;
                         position.byte_index = lines[position.line_index].len();
                         length.line_count += 1;
+                        length.byte_count = byte_count;
                     }
                 }
                 editor.apply_edit(Edit {
