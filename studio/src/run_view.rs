@@ -143,7 +143,7 @@ impl RunView {
         match msg {
 
             StdinToHost::SetCursor(cursor) => {
-                cx.set_cursor(cursor)
+                cx.set_cursor(*cursor)
             }
             StdinToHost::ReadyToStart => {
                 self.animator_play(cx, id!(recompiling.off));
