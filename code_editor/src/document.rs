@@ -5,8 +5,8 @@ use {
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
         selection::SelectionSet,
+        session::SessionId,
         settings::Settings,
-        state::SessionId,
         str::StrExt,
         text::{Change, Drift, Edit, Length, Position, Text},
         token::{Token, TokenKind},
@@ -232,7 +232,7 @@ impl Document {
                     desired_indentation_column_count -= 4;
                 }
                 self.edit_lines_internal(line, edits, |line| {
-                    crate::state::reindent(line, |_| desired_indentation_column_count)
+                    crate::session::reindent(line, |_| desired_indentation_column_count)
                 });
                 if let Some(next_line_indentation_column_count) = next_line_indent_column_count(
                     &self.as_text().as_lines()[line],

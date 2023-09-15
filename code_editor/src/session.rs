@@ -55,7 +55,7 @@ impl Session {
             }),
             selection_state: RefCell::new(SelectionState {
                 selections: SelectionSet::new(),
-                last_added_selection_index: None,
+                last_added_selection_index: Some(0),
                 injected_delimiter_stack: Vec::new(),
                 highlighted_delimiter_positions: HashSet::new(),
             }),
@@ -102,6 +102,10 @@ impl Session {
         Ref::map(self.selection_state.borrow(), |selection_state| {
             selection_state.selections.as_selections()
         })
+    }
+
+    pub fn last_added_selection_index(&self) -> Option<usize> {
+        self.selection_state.borrow().last_added_selection_index
     }
 
     pub fn highlighted_delimiter_positions(&self) -> Ref<'_, HashSet<Position>> {
