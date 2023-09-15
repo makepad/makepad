@@ -23,6 +23,7 @@ pub struct StdinWindowSize{
     pub width: f64,
     pub height: f64,
     pub dpi_factor: f64,
+    pub swapchain_handles: [u64; 2],  // Windows for now, later make better struct, or add #[cfg]s
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
@@ -128,15 +129,13 @@ pub enum HostToStdin{
         file:String,
         contents:String
     },
-    
-    Dx11SharedHandle(u64)
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost{
     ReadyToStart,
     SetCursor(MouseCursor),
-    DrawComplete
+    DrawCompleteAndFlip(usize),  // the client is done drawing, and the texture is completely updated
 }
 
 impl StdinToHost{
