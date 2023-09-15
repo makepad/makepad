@@ -202,6 +202,7 @@ impl Win32App {
             IsGUIThread(TRUE);
             
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
+            //CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             OleInitialize(None).unwrap();
         }
         
@@ -277,7 +278,7 @@ impl Win32App {
         if let Some(mut callback) = cb {
             let event_flow = callback(event);
             get_win32_app_global().event_flow = event_flow;
-            if let EventFlow::Exit = get_win32_app_global().event_flow {
+            if let EventFlow::Exit = event_flow {
                 unsafe {ExitProcess(0);}
             }
             get_win32_app_global().event_callback = Some(callback);

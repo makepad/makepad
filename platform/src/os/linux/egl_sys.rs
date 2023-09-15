@@ -297,15 +297,16 @@ pub unsafe fn create_egl_context(
     display: *mut std::ffi::c_void,
     alpha: bool,
 ) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
+
     let display = (egl.eglGetDisplay.unwrap())(display as _);
     if display == /* EGL_NO_DISPLAY */ null_mut() {
         return Err(EglError::NoDisplay);
     }
-    
+
     if (egl.eglInitialize.unwrap())(display, null_mut(), null_mut()) == 0 {
         return Err(EglError::InitializeFailed);
     }
-    
+
     let alpha_size = if alpha {8} else {0};
     #[rustfmt::skip]
     let cfg_attributes = vec![
@@ -320,14 +321,14 @@ pub unsafe fn create_egl_context(
         EGL_ALPHA_SIZE,
         alpha_size,
         EGL_DEPTH_SIZE,
-        16,
+        24,
         EGL_STENCIL_SIZE,
         0,
         EGL_NONE,
     ];
     let mut available_cfgs: Vec<EGLConfig> = vec![null_mut(); 32];
     let mut cfg_count = 0;
-    
+
     (egl.eglChooseConfig.unwrap())(
         display,
         cfg_attributes.as_ptr() as _,
