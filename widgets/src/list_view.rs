@@ -151,7 +151,7 @@ impl ListView {
         let vi = self.vec_index;
         let mut at_end = false;
         let mut visible_items = 0;
-        let dpi_factor = cx.current_dpi_factor();
+
         if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
             if list.len()>0 {

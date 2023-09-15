@@ -190,7 +190,7 @@ impl Cx {
                     FromJavaMessage::KeyUp {keycode, meta_state} => {
                         let makepad_keycode = android_to_makepad_key_code(keycode);
                         let control = meta_state & ANDROID_META_CTRL_MASK != 0;
-                        let alt = meta_state & ANDROID_META_ALT_MASK != 0;
+                        let alt = meta_state & ANDROID_META_ALT_MASK != 0; 
                         let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
 
                         let e = Event::KeyUp(
@@ -307,9 +307,9 @@ impl Cx {
         
         // lets start a thread
         std::thread::spawn(move || {
-            
+            unsafe{attach_jni_env()};
             let mut cx = startup();
-            
+            cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
             
             let window = loop {
@@ -323,20 +323,17 @@ impl Cx {
                         width,
                         height,
                     }) => {
-                        crate::log!("GOT WIDTH HEIGHT {} {}", width, height);
                         cx.os.display_size = dvec2(width as f64, height as f64);
                         break window;
                     }
                     _ => {}
                 }
             };
-            
             let (egl_context, egl_config, egl_display) = unsafe {egl_sys::create_egl_context(
                 &mut libegl,
                 std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
                 false,
             ).expect("Cant create EGL context")};
-            
             unsafe {gl_sys::load_with( | s | {
                 let s = CString::new(s).unwrap();
                 libegl.eglGetProcAddress.unwrap()(s.as_ptr())
