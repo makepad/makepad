@@ -134,6 +134,14 @@ impl DVec2 {
     pub fn new() -> DVec2 {
         DVec2::default()
     }
+
+
+    pub fn dpi_snap(&self, f:f64)->DVec2{
+        DVec2{
+            x:(self.x * f).round() / f,
+            y:(self.y * f).round() / f
+        }
+    }
     
     pub fn all(x: f64) -> DVec2 {
         DVec2 {x, y: x}

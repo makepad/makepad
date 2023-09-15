@@ -12,6 +12,7 @@ use {
             TextClipboardEvent,
             TimerEvent,
             TouchUpdateEvent,
+            VirtualKeyboardEvent,
         },
     }
 };
@@ -23,7 +24,7 @@ pub enum IosEvent {
     AppLostFocus,
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
-    
+    VirtualKeyboard(VirtualKeyboardEvent),
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),

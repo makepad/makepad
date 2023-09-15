@@ -1,12 +1,10 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-     
+    import makepad_draw::shader::std::*;
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
-    //self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
     LOGO = dep("crate://self/resources/logo.svg")
@@ -19,10 +17,12 @@ live_design!{
     ICO_USER = dep("crate://self/resources/icon_user.svg")
     ICO_ADD = dep("crate://self/resources/icon_add.svg")
     
+    
     FONT_SIZE_SUB = 9.5
     FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
+        
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
@@ -44,7 +44,7 @@ live_design!{
     COLOR_DIVIDER_DARK = #x00000044
     COLOR_PROFILE_CIRCLE = #xfff8ee
     COLOR_P = #x999
-     
+    
     FillerY = <View> {width: Fill}
     
     FillerX = <View> {height: Fill}
@@ -295,42 +295,45 @@ live_design!{
     
     
     App = {{App}} {
-        ui: <DesktopWindow> {
+        ui: <Window> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
             
-            flow: Overlay,
-            padding: 0.0
-            spacing: 0,
-            align: {
-                x: 0.0,
-                y: 0.0
-            },
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return (COLOR_BG);
                 }
             }
-            
-            news_feed = <ListView> {
-                height: Fill,
-                width: Fill
-                flow: Down
-                TopSpace = <View> {height: 80}
-                Post = <Post> {}
-                PostImage = <PostImage> {}
-                BottomSpace = <View> {height: 100}
-            }
-            
-            <View> {
-                height: Fill,
-                width: Fill
-                flow: Down
+            body = {
+                flow: Overlay,
+                padding: 0.0
+                spacing: 0,
+                align: {
+                    x: 0.0,
+                    y: 0.0
+                },
                 
-                    <Header> {}
-                <FillerY> {}
-                <Menu> {}
+                
+                news_feed = <ListView> {
+                    height: Fill,
+                    width: Fill
+                    flow: Down
+                    TopSpace = <View> {height: 80}
+                    Post = <Post> {}
+                    PostImage = <PostImage> {}
+                    BottomSpace = <View> {height: 100}
+                }
+                
+                <View> {
+                    height: Fill,
+                    width: Fill
+                    flow: Down
+                    
+                        <Header> {}
+                    <FillerY> {}
+                    <Menu> {}
+                }
             }
         }
     }
@@ -346,7 +349,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-    }
+    } 
 }
 
 impl AppMain for App {
