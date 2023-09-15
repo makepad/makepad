@@ -25,21 +25,21 @@ live_design! {
 }
 
 // TODO:
-// - Properly cleanup resources after playback is finished
 
-// - Fix support for YUV420Plannar, colors don't show right.
 // - Add support for SemiPlanar nv21, currently we assume that SemiPlanar is nv12
-
 // - Add function to restart playback manually when not looping.
 
 // - Optimizations:
+//      - we could offload work by moving the YUV interleaving to the GPU. however this either requires to either add support for textures as vec<u8> in makeapd
+//        or convert to vec<u32> more directly and having the GPU do the interleaving. currently since we're already iterating over the data when converting to vec<u32>,
+//        we're also packing it into YUV in way that's simple to grab in the shader.
 //      - lower memory usage by avoiding copying on frame chunk deserialization
-//      - dynamically calculate chunk size this based on frame rate and size
-//      - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
-//      - testing multiple videos on a ListView will probably show other issues
+//      - determine frame chunk size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
+//      - we're allocating new vec and copying data from java into rust when decoding, if we need to we could have a shared memory buffer between them, but that
+//        introduces a lot of complexity.
 
-// - Post-conf:
-//      - add audio playback
+// Future:
+//  - Add audio playback
 
 #[derive(Live)]
 pub struct Video {
@@ -65,6 +65,10 @@ pub struct Video {
     hold_to_pause: bool,
     #[rust]
     is_paused: bool, 
+    #[rust]
+    pause_time: Option<Instant>,
+    #[rust]
+    total_pause_duration: Duration,
 
     // Original video metadata
     #[rust]
@@ -241,12 +245,12 @@ impl Video {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 if self.hold_to_pause {
-                    self.is_paused = true;
+                    self.pause_playback();
                 }
             },
             Hit::FingerUp(_fe) => {
                 if self.hold_to_pause {
-                    self.is_paused = false;
+                    self.resume_playback();
                 }
             }
             _ => (),
@@ -388,6 +392,22 @@ impl Video {
 
     fn is_buffer_running_low(&self) -> bool {
         self.frames_buffer.lock().unwrap().data.len() < FRAME_BUFFER_LOW_WATER_MARK
+    }
+    
+    fn pause_playback(&mut self) {
+        self.pause_time = Some(Instant::now());
+        self.is_paused = true;
+    }
+
+    fn resume_playback(&mut self) {
+        if let Some(pause_time) = self.pause_time.take() {
+            let pause_duration = Instant::now().duration_since(pause_time);
+            self.total_pause_duration += pause_duration;
+            if let Some(start_time) = self.start_time.as_mut() {
+                *start_time += pause_duration;
+            }
+        }
+        self.is_paused = false;
     }
 
     fn _cleanup_decoding(&mut self, cx: &mut Cx) {
