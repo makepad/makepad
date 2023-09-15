@@ -76,9 +76,17 @@ extern {
 #[cfg(target_os = "ios")]
 #[link(name = "UIKit", kind = "framework")]
 extern "C" {
-    pub static UIKeyboardDidShowNotification: ObjcId;
+    pub static UIKeyboardFrameBeginUserInfoKey: ObjcId;
+    pub static UIKeyboardFrameEndUserInfoKey: ObjcId;
+    pub static UIKeyboardWillShowNotification: ObjcId;
     pub static UIKeyboardWillHideNotification: ObjcId;
+    pub static UIKeyboardDidShowNotification: ObjcId;
+    pub static UIKeyboardDidHideNotification: ObjcId;
     pub static UIKeyboardDidChangeFrameNotification: ObjcId;
+    pub static UIKeyboardWillChangeFrameNotification: ObjcId;
+    pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
+    pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
+    
     pub fn UIApplicationMain(
         argc: i32,
         argv: *mut *mut i8,
@@ -93,6 +101,8 @@ extern {
     pub fn dispatch_queue_create(label: *const u8, attr: ObjcId,) -> ObjcId;
     pub fn dispatch_get_global_queue(ident:u64, flags: u64) -> ObjcId;
     pub fn dispatch_release(object: ObjcId);
+    pub fn _NSGetExecutablePath(buf: *mut u8, buf_size: &mut u32);
+
 
     pub static NSNotificationCenter: ObjcId;
     pub static NSRunLoopCommonModes: ObjcId;

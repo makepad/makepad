@@ -910,6 +910,18 @@ impl ::windows_core::TypeKind for HICON {
     type TypeKind = ::windows_core::CopyType;
 }
 
+pub const WM_USER: u32 = 1024u32;
+
+pub unsafe fn SendMessageW<P0, P1, P2>(hwnd: P0, msg: u32, wparam: P1, lparam: P2) -> super::super::Foundation::LRESULT
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HWND>,
+    P1: ::windows_core::IntoParam<super::super::Foundation::WPARAM>,
+    P2: ::windows_core::IntoParam<super::super::Foundation::LPARAM>,
+{
+    ::windows_targets::link!("user32.dll" "system" fn SendMessageW(hwnd : super::super::Foundation:: HWND, msg : u32, wparam : super::super::Foundation:: WPARAM, lparam : super::super::Foundation:: LPARAM) -> super::super::Foundation:: LRESULT);
+    SendMessageW(hwnd.into_param().abi(), msg, wparam.into_param().abi(), lparam.into_param().abi())
+}
+
 }
 pub mod HiDpi{
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct PROCESS_DPI_AWARENESS(pub i32);
@@ -1532,6 +1544,32 @@ impl IPropertyStore_Vtbl {
 }
 
 }
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HDROP(pub isize);
+impl HDROP {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == -1 || self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HDROP {}
+impl ::core::clone::Clone for HDROP {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HDROP {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for HDROP {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HDROP").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for HDROP {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 }
 }
 pub mod Graphics{
@@ -1597,6 +1635,14 @@ where
 pub const MONITOR_DEFAULTTONEAREST: MONITOR_FROM_FLAGS = MONITOR_FROM_FLAGS(2u32);
 
 pub const LOGPIXELSX: GET_DEVICE_CAPS_INDEX = GET_DEVICE_CAPS_INDEX(88u32);
+
+pub unsafe fn ScreenToClient<P0>(hwnd: P0, lppoint: *mut super::super::Foundation::POINT) -> super::super::Foundation::BOOL
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HWND>,
+{
+    ::windows_targets::link!("user32.dll" "system" fn ScreenToClient(hwnd : super::super::Foundation:: HWND, lppoint : *mut super::super::Foundation:: POINT) -> super::super::Foundation:: BOOL);
+    ScreenToClient(hwnd.into_param().abi(), lppoint)
+}
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HDC(pub isize);
 impl HDC {
@@ -12357,6 +12403,10 @@ impl ::windows_core::TypeKind for BOOL {
 
 pub type FARPROC = ::core::option::Option<unsafe extern "system" fn() -> isize>;
 
+pub const DRAGDROP_S_DROP: ::windows_core::HRESULT = ::windows_core::HRESULT(262400i32);
+
+pub const DRAGDROP_S_CANCEL: ::windows_core::HRESULT = ::windows_core::HRESULT(262401i32);
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HANDLE(pub isize);
 impl HANDLE {
     pub fn is_invalid(&self) -> bool {
@@ -12504,6 +12554,66 @@ impl ::windows_core::TypeKind for RECT {
     type TypeKind = ::windows_core::CopyType;
 }
 
+#[repr(C)]pub struct POINT {
+    pub x: i32,
+    pub y: i32,
+}
+impl ::core::marker::Copy for POINT {}
+impl ::core::cmp::Eq for POINT {}
+impl ::core::cmp::PartialEq for POINT {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+impl ::core::clone::Clone for POINT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for POINT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for POINT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("POINT").field("x", &self.x).field("y", &self.y).finish()
+    }
+}
+impl ::windows_core::TypeKind for POINT {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[repr(C)]pub struct POINTL {
+    pub x: i32,
+    pub y: i32,
+}
+impl ::core::marker::Copy for POINTL {}
+impl ::core::cmp::Eq for POINTL {}
+impl ::core::cmp::PartialEq for POINTL {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+impl ::core::clone::Clone for POINTL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for POINTL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for POINTL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("POINTL").field("x", &self.x).field("y", &self.y).finish()
+    }
+}
+impl ::windows_core::TypeKind for POINTL {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HINSTANCE(pub isize);
 impl HINSTANCE {
     pub fn is_invalid(&self) -> bool {
@@ -12537,36 +12647,6 @@ impl ::windows_core::TypeKind for HINSTANCE {
 }
 
 pub const WAIT_OBJECT_0: WAIT_EVENT = WAIT_EVENT(0u32);
-
-#[repr(C)]pub struct POINTL {
-    pub x: i32,
-    pub y: i32,
-}
-impl ::core::marker::Copy for POINTL {}
-impl ::core::cmp::Eq for POINTL {}
-impl ::core::cmp::PartialEq for POINTL {
-    fn eq(&self, other: &Self) -> bool {
-        self.x == other.x && self.y == other.y
-    }
-}
-impl ::core::clone::Clone for POINTL {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for POINTL {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-impl ::core::fmt::Debug for POINTL {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("POINTL").field("x", &self.x).field("y", &self.y).finish()
-    }
-}
-impl ::windows_core::TypeKind for POINTL {
-    type TypeKind = ::windows_core::CopyType;
-}
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WAIT_EVENT(pub u32);
 impl ::core::marker::Copy for WAIT_EVENT {}
@@ -12807,36 +12887,6 @@ impl ::windows_core::TypeKind for LUID {
     type TypeKind = ::windows_core::CopyType;
 }
 
-#[repr(C)]pub struct POINT {
-    pub x: i32,
-    pub y: i32,
-}
-impl ::core::marker::Copy for POINT {}
-impl ::core::cmp::Eq for POINT {}
-impl ::core::cmp::PartialEq for POINT {
-    fn eq(&self, other: &Self) -> bool {
-        self.x == other.x && self.y == other.y
-    }
-}
-impl ::core::clone::Clone for POINT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for POINT {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-impl ::core::fmt::Debug for POINT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("POINT").field("x", &self.x).field("y", &self.y).finish()
-    }
-}
-impl ::windows_core::TypeKind for POINT {
-    type TypeKind = ::windows_core::CopyType;
-}
-
 #[repr(C)]pub struct DECIMAL {
     pub wReserved: u16,
     pub Anonymous1: DECIMAL_0,
@@ -12950,6 +13000,26 @@ impl ::windows_core::TypeKind for DECIMAL_1_0 {
     type TypeKind = ::windows_core::CopyType;
 }
 
+pub const DRAGDROP_S_USEDEFAULTCURSORS: ::windows_core::HRESULT = ::windows_core::HRESULT(262402i32);
+
+pub const E_NOTIMPL: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147467263i32);
+
+pub const OLE_E_ADVISENOTSUPPORTED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221501i32);
+
+pub const DATA_S_SAMEFORMATETC: ::windows_core::HRESULT = ::windows_core::HRESULT(262448i32);
+
+pub const DV_E_FORMATETC: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221404i32);
+
+pub const DV_E_DVASPECT: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221397i32);
+
+pub const DV_E_LINDEX: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221400i32);
+
+pub const DV_E_TYMED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221399i32);
+
+pub const S_FALSE: ::windows_core::HRESULT = ::windows_core::HRESULT(1i32);
+
+pub const E_UNEXPECTED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147418113i32);
+
 }
 pub mod System{
 pub mod Threading{
@@ -13027,114 +13097,89 @@ pub unsafe fn QueryPerformanceFrequency(lpfrequency: *mut i64) -> ::windows_core
 }
 
 }
-pub mod Memory{
-pub unsafe fn GlobalLock<P0>(hmem: P0) -> *mut ::core::ffi::c_void
-where
-    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
-{
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalLock(hmem : super::super::Foundation:: HGLOBAL) -> *mut ::core::ffi::c_void);
-    GlobalLock(hmem.into_param().abi())
-}
-
-pub unsafe fn GlobalAlloc(uflags: GLOBAL_ALLOC_FLAGS, dwbytes: usize) -> ::windows_core::Result<super::super::Foundation::HGLOBAL> {
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalAlloc(uflags : GLOBAL_ALLOC_FLAGS, dwbytes : usize) -> super::super::Foundation:: HGLOBAL);
-    let result__ = GlobalAlloc(uflags, dwbytes);
-    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows_core::Error::from_win32)
-}
-
-pub unsafe fn GlobalSize<P0>(hmem: P0) -> usize
-where
-    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
-{
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalSize(hmem : super::super::Foundation:: HGLOBAL) -> usize);
-    GlobalSize(hmem.into_param().abi())
-}
-
-pub unsafe fn GlobalUnlock<P0>(hmem: P0) -> ::windows_core::Result<()>
-where
-    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
-{
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalUnlock(hmem : super::super::Foundation:: HGLOBAL) -> super::super::Foundation:: BOOL);
-    GlobalUnlock(hmem.into_param().abi()).ok()
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct GLOBAL_ALLOC_FLAGS(pub u32);
-impl GLOBAL_ALLOC_FLAGS {
-    pub const fn contains(&self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-}
-impl ::core::marker::Copy for GLOBAL_ALLOC_FLAGS {}
-impl ::core::clone::Clone for GLOBAL_ALLOC_FLAGS {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for GLOBAL_ALLOC_FLAGS {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-impl ::core::fmt::Debug for GLOBAL_ALLOC_FLAGS {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("GLOBAL_ALLOC_FLAGS").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for GLOBAL_ALLOC_FLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for GLOBAL_ALLOC_FLAGS {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for GLOBAL_ALLOC_FLAGS {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for GLOBAL_ALLOC_FLAGS {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for GLOBAL_ALLOC_FLAGS {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
-impl ::windows_core::TypeKind for GLOBAL_ALLOC_FLAGS {
-    type TypeKind = ::windows_core::CopyType;
-}
-
-}
 pub mod Ole{
-pub const CF_UNICODETEXT: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(13u16);
+pub unsafe fn OleInitialize(pvreserved: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows_core::Result<()> {
+    ::windows_targets::link!("ole32.dll" "system" fn OleInitialize(pvreserved : *const ::core::ffi::c_void) -> ::windows_core::HRESULT);
+    OleInitialize(::core::mem::transmute(pvreserved.unwrap_or(::std::ptr::null()))).ok()
+}
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CLIPBOARD_FORMAT(pub u16);
-impl ::core::marker::Copy for CLIPBOARD_FORMAT {}
-impl ::core::clone::Clone for CLIPBOARD_FORMAT {
+#[repr(transparent)]pub struct IDropSource(::windows_core::IUnknown);
+impl IDropSource {
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_SystemServices\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
+    pub unsafe fn QueryContinueDrag<P0>(&self, fescapepressed: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT
+    where
+        P0: ::windows_core::IntoParam<super::super::Foundation::BOOL>,
+    {
+        (::windows_core::Interface::vtable(self).QueryContinueDrag)(::windows_core::Interface::as_raw(self), fescapepressed.into_param().abi(), grfkeystate)
+    }
+    pub unsafe fn GiveFeedback(&self, dweffect: DROPEFFECT) -> ::windows_core::HRESULT {
+        (::windows_core::Interface::vtable(self).GiveFeedback)(::windows_core::Interface::as_raw(self), dweffect)
+    }
+}
+impl ::core::cmp::Eq for IDropSource {}
+impl ::core::cmp::PartialEq for IDropSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IDropSource {
     fn clone(&self) -> Self {
-        *self
+        Self(self.0.clone())
     }
 }
-impl ::core::default::Default for CLIPBOARD_FORMAT {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-impl ::core::fmt::Debug for CLIPBOARD_FORMAT {
+impl ::core::fmt::Debug for IDropSource {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("CLIPBOARD_FORMAT").field(&self.0).finish()
+        f.debug_tuple("IDropSource").field(&self.0).finish()
     }
 }
-impl ::windows_core::TypeKind for CLIPBOARD_FORMAT {
-    type TypeKind = ::windows_core::CopyType;
+unsafe impl ::windows_core::Interface for IDropSource {
+    type Vtable = IDropSource_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for IDropSource {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000121_0000_0000_c000_000000000046);
+}
+
+::windows_core::imp::interface_hierarchy!(IDropSource, ::windows_core::IUnknown);
+
+#[repr(C)]
+pub struct IDropSource_Vtbl {
+    pub base__: ::windows_core::IUnknown_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
+    pub QueryContinueDrag: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, fescapepressed: super::super::Foundation::BOOL, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices")))]
+    QueryContinueDrag: usize,
+    pub GiveFeedback: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dweffect: DROPEFFECT) -> ::windows_core::HRESULT,
+}
+
+pub trait IDropSource_Impl: Sized {
+    fn QueryContinueDrag(&self, fescapepressed: super::super::Foundation::BOOL, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT;
+    fn GiveFeedback(&self, dweffect: DROPEFFECT) -> ::windows_core::HRESULT;
+}
+
+impl ::windows_core::RuntimeName for IDropSource {}
+
+impl IDropSource_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropSource_Impl, const OFFSET: isize>() -> IDropSource_Vtbl {
+        unsafe extern "system" fn QueryContinueDrag<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropSource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, fescapepressed: super::super::Foundation::BOOL, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.QueryContinueDrag(::core::mem::transmute_copy(&fescapepressed), ::core::mem::transmute_copy(&grfkeystate))
+        }
+        unsafe extern "system" fn GiveFeedback<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropSource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dweffect: DROPEFFECT) -> ::windows_core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GiveFeedback(::core::mem::transmute_copy(&dweffect))
+        }
+        Self {
+            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            QueryContinueDrag: QueryContinueDrag::<Identity, Impl, OFFSET>,
+            GiveFeedback: GiveFeedback::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<IDropSource as ::windows_core::ComInterface>::IID
+    }
 }
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DROPEFFECT(pub u32);
@@ -13188,6 +13233,37 @@ impl ::core::ops::Not for DROPEFFECT {
     }
 }
 impl ::windows_core::TypeKind for DROPEFFECT {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+pub const DROPEFFECT_COPY: DROPEFFECT = DROPEFFECT(1u32);
+
+pub const DROPEFFECT_MOVE: DROPEFFECT = DROPEFFECT(2u32);
+
+pub const CF_UNICODETEXT: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(13u16);
+
+pub const DROPEFFECT_LINK: DROPEFFECT = DROPEFFECT(4u32);
+
+pub const DROPEFFECT_SCROLL: DROPEFFECT = DROPEFFECT(2147483648u32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CLIPBOARD_FORMAT(pub u16);
+impl ::core::marker::Copy for CLIPBOARD_FORMAT {}
+impl ::core::clone::Clone for CLIPBOARD_FORMAT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CLIPBOARD_FORMAT {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for CLIPBOARD_FORMAT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("CLIPBOARD_FORMAT").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for CLIPBOARD_FORMAT {
     type TypeKind = ::windows_core::CopyType;
 }
 
@@ -13618,119 +13694,168 @@ impl ::windows_core::TypeKind for PARAMDESC {
     type TypeKind = ::windows_core::CopyType;
 }
 
-#[repr(transparent)]pub struct IDropTarget(::windows_core::IUnknown);
-impl IDropTarget {
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`, `\"Win32_System_SystemServices\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub unsafe fn DragEnter<P0>(&self, pdataobj: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>
-    where
-        P0: ::windows_core::IntoParam<super::Com::IDataObject>,
-    {
-        (::windows_core::Interface::vtable(self).DragEnter)(::windows_core::Interface::as_raw(self), pdataobj.into_param().abi(), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_SystemServices\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
-    pub unsafe fn DragOver(&self, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()> {
-        (::windows_core::Interface::vtable(self).DragOver)(::windows_core::Interface::as_raw(self), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
-    }
-    pub unsafe fn DragLeave(&self) -> ::windows_core::Result<()> {
-        (::windows_core::Interface::vtable(self).DragLeave)(::windows_core::Interface::as_raw(self)).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`, `\"Win32_System_SystemServices\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub unsafe fn Drop<P0>(&self, pdataobj: P0, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>
-    where
-        P0: ::windows_core::IntoParam<super::Com::IDataObject>,
-    {
-        (::windows_core::Interface::vtable(self).Drop)(::windows_core::Interface::as_raw(self), pdataobj.into_param().abi(), grfkeystate, ::core::mem::transmute(pt), pdweffect).ok()
+pub unsafe fn ReleaseStgMedium(param0: *mut super::Com::STGMEDIUM) {
+    ::windows_targets::link!("ole32.dll" "system" fn ReleaseStgMedium(param0 : *mut super::Com:: STGMEDIUM) -> ());
+    ReleaseStgMedium(param0)
+}
+
+pub const CF_HDROP: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(15u16);
+
+}
+pub mod Memory{
+pub unsafe fn GlobalAlloc(uflags: GLOBAL_ALLOC_FLAGS, dwbytes: usize) -> ::windows_core::Result<super::super::Foundation::HGLOBAL> {
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalAlloc(uflags : GLOBAL_ALLOC_FLAGS, dwbytes : usize) -> super::super::Foundation:: HGLOBAL);
+    let result__ = GlobalAlloc(uflags, dwbytes);
+    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows_core::Error::from_win32)
+}
+
+pub const GMEM_ZEROINIT: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(64u32);
+
+pub const GMEM_FIXED: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(0u32);
+
+pub unsafe fn GlobalLock<P0>(hmem: P0) -> *mut ::core::ffi::c_void
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
+{
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalLock(hmem : super::super::Foundation:: HGLOBAL) -> *mut ::core::ffi::c_void);
+    GlobalLock(hmem.into_param().abi())
+}
+
+pub unsafe fn GlobalUnlock<P0>(hmem: P0) -> ::windows_core::Result<()>
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
+{
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalUnlock(hmem : super::super::Foundation:: HGLOBAL) -> super::super::Foundation:: BOOL);
+    GlobalUnlock(hmem.into_param().abi()).ok()
+}
+
+pub unsafe fn GlobalSize<P0>(hmem: P0) -> usize
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
+{
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalSize(hmem : super::super::Foundation:: HGLOBAL) -> usize);
+    GlobalSize(hmem.into_param().abi())
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct GLOBAL_ALLOC_FLAGS(pub u32);
+impl GLOBAL_ALLOC_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 }
-impl ::core::cmp::Eq for IDropTarget {}
-impl ::core::cmp::PartialEq for IDropTarget {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for IDropTarget {
+impl ::core::marker::Copy for GLOBAL_ALLOC_FLAGS {}
+impl ::core::clone::Clone for GLOBAL_ALLOC_FLAGS {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        *self
     }
 }
-impl ::core::fmt::Debug for IDropTarget {
+impl ::core::default::Default for GLOBAL_ALLOC_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for GLOBAL_ALLOC_FLAGS {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("IDropTarget").field(&self.0).finish()
+        f.debug_tuple("GLOBAL_ALLOC_FLAGS").field(&self.0).finish()
     }
 }
-unsafe impl ::windows_core::Interface for IDropTarget {
-    type Vtable = IDropTarget_Vtbl;
-}
-unsafe impl ::windows_core::ComInterface for IDropTarget {
-    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0x00000122_0000_0000_c000_000000000046);
-}
-
-::windows_core::imp::interface_hierarchy!(IDropTarget, ::windows_core::IUnknown);
-
-#[repr(C)]
-pub struct IDropTarget_Vtbl {
-    pub base__: ::windows_core::IUnknown_Vtbl,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub DragEnter: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices")))]
-    DragEnter: usize,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices"))]
-    pub DragOver: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_SystemServices")))]
-    DragOver: usize,
-    pub DragLeave: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices"))]
-    pub Drop: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com", feature = "Win32_System_SystemServices")))]
-    Drop: usize,
-}
-
-pub trait IDropTarget_Impl: Sized {
-    fn DragEnter(&self, pdataobj: ::core::option::Option<&super::Com::IDataObject>, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
-    fn DragOver(&self, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
-    fn DragLeave(&self) -> ::windows_core::Result<()>;
-    fn Drop(&self, pdataobj: ::core::option::Option<&super::Com::IDataObject>, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: &super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::Result<()>;
-}
-
-impl ::windows_core::RuntimeName for IDropTarget {}
-
-impl IDropTarget_Vtbl {
-    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>() -> IDropTarget_Vtbl {
-        unsafe extern "system" fn DragEnter<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.DragEnter(::windows_core::from_raw_borrowed(&pdataobj), ::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
-        }
-        unsafe extern "system" fn DragOver<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.DragOver(::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
-        }
-        unsafe extern "system" fn DragLeave<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows_core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.DragLeave().into()
-        }
-        unsafe extern "system" fn Drop<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: IDropTarget_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdataobj: *mut ::core::ffi::c_void, grfkeystate: super::SystemServices::MODIFIERKEYS_FLAGS, pt: super::super::Foundation::POINTL, pdweffect: *mut DROPEFFECT) -> ::windows_core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.Drop(::windows_core::from_raw_borrowed(&pdataobj), ::core::mem::transmute_copy(&grfkeystate), ::core::mem::transmute(&pt), ::core::mem::transmute_copy(&pdweffect)).into()
-        }
-        Self {
-            base__: ::windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
-            DragEnter: DragEnter::<Identity, Impl, OFFSET>,
-            DragOver: DragOver::<Identity, Impl, OFFSET>,
-            DragLeave: DragLeave::<Identity, Impl, OFFSET>,
-            Drop: Drop::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &::windows_core::GUID) -> bool {
-        iid == &<IDropTarget as ::windows_core::ComInterface>::IID
+impl ::core::ops::BitOr for GLOBAL_ALLOC_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
+impl ::core::ops::BitAnd for GLOBAL_ALLOC_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for GLOBAL_ALLOC_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for GLOBAL_ALLOC_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for GLOBAL_ALLOC_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+impl ::windows_core::TypeKind for GLOBAL_ALLOC_FLAGS {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+}
+pub mod SystemServices{
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct MODIFIERKEYS_FLAGS(pub u32);
+impl MODIFIERKEYS_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl ::core::marker::Copy for MODIFIERKEYS_FLAGS {}
+impl ::core::clone::Clone for MODIFIERKEYS_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for MODIFIERKEYS_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for MODIFIERKEYS_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("MODIFIERKEYS_FLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for MODIFIERKEYS_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for MODIFIERKEYS_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for MODIFIERKEYS_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for MODIFIERKEYS_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for MODIFIERKEYS_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+impl ::windows_core::TypeKind for MODIFIERKEYS_FLAGS {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+pub const MK_CONTROL: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(8u32);
+
+pub const MK_SHIFT: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(4u32);
+
+pub const MK_LBUTTON: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(1u32);
+
+pub const MK_MBUTTON: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(16u32);
+
+pub const MK_RBUTTON: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(2u32);
 
 }
 pub mod WindowsProgramming{
@@ -17811,6 +17936,69 @@ impl ::windows_core::TypeKind for CY_0 {
     type TypeKind = ::windows_core::CopyType;
 }
 
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DATADIR(pub i32);
+impl ::core::marker::Copy for DATADIR {}
+impl ::core::clone::Clone for DATADIR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DATADIR {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for DATADIR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DATADIR").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for DATADIR {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct TYMED(pub i32);
+impl ::core::marker::Copy for TYMED {}
+impl ::core::clone::Clone for TYMED {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TYMED {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for TYMED {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("TYMED").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for TYMED {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DVASPECT(pub u32);
+impl ::core::marker::Copy for DVASPECT {}
+impl ::core::clone::Clone for DVASPECT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DVASPECT {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+impl ::core::fmt::Debug for DVASPECT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DVASPECT").field(&self.0).finish()
+    }
+}
+impl ::windows_core::TypeKind for DVASPECT {
+    type TypeKind = ::windows_core::CopyType;
+}
+
 pub mod StructuredStorage{
 #[repr(transparent)]pub struct IEnumSTATSTG(::windows_core::IUnknown);
 impl IEnumSTATSTG {
@@ -19118,6 +19306,12 @@ impl ::windows_core::TypeKind for STGMOVE {
 }
 
 }
+pub const DATADIR_GET: DATADIR = DATADIR(1i32);
+
+pub const TYMED_HGLOBAL: TYMED = TYMED(1i32);
+
+pub const DVASPECT_CONTENT: DVASPECT = DVASPECT(1u32);
+
 }
 pub mod Variant{
 pub const VT_LPWSTR: VARENUM = VARENUM(31u16);
@@ -19281,62 +19475,6 @@ impl ::core::fmt::Debug for VARIANT_0_0_0_0 {
     }
 }
 impl ::windows_core::TypeKind for VARIANT_0_0_0_0 {
-    type TypeKind = ::windows_core::CopyType;
-}
-
-}
-pub mod SystemServices{
-#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct MODIFIERKEYS_FLAGS(pub u32);
-impl MODIFIERKEYS_FLAGS {
-    pub const fn contains(&self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-}
-impl ::core::marker::Copy for MODIFIERKEYS_FLAGS {}
-impl ::core::clone::Clone for MODIFIERKEYS_FLAGS {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for MODIFIERKEYS_FLAGS {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-impl ::core::fmt::Debug for MODIFIERKEYS_FLAGS {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("MODIFIERKEYS_FLAGS").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for MODIFIERKEYS_FLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for MODIFIERKEYS_FLAGS {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for MODIFIERKEYS_FLAGS {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for MODIFIERKEYS_FLAGS {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for MODIFIERKEYS_FLAGS {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
-impl ::windows_core::TypeKind for MODIFIERKEYS_FLAGS {
     type TypeKind = ::windows_core::CopyType;
 }
 

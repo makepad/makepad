@@ -135,6 +135,7 @@ pub use {
         menu::MenuCommand,
         thread::Signal,
         event::{
+            VirtualKeyboardEvent,
             HttpRequest,
             HttpResponse,
             HttpMethod,
@@ -188,7 +189,7 @@ pub use {
         cursor::MouseCursor,
         menu::Menu,
         draw_matrix::DrawMatrix,
-        window::Window,
+        window::WindowHandle,
         pass::{
             PassId,
             CxPassParent,

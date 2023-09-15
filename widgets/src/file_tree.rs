@@ -4,6 +4,7 @@ use {
     },
     crate::{
         makepad_derive_widget::*,
+        check_box::*,
         makepad_draw::*,
         widget::*,
         scroll_shadow::DrawScrollShadow,
@@ -61,6 +62,7 @@ pub struct FileTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
     #[live] draw_name: DrawNameText,
+    #[live] check_box: CheckBox,
     #[layout] layout: Layout,
     
     #[animator] animator: Animator,
@@ -382,6 +384,9 @@ impl FileTree {
         items: Vec<DragItem>,
     ) {
         self.dragging_node_id = Some(node_id);
+
+        log!("makepad: start_dragging_file_node");
+
         cx.start_dragging(items);
     }
     
