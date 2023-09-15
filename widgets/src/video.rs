@@ -221,13 +221,6 @@ impl Video {
         self.color_format = event.color_format;
         self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
 
-        let is_planar = match self.color_format {
-            VideoColorFormat::YUV420Planar => 1.0,
-            _ => 0.0,
-        };
-
-        self.draw_bg.set_uniform(cx, id!(is_planar), &[is_planar]);
-
         makepad_error_log::log!(
             "<<<<<<<<<<<<<<< Decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
             self.video_width,
@@ -399,7 +392,7 @@ impl Video {
 
     fn _cleanup_decoding(&mut self, cx: &mut Cx) {
         cx.cleanup_video_decoding(self.id);
-        self.frames_buffer.lock().unwrap().clear();
+        // self.frames_buffer.lock().unwrap().clear();
     }
 }
 
@@ -428,7 +421,7 @@ impl RingBuffer {
         }
     }
 
-    fn clear(&mut self) {
+    fn _clear(&mut self) {
         self.data.clear();
         self.last_added_index = None;
     }

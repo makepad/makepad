@@ -211,7 +211,6 @@ live_design!{
             instance image_scale: vec2(1.0, 1.0)
             instance image_pan: vec2(0.0, 0.0)
             uniform image_alpha: 1.0
-            uniform is_planar: 1.0
             uniform texture_available: 0.0
             uniform is_last_frame: 0.0
         
@@ -232,23 +231,12 @@ live_design!{
                     return vec4(0.0, 0.0, 0.0, 1.0);
                 }
 
-                if self.is_planar == 1.0 {
-                    let y_sample = sample2d(self.yuv_texture, self.pos * self.image_scale + self.image_pan).z;
-                    let uv_coords = (self.pos * self.image_scale + self.image_pan) / 2.0;
-                    let uv_sample = sample2d(self.yuv_texture, uv_coords);
-                    let u = uv_sample.y;
-                    let v = uv_sample.x;
-            
-                    return yuv_to_rgb(y_sample * 255.0, u * 255.0, v * 255.0);
-                } else {
-                    // Semi-planar NV12 handling
-                    let sample = sample2d(self.yuv_texture, self.pos * self.image_scale + self.image_pan);
-                    let y = sample.z * 255.0;
-                    let u = sample.y * 255.0;
-                    let v = sample.x * 255.0;
+                let sample = sample2d(self.yuv_texture, self.pos * self.image_scale + self.image_pan);
+                let y = sample.z * 255.0;
+                let u = sample.y * 255.0;
+                let v = sample.x * 255.0;
 
-                    return yuv_to_rgb(y, u, v);
-                }
+                return yuv_to_rgb(y, u, v);
             }
             
             fn pixel(self) -> vec4 {
