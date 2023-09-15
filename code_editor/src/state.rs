@@ -13,7 +13,7 @@ use {
         Selection, Settings,
     },
     std::{
-        cell::RefCell,
+        cell::{Ref, RefCell},
         collections::HashSet,
         fmt::Write,
         iter, mem,
@@ -28,13 +28,11 @@ pub struct Session {
     settings: Rc<Settings>,
     document: Document,
     layout: RefCell<SessionLayout>,
+    selection_state: RefCell<SelectionState>,
     wrap_column: Option<usize>,
     folding_lines: HashSet<usize>,
     folded_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
-    selections: SelectionSet,
-    pending_selection_index: Option<usize>,
-    delimiter_stack: Vec<char>,
     edit_receiver: Receiver<(Option<SelectionSet>, Vec<Edit>)>,
 }
 
@@ -55,13 +53,16 @@ impl Session {
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 wrap_data: (0..line_count).map(|_| None).collect(),
             }),
+            selection_state: RefCell::new(SelectionState {
+                selections: SelectionSet::new(),
+                last_added_selection_index: None,
+                delimiter_stack: Vec::new(),
+            }),
             wrap_column: None,
             folding_lines: HashSet::new(),
             folded_lines: HashSet::new(),
             unfolding_lines: HashSet::new(),
-            selections: SelectionSet::new(),
-            pending_selection_index: None,
-            delimiter_stack: Vec::new(),
+
             edit_receiver,
         };
         for line in 0..line_count {
@@ -96,8 +97,10 @@ impl Session {
         self.wrap_column
     }
 
-    pub fn selections(&self) -> &[Selection] {
-        &self.selections
+    pub fn selections(&self) -> Ref<'_, [Selection]> {
+        Ref::map(self.selection_state.borrow(), |selection_state| {
+            selection_state.selections.as_selections()
+        })
     }
 
     pub fn set_wrap_column(&mut self, wrap_column: Option<usize>) {
@@ -116,14 +119,11 @@ impl Session {
         let text = self.document.as_text();
         let lines = text.as_lines();
         for line in 0..lines.len() {
-            let indent_level = lines[line]
-                .leading_whitespace()
-                .unwrap_or("")
-                .column_count()
-                / self.settings.indent_column_count;
+            let indent_level =
+                lines[line].indent().unwrap_or("").column_count() / self.settings.tab_column_count;
             if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
                 self.layout.borrow_mut().fold_column[line] =
-                    self.settings.fold_level * self.settings.indent_column_count;
+                    self.settings.fold_level * self.settings.tab_column_count;
                 self.unfolding_lines.remove(&line);
                 self.folding_lines.insert(line);
             }
@@ -172,39 +172,52 @@ impl Session {
     }
 
     pub fn set_cursor(&mut self, position: Position, affinity: Affinity) {
-        self.selections.set_selection(Selection::from(Cursor {
-            position,
-            affinity,
-            preferred_column_index: None,
-        }));
-        self.pending_selection_index = Some(0);
-        self.delimiter_stack.clear();
-        self.document.force_new_group();
-    }
-
-    pub fn push_cursor(&mut self, position: Position, affinity: Affinity) {
-        self.pending_selection_index =
-            Some(self.selections.push_selection(Selection::from(Cursor {
+        let mut selection_state = self.selection_state.borrow_mut();
+        selection_state
+            .selections
+            .set_selection(Selection::from(Cursor {
                 position,
                 affinity,
                 preferred_column_index: None,
-            })));
-        self.delimiter_stack.clear();
+            }));
+        selection_state.last_added_selection_index = Some(0);
+        selection_state.delimiter_stack.clear();
+        drop(selection_state);
+        self.document.force_new_group();
+    }
+
+    pub fn add_cursor(&mut self, position: Position, affinity: Affinity) {
+        let mut selection_state = self.selection_state.borrow_mut();
+        selection_state.last_added_selection_index = Some(
+            selection_state
+                .selections
+                .add_selection(Selection::from(Cursor {
+                    position,
+                    affinity,
+                    preferred_column_index: None,
+                })),
+        );
+        selection_state.delimiter_stack.clear();
+        drop(selection_state);
         self.document.force_new_group();
     }
 
     pub fn move_to(&mut self, position: Position, affinity: Affinity) {
-        self.pending_selection_index = Some(self.selections.update_selection(
-            self.pending_selection_index.unwrap(),
-            |selection| {
-                selection.update_cursor(|_| Cursor {
-                    position,
-                    affinity,
-                    preferred_column_index: None,
-                })
-            },
-        ));
-        self.delimiter_stack.clear();
+        let mut selection_state = self.selection_state.borrow_mut();
+        let last_added_selection_index = selection_state.last_added_selection_index.unwrap();
+        selection_state.last_added_selection_index = Some(
+            selection_state
+                .selections
+                .update_selection(last_added_selection_index, |selection| {
+                    selection.update_cursor(|_| Cursor {
+                        position,
+                        affinity,
+                        preferred_column_index: None,
+                    })
+                }),
+        );
+        selection_state.delimiter_stack.clear();
+        drop(selection_state);
         self.document.force_new_group();
     }
 
@@ -236,35 +249,50 @@ impl Session {
         let mut edit_kind = EditKind::Insert;
         let mut inject_delimiter = None;
         let mut uninject_delimiter = None;
+        let mut selection_state = self.selection_state.borrow_mut();
         match text.to_single_char() {
             Some(' ') => {
                 edit_kind = EditKind::InsertSpace;
             }
             Some(char) if char.is_opening_delimiter() => {
-                let char = char.opposite_delimiter().unwrap();
-                inject_delimiter = Some(char);
-                self.delimiter_stack.push(char);
+                if selection_state.selections.iter().all(|selection| {
+                    !selection.is_empty()
+                        || self.document.as_text().as_lines()[selection.cursor.position.line_index]
+                            [selection.cursor.position.byte_index..]
+                            .chars()
+                            .all(|char| char.is_whitespace())
+                }) {
+                    let char = char.opposite_delimiter().unwrap();
+                    inject_delimiter = Some(char);
+                    selection_state.delimiter_stack.push(char);
+                }
             }
             Some(char)
-                if self
+                if selection_state
                     .delimiter_stack
                     .last()
                     .map_or(false, |&last_char| last_char == char) =>
             {
-                uninject_delimiter = Some(self.delimiter_stack.pop().unwrap());
+                uninject_delimiter = Some(selection_state.delimiter_stack.pop().unwrap());
             }
             _ => {}
         }
+        drop(selection_state);
         self.document.edit_selections(
             self.id,
             edit_kind,
-            &self.selections,
+            &self.selection_state.borrow().selections,
             &self.settings,
             |mut editor, position, length| {
-                editor.apply_edit(Edit {
-                    change: Change::Delete(position, length),
-                    drift: Drift::Before,
-                });
+                let mut position = position;
+                let mut length = length;
+                if inject_delimiter.is_none() {
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(position, length),
+                        drift: Drift::Before,
+                    });
+                    length = Length::zero();
+                }
                 if let Some(uninject_delimiter) = uninject_delimiter {
                     editor.apply_edit(Edit {
                         change: Change::Delete(
@@ -281,12 +309,10 @@ impl Session {
                     change: Change::Insert(position, text.clone()),
                     drift: Drift::Before,
                 });
+                position += text.length();
                 if let Some(inject_delimiter) = inject_delimiter {
                     editor.apply_edit(Edit {
-                        change: Change::Insert(
-                            position + text.length(),
-                            Text::from(inject_delimiter),
-                        ),
+                        change: Change::Insert(position + length, Text::from(inject_delimiter)),
                         drift: Drift::After,
                     })
                 }
@@ -298,11 +324,14 @@ impl Session {
         self.document.edit_selections(
             self.id,
             EditKind::Other,
-            &self.selections,
+            &self.selection_state.borrow().selections,
             &self.settings,
             |mut editor, position, length| {
                 let line = &editor.as_text().as_lines()[position.line_index];
-                let delete_whitespace = line.chars().all(|char| char.is_whitespace());
+                let delete_whitespace = !line.is_empty()
+                    && line[..position.byte_index]
+                        .chars()
+                        .all(|char| char.is_whitespace());
                 let inject_newline = line[..position.byte_index]
                     .chars()
                     .rev()
@@ -328,6 +357,7 @@ impl Session {
                             None
                         })
                         .unwrap_or(false);
+                let mut position = position;
                 if delete_whitespace {
                     editor.apply_edit(Edit {
                         change: Change::Delete(
@@ -342,6 +372,7 @@ impl Session {
                         ),
                         drift: Drift::Before,
                     });
+                    position.byte_index = 0;
                 }
                 editor.apply_edit(Edit {
                     change: Change::Delete(position, length),
@@ -351,15 +382,11 @@ impl Session {
                     change: Change::Insert(position, Text::newline()),
                     drift: Drift::Before,
                 });
+                position.line_index += 1;
+                position.byte_index = 0;
                 if inject_newline {
                     editor.apply_edit(Edit {
-                        change: Change::Insert(
-                            Position {
-                                line_index: position.line_index + 1,
-                                byte_index: 0,
-                            },
-                            Text::newline(),
-                        ),
+                        change: Change::Insert(position, Text::newline()),
                         drift: Drift::After,
                     });
                 }
@@ -367,48 +394,105 @@ impl Session {
         );
     }
 
-    pub fn indent(&mut self) {
-        self.document
-            .edit_lines(self.id, EditKind::Indent, &self.selections, |line| {
-                reindent(line, |indentation_column_count| {
-                    (indentation_column_count + self.settings.indent_column_count)
-                        / self.settings.indent_column_count
-                        * self.settings.indent_column_count
-                })
-            });
-    }
-
-    pub fn outdent(&mut self) {
-        self.document
-            .edit_lines(self.id, EditKind::Outdent, &self.selections, |line| {
-                reindent(line, |indentation_column_count| {
-                    indentation_column_count.saturating_sub(1) / self.settings.indent_column_count
-                        * self.settings.indent_column_count
-                })
-            });
+    pub fn tab(&mut self) {
+        self.document.edit_selections(
+            self.id,
+            EditKind::Insert,
+            &self.selection_state.borrow().selections,
+            &self.settings,
+            |mut editor, position, length| {
+                let lines = editor.as_text().as_lines();
+                let column_index = lines[position.line_index][..position.byte_index].column_count();
+                let column_count =
+                    self.settings.tab_column_count - column_index % self.settings.tab_column_count;
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                editor.apply_edit(Edit {
+                    change: Change::Insert(
+                        position,
+                        iter::repeat(' ').take(column_count).collect(),
+                    ),
+                    drift: Drift::Before,
+                });
+            },
+        );
     }
 
     pub fn delete(&mut self) {
         self.document.edit_selections(
             self.id,
             EditKind::Delete,
-            &self.selections,
+            &self.selection_state.borrow().selections,
             &self.settings,
             |mut editor, position, length| {
-                let mut length = length;
                 if length == Length::zero() {
+                    // The selection is empty, so delete forward.
                     let lines = editor.as_text().as_lines();
-                    if position.byte_index < lines[position.line_index].len() {
-                        length.byte_count += 1;
-                    } else if position.line_index < lines.len() {
-                        length.line_count += 1;
-                        length.byte_count = 0;
+                    if lines[position.line_index][position.byte_index..]
+                        .chars()
+                        .all(|char| char.is_whitespace())
+                    {
+                        // There are only whitespace characters after the cursor on this line, so
+                        // delete forward until either the first non-whitespace character on the
+                        // next line, if it exists, or otherwise until the end of the text.
+                        if position.line_index < lines.len() - 1 {
+                            // There is a next line, so delete until the first non-whitespace
+                            // character on the next line.
+                            let byte_count = lines[position.line_index + 1]
+                                .chars()
+                                .take_while(|char| char.is_whitespace())
+                                .map(|char| char.len_utf8())
+                                .sum::<usize>();
+                            editor.apply_edit(Edit {
+                                change: Change::Delete(
+                                    position,
+                                    Length {
+                                        line_count: 1,
+                                        byte_count,
+                                    },
+                                ),
+                                drift: Drift::Before,
+                            });
+                        } else {
+                            // There is no next line, so delete forward until the start of the
+                            // text.
+                            let byte_count = lines[position.line_index].len() - position.byte_index;
+                            editor.apply_edit(Edit {
+                                change: Change::Delete(
+                                    position,
+                                    Length {
+                                        line_count: 0,
+                                        byte_count,
+                                    },
+                                ),
+                                drift: Drift::Before,
+                            });
+                        }
+                    } else {
+                        // There is at least one non-whitespace character before the cursor on the
+                        // current line, so delete forward by a single grapheme.
+                        let byte_count =
+                            lines[position.line_index].graphemes().next().unwrap().len();
+                        editor.apply_edit(Edit {
+                            change: Change::Delete(
+                                position,
+                                Length {
+                                    line_count: 0,
+                                    byte_count,
+                                },
+                            ),
+                            drift: Drift::Before,
+                        });
                     }
+                } else {
+                    // The selection is non-empty, so delete it.
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(position, length),
+                        drift: Drift::Before,
+                    });
                 }
-                editor.apply_edit(Edit {
-                    change: Change::Delete(position, length),
-                    drift: Drift::Before,
-                });
             },
         );
     }
@@ -417,29 +501,161 @@ impl Session {
         self.document.edit_selections(
             self.id,
             EditKind::Delete,
-            &self.selections,
+            &self.selection_state.borrow().selections,
             &self.settings,
             |mut editor, position, length| {
-                let mut position = position;
-                let mut length = length;
                 if length == Length::zero() {
+                    // The selection is empty, so delete backwards.
                     let lines = editor.as_text().as_lines();
-                    if position.byte_index > 0 {
+                    if lines[position.line_index][..position.byte_index]
+                        .chars()
+                        .all(|char| char.is_whitespace())
+                    {
+                        // There are only whitespace characters before the cursor on this line, so
+                        // delete backwards until either the first non-whitespace character on the
+                        // previous line, if it exists, or otherwise until the start of the text.
+                        if position.line_index > 0 {
+                            // There is a previous line, so delete until the first non-whitespace
+                            // character on the previous line.
+                            let byte_count = lines[position.line_index - 1]
+                                .chars()
+                                .rev()
+                                .take_while(|char| char.is_whitespace())
+                                .map(|char| char.len_utf8())
+                                .sum::<usize>();
+                            let byte_index = lines[position.line_index - 1].len() - byte_count;
+                            if byte_index == 0 {
+                                // The previous line is empty, so keep the indentation on the
+                                // current line.
+                                editor.apply_edit(Edit {
+                                    change: Change::Delete(
+                                        Position {
+                                            line_index: position.line_index - 1,
+                                            byte_index,
+                                        },
+                                        Length {
+                                            line_count: 1,
+                                            byte_count: 0,
+                                        },
+                                    ),
+                                    drift: Drift::Before,
+                                });
+                            } else {
+                                // The previous line is non-empty, so don't keep the indentation on
+                                // the current line.
+                                editor.apply_edit(Edit {
+                                    change: Change::Delete(
+                                        Position {
+                                            line_index: position.line_index - 1,
+                                            byte_index,
+                                        },
+                                        Length {
+                                            line_count: 1,
+                                            byte_count: position.byte_index,
+                                        },
+                                    ),
+                                    drift: Drift::Before,
+                                });
+                            }
+                        } else {
+                            // There is no previous line, so delete backwards until the start of the
+                            // text.
+                            editor.apply_edit(Edit {
+                                change: Change::Delete(
+                                    Position::zero(),
+                                    Length {
+                                        line_count: 0,
+                                        byte_count: position.byte_index,
+                                    },
+                                ),
+                                drift: Drift::Before,
+                            });
+                        }
+                    } else {
+                        // There is at least one non-whitespace character before the cursor on the
+                        // current line, so delete backwards by a single grapheme.
                         let byte_count = lines[position.line_index]
                             .graphemes()
                             .next_back()
                             .unwrap()
                             .len();
-                        position.byte_index -= byte_count;
-                        length.byte_count += byte_count;
-                    } else if position.line_index > 0 {
-                        position.line_index -= 1;
-                        position.byte_index = lines[position.line_index].len();
-                        length.line_count += 1;
+                        editor.apply_edit(Edit {
+                            change: Change::Delete(
+                                Position {
+                                    line_index: position.line_index,
+                                    byte_index: position.byte_index - byte_count,
+                                },
+                                Length {
+                                    line_count: 0,
+                                    byte_count,
+                                },
+                            ),
+                            drift: Drift::Before,
+                        });
                     }
+                } else {
+                    // The selection is non-empty, so delete it.
+                    editor.apply_edit(Edit {
+                        change: Change::Delete(position, length),
+                        drift: Drift::Before,
+                    });
                 }
+            },
+        );
+    }
+
+    pub fn indent(&mut self) {
+        self.document.edit_linewise(
+            self.id,
+            EditKind::Other,
+            &self.selection_state.borrow().selections,
+            |mut editor, line_index| {
+                let indent_column_count = editor.as_text().as_lines()[line_index]
+                    .indent()
+                    .unwrap_or("")
+                    .len();
+                let column_count = self.settings.tab_column_count
+                    - indent_column_count % self.settings.tab_column_count;
                 editor.apply_edit(Edit {
-                    change: Change::Delete(position, length),
+                    change: Change::Insert(
+                        Position {
+                            line_index,
+                            byte_index: indent_column_count,
+                        },
+                        iter::repeat(' ').take(column_count).collect(),
+                    ),
+                    drift: Drift::Before,
+                });
+            },
+        );
+    }
+
+    pub fn outdent(&mut self) {
+        self.document.edit_linewise(
+            self.id,
+            EditKind::Other,
+            &self.selection_state.borrow().selections,
+            |mut editor, line_index| {
+                let indent_column_count = editor.as_text().as_lines()[line_index]
+                    .indent()
+                    .unwrap_or("")
+                    .len();
+                let column_count = indent_column_count.min(
+                    (indent_column_count + self.settings.tab_column_count - 1)
+                        % self.settings.tab_column_count
+                        + 1,
+                );
+                editor.apply_edit(Edit {
+                    change: Change::Delete(
+                        Position {
+                            line_index,
+                            byte_index: indent_column_count - column_count,
+                        },
+                        Length {
+                            line_count: 0,
+                            byte_count: column_count,
+                        },
+                    ),
                     drift: Drift::Before,
                 });
             },
@@ -449,6 +665,8 @@ impl Session {
     pub fn copy(&self) -> String {
         let mut string = String::new();
         for range in self
+            .selection_state
+            .borrow()
             .selections
             .iter()
             .copied()
@@ -471,11 +689,13 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.document.undo(self.id, &self.selections)
+        self.document
+            .undo(self.id, &self.selection_state.borrow().selections)
     }
 
     pub fn redo(&mut self) -> bool {
-        self.document.redo(self.id, &self.selections)
+        self.document
+            .redo(self.id, &self.selection_state.borrow().selections)
     }
 
     fn update_y(&mut self) {
@@ -492,7 +712,7 @@ impl Session {
             line.y() + line.height()
         };
         let mut ys = mem::take(&mut self.layout.borrow_mut().y);
-        for block in self.layout().blocks(start, end) {
+        for block in self.layout().block_elements(start, end) {
             match block {
                 BlockElement::Line { is_inlay, line } => {
                     if !is_inlay {
@@ -562,17 +782,20 @@ impl Session {
             document_layout: self.document.layout(),
             session_layout: self.layout.borrow(),
         };
-        self.pending_selection_index =
-            self.selections
-                .update_all_selections(self.pending_selection_index, |selection| {
-                    let mut selection = f(selection, &layout);
-                    if reset_anchor {
-                        selection = selection.reset_anchor();
-                    }
-                    selection
-                });
+        let mut selection_state = self.selection_state.borrow_mut();
+        let last_added_selection_index = selection_state.last_added_selection_index;
+        selection_state.last_added_selection_index = selection_state
+            .selections
+            .update_all_selections(last_added_selection_index, |selection| {
+                let mut selection = f(selection, &layout);
+                if reset_anchor {
+                    selection = selection.reset_anchor();
+                }
+                selection
+            });
+        selection_state.delimiter_stack.clear();
+        drop(selection_state);
         drop(layout);
-        self.delimiter_stack.clear();
         self.document.force_new_group();
     }
 
@@ -635,13 +858,15 @@ impl Session {
                 self.update_wrap_data(line);
             }
         }
+        let mut selection_state = self.selection_state.borrow_mut();
         if let Some(selections) = selections {
-            self.selections = selections;
+            selection_state.selections = selections;
         } else {
             for edit in edits {
-                self.selections.apply_change(edit);
+                selection_state.selections.apply_change(edit);
             }
         }
+        drop(selection_state);
         self.update_y();
     }
 }
@@ -664,8 +889,15 @@ pub struct SessionLayout {
     pub wrap_data: Vec<Option<WrapData>>,
 }
 
+#[derive(Debug)]
+struct SelectionState {
+    selections: SelectionSet,
+    last_added_selection_index: Option<usize>,
+    delimiter_stack: Vec<char>,
+}
+
 pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, String) {
-    let indentation = string.leading_whitespace().unwrap_or("");
+    let indentation = string.indent().unwrap_or("");
     let indentation_column_count = indentation.column_count();
     let new_indentation_column_count = f(indentation_column_count);
     let new_indentation = new_indentation(new_indentation_column_count);

@@ -16,22 +16,14 @@ use {
             NextFrame,
             HttpRequest,
         },
-        draw_list::{
-            DrawListId
-        },
-        window::{
-            WindowId
-        },
-        cursor::{
-            MouseCursor
-        },
+        draw_list::DrawListId,
+        window::WindowId,
+        cursor::MouseCursor,
         area::{
             Area, 
             //DrawListArea
         },
-        menu::{
-            Menu,
-        },
+        menu::Menu,
         pass::{
             PassId,
             CxPassRect,
@@ -45,6 +37,9 @@ pub trait CxOsApi {
     fn init_cx_os(&mut self);
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
+    
+    fn start_stdin_service(&mut self){}
+    fn pre_start()->bool{false}
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -118,6 +113,7 @@ impl Cx {
     
     pub fn show_text_ime(&mut self, area: Area, pos: DVec2) {
         if !self.keyboard.text_ime_dismissed {
+            self.ime_area = area;
             self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
         }
     }
@@ -268,6 +264,29 @@ impl Cx {
         } 
     }
     
+    pub fn get_pass_rect2(&self, pass_id: PassId, dpi:f64) -> Option<Rect> {
+        match self.passes[pass_id].pass_rect {
+            Some(CxPassRect::Area(area)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size: (rect.size * dpi).ceil() / dpi
+                })
+            }
+            Some(CxPassRect::ScaledArea(area, scale)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size:  scale * (rect.size * dpi).ceil() / dpi
+                })
+            }
+            Some(CxPassRect::Size(size)) => {
+                Some(Rect {pos: DVec2::default(), size: (size * dpi).floor() / dpi})
+            }
+            None => None
+        } 
+    }
+    
     pub fn get_pass_name(&self, pass_id: PassId) -> &str {
         &self.passes[pass_id].debug_name
     }
@@ -322,12 +341,17 @@ impl Cx {
         self.new_draw_event.draw_lists_and_children.push(draw_list_id);
     }
     
+    pub fn get_ime_area_rect(&self)->Rect{
+        self.ime_area.get_rect(self)
+    }
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty {
             return new_area
         }
-        
+        if self.ime_area == old_area {
+            self.ime_area = new_area;
+        }
         self.fingers.update_area(old_area, new_area);
         self.drag_drop.update_area(old_area, new_area);
         self.keyboard.update_area(old_area, new_area);
