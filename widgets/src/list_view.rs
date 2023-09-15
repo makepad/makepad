@@ -85,6 +85,7 @@ pub struct ListView {
 struct AlignItem {
     align_range: TurtleAlignRange,
     size: DVec2,
+    shift: f64,
     index: u64
 }
 
@@ -150,6 +151,7 @@ impl ListView {
         let vi = self.vec_index;
         let mut at_end = false;
         let mut visible_items = 0;
+
         if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
             if list.len()>0 {
@@ -207,7 +209,7 @@ impl ListView {
                     let mut pos = first_pos.min(min); // lets do a maximum for first scroll
                     for item in list {
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift);
+                        cx.shift_align_range(&item.align_range, shift - DVec2::from_index_pair(vi, item.shift, 0.0));
                         pos += item.size.index(vi);
                         visible_items += 1;
                     }
@@ -241,7 +243,7 @@ impl ListView {
                         let visible = pos > 0.0;
                         pos -= item.size.index(vi);
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift);
+                        cx.shift_align_range(&item.align_range, shift - DVec2::from_index_pair(vi, item.shift, 0.0));
                         if visible { // move up
                             self.first_scroll = pos;
                             self.first_id = item.index;
@@ -256,7 +258,7 @@ impl ListView {
                     for i in first_index..list.len() {
                         let item = &list[i];
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift);
+                        cx.shift_align_range(&item.align_range, shift - DVec2::from_index_pair(vi, item.shift, 0.0));
                         pos += item.size.index(vi);
                         let invisible = pos < 0.0;
                         if invisible { // move down
@@ -312,7 +314,7 @@ impl ListView {
                     });
                     
                     cx.begin_turtle(Walk {
-                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.first_scroll)),
                         margin: Default::default(),
                         width: Size::Fill,
                         height: Size::Fit
@@ -326,6 +328,7 @@ impl ListView {
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
                         align_range,
+                        shift: pos, 
                         size: rect.size,
                         index
                     });
@@ -367,7 +370,7 @@ impl ListView {
                         });
                     }
                     cx.begin_turtle(Walk {
-                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + pos + rect.size.index(vi))),
                         margin: Default::default(),
                         width: Size::Fill,
                         height: Size::Fit
@@ -381,6 +384,7 @@ impl ListView {
                     self.draw_align_list.push(AlignItem {
                         align_range,
                         size: rect.size,
+                        shift: 0.0,
                         index
                     });
                     if index == self.range_start {

@@ -61,7 +61,6 @@ impl MetalWindow {
     pub (crate) fn new(
         window_id: WindowId,
         metal_cx: &MetalCx,
-        cocoa_app: &mut MacosApp,
         inner_size: DVec2,
         position: Option<DVec2>,
         title: &str
@@ -69,7 +68,7 @@ impl MetalWindow {
         
         let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
-        let mut cocoa_window = Box::new(MacosWindow::new(cocoa_app, window_id));
+        let mut cocoa_window = Box::new(MacosWindow::new(window_id));
         
         cocoa_window.init(title, inner_size, position);
         unsafe {
@@ -137,20 +136,16 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
-        for arg in std::env::args() {
-            if arg == "--metal-xpc" {
-                return start_xpc_service();
-            }
-        }
+
         
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
-        
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
+                cx.in_makepad_studio = true;
                 let mut metal_cx = metal_cx.borrow_mut();
                 return cx.stdin_event_loop(&mut metal_cx);
             }
@@ -160,12 +155,11 @@ impl Cx {
         init_apple_classes_global();
         init_macos_app_global(Box::new({
             let cx = cx.clone();
-            move | cocoa_app,
-            event | {
+            move | event | {
                 let mut cx_ref = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
                 let mut metal_windows = metal_windows.borrow_mut();
-                let event_flow = cx_ref.cocoa_event_callback(cocoa_app, event, &mut metal_cx, &mut metal_windows);
+                let event_flow = cx_ref.cocoa_event_callback(event, &mut metal_cx, &mut metal_windows);
                 let executor = cx_ref.executor.take().unwrap();
                 drop(cx_ref);
                 executor.run_until_stalled();
@@ -180,7 +174,7 @@ impl Cx {
         get_macos_app_global().start_timer(0, 0.008, true);
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
-        get_macos_app_global().event_loop();
+        MacosApp::event_loop();
     }
     
     pub (crate) fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
@@ -228,13 +222,12 @@ impl Cx {
     
     fn cocoa_event_callback(
         &mut self,
-        cocoa_app: &mut MacosApp,
         event: MacosEvent,
         metal_cx: &mut MetalCx,
         metal_windows: &mut Vec<MetalWindow>
     ) -> EventFlow {
         
-        self.handle_platform_ops(metal_windows, metal_cx, cocoa_app);
+        self.handle_platform_ops(metal_windows, metal_cx);
          
         // send a mouse up when dragging starts
         
@@ -333,7 +326,7 @@ impl Cx {
             }
             MacosEvent::Paint => {
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(cocoa_app.time_now());
+                    self.call_next_frame_event(get_macos_app_global().time_now());
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
@@ -428,7 +421,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut MacosApp){
+    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx){
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -436,7 +429,6 @@ impl Cx {
                     let metal_window = MetalWindow::new(
                         window_id,
                         &metal_cx,
-                        cocoa_app,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title
@@ -492,19 +484,19 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::SetCursor(cursor) => {
-                    cocoa_app.set_mouse_cursor(cursor);
+                    get_macos_app_global().set_mouse_cursor(cursor);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    cocoa_app.start_timer(timer_id, interval, repeats);
+                    get_macos_app_global().start_timer(timer_id, interval, repeats);
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    cocoa_app.stop_timer(timer_id);
+                    get_macos_app_global().stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(items) => {
-                    cocoa_app.start_dragging(items);
+                    get_macos_app_global().start_dragging(items);
                 }
                 CxOsOp::UpdateMenu(menu) => {
-                    cocoa_app.update_app_menu(&menu, &self.command_settings)
+                    get_macos_app_global().update_app_menu(&menu, &self.command_settings)
                 },
                 CxOsOp::HttpRequest{request_id, request} => {
                     make_http_request(request_id, request, self.os.network_response.sender.clone());
@@ -527,6 +519,16 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
+    fn pre_start()->bool{
+        for arg in std::env::args() {
+            if arg == "--metal-xpc" {
+                start_xpc_service();
+                return true
+            }
+        }
+        false
+    }
+
     fn init_cx_os(&mut self) {
         self.live_expand();
         self.start_live_file_watcher();
@@ -536,6 +538,10 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
+    }
+
+    fn start_stdin_service(&mut self){
+        self.start_xpc_service()
     }
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
