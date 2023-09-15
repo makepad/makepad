@@ -145,6 +145,7 @@ impl Cx {
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
+                cx.in_makepad_studio = true;
                 let mut metal_cx = metal_cx.borrow_mut();
                 return cx.stdin_event_loop(&mut metal_cx);
             }

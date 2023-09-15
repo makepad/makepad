@@ -35,6 +35,7 @@ impl Cx {
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
+                cx.in_makepad_studio = true;
                 let mut d3d11_cx = d3d11_cx.borrow_mut();
                 return cx.stdin_event_loop(&mut d3d11_cx);
             }

@@ -98,6 +98,8 @@ impl Cx {
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn os_type(&self) -> &OsType {&self.os_type}
+    pub fn in_makepad_studio(&self)->bool {self.in_makepad_studio}
+    
     pub fn cpu_cores(&self) -> usize {self.cpu_cores}
     pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
