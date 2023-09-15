@@ -278,16 +278,24 @@ public class VideoDecoder {
         if (mCodec != null) {
             mCodec.stop();
             mCodec.release();
+            mCodec = null;
         }
         if (mExtractor != null) {
             mExtractor.release();
+            mExtractor = null;
         }
         if (mExecutor != null) {
             mExecutor.shutdown();
+            mExecutor = null;
         }
-
-        mExtractor = null;
-        mCodec = null;
+        if (mVideoFrameQueue != null) {
+            mVideoFrameQueue.clear();
+            mVideoFrameQueue = null;
+        }
+        if (mBufferPool != null) {
+            mBufferPool.clear();
+            mBufferPool = null;
+        }
         mInfo = null;
     }
 

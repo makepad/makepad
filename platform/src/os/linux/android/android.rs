@@ -594,6 +594,12 @@ impl Cx {
                         android_jni::to_java_fetch_next_video_frames(env, video_id, number_frames);
                     }
                 },
+                CxOsOp::CleanupVideoDecoding(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_cleanup_video_decoding(env, video_id);
+                    }
+                }
                 _ => ()
             }
         }
