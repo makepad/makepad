@@ -54,6 +54,18 @@ pub fn get_build_crate_from_args(args: &[String]) -> Result<&str, String> {
     }
 }
 
+pub fn get_profile_from_args(args: &[String]) -> String {
+    for arg in args{
+        if let Some(opt) = arg.strip_prefix("--profile=") {
+            return opt.to_string();
+        }
+        if arg == "--release"{
+            return "release".to_string()
+        }
+    }
+    return "debug".to_string()
+}
+
 pub fn shell(cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
     let mut cmd_build = Command::new(cmd);
     
