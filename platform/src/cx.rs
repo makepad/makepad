@@ -260,7 +260,7 @@ impl Cx {
 
             executor: Some(executor),
             spawner,
-            
+
             self_ref: None
         }
     }

@@ -76,17 +76,6 @@ impl RunView {
             self.time += self.frame_delta;
             self.frame += 1;
             
-            // ugly hack but whatever for now.
-            #[cfg(target_os = "windows")]
-            for client in &manager.clients {
-                for process in client.processes.values() {
-                    let handle = cx.get_shared_handle(&process.texture);
-
-                    let marshalled_handle = handle.0 as u64;  // hack: unsure if HANDLE is supported in microserde yet, so convert to u64
-                    manager.send_host_to_stdin(None, HostToStdin::Dx11SharedHandle(marshalled_handle));
-                }
-            }
-            
             // what shall we do, a timer? or do we do a next-frame
             manager.send_host_to_stdin(None, HostToStdin::Tick {
                 frame: self.frame,
@@ -149,8 +138,10 @@ impl RunView {
         }
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, _manager: &mut BuildManager) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, manager: &mut BuildManager) {
+
         match msg {
+
             StdinToHost::SetCursor(cursor) => {
                 cx.set_cursor(cursor)
             }
@@ -160,7 +151,20 @@ impl RunView {
                 self.last_size = Default::default();
                 self.redraw(cx);
             }
-            StdinToHost::DrawComplete => {
+            StdinToHost::DrawCompleteAndFlip(present_index) => {
+
+                // client is ready with new image on swapchain[present_index]
+
+                // hack, only run part inside loops for the process associated with this RunView
+                for client in manager.clients.iter_mut() {
+                    for process in client.processes.values_mut() {
+
+                        process.present_index = present_index;
+                        self.draw_app.set_texture(0, &process.swapchain[present_index]);
+                    }
+                }
+
+                // and draw
                 self.redraw(cx);
             }
         }
@@ -178,27 +182,53 @@ impl RunView {
         let walk = if let Some(walk) = self.draw_state.get() {walk}else {panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
-        for client in &manager.clients {
+        for client in manager.clients.iter() {
             for process in client.processes.values() {
                 
+                // update texture size and indicate new size to client if needed
                 let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
                 if new_size != self.last_size {
                     self.last_size = new_size;
 
-                    process.texture.set_desc(cx, TextureDesc {
+                    // update descriptors for swapchain textures
+                    process.swapchain[0].set_desc(cx,TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0.max(1)),
-                        height: Some(new_size.1.max(1)),
+                        height: Some(new_size.1.max(1)),    
+                    });
+                    process.swapchain[1].set_desc(cx,TextureDesc {
+                        format: TextureFormat::SharedBGRA(0),
+                        width: Some(new_size.0.max(1)),
+                        height: Some(new_size.1.max(1)),    
                     });
 
+                    // make sure the actual shared texture resources exist, and get their handles
+                    let mut handles = [0u64,0u64];
+                    
+                    let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
+
+                    let cxtexture = &mut cx.textures[process.swapchain[0].texture_id()];
+                    cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
+                    handles[0] = cxtexture.os.shared_handle.0 as u64;
+
+                    let cxtexture = &mut cx.textures[process.swapchain[1].texture_id()];
+                    cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
+                    handles[1] = cxtexture.os.shared_handle.0 as u64;
+
+                    cx.cx.os.d3d11_device.replace(Some(d3d11_device));
+
+                    // send size update to client
                     manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
                         width: rect.size.x,
                         height: rect.size.y,
                         dpi_factor: dpi_factor,
+                        swapchain_handles: handles,
                     }));
                 }
-                
-                self.draw_app.set_texture(0, &process.texture);
+
+                // make sure it's going to present the right texture
+                let texture = &process.swapchain[process.present_index];
+                self.draw_app.set_texture(0, texture);
                 
                 break
             }

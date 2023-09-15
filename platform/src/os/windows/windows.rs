@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::RefCell,
+        cell::{Cell,RefCell},
     },
     crate::{
         log,
@@ -21,6 +21,7 @@ use {
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         window::CxWindowPool,
+        windows::Win32::Graphics::Direct3D11::ID3D11Device,
     }
 };
 
@@ -32,7 +33,10 @@ impl Cx {
         cx.borrow_mut().os_type = OsType::Windows;
         
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
-        
+
+        // hack: store ID3D11Device in CxOs, so texture-related operations become possible on the makepad/studio side, yet don't completely destroy the code there
+        cx.borrow_mut().os.d3d11_device = Cell::new(Some(d3d11_cx.borrow().device.clone()));
+
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
@@ -365,4 +369,6 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
+
+    pub d3d11_device: Cell<Option<ID3D11Device>>,
 }
