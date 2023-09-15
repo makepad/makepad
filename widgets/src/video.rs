@@ -10,7 +10,7 @@ use std::{
     sync::mpsc::channel,
     sync::{Arc, Mutex},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const MAX_FRAMES_TO_DECODE: usize = 30;
@@ -21,11 +21,11 @@ live_design! {
 }
 
 // TODO:
-// - Fix second iteration of video running faster than it should (when looping)
+// - Remove green background while buffering for the first time
+// - Properly cleanup resources after playback is finished
+
 // - Fix support for YUV420Plannar, colors don't show right.
 // - Add support for SemiPlanar nv21, currently we assume that SemiPlanar is nv12
-
-// - Properly cleanup resources after playback is finished
 
 // - Optimizations:
 //      - lower memory usage by avoiding copying on frame chunk deserialization
@@ -94,8 +94,6 @@ pub struct Video {
     decoding_state: DecodingState,
     #[rust]
     vec_pool: SharedVecPool,
-    #[rust]
-    last_timeout: Option<Instant>,
     #[rust]
     available_to_fetch: bool,
 
@@ -239,13 +237,12 @@ impl Video {
         self.decoding_state = DecodingState::Decoding;
 
         self.begin_buffering_thread(cx);
-
-        self.last_timeout = Some(Instant::now());
         self.tick = cx.start_interval(8.0);
     }
 
     fn should_fetch(&self) -> bool {
-        self.available_to_fetch && self.frames_buffer.lock().unwrap().data.len() < FRAME_BUTTER_LOW_WATER_MARK
+        self.available_to_fetch
+            && self.frames_buffer.lock().unwrap().data.len() < FRAME_BUTTER_LOW_WATER_MARK
     }
 
     fn should_request_decoding(&self) -> bool {
@@ -263,32 +260,35 @@ impl Video {
             Some(start_time) => now.duration_since(start_time).as_micros(),
             None => 0,
         };
-    
+
         if video_time_us >= self.next_frame_ts || self.start_time.is_none() {
             let maybe_current_frame = { self.frames_buffer.lock().unwrap().get() };
-    
+
             match maybe_current_frame {
                 Some(current_frame) => {
                     if self.start_time.is_none() {
                         self.start_time = Some(now);
                     }
-    
+
                     self.update_textures(cx, current_frame.pixel_data);
                     self.redraw(cx);
 
-                    // if at the latest frame, loop or stop
-                    if self.next_frame_ts >= self.total_duration {
-                        if self.is_looping {
-                            self.next_frame_ts = 0;
-                            self.start_time = Some(now);
-                        } else {
+                    // if at the last frame, loop or stop
+                    if current_frame.is_eos {
+                        self.next_frame_ts = 0;
+                        if let Some(start_time) = self.start_time {
+                            self.start_time = Some(
+                                start_time + Duration::from_micros(self.total_duration as u64),
+                            );
+                        }
+                        if !self.is_looping {
                             self.playback_finished = true;
                             self.cleanup_decoding(cx);
                         }
                     } else {
-                        self.next_frame_ts = current_frame.timestamp_us + self.frame_ts_interval.ceil() as u128;
+                        self.next_frame_ts =
+                            current_frame.timestamp_us + self.frame_ts_interval.ceil() as u128;
                     }
-    
                 }
                 // empty buffer, deocder is falling behind
                 None => {}
@@ -411,6 +411,7 @@ impl Default for RingBuffer {
 struct VideoFrame {
     pixel_data: Arc<Mutex<Vec<u32>>>,
     timestamp_us: u128,
+    is_eos: bool,
 }
 
 type SharedVecPool = Arc<Mutex<VecPool>>;
@@ -447,7 +448,7 @@ fn deserialize_chunk(
 ) {
     let mut cursor = 0;
 
-    // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | Frame data length (4b) | Pixel Data |
+    // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | isEoS (1B) | Frame data length (4b) | Pixel Data |
     while cursor < frame_group.len() {
         // might have to update for different endinaess on other platforms
         let timestamp =
@@ -462,6 +463,8 @@ fn deserialize_chunk(
         let v_stride =
             u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
         cursor += 4;
+        let is_eos = u8::from_be_bytes(frame_group[cursor..cursor + 1].try_into().unwrap()) != 0;
+        cursor += 1;
         let frame_length =
             u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
         cursor += 4;
@@ -499,6 +502,7 @@ fn deserialize_chunk(
         frames_buffer.lock().unwrap().push(VideoFrame {
             pixel_data: Arc::new(Mutex::new(pixel_data_u32)),
             timestamp_us: timestamp,
+            is_eos,
         });
 
         cursor = frame_data_end;
