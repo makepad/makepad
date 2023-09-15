@@ -55,9 +55,13 @@ pub struct Video {
     #[rust]
     texture: Option<Texture>,
 
-    // Playback options
+    // Playback
     #[live(true)]
     is_looping: bool,
+    #[live(false)]
+    hold_to_pause: bool,
+    #[rust]
+    is_paused: bool, 
 
     // Original video metadata
     #[rust]
@@ -191,7 +195,7 @@ impl Video {
         }
 
         if self.tick.is_event(event) {
-            if self.decoding_state == DecodingState::Finished
+            if !self.is_paused && self.decoding_state == DecodingState::Finished
                 || (self.decoding_state == DecodingState::Decoding
                     && self.frames_buffer.lock().unwrap().data.len() > FRAME_BUTTER_LOW_WATER_MARK)
             {
@@ -206,6 +210,8 @@ impl Video {
                 self.decoding_state = DecodingState::Decoding;
             }
         }
+
+        self.handle_gestures(cx, event);
     }
 
     fn handle_decoding_initialized(&mut self, cx: &mut Cx, event: &VideoDecodingInitializedEvent) {
@@ -238,6 +244,22 @@ impl Video {
 
         self.begin_buffering_thread(cx);
         self.tick = cx.start_interval(8.0);
+    }
+
+    fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerDown(_fe) => {
+                if self.hold_to_pause {
+                    self.is_paused = true;
+                }
+            },
+            Hit::FingerUp(_fe) => {
+                if self.hold_to_pause {
+                    self.is_paused = false;
+                }
+            }
+            _ => (),
+        }
     }
 
     fn should_fetch(&self) -> bool {
