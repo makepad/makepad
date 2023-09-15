@@ -384,7 +384,7 @@ live_design!{
         height: Fit
         
         label_walk: {
-            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
+            margin: {left: 20.0, top: 1, bottom: 1, right: 1}
             width: Fit,
             height: Fit,
         }
@@ -1520,7 +1520,7 @@ live_design!{
     
     FoldButton = <FoldButtonBase> {
         draw_bg: {
-            instance opened: 0.0
+            instance open: 0.0
             instance hover: 0.0
             
             uniform fade: 1.0
@@ -1532,7 +1532,7 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.clear(vec4(0.));
                 // we have 3 points, and need to rotate around its center
-                sdf.rotate(self.opened * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
                 sdf.move_to(c.x - sz, c.y + sz);
                 sdf.line_to(c.x, c.y - sz);
                 sdf.line_to(c.x + sz, c.y + sz);
@@ -1569,8 +1569,7 @@ live_design!{
                     ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
-                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        draw_bg: {opened: (opened)}
+                        draw_bg: {open: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
                 yes = {
@@ -1578,8 +1577,7 @@ live_design!{
                     ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
-                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
-                        draw_bg: {opened: (opened)}
+                        draw_bg: {open: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                     }
                 }
             }
@@ -1890,6 +1888,13 @@ live_design!{
         flow: Down
     }
     
+    ItemView = <ItemViewBase> {
+        width: Fill
+        height: Fill
+        capture_overload: true
+        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+        flow: Down
+    }
     
     CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}

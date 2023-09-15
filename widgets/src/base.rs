@@ -20,6 +20,7 @@ live_design!{
     import crate::label::LabelBase;
     import crate::link_label::LinkLabelBase;
     import crate::list_view::ListViewBase;
+    import crate::item_view::ItemViewBase;
     import crate::scroll_bars::ScrollBarsBase;
     import crate::view::ViewBase;
     import crate::nav_control::NavControlBase;
@@ -541,6 +542,7 @@ live_design!{
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}
     ListViewBase = <ListViewBase> {}
+    ItemViewBase = <ItemViewBase>{}
     NavControlBase = <NavControlBase> {}
     PopupMenuBase = <PopupMenuBase> {}
     PopupMenuItemBase = <PopupMenuItemBase> {}

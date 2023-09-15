@@ -35,6 +35,7 @@ pub mod rotated_image;
 pub mod slide_panel;
 pub mod page_flip;
 pub mod keyboard_view;
+pub mod item_view;
 
 pub mod file_tree;
 pub mod slides_view;
@@ -68,8 +69,10 @@ pub use crate::{
     text_input::*,
     link_label::*,
     list_view::*,
+    item_view::*,
     page_flip::*,
     slide_panel::*,
+    fold_button::*,
     window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
@@ -127,6 +130,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
     crate::list_view::live_design(cx);
+    crate::item_view::live_design(cx);
     crate::slide_panel::live_design(cx);
     crate::tab::live_design(cx);
     crate::tab_bar::live_design(cx);
