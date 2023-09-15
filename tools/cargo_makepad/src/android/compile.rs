@@ -336,7 +336,7 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
 
         let assets = ls(&dst_dir) ?;
         for path in &assets {
-            let path = path.display();
+            let path = path.display().to_string().replace("\\","/");
             assets_to_add.push(format!("assets/makepad/{underscore_build_crate}/resources/{path}"));
         }
     }
@@ -360,7 +360,7 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
 
         let assets = ls(&dst_dir) ?;
         for path in &assets {
-            let path = path.display();
+            let path = path.display().to_string().replace("\\","/");
             assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
         }
     }
