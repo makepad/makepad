@@ -161,7 +161,8 @@ class MakepadSurface
         }
 
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
-            MakepadNative.surfaceOnKeyUp(keyCode);
+            int metaState = event.getMetaState();
+            MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
         
         if (event.getAction() == KeyEvent.ACTION_UP || event.getAction() == KeyEvent.ACTION_MULTIPLE) {
