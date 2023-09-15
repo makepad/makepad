@@ -404,32 +404,6 @@ impl Session {
         );
     }
 
-    pub fn tab(&mut self) {
-        self.document.edit_selections(
-            self.id,
-            EditKind::Insert,
-            &self.selection_state.borrow().selections,
-            &self.settings,
-            |mut editor, position, length| {
-                let lines = editor.as_text().as_lines();
-                let column_index = lines[position.line_index][..position.byte_index].column_count();
-                let column_count =
-                    self.settings.tab_column_count - column_index % self.settings.tab_column_count;
-                editor.apply_edit(Edit {
-                    change: Change::Delete(position, length),
-                    drift: Drift::Before,
-                });
-                editor.apply_edit(Edit {
-                    change: Change::Insert(
-                        position,
-                        iter::repeat(' ').take(column_count).collect(),
-                    ),
-                    drift: Drift::Before,
-                });
-            },
-        );
-    }
-
     pub fn delete(&mut self) {
         self.document.edit_selections(
             self.id,
