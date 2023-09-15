@@ -914,7 +914,7 @@ impl Win32Window {
             can_fullscreen: false,
             is_topmost: self.get_is_topmost(),
             is_fullscreen: self.get_is_maximized(),
-            inner_size: self.get_inner_size(),
+            inner_size: if self.get_is_maximized(){self.get_outer_size()}else{self.get_inner_size()},
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
             position: self.get_position()
@@ -963,7 +963,8 @@ impl Win32Window {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             GetWindowRect(self.hwnd, &mut rect).unwrap();
-            DVec2 {x: (rect.right - rect.left) as f64, y: (rect.bottom - rect.top)as f64}
+            let dpi = self.get_dpi_factor();
+            DVec2 {x: (rect.right - rect.left) as f64/ dpi, y: (rect.bottom - rect.top)as f64/ dpi}
         }
     }
     
