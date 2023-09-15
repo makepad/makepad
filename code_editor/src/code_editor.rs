@@ -485,7 +485,7 @@ impl CodeEditor {
     }
 
     fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
-        let enclosing_brackets = session.enclosing_brackets();
+        let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
@@ -548,7 +548,10 @@ impl CodeEditor {
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
                                     if let TokenKind::Delimiter = token.kind {
-                                        if enclosing_brackets.contains(&Position { line_index, byte_index }) {
+                                        if highlighted_delimiter_positions.contains(&Position {
+                                            line_index,
+                                            byte_index,
+                                        }) {
                                             self.draw_text.color = vec4(1.0, 0.0, 0.0, 1.0);
                                         }
                                     }

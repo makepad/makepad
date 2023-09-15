@@ -57,7 +57,7 @@ impl Session {
                 selections: SelectionSet::new(),
                 last_added_selection_index: None,
                 injected_delimiter_stack: Vec::new(),
-                enclosing_brackets: HashSet::new(),
+                highlighted_delimiter_positions: HashSet::new(),
             }),
             wrap_column: None,
             folding_lines: HashSet::new(),
@@ -104,9 +104,9 @@ impl Session {
         })
     }
 
-    pub fn enclosing_brackets(&self) -> Ref<'_, HashSet<Position>> {
+    pub fn highlighted_delimiter_positions(&self) -> Ref<'_, HashSet<Position>> {
         Ref::map(self.selection_state.borrow(), |selection_state| {
-            &selection_state.enclosing_brackets
+            &selection_state.highlighted_delimiter_positions
         })
     }
 
@@ -190,7 +190,7 @@ impl Session {
         selection_state.last_added_selection_index = Some(0);
         selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
-        self.update_enclosing_brackets();
+        self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
     }
 
@@ -207,7 +207,7 @@ impl Session {
         );
         selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
-        self.update_enclosing_brackets();
+        self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
     }
 
@@ -227,7 +227,7 @@ impl Session {
         );
         selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
-        self.update_enclosing_brackets();
+        self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
     }
 
@@ -738,7 +738,7 @@ impl Session {
         selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
         drop(layout);
-        self.update_enclosing_brackets();
+        self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
     }
 
@@ -811,7 +811,7 @@ impl Session {
             }
         }
         drop(selection_state);
-        self.update_enclosing_brackets();
+        self.update_highlighted_delimiter_positions();
     }
 
     fn update_y(&self) {
@@ -844,7 +844,7 @@ impl Session {
         ys.push(y);
         self.layout.borrow_mut().y = ys;
     }
-    
+
     fn update_column_count(&self, index: usize) {
         let mut column_count = 0;
         let mut column = 0;
@@ -882,9 +882,26 @@ impl Session {
         self.update_column_count(line);
     }
 
-    fn update_enclosing_brackets(&self) {
-        let enclosing_brackets = find_enclosing_brackets(self.document().as_text().as_lines(), &self.selection_state.borrow().selections);
-        self.selection_state.borrow_mut().enclosing_brackets = enclosing_brackets;
+    fn update_highlighted_delimiter_positions(&self) {
+        let mut selection_state = self.selection_state.borrow_mut();
+        let mut highlighted_delimiter_positions =
+            mem::take(&mut selection_state.highlighted_delimiter_positions);
+        highlighted_delimiter_positions.clear();
+        for selection in &selection_state.selections {
+            if !selection.is_empty() {
+                continue;
+            }
+            if let Some((opening_delimiter_position, closing_delimiter_position)) =
+                find_highlighted_delimiter_pair(
+                    self.document.as_text().as_lines(),
+                    selection.cursor.position,
+                )
+            {
+                highlighted_delimiter_positions.insert(opening_delimiter_position);
+                highlighted_delimiter_positions.insert(closing_delimiter_position);
+            }
+        }
+        selection_state.highlighted_delimiter_positions = highlighted_delimiter_positions;
     }
 }
 
@@ -911,7 +928,7 @@ struct SelectionState {
     selections: SelectionSet,
     last_added_selection_index: Option<usize>,
     injected_delimiter_stack: Vec<char>,
-    enclosing_brackets: HashSet<Position>,
+    highlighted_delimiter_positions: HashSet<Position>,
 }
 
 pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, String) {
@@ -931,63 +948,59 @@ fn new_indentation(column_count: usize) -> String {
     iter::repeat(' ').take(column_count).collect()
 }
 
-fn find_enclosing_brackets(lines: &[String], selections: &SelectionSet) -> HashSet<Position> {
-    let mut enclosing_brackets = HashSet::new();
-    for selection in selections {
-        if !selection.is_empty() {
-            continue;
-        }
-        if let (Some(enclosing_bracket_before), Some(enclosing_bracket_after)) = (
-            find_enclosing_opening_bracket(lines, selection.cursor.position),
-            find_enclosing_closing_bracket(lines, selection.cursor.position),
-        ) {
-            enclosing_brackets.insert(enclosing_bracket_before);
-            enclosing_brackets.insert(enclosing_bracket_after);
-        }
-    }
-    enclosing_brackets
-}
-
-fn find_enclosing_opening_bracket(lines: &[String], position: Position) -> Option<Position> {
-    let mut position = position;
-    let mut depth = 0;
-    loop {
-        for char in lines[position.line_index][..position.byte_index]
-            .chars()
-            .rev()
-        {
-            position.byte_index -= char.len_utf8();
-            if char == '}' {
-                depth += 1;
-            }
-            if char == '{' {
-                if depth == 0 {
-                    return Some(position);
+fn find_highlighted_delimiter_pair(
+    lines: &[String],
+    position: Position,
+) -> Option<(Position, Position)> {
+    match find_opening_delimiter(lines, position) {
+        Some((opening_delimiter_position, opening_delimiter)) => {
+            match find_closing_delimiter(lines, position, opening_delimiter) {
+                Some(closing_delimiter_position) => {
+                    Some((opening_delimiter_position, closing_delimiter_position))
                 }
-                depth -= 1;
+                None => None,
             }
         }
-        if position.line_index == 0 {
-            return None;
-        }
-        position.line_index -= 1;
-        position.byte_index = lines[position.line_index].len();
+        None => None,
     }
 }
 
-fn find_enclosing_closing_bracket(lines: &[String], position: Position) -> Option<Position> {
+fn find_opening_delimiter(lines: &[String], position: Position) -> Option<(Position, char)> {
+    match lines[position.line_index][..position.byte_index]
+        .chars()
+        .next_back()
+    {
+        Some(char) if char.is_opening_delimiter() => Some((
+            Position {
+                line_index: position.line_index,
+                byte_index: position.byte_index - char.len_utf8(),
+            },
+            char,
+        )),
+        _ => None,
+    }
+}
+
+fn find_closing_delimiter(
+    lines: &[String],
+    position: Position,
+    opening_delimiter: char,
+) -> Option<Position> {
+    let mut delimiter_stack = vec![opening_delimiter];
     let mut position = position;
-    let mut depth = 0;
     loop {
         for char in lines[position.line_index][position.byte_index..].chars() {
-            if char == '{' {
-                depth += 1;
+            if char.is_opening_delimiter() {
+                delimiter_stack.push(char);
             }
-            if char == '}' {
-                if depth == 0 {
+            if char.is_closing_delimiter() {
+                if delimiter_stack.last() != Some(&char.opposite_delimiter().unwrap()) {
+                    return None;
+                }
+                delimiter_stack.pop().unwrap();
+                if delimiter_stack.is_empty() {
                     return Some(position);
                 }
-                depth -= 1;
             }
             position.byte_index += char.len_utf8();
         }
