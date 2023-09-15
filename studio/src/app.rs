@@ -185,7 +185,7 @@ impl AppMain for App {
                     );
                 }
                 else if let Some(mut run_view) = run_view.has_widget(&next).borrow_mut() {
-                    run_view.draw(cx, &self.build_manager);
+                    run_view.draw(cx, &mut self.build_manager);
                 }
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_log(cx, &mut *list_view);

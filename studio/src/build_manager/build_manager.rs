@@ -229,7 +229,8 @@ live_design!{
 
 pub struct BuildClientProcess {
     pub cmd_id: BuildCmdId,
-    pub texture: Texture
+    pub swapchain: [Texture; 2],  // fixed to two textures
+    pub present_index: usize,
 }
 
 pub struct BuildClientWrap {
@@ -330,11 +331,13 @@ impl BuildManager {
             processes: HashMap::new()
         };
         
-        let texture = Texture::new(cx);
+        let swapchain = [Texture::new(cx),Texture::new(cx)];
+        let present_index = 0usize;
         
         client.processes.insert(WHAT_TO_BUILD.into(), BuildClientProcess {
-            texture,
-            cmd_id: BuildCmdId(0)
+            cmd_id: BuildCmdId(0),
+            swapchain,
+            present_index,
         });
         
         self.clients.push(client);
