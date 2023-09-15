@@ -221,8 +221,6 @@ public class VideoDecoder {
 
                         frameBuffer.flip();
 
-                        // WIP: Ideally I'd use `put` instead of `add` (if the queue has a limit) because `put` waits for capacity to be available
-                        // howver because this is synchronized, if this waits, it locks other things.
                         mVideoFrameQueue.add(frameBuffer);
 
                         mCodec.releaseOutputBuffer(outputBufferIndex, false);
