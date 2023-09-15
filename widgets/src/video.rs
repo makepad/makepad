@@ -14,7 +14,7 @@ use std::{
 };
 
 const MAX_FRAMES_TO_DECODE: usize = 30;
-const FRAME_BUTTER_LOW_WATER_MARK: usize = MAX_FRAMES_TO_DECODE / 3;
+const FRAME_BUFFER_LOW_WATER_MARK: usize = MAX_FRAMES_TO_DECODE / 3;
 
 // Usage
 // is_looping - determines if the video should be played in a loop. defaults to false.
@@ -25,7 +25,6 @@ live_design! {
 }
 
 // TODO:
-// - Remove green background while buffering for the first time
 // - Properly cleanup resources after playback is finished
 
 // - Fix support for YUV420Plannar, colors don't show right.
@@ -198,13 +197,8 @@ impl Video {
             }
         }
 
-        if self.tick.is_event(event) {
-            if !self.is_paused && !self.playback_finished && self.decoding_state == DecodingState::Finished
-                || (self.decoding_state == DecodingState::Decoding
-                    && self.frames_buffer.lock().unwrap().data.len() > FRAME_BUTTER_LOW_WATER_MARK)
-            {
-                self.maybe_advance_playback(cx);
-            }
+        if self.tick.is_event(event) {            
+            self.maybe_advance_playback(cx);
 
             if self.should_fetch() {
                 self.available_to_fetch = false;
@@ -266,21 +260,11 @@ impl Video {
         }
     }
 
-    fn should_fetch(&self) -> bool {
-        self.available_to_fetch
-            && self.frames_buffer.lock().unwrap().data.len() < FRAME_BUTTER_LOW_WATER_MARK
-    }
-
-    fn should_request_decoding(&self) -> bool {
-        match self.decoding_state {
-            DecodingState::Finished => {
-                self.frames_buffer.lock().unwrap().data.len() < FRAME_BUTTER_LOW_WATER_MARK
-            }
-            _ => false,
-        }
-    }
-
     fn maybe_advance_playback(&mut self, cx: &mut Cx) {
+        if self.is_paused || self.playback_finished {
+            return;
+        }
+
         let now = Instant::now();
         let video_time_us = match self.start_time {
             Some(start_time) => now.duration_since(start_time).as_micros(),
@@ -395,9 +379,27 @@ impl Video {
         });
     }
 
-    fn _cleanup_decoding(&mut self, _cx: &mut Cx) {
-        //cx.cleanup_video_decoding(self.id);
-        //cx.cancel_timeout
+    fn should_fetch(&self) -> bool {
+        self.available_to_fetch
+            && self.is_buffer_running_low()
+    }
+
+    fn should_request_decoding(&self) -> bool {
+        match self.decoding_state {
+            DecodingState::Finished => {
+                self.is_buffer_running_low()
+            }
+            _ => false,
+        }
+    }
+
+    fn is_buffer_running_low(&self) -> bool {
+        self.frames_buffer.lock().unwrap().data.len() < FRAME_BUFFER_LOW_WATER_MARK
+    }
+
+    fn _cleanup_decoding(&mut self, cx: &mut Cx) {
+        cx.cleanup_video_decoding(self.id);
+        self.frames_buffer.lock().unwrap().clear();
     }
 }
 
@@ -424,6 +426,11 @@ impl RingBuffer {
                 self.last_added_index = Some(index + 1);
             }
         }
+    }
+
+    fn clear(&mut self) {
+        self.data.clear();
+        self.last_added_index = None;
     }
 }
 

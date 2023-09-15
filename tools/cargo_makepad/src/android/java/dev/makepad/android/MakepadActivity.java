@@ -232,7 +232,7 @@ MidiManager.OnDeviceOpenedListener{
     Handler mDecoderHandler;
     HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
     private HashMap<Long, BlockingQueue<ByteBuffer>> mVideoFrameQueues = new HashMap<>();
-    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 2; 
+    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 5; 
     private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
 
     static {
@@ -481,40 +481,42 @@ MidiManager.OnDeviceOpenedListener{
 
     public void fetchNextVideoFrames(long videoId, int numberFrames) {
         BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
+        if (videoFrameQueue != null) {
+            int totalBytes = 0;
+            ArrayList<ByteBuffer> individualFrames = new ArrayList<>();
 
-        int totalBytes = 0;
-        ArrayList<ByteBuffer> individualFrames = new ArrayList<>();
-
-        for (int i = 0; i < numberFrames; i++) {
-            ByteBuffer frame = videoFrameQueue.poll();
-            if (frame != null) {
-                individualFrames.add(frame);
-                totalBytes += frame.remaining();
-            }
-        }
-
-        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
-        ByteBuffer frameGroup = acquireBuffer(totalBytes);
-    
-        for (ByteBuffer frame : individualFrames) {
-            if (frame != null) {
-                frameGroup.put(frame);
-                if (runnable != null) {
-                    runnable.releaseBuffer(frame);
+            for (int i = 0; i < numberFrames; i++) {
+                ByteBuffer frame = videoFrameQueue.poll();
+                if (frame != null) {
+                    individualFrames.add(frame);
+                    totalBytes += frame.remaining();
                 }
             }
-        }
 
-        frameGroup.flip();
-        runOnUiThread(() -> MakepadNative.onVideoStream(videoId, frameGroup));       
-        releaseBuffer(frameGroup);
+            VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+            ByteBuffer frameGroup = acquireBuffer(totalBytes);
+        
+            for (ByteBuffer frame : individualFrames) {
+                if (frame != null) {
+                    frameGroup.put(frame);
+                    if (runnable != null) {
+                        runnable.releaseBuffer(frame);
+                    }
+                }
+            }
+
+            frameGroup.flip();
+            runOnUiThread(() -> MakepadNative.onVideoStream(videoId, frameGroup));       
+            releaseBuffer(frameGroup);
+        }
     }
 
-    public void cleanupDecoder(long videoId) {
+    public void cleanupVideoDecoding(long videoId) {
         VideoDecoderRunnable runnable = mDecoderRunnables.remove(videoId);
         if(runnable != null) {
             runnable.cleanup();
         }
+        mVideoFrameQueues.remove(videoId);
     }
 
     private ByteBuffer acquireBuffer(int size) {
@@ -534,8 +536,10 @@ MidiManager.OnDeviceOpenedListener{
 
     private void releaseBuffer(ByteBuffer buffer) {
         synchronized(mVideoChunkBufferPool) {
-            buffer.clear();
-            mVideoChunkBufferPool.offer(buffer);
+            if (mVideoChunkBufferPool.size() < VIDEO_CHUNK_BUFFER_POOL_SIZE) {
+                buffer.clear();
+                mVideoChunkBufferPool.offer(buffer);
+            }
         }
     }
 }

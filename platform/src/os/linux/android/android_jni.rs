@@ -623,11 +623,11 @@ pub unsafe fn to_java_fetch_next_video_frames(env: *mut jni_sys::JNIEnv, video_i
     );
 }
 
-pub unsafe fn to_java_cleanup_decoder(env: *mut jni_sys::JNIEnv, video_id: i64) {
+pub unsafe fn to_java_cleanup_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
-        "cleanupDecoder",
+        "cleanupVideoDecoding",
         "(J)V",
         video_id
     );

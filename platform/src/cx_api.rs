@@ -77,6 +77,7 @@ pub enum CxOsOp {
     InitializeVideoDecoding(LiveId, Rc<Vec<u8>>, usize),
     DecodeNextVideoChunk(LiveId, usize),
     FetchNextVideoFrames(LiveId, usize),
+    CleanupVideoDecoding(LiveId),
 }
 
 impl Cx { 
@@ -451,6 +452,10 @@ impl Cx {
 
     pub fn fetch_next_video_frames(&mut self, video_id: LiveId, number_frames: usize) {
         self.platform_ops.push(CxOsOp::FetchNextVideoFrames(video_id, number_frames));
+    }
+
+    pub fn cleanup_video_decoding(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::CleanupVideoDecoding(video_id));
     }
     
     pub fn println_resources(&self){
