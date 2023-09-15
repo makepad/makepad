@@ -37,6 +37,9 @@ pub trait CxOsApi {
     fn init_cx_os(&mut self);
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
+    
+    fn start_stdin_service(&mut self){}
+    fn pre_start()->bool{false}
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -95,6 +98,8 @@ impl Cx {
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn os_type(&self) -> &OsType {&self.os_type}
+    pub fn in_makepad_studio(&self)->bool {self.in_makepad_studio}
+    
     pub fn cpu_cores(&self) -> usize {self.cpu_cores}
     pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
@@ -257,6 +262,29 @@ impl Cx {
                 })
             }
             Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size: (size / dpi).floor() * dpi}),
+            None => None
+        } 
+    }
+    
+    pub fn get_pass_rect2(&self, pass_id: PassId, dpi:f64) -> Option<Rect> {
+        match self.passes[pass_id].pass_rect {
+            Some(CxPassRect::Area(area)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size: (rect.size * dpi).ceil() / dpi
+                })
+            }
+            Some(CxPassRect::ScaledArea(area, scale)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size:  scale * (rect.size * dpi).ceil() / dpi
+                })
+            }
+            Some(CxPassRect::Size(size)) => {
+                Some(Rect {pos: DVec2::default(), size: (size * dpi).floor() / dpi})
+            }
             None => None
         } 
     }

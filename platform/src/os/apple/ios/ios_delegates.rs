@@ -5,6 +5,7 @@ use {
         event::{TouchState, VirtualKeyboardEvent},
         animator::Ease,
         os::{
+            apple::ios_app::IosApp,
             apple::apple_util::nsstring_to_string,
             apple::apple_sys::*,
             apple::ios_app::get_ios_app_global,
@@ -23,8 +24,7 @@ pub fn define_ios_app_delegate() -> *const Class {
         _: ObjcId,
         _: ObjcId,
     ) -> BOOL {
-        let ca = get_ios_app_global();
-        ca.did_finish_launching_with_options();
+        get_ios_app_global().did_finish_launching_with_options();
         YES
     }
     
@@ -68,22 +68,22 @@ pub fn define_mtk_view() -> *const Class {
     
     extern "C" fn touches_began(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Start);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     extern "C" fn touches_moved(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Move);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     extern "C" fn touches_ended(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Stop);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     extern "C" fn touches_canceled(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Stop);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     unsafe {
@@ -113,12 +113,12 @@ pub fn define_mtk_view_delegate() -> *const Class {
     let mut decl = ClassDecl::new("MakepadViewDlg", class!(NSObject)).unwrap();
     
     extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
-        get_ios_app_global().draw_in_rect();
+        IosApp::draw_in_rect();
     }
     
     extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
         crate::log!("Draw size will change");
-        get_ios_app_global().draw_size_will_change();
+        IosApp::draw_size_will_change();
     }
     unsafe {
         decl.add_method(
@@ -138,11 +138,11 @@ pub fn define_mtk_view_delegate() -> *const Class {
 pub fn define_ios_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
-        get_ios_app_global().send_timer_received(nstimer);
+        IosApp::send_timer_received(nstimer);
     }
     
     extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        get_ios_app_global().send_paint_event();
+        IosApp::send_paint_event();
     }
     
     let superclass = class!(NSObject);
@@ -198,14 +198,15 @@ pub fn define_textfield_delegate() -> *const Class {
     extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, _notif: ObjcId) {
     }
     
-    extern "C" fn keyboard_will_change_frame(_: &Object, _: Sel, notif: ObjcId) {
+    extern "C" fn keyboard_will_change_frame(_: &Object, _: Sel, _notif: ObjcId) {
     }
     
     extern "C" fn keyboard_will_hide(_: &Object, _: Sel, notif: ObjcId) {
         let height = get_height_delta(notif);
         let (duration, ease) = get_curve_duration(notif);
+        let time = get_ios_app_global().time_now();
         get_ios_app_global().queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
-            time: get_ios_app_global().time_now(),
+            time,
             ease,
             height: -height,
             duration
@@ -213,15 +214,17 @@ pub fn define_textfield_delegate() -> *const Class {
     }
     
     extern "C" fn keyboard_did_hide(_: &Object, _: Sel, _notif: ObjcId) {
-        get_ios_app_global().send_virtual_keyboard_event(VirtualKeyboardEvent::DidHide {
-            time: get_ios_app_global().time_now()
+        let time = get_ios_app_global().time_now();
+        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidHide {
+            time,
         });
     }
     extern "C" fn keyboard_will_show(_: &Object, _: Sel, notif: ObjcId) {
         let height = get_height_delta(notif);
         let (duration, ease) = get_curve_duration(notif);
-        get_ios_app_global().send_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
-            time: get_ios_app_global().time_now(),
+        let time = get_ios_app_global().time_now();
+        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
+            time,
             height,
             ease,
             duration
@@ -229,8 +232,9 @@ pub fn define_textfield_delegate() -> *const Class {
     }
     extern "C" fn keyboard_did_show(_: &Object, _: Sel, notif: ObjcId) {
         let height = get_height_delta(notif);
-        get_ios_app_global().send_virtual_keyboard_event(VirtualKeyboardEvent::DidShow {
-            time: get_ios_app_global().time_now(),
+        let time = get_ios_app_global().time_now();
+        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidShow {
+            time,
             height: height
         });
     }
@@ -245,9 +249,9 @@ pub fn define_textfield_delegate() -> *const Class {
             let len: u64 = msg_send![string, length];
             if len > 0 {
                 let string = nsstring_to_string(string);
-                get_ios_app_global().send_text_input(string, range.length != 0);
+                IosApp::send_text_input(string, range.length != 0);
             } else {
-                get_ios_app_global().send_backspace();
+                IosApp::send_backspace();
             }
         }
         NO

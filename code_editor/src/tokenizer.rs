@@ -68,6 +68,7 @@ impl Tokenizer {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum State {
     Initial(InitialState),
+    BlockCommentTail(BlockCommentTailState),
     DoubleQuotedStringTail(DoubleQuotedStringTailState),
     RawDoubleQuotedStringTail(RawDoubleQuotedStringTailState),
 }
@@ -86,6 +87,7 @@ impl State {
         let start = cursor.index;
         let (next_state, kind) = match self {
             State::Initial(state) => state.next(cursor),
+            State::BlockCommentTail(state) => state.next(cursor),
             State::DoubleQuotedStringTail(state) => state.next(cursor),
             State::RawDoubleQuotedStringTail(state) => state.next(cursor),
         };
@@ -109,6 +111,8 @@ impl InitialState {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
             ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
             ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
+            ('/', '/', _) => self.line_comment(cursor),
+            ('/', '*', _) => self.block_comment(cursor),
             ('b', '\'', _) => self.byte(cursor),
             ('b', '"', _) => self.byte_string(cursor),
             ('!', '=', _)
@@ -136,6 +140,48 @@ impl InitialState {
             }
             ('\'', _, _) => self.char_or_lifetime(cursor),
             ('"', _, _) => self.string(cursor),
+            ('(', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Delimiter
+                )
+            }
+            (')', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Delimiter
+                )
+            }
+            ('[', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Delimiter
+                )
+            }
+            (']', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Delimiter
+                )
+            }
+            ('{', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Delimiter
+                )
+            }
+            ('}', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Delimiter
+                )
+            }
             ('.', char, _) if char.is_digit(10) => self.number(cursor),
             ('!', _, _)
             | ('#', _, _)
@@ -169,6 +215,19 @@ impl InitialState {
                 (State::Initial(InitialState), TokenKind::Unknown)
             }
         }
+    }
+
+    fn line_comment(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
+        cursor.skip(2);
+        while cursor.skip_if(|ch| ch != '\0') {}
+        (State::Initial(InitialState), TokenKind::Comment)
+    }
+
+    fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
+        cursor.skip(2);
+        BlockCommentTailState { depth: 0 }.next(cursor)
     }
 
     fn identifier_or_keyword(self, cursor: &mut Cursor) -> (State, TokenKind) {
@@ -338,6 +397,36 @@ impl InitialState {
         cursor.skip(1);
         while cursor.skip_if(|char| char.is_whitespace()) {}
         (State::Initial(InitialState), TokenKind::Whitespace)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BlockCommentTailState {
+    depth: usize,
+}
+
+impl BlockCommentTailState {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+        let mut state = self;
+        loop {
+            match (cursor.peek(0), cursor.peek(1)) {
+                ('/', '*') => {
+                    cursor.skip(2);
+                    state.depth += 1;
+                }
+                ('*', '/') => {
+                    cursor.skip(2);
+                    if state.depth == 0 {
+                        break (State::Initial(InitialState), TokenKind::Comment);
+                    }
+                    state.depth -= 1;
+                }
+                ('\0', _) => {
+                    break (State::BlockCommentTail(state), TokenKind::Comment);
+                }
+                _ => cursor.skip(1),
+            }
+        }
     }
 }
 

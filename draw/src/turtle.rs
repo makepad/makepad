@@ -528,7 +528,7 @@ impl<'a> Cx2d<'a> {
         //let current_dpi_factor = self.current_dpi_factor();
         let dx = if dx.is_nan() {0.0}else {dx} + turtle_shift.x;
         let dy = if dy.is_nan() {0.0}else {dy} + turtle_shift.y;
-        if dx == 0.0 && dy == 0.0 {
+        if dx.abs() <  0.000000001 && dy.abs() <  0.000000001{
             return 
         }
         //let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;

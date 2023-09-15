@@ -55,6 +55,7 @@ pub enum FromJavaMessage {
     },
     KeyUp {
         keycode: u32,
+        meta_state: u32,
     },
     ResizeTextIME {
         keyboard_height: u32,
@@ -277,8 +278,12 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyUp(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     keycode: jni_sys::jint,
+    meta_state: jni_sys::jint,
 ) {
-    send_from_java_message(FromJavaMessage::KeyUp { keycode: keycode as u32});
+    send_from_java_message(FromJavaMessage::KeyUp {
+        keycode: keycode as u32,
+        meta_state: meta_state as u32,
+    });
 }
 
 #[no_mangle]

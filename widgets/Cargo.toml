@@ -14,3 +14,4 @@ makepad-draw = { path = "../draw", version = "0.3.0" }
 makepad-derive-widget = {path = "./derive_widget", version="0.3.0"}
 makepad-zune-jpeg ={ path = "../libs/zune-jpeg", version = "0.3.17" }
 makepad-zune-png ={ path = "../libs/zune-png", version = "0.2.1" }
+#makepad-image-formats ={ path = "../libs/image_formats", version = "0.3.0" }
