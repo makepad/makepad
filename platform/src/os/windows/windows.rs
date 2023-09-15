@@ -96,17 +96,20 @@ impl Cx {
                 }
             }
             Win32Event::WindowGeomChange(re) => { // do this here because mac
+               
                 if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == re.window_id) {
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
                     // redraw just this windows root draw list
                     if re.old_geom.inner_size != re.new_geom.inner_size {
+                        
                         if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
                             self.redraw_pass_and_child_passes(main_pass_id);
                         }
                     }
                 }
                 // ok lets not redraw all, just this window
+                self.redraw_all();
                 self.call_event_handler(&Event::WindowGeomChange(re));
             }
             Win32Event::WindowClosed(wc) => {
