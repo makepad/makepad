@@ -56,7 +56,8 @@ impl Session {
             selection_state: RefCell::new(SelectionState {
                 selections: SelectionSet::new(),
                 last_added_selection_index: None,
-                delimiter_stack: Vec::new(),
+                injected_delimiter_stack: Vec::new(),
+                enclosing_brackets: HashSet::new(),
             }),
             wrap_column: None,
             folding_lines: HashSet::new(),
@@ -100,6 +101,12 @@ impl Session {
     pub fn selections(&self) -> Ref<'_, [Selection]> {
         Ref::map(self.selection_state.borrow(), |selection_state| {
             selection_state.selections.as_selections()
+        })
+    }
+
+    pub fn enclosing_brackets(&self) -> Ref<'_, HashSet<Position>> {
+        Ref::map(self.selection_state.borrow(), |selection_state| {
+            &selection_state.enclosing_brackets
         })
     }
 
@@ -181,8 +188,9 @@ impl Session {
                 preferred_column_index: None,
             }));
         selection_state.last_added_selection_index = Some(0);
-        selection_state.delimiter_stack.clear();
+        selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
+        self.update_enclosing_brackets();
         self.document.force_new_group();
     }
 
@@ -197,8 +205,9 @@ impl Session {
                     preferred_column_index: None,
                 })),
         );
-        selection_state.delimiter_stack.clear();
+        selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
+        self.update_enclosing_brackets();
         self.document.force_new_group();
     }
 
@@ -216,8 +225,9 @@ impl Session {
                     })
                 }),
         );
-        selection_state.delimiter_stack.clear();
+        selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
+        self.update_enclosing_brackets();
         self.document.force_new_group();
     }
 
@@ -264,16 +274,16 @@ impl Session {
                 }) {
                     let char = char.opposite_delimiter().unwrap();
                     inject_delimiter = Some(char);
-                    selection_state.delimiter_stack.push(char);
+                    selection_state.injected_delimiter_stack.push(char);
                 }
             }
             Some(char)
                 if selection_state
-                    .delimiter_stack
+                    .injected_delimiter_stack
                     .last()
                     .map_or(false, |&last_char| last_char == char) =>
             {
-                uninject_delimiter = Some(selection_state.delimiter_stack.pop().unwrap());
+                uninject_delimiter = Some(selection_state.injected_delimiter_stack.pop().unwrap());
             }
             _ => {}
         }
@@ -698,78 +708,10 @@ impl Session {
             .redo(self.id, &self.selection_state.borrow().selections)
     }
 
-    fn update_y(&mut self) {
-        let start = self.layout.borrow().y.len();
-        let end = self.document.as_text().as_lines().len();
-        if start == end + 1 {
-            return;
-        }
-        let mut y = if start == 0 {
-            0.0
-        } else {
-            let layout = self.layout();
-            let line = layout.line(start - 1);
-            line.y() + line.height()
-        };
-        let mut ys = mem::take(&mut self.layout.borrow_mut().y);
-        for block in self.layout().block_elements(start, end) {
-            match block {
-                BlockElement::Line { is_inlay, line } => {
-                    if !is_inlay {
-                        ys.push(y);
-                    }
-                    y += line.height();
-                }
-                BlockElement::Widget(widget) => {
-                    y += widget.height;
-                }
-            }
-        }
-        ys.push(y);
-        self.layout.borrow_mut().y = ys;
-    }
-
     pub fn handle_changes(&mut self) {
         while let Ok((selections, edits)) = self.edit_receiver.try_recv() {
             self.apply_edits(selections, &edits);
         }
-    }
-
-    fn update_column_count(&mut self, index: usize) {
-        let mut column_count = 0;
-        let mut column = 0;
-        let layout = self.layout();
-        let line = layout.line(index);
-        for wrapped in line.wrapped_elements() {
-            match wrapped {
-                WrappedElement::Text { text, .. } => {
-                    column += text.column_count();
-                }
-                WrappedElement::Widget(widget) => {
-                    column += widget.column_count;
-                }
-                WrappedElement::Wrap => {
-                    column_count = column_count.max(column);
-                    column = line.wrap_indent_column_count();
-                }
-            }
-        }
-        drop(layout);
-        self.layout.borrow_mut().column_count[index] = Some(column_count.max(column));
-    }
-
-    fn update_wrap_data(&mut self, line: usize) {
-        let wrap_data = match self.wrap_column {
-            Some(wrap_column) => {
-                let layout = self.layout();
-                let line = layout.line(line);
-                wrap::compute_wrap_data(line, wrap_column)
-            }
-            None => WrapData::default(),
-        };
-        self.layout.borrow_mut().wrap_data[line] = Some(wrap_data);
-        self.layout.borrow_mut().y.truncate(line + 1);
-        self.update_column_count(line);
     }
 
     fn modify_selections(
@@ -793,13 +735,14 @@ impl Session {
                 }
                 selection
             });
-        selection_state.delimiter_stack.clear();
+        selection_state.injected_delimiter_stack.clear();
         drop(selection_state);
         drop(layout);
+        self.update_enclosing_brackets();
         self.document.force_new_group();
     }
 
-    fn apply_edits(&mut self, selections: Option<SelectionSet>, edits: &[Edit]) {
+    fn apply_edits(&self, selections: Option<SelectionSet>, edits: &[Edit]) {
         for edit in edits {
             match edit.change {
                 Change::Insert(point, ref text) => {
@@ -858,6 +801,7 @@ impl Session {
                 self.update_wrap_data(line);
             }
         }
+        self.update_y();
         let mut selection_state = self.selection_state.borrow_mut();
         if let Some(selections) = selections {
             selection_state.selections = selections;
@@ -867,7 +811,80 @@ impl Session {
             }
         }
         drop(selection_state);
-        self.update_y();
+        self.update_enclosing_brackets();
+    }
+
+    fn update_y(&self) {
+        let start = self.layout.borrow().y.len();
+        let end = self.document.as_text().as_lines().len();
+        if start == end + 1 {
+            return;
+        }
+        let mut y = if start == 0 {
+            0.0
+        } else {
+            let layout = self.layout();
+            let line = layout.line(start - 1);
+            line.y() + line.height()
+        };
+        let mut ys = mem::take(&mut self.layout.borrow_mut().y);
+        for block in self.layout().block_elements(start, end) {
+            match block {
+                BlockElement::Line { is_inlay, line } => {
+                    if !is_inlay {
+                        ys.push(y);
+                    }
+                    y += line.height();
+                }
+                BlockElement::Widget(widget) => {
+                    y += widget.height;
+                }
+            }
+        }
+        ys.push(y);
+        self.layout.borrow_mut().y = ys;
+    }
+    
+    fn update_column_count(&self, index: usize) {
+        let mut column_count = 0;
+        let mut column = 0;
+        let layout = self.layout();
+        let line = layout.line(index);
+        for wrapped in line.wrapped_elements() {
+            match wrapped {
+                WrappedElement::Text { text, .. } => {
+                    column += text.column_count();
+                }
+                WrappedElement::Widget(widget) => {
+                    column += widget.column_count;
+                }
+                WrappedElement::Wrap => {
+                    column_count = column_count.max(column);
+                    column = line.wrap_indent_column_count();
+                }
+            }
+        }
+        drop(layout);
+        self.layout.borrow_mut().column_count[index] = Some(column_count.max(column));
+    }
+
+    fn update_wrap_data(&self, line: usize) {
+        let wrap_data = match self.wrap_column {
+            Some(wrap_column) => {
+                let layout = self.layout();
+                let line = layout.line(line);
+                wrap::compute_wrap_data(line, wrap_column)
+            }
+            None => WrapData::default(),
+        };
+        self.layout.borrow_mut().wrap_data[line] = Some(wrap_data);
+        self.layout.borrow_mut().y.truncate(line + 1);
+        self.update_column_count(line);
+    }
+
+    fn update_enclosing_brackets(&self) {
+        let enclosing_brackets = find_enclosing_brackets(self.document().as_text().as_lines(), &self.selection_state.borrow().selections);
+        self.selection_state.borrow_mut().enclosing_brackets = enclosing_brackets;
     }
 }
 
@@ -893,7 +910,8 @@ pub struct SessionLayout {
 struct SelectionState {
     selections: SelectionSet,
     last_added_selection_index: Option<usize>,
-    delimiter_stack: Vec<char>,
+    injected_delimiter_stack: Vec<char>,
+    enclosing_brackets: HashSet<Position>,
 }
 
 pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, String) {
@@ -911,4 +929,72 @@ pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, 
 
 fn new_indentation(column_count: usize) -> String {
     iter::repeat(' ').take(column_count).collect()
+}
+
+fn find_enclosing_brackets(lines: &[String], selections: &SelectionSet) -> HashSet<Position> {
+    let mut enclosing_brackets = HashSet::new();
+    for selection in selections {
+        if !selection.is_empty() {
+            continue;
+        }
+        if let (Some(enclosing_bracket_before), Some(enclosing_bracket_after)) = (
+            find_enclosing_opening_bracket(lines, selection.cursor.position),
+            find_enclosing_closing_bracket(lines, selection.cursor.position),
+        ) {
+            enclosing_brackets.insert(enclosing_bracket_before);
+            enclosing_brackets.insert(enclosing_bracket_after);
+        }
+    }
+    enclosing_brackets
+}
+
+fn find_enclosing_opening_bracket(lines: &[String], position: Position) -> Option<Position> {
+    let mut position = position;
+    let mut depth = 0;
+    loop {
+        for char in lines[position.line_index][..position.byte_index]
+            .chars()
+            .rev()
+        {
+            position.byte_index -= char.len_utf8();
+            if char == '}' {
+                depth += 1;
+            }
+            if char == '{' {
+                if depth == 0 {
+                    return Some(position);
+                }
+                depth -= 1;
+            }
+        }
+        if position.line_index == 0 {
+            return None;
+        }
+        position.line_index -= 1;
+        position.byte_index = lines[position.line_index].len();
+    }
+}
+
+fn find_enclosing_closing_bracket(lines: &[String], position: Position) -> Option<Position> {
+    let mut position = position;
+    let mut depth = 0;
+    loop {
+        for char in lines[position.line_index][position.byte_index..].chars() {
+            if char == '{' {
+                depth += 1;
+            }
+            if char == '}' {
+                if depth == 0 {
+                    return Some(position);
+                }
+                depth -= 1;
+            }
+            position.byte_index += char.len_utf8();
+        }
+        if position.line_index == lines.len() - 1 {
+            return None;
+        }
+        position.line_index += 1;
+        position.byte_index = 0;
+    }
 }

@@ -10,6 +10,7 @@ pub enum TokenKind {
     BranchKeyword,
     Comment,
     Constant,
+    Delimiter,
     Identifier,
     LoopKeyword,
     OtherKeyword,
