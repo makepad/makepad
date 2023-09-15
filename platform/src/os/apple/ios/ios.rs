@@ -51,11 +51,10 @@ impl Cx {
         init_apple_classes_global();
         init_ios_app_global(device, Box::new({
             let cx = cx.clone();
-            move | ios_app,
-            event | {
+            move | event | {
                 let mut cx_ref = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
-                let event_flow = cx_ref.ios_event_callback(ios_app, event, &mut metal_cx);
+                let event_flow = cx_ref.ios_event_callback(event, &mut metal_cx);
                 let executor = cx_ref.executor.take().unwrap();
                 drop(cx_ref);
                 executor.run_until_stalled();
@@ -68,17 +67,18 @@ impl Cx {
         
         // final bit of initflow
         
-        get_ios_app_global().event_loop();
+        IosApp::event_loop();
     }
     
-    pub (crate) fn handle_repaint(&mut self, ios_app:&mut IosApp, metal_cx: &mut MetalCx) {
+    pub (crate) fn handle_repaint(&mut self, metal_cx: &mut MetalCx) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::MTKView(ios_app.mtk_view.unwrap()));
+                    let mtk_view = get_ios_app_global().mtk_view.unwrap();
+                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
                 }
                 CxPassParent::Pass(_) => {
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
@@ -127,12 +127,11 @@ impl Cx {
     
     fn ios_event_callback(
         &mut self,
-        ios_app: &mut IosApp,
         event: IosEvent,
         metal_cx: &mut MetalCx,
     ) -> EventFlow {
         
-        self.handle_platform_ops(ios_app, metal_cx);
+        self.handle_platform_ops(metal_cx);
          
         // send a mouse up when dragging starts
         
@@ -144,7 +143,8 @@ impl Cx {
             }
             IosEvent::Timer(te) => {
                 if te.timer_id == 0 {
-                    if let Some(vk) = ios_app.virtual_keyboard_event.take(){
+                    let vk = get_ios_app_global().virtual_keyboard_event.take();
+                    if let Some(vk) = vk{
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
                     // check signals
@@ -190,14 +190,15 @@ impl Cx {
             }
             IosEvent::Paint => { 
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(ios_app.time_now());
+                    let time_now = get_ios_app_global().time_now();
+                    self.call_next_frame_event(time_now);
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 // ok here we send out to all our childprocesses
-                self.handle_repaint(ios_app, metal_cx);
+                self.handle_repaint(metal_cx);
             }
             IosEvent::TouchUpdate(e)=>{
                 self.fingers.process_touch_update_start(e.time, &e.touches);
@@ -261,12 +262,12 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, ios_app:&mut IosApp, _metal_cx: &MetalCx){
+    fn handle_platform_ops(&mut self, _metal_cx: &MetalCx){
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
-                    window.window_geom = ios_app.last_window_geom.clone();
+                    window.window_geom = get_ios_app_global().last_window_geom.clone();
                     window.is_created = true;
                 },
                 CxOsOp::CloseWindow(_window_id) => {
@@ -293,10 +294,10 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
-                    ios_app.show_keyboard();
+                    IosApp::show_keyboard();
                 },
                 CxOsOp::HideTextIME => {
-                    ios_app.hide_keyboard();
+                    IosApp::hide_keyboard();
                 },
                 CxOsOp::SetCursor(_cursor) => { 
                 },

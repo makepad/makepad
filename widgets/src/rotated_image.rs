@@ -6,9 +6,9 @@ live_design! {
 
 #[derive(Live)]
 pub struct RotatedImage {
-    #[live]
+    #[walk]
     walk: Walk,
-    #[live]
+    #[layout]
     layout: Layout,
     #[live]
     draw_bg: DrawColor,
