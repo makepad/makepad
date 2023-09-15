@@ -204,9 +204,6 @@ live_design!{
     }
 
     Video = <VideoBase> {
-        width: 500
-        height: 500
-        
         draw_bg: {
             shape: Solid,
             fill: Image
@@ -215,6 +212,8 @@ live_design!{
             instance image_pan: vec2(0.0, 0.0)
             uniform image_alpha: 1.0
             uniform is_planar: 1.0
+            uniform texture_available: 0.0
+            uniform is_last_frame: 0.0
         
             fn yuv_to_rgb(y: float, u: float, v: float) -> vec4 {
                 let c = y - 16.0;
@@ -229,7 +228,11 @@ live_design!{
             }
         
             fn get_color(self) -> vec4 {
-                if (self.is_planar == 1.0) {
+                if self.texture_available == 0.0 {
+                    return vec4(0.0, 0.0, 0.0, 1.0);
+                }
+
+                if self.is_planar == 1.0 {
                     let y_sample = sample2d(self.yuv_texture, self.pos * self.image_scale + self.image_pan).z;
                     let uv_coords = (self.pos * self.image_scale + self.image_pan) / 2.0;
                     let uv_sample = sample2d(self.yuv_texture, uv_coords);
@@ -250,7 +253,13 @@ live_design!{
             
             fn pixel(self) -> vec4 {
                 let color = self.get_color();
-                return Pal::premul(vec4(color.xyz, color.w * self.image_alpha))
+                let premul_color = Pal::premul(vec4(color.xyz, color.w * self.image_alpha));
+
+                if (self.is_last_frame == 1.0) {
+                    return mix(premul_color, vec4(0.0, 0.0, 0.0, 1.0), 0.5);
+                } 
+
+                return premul_color;
             }
         }
     }

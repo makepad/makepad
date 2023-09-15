@@ -16,6 +16,10 @@ use std::{
 const MAX_FRAMES_TO_DECODE: usize = 30;
 const FRAME_BUTTER_LOW_WATER_MARK: usize = MAX_FRAMES_TO_DECODE / 3;
 
+// Usage
+// is_looping - determines if the video should be played in a loop. defaults to false.
+// hold_to_pause - determines if the video should be paused when the user hold the pause button. defaults to false.
+
 live_design! {
     VideoBase = {{Video}} {}
 }
@@ -27,13 +31,13 @@ live_design! {
 // - Fix support for YUV420Plannar, colors don't show right.
 // - Add support for SemiPlanar nv21, currently we assume that SemiPlanar is nv12
 
+// - Add function to restart playback manually when not looping.
+
 // - Optimizations:
 //      - lower memory usage by avoiding copying on frame chunk deserialization
 //      - dynamically calculate chunk size this based on frame rate and size
 //      - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
 //      - testing multiple videos on a ListView will probably show other issues
-
-// - Implement a pause/play
 
 // - Post-conf:
 //      - add audio playback
@@ -56,7 +60,7 @@ pub struct Video {
     texture: Option<Texture>,
 
     // Playback
-    #[live(true)]
+    #[live(false)]
     is_looping: bool,
     #[live(false)]
     hold_to_pause: bool,
@@ -195,11 +199,11 @@ impl Video {
         }
 
         if self.tick.is_event(event) {
-            if !self.is_paused && self.decoding_state == DecodingState::Finished
+            if !self.is_paused && !self.playback_finished && self.decoding_state == DecodingState::Finished
                 || (self.decoding_state == DecodingState::Decoding
                     && self.frames_buffer.lock().unwrap().data.len() > FRAME_BUTTER_LOW_WATER_MARK)
             {
-                self.process_tick(cx);
+                self.maybe_advance_playback(cx);
             }
 
             if self.should_fetch() {
@@ -276,7 +280,7 @@ impl Video {
         }
     }
 
-    fn process_tick(&mut self, cx: &mut Cx) {
+    fn maybe_advance_playback(&mut self, cx: &mut Cx) {
         let now = Instant::now();
         let video_time_us = match self.start_time {
             Some(start_time) => now.duration_since(start_time).as_micros(),
@@ -290,6 +294,8 @@ impl Video {
                 Some(current_frame) => {
                     if self.start_time.is_none() {
                         self.start_time = Some(now);
+                        self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
+                        self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
                     }
 
                     self.update_textures(cx, current_frame.pixel_data);
@@ -304,8 +310,9 @@ impl Video {
                             );
                         }
                         if !self.is_looping {
+                            self.draw_bg.set_uniform(cx, id!(is_last_frame), &[1.0]);
                             self.playback_finished = true;
-                            self.cleanup_decoding(cx);
+                            self.start_time = None;
                         }
                     } else {
                         self.next_frame_ts =
@@ -388,7 +395,7 @@ impl Video {
         });
     }
 
-    fn cleanup_decoding(&mut self, _cx: &mut Cx) {
+    fn _cleanup_decoding(&mut self, _cx: &mut Cx) {
         //cx.cleanup_video_decoding(self.id);
         //cx.cancel_timeout
     }
