@@ -88,10 +88,6 @@ use {
                         QueryPerformanceFrequency,
                     },
                     //Com::IDataObject,
-                    Com::{
-                        COINIT_MULTITHREADED,
-                        CoInitializeEx
-                    },
                     Ole::{
                         OleInitialize,
                         //DoDragDrop,
