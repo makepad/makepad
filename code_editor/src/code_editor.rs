@@ -2,8 +2,8 @@ use {
     crate::{
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
+        session::Session,
         settings::Settings,
-        state::Session,
         str::StrExt,
         text::Position,
         token::TokenKind,
@@ -252,6 +252,16 @@ impl CodeEditor {
         self.draw_indent_guide_layer(cx, session);
         self.draw_selection_layer(cx, session);
 
+        // Get the last added selection.
+        let last_added_selection =
+            session.selections()[session.last_added_selection_index().unwrap()];
+        // Get the normalized cursor position. To go from normalized to screen position, multiply by
+        // the cell size, then shift by the viewport origin.
+        let (x, y) = session.layout().logical_to_normalized_position(
+            last_added_selection.cursor.position,
+            last_added_selection.cursor.affinity,
+        );
+
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
             session.layout().height() * self.cell_size.y,
@@ -347,10 +357,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
-                modifiers: KeyModifiers {
-                    shift: false,
-                    ..
-                },
+                modifiers: KeyModifiers { shift: false, .. },
                 ..
             }) => {
                 session.indent();
@@ -359,10 +366,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
-                modifiers: KeyModifiers {
-                    shift: true,
-                    ..
-                },
+                modifiers: KeyModifiers { shift: true, .. },
                 ..
             }) => {
                 session.outdent();
