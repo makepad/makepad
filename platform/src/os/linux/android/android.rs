@@ -52,7 +52,7 @@ use {
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         
-        self.android_load_dependencies();
+        //elf.android_load_dependencies();
         self.gpu_info.performance = GpuPerformance::Tier1;
         
         self.call_event_handler(&Event::Construct);

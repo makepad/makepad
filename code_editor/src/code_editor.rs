@@ -18,10 +18,11 @@ live_design! {
     import makepad_widgets::theme_desktop_dark::*;
 
     TokenColors = {{TokenColors}} {
-        unknown: #808080,
+        unknown: #C0C0C0,
         branch_keyword: #C485BE,
         comment: #638D54,
         constant: #CC917B,
+        delimiter: #C0C0C0,
         identifier: #D4D4D4,
         loop_keyword: #FF8C00,
         number: #B6CEAA,
@@ -232,7 +233,7 @@ impl CodeEditor {
         self.gutter_rect.size -= pad_left_top;
         self.viewport_rect.pos += pad_left_top;
         self.viewport_rect.size -= pad_left_top;
-        
+
         session.handle_changes();
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
@@ -442,7 +443,7 @@ impl CodeEditor {
             }
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
-            },
+            }
             Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
                 cx.set_cursor(MouseCursor::Text);
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
@@ -484,6 +485,8 @@ impl CodeEditor {
     }
 
     fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+        let enclosing_brackets = session.enclosing_brackets();
+        let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
             .layout()
@@ -495,6 +498,7 @@ impl CodeEditor {
                     let mut token_iter = line.tokens().iter().copied();
                     let mut token_slot = token_iter.next();
                     let mut row_index = 0;
+                    let mut byte_index = 0;
                     let mut column_index = 0;
                     for element in line.wrapped_elements() {
                         match element {
@@ -533,6 +537,7 @@ impl CodeEditor {
                                         }
                                         TokenKind::Comment => self.token_colors.comment,
                                         TokenKind::Constant => self.token_colors.constant,
+                                        TokenKind::Delimiter => self.token_colors.delimiter,
                                         TokenKind::Identifier => self.token_colors.identifier,
                                         TokenKind::LoopKeyword => self.token_colors.loop_keyword,
                                         TokenKind::Number => self.token_colors.number,
@@ -542,6 +547,11 @@ impl CodeEditor {
                                         TokenKind::Typename => self.token_colors.typename,
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
+                                    if let TokenKind::Delimiter = token.kind {
+                                        if enclosing_brackets.contains(&Position { line_index, byte_index }) {
+                                            self.draw_text.color = vec4(1.0, 0.0, 0.0, 1.0);
+                                        }
+                                    }
                                     for grapheme in text_0.graphemes() {
                                         let (x, y) = line
                                             .grid_to_normalized_position(row_index, column_index);
@@ -551,6 +561,7 @@ impl CodeEditor {
                                                 + self.viewport_rect.pos,
                                             grapheme,
                                         );
+                                        byte_index += grapheme.len();
                                         column_index += grapheme.column_count();
                                     }
                                 }
@@ -578,6 +589,7 @@ impl CodeEditor {
                             }
                         }
                     }
+                    line_index += 1;
                     origin_y += line.height();
                 }
                 BlockElement::Widget(widget) => {
@@ -1025,6 +1037,8 @@ struct TokenColors {
     comment: Vec4,
     #[live]
     constant: Vec4,
+    #[live]
+    delimiter: Vec4,
     #[live]
     identifier: Vec4,
     #[live]
