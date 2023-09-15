@@ -21,6 +21,7 @@ live_design!{
     
     import makepad_studio::run_view::RunView;
     import makepad_studio::build_manager::build_manager::LogList;
+    import makepad_studio::build_manager::build_manager::RunList;
     
     Logo = <Button> {
         draw_icon: {
@@ -50,7 +51,7 @@ live_design!{
                 
                 root = Splitter {
                     axis: Horizontal,
-                    align: FromA(200.0),
+                    align: FromA(230.0),
                     a: file_tree_tabs,
                     b: split1
                 }
@@ -72,9 +73,9 @@ live_design!{
                 
                 
                 file_tree_tabs = Tabs {
-                    tabs: [file_tree, search, debug],
+                    tabs: [file_tree, search, run_list],
                     closable: false,
-                    selected: 0
+                    selected: 2
                 }
                 
                 edit_tabs = Tabs {
@@ -124,10 +125,10 @@ live_design!{
                 }
                 
                 
-                debug = Tab {
+                run_list = Tab {
                     name: "Run"
                     closable: false,
-                    kind: Run
+                    kind: RunList
                 }
                 
                 file1 = Tab {
@@ -206,8 +207,7 @@ live_design!{
                     }
                     
                 }
-                Run = <RectView> {
-                    draw_bg: {color: #2}
+                RunList = <RunList> {
                 }
                 Search = <RectView> {
                     draw_bg: {color: #2}
@@ -254,7 +254,7 @@ impl AppMain for App {
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
         let log_list = self.ui.list_view(id!(log1));
-        
+        let run_list = self.ui.item_view(id!(run_list));
         if let Event::Draw(event) = event {
             //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);
@@ -271,8 +271,11 @@ impl AppMain for App {
                 else if let Some(mut run_view) = next.as_run_view().borrow_mut() {
                     run_view.draw(cx, &self.build_manager);
                 }
-                else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
-                    self.build_manager.draw_log(cx, &mut *list_view);
+                else if let Some(mut log_list) = log_list.has_widget(&next).borrow_mut() {
+                    self.build_manager.draw_log(cx, &mut *log_list);
+                }
+                else if let Some(mut run_list) = run_list.has_widget(&next).borrow_mut() {
+                    self.build_manager.draw_run_list(cx, &mut *run_list);
                 }
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
@@ -355,7 +358,10 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         // dock drag drop and tabs
-        
+        for (item_id, item) in run_list.items_with_actions(&actions) {
+            self.build_manager.handle_run_list(cx, item_id, item, &actions);
+        }
+            
         if let Some(tab_id) = dock.clicked_tab_close(&actions) {
             dock.close_tab(cx, tab_id);
         }
