@@ -293,7 +293,7 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
 
 fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args:&[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
-    let is_release = args.iter().find(|v| v == &"--release").is_some();
+    let profile = get_profile_from_args(args);
     
     for android_target in android_targets {
         let abi = android_target.abi_identifier();
@@ -301,14 +301,10 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
 
         let android_target_dir = android_target.toolchain();
         let binary_path = format!("lib/{abi}/libmakepad.so");
-
-        let src_lib = if is_release{
-            cwd.join(format!("target/{android_target_dir}/release/lib{underscore_target}.so"))
+        if profile == "debug"{
+            println!("WARNING - compiling a DEBUG build of the application, this creates a very slow and big app. Try adding --release for a fast, or --profile=small for a small build.");
         }
-        else{
-            println!("WARNING: Building debug build, this creates a very slow application. Use --release if this is not what you want.");
-            cwd.join(format!("target/{android_target_dir}/debug/lib{underscore_target}.so"))
-        };
+        let src_lib = cwd.join(format!("target/{android_target_dir}/{profile}/lib{underscore_target}.so"));
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false) ?;
 
