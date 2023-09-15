@@ -88,6 +88,10 @@ use {
                         QueryPerformanceFrequency,
                     },
                     //Com::IDataObject,
+                    Com::{
+                        COINIT_MULTITHREADED,
+                        CoInitializeEx
+                    },
                     Ole::{
                         OleInitialize,
                         //DoDragDrop,
@@ -202,6 +206,7 @@ impl Win32App {
             IsGUIThread(TRUE);
             
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
+            //CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             OleInitialize(None).unwrap();
         }
         
