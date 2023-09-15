@@ -53,6 +53,8 @@ pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
     pub (crate) os_type: OsType,
+    pub (crate) in_makepad_studio: bool,
+   
     pub (crate) gpu_info: GpuInfo,
     pub (crate) xr_capabilities: XrCapabilities,
     pub (crate) cpu_cores: usize,
@@ -208,7 +210,7 @@ impl Cx {
 
         Self {
             cpu_cores: 8,
-            
+            in_makepad_studio: false,
             os_type: OsType::Unknown,
             gpu_info: Default::default(),
             xr_capabilities: Default::default(),
