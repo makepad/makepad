@@ -46,6 +46,8 @@ fn show_help(err: &str){
     println!();
     println!("    [options] with its default value:");
     println!();
+    println!("       --abi=x86_64,aarch64,armv7,i686           Select the target ABI (default is aarch64). On an intel chip simulator use x86_64");
+    println!("                                                 Be sure to add this also to toolchain-install");
     println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
     println!("       --host-os=<linux-x64|windows-x64|macos-aarch64|macos-x64>");
     println!("       --all-targets                             install all android targets, default only aarch64");
