@@ -473,7 +473,7 @@ impl Cx {
                 },
                 CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
+                CxOsOp::CleanupVideoDecoding(_) => todo!(),
             }
         }
     }
