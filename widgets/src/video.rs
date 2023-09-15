@@ -216,6 +216,20 @@ impl Video {
         self.handle_gestures(cx, event);
     }
 
+    fn initialize_decoding(&mut self, cx: &mut Cx) {
+        if self.decoding_state == DecodingState::NotStarted {
+            match cx.get_dependency(self.source.as_str()) {
+                Ok(data) => {
+                    cx.initialize_video_decoding(self.id, data, 100);
+                    self.decoding_state = DecodingState::Initializing;
+                }
+                Err(_e) => {
+                    todo!()
+                }
+            }
+        }
+    }
+
     fn handle_decoding_initialized(&mut self, cx: &mut Cx, event: &VideoDecodingInitializedEvent) {
         self.decoding_state = DecodingState::Initialized;
         self.video_width = event.video_width as usize;
@@ -241,22 +255,35 @@ impl Video {
         self.tick = cx.start_interval(8.0);
     }
 
-    fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                if self.hold_to_pause {
-                    self.pause_playback();
-                }
-            },
-            Hit::FingerUp(_fe) => {
-                if self.hold_to_pause {
-                    self.resume_playback();
-                }
-            }
-            _ => (),
-        }
-    }
+    fn begin_buffering_thread(&mut self, cx: &mut Cx) {
+        let video_sender = self.decoding_receiver.sender();
+        cx.video_decoding_input(self.id, move |data| {
+            let _ = video_sender.send(data);
+        });
 
+        let frames_buffer = Arc::clone(&self.frames_buffer);
+        let vec_pool = Arc::clone(&self.vec_pool);
+
+        let video_width = self.video_width.clone();
+        let video_height = self.video_height.clone();
+        let color_format = self.color_format.clone();
+
+        let (_new_sender, new_receiver) = channel();
+        let old_receiver = std::mem::replace(&mut self.decoding_receiver.receiver, new_receiver);
+
+        thread::spawn(move || loop {
+            let frame_group = old_receiver.recv().unwrap();
+            deserialize_chunk(
+                Arc::clone(&frames_buffer),
+                Arc::clone(&vec_pool),
+                &frame_group,
+                video_width,
+                video_height,
+                color_format,
+            );
+        });
+    }
+    
     fn maybe_advance_playback(&mut self, cx: &mut Cx) {
         if self.is_paused || self.playback_finished {
             return;
@@ -332,48 +359,37 @@ impl Video {
             .unwrap()
             .release(pixel_data.lock().unwrap().to_vec());
     }
-
-    fn initialize_decoding(&mut self, cx: &mut Cx) {
-        if self.decoding_state == DecodingState::NotStarted {
-            match cx.get_dependency(self.source.as_str()) {
-                Ok(data) => {
-                    cx.initialize_video_decoding(self.id, data, 100);
-                    self.decoding_state = DecodingState::Initializing;
+    
+    fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerDown(_fe) => {
+                if self.hold_to_pause {
+                    self.pause_playback();
                 }
-                Err(_e) => {
-                    todo!()
+            },
+            Hit::FingerUp(_fe) => {
+                if self.hold_to_pause {
+                    self.resume_playback();
                 }
             }
+            _ => (),
         }
     }
 
-    fn begin_buffering_thread(&mut self, cx: &mut Cx) {
-        let video_sender = self.decoding_receiver.sender();
-        cx.video_decoding_input(self.id, move |data| {
-            let _ = video_sender.send(data);
-        });
+    fn pause_playback(&mut self) {
+        self.pause_time = Some(Instant::now());
+        self.is_paused = true;
+    }
 
-        let frames_buffer = Arc::clone(&self.frames_buffer);
-        let vec_pool = Arc::clone(&self.vec_pool);
-
-        let video_width = self.video_width.clone();
-        let video_height = self.video_height.clone();
-        let color_format = self.color_format.clone();
-
-        let (_new_sender, new_receiver) = channel();
-        let old_receiver = std::mem::replace(&mut self.decoding_receiver.receiver, new_receiver);
-
-        thread::spawn(move || loop {
-            let frame_group = old_receiver.recv().unwrap();
-            deserialize_chunk(
-                Arc::clone(&frames_buffer),
-                Arc::clone(&vec_pool),
-                &frame_group,
-                video_width,
-                video_height,
-                color_format,
-            );
-        });
+    fn resume_playback(&mut self) {
+        if let Some(pause_time) = self.pause_time.take() {
+            let pause_duration = Instant::now().duration_since(pause_time);
+            self.total_pause_duration += pause_duration;
+            if let Some(start_time) = self.start_time.as_mut() {
+                *start_time += pause_duration;
+            }
+        }
+        self.is_paused = false;
     }
 
     fn should_fetch(&self) -> bool {
@@ -394,22 +410,6 @@ impl Video {
         self.frames_buffer.lock().unwrap().data.len() < FRAME_BUFFER_LOW_WATER_MARK
     }
     
-    fn pause_playback(&mut self) {
-        self.pause_time = Some(Instant::now());
-        self.is_paused = true;
-    }
-
-    fn resume_playback(&mut self) {
-        if let Some(pause_time) = self.pause_time.take() {
-            let pause_duration = Instant::now().duration_since(pause_time);
-            self.total_pause_duration += pause_duration;
-            if let Some(start_time) = self.start_time.as_mut() {
-                *start_time += pause_duration;
-            }
-        }
-        self.is_paused = false;
-    }
-
     fn _cleanup_decoding(&mut self, cx: &mut Cx) {
         cx.cleanup_video_decoding(self.id);
         // self.frames_buffer.lock().unwrap().clear();
