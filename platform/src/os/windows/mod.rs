@@ -4,6 +4,7 @@ pub mod implement_com;
 pub mod win32_app;
 pub mod win32_window;
 pub mod win32_event;
+pub mod dropfiles;
 pub mod droptarget;
 pub mod dropsource;
 pub mod dataobject;

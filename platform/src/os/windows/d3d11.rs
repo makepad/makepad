@@ -21,11 +21,13 @@ use crate::{
         core::{
             PCSTR,
             ComInterface,
+            Interface,
         },
         Win32::{
             Foundation::{
                 HINSTANCE,
                 HANDLE,
+                S_FALSE,
             },
             Graphics::{
                 Direct3D11::{
@@ -70,6 +72,8 @@ use crate::{
                     D3D11_USAGE_DYNAMIC,
                     D3D11_CPU_ACCESS_WRITE,
                     D3D11_MAP_WRITE_DISCARD,
+                    D3D11_QUERY_DESC,
+                    D3D11_QUERY_EVENT,
                     ID3D11Device,
                     ID3D11DeviceContext,
                     ID3D11RenderTargetView,
@@ -85,6 +89,7 @@ use crate::{
                     ID3D11Buffer,
                     D3D11CreateDevice,
                     ID3D11Resource,
+                    ID3D11Query,
                 },
                 Direct3D::{
                     Fxc::D3DCompile,
@@ -118,6 +123,7 @@ use crate::{
                     },
                 },
             },
+            System::Threading::Sleep,
         },
     },
 };
@@ -268,7 +274,7 @@ impl Cx {
                         },
                         TextureFormat::SharedBGRA(_) => {
                             cxtexture.os.update_shared_texture(
-                                d3d11_cx,
+                                &d3d11_cx.device,
                                 cxtexture.desc.width.unwrap() as u32,
                                 cxtexture.desc.height.unwrap() as u32,
                             );
@@ -613,6 +619,7 @@ impl D3d11Window {
 pub struct D3d11Cx {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
+    pub query: ID3D11Query,
     pub factory: IDXGIFactory2,
 }
 
@@ -624,6 +631,7 @@ impl D3d11Cx {
             let adapter = factory.EnumAdapters(0).unwrap();
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
+            let mut query: Option<ID3D11Query> = None;
             D3D11CreateDevice(
                 &adapter,
                 D3D_DRIVER_TYPE_UNKNOWN,
@@ -635,11 +643,40 @@ impl D3d11Cx {
                 None,
                 Some(&mut context)
             ).unwrap();
+
+            let device = device.unwrap();
+            let context = context.unwrap();
+
+            device.CreateQuery(&D3D11_QUERY_DESC {
+                Query: D3D11_QUERY_EVENT,
+                MiscFlags: 0,
+            },Some(&mut query)).unwrap();
+
+            let query = query.unwrap();
+
             D3d11Cx {
-                device: device.unwrap(),
-                context: context.unwrap(),
-                factory: factory,
+                device,
+                context,
+                factory,
+                query,
             }
+        }
+    }
+
+    pub fn wait_for_gpu(&self) {
+
+        // QUERY_EVENT signals when rendering is complete
+        unsafe { self.context.End(&self.query) };
+
+        // wait for status with GetData
+        // (calling context.GetData doesn't distinguish between S_OK and S_FALSE, so call vtable directly)
+        while unsafe { (Interface::vtable(&self.context).GetData)(Interface::as_raw(&self.context),Interface::as_raw(&self.query),std::ptr::null_mut(),0,0) } == S_FALSE {
+
+            unsafe { Sleep(1) };  // set to 1ms, but in practice probably somewhere around 10 or 15 ms
+            
+            // so let's see if this even works well enough for 60Hz framerate...
+
+            // and otherwise needs shorter waiting API, but please no spinning
         }
     }
 }
@@ -745,7 +782,7 @@ pub struct CxOsTexture {
     height: u32,
     //slots_per_pixel: usize,
     texture: Option<ID3D11Texture2D >,
-    shared_handle: HANDLE,
+    pub shared_handle: HANDLE,
     shader_resource_view: Option<ID3D11ShaderResourceView >,
     render_target_view: Option<ID3D11RenderTargetView >,
     depth_stencil_view: Option<ID3D11DepthStencilView >,
@@ -927,7 +964,7 @@ impl CxOsTexture {
 
     pub fn update_shared_texture(
         &mut self,
-        d3d11_cx: &D3d11Cx,
+        d3d11_device: &ID3D11Device,
         width: u32,
         height: u32,
     ) {
@@ -950,10 +987,10 @@ impl CxOsTexture {
             };
             
             let mut texture = None;
-            unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
+            unsafe {d3d11_device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
-            unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
+            unsafe {d3d11_device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
 
             // get IDXGIResource interface on newly created texture object
             let dxgi_resource: IDXGIResource = resource.cast().unwrap();
@@ -963,6 +1000,7 @@ impl CxOsTexture {
 
             // get shared handle of this resource
             let handle = unsafe { dxgi_resource.GetSharedHandle().unwrap() };
+            log!("created new shared texture with handle {:?}",handle);
 
             self.width = width;
             self.height = height;
@@ -979,6 +1017,7 @@ impl CxOsTexture {
         let mut texture: Option<ID3D11Texture2D> = None;
         if let Ok(()) = unsafe { d3d11_cx.device.OpenSharedResource(handle,&mut texture) } {
 
+            log!("found shared texture with handle {:?}",handle);
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
