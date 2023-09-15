@@ -581,7 +581,7 @@ impl Cx {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    self.os.timers.insert(timer_id, Timer {interval: Duration::from_secs_f64(interval / 1000.0), repeats, last_tick: Instant::now()});
+                    self.os.timers.insert(timer_id, Timer::new(interval, repeats));
                 },
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.remove(&timer_id);
@@ -630,15 +630,19 @@ impl Cx {
         let now = Instant::now();
 
         for (id, timer) in self.os.timers.iter_mut() {
-            if now - timer.last_tick > timer.interval {
+            let elapsed_time = now - timer.start_time;
+            let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
+
+            if elapsed_time > next_due_time {
                 to_be_dispatched.push(Event::Timer(TimerEvent { timer_id: *id }));
                 if timer.repeats {
-                    timer.last_tick = now;
+                    timer.step += 1;
                 } else {
                     to_be_removed.push(*id);
                 }
             }
         }
+
         for id in to_be_removed {
             self.os.timers.remove(&id);
         }
@@ -763,7 +767,20 @@ impl CxOs {
 }
 
 pub struct Timer {
-    pub last_tick: Instant,
+    pub start_time: Instant,
     pub interval: Duration,
     pub repeats: bool,
+    pub step: u64, 
+}
+
+impl Timer {
+    pub fn new(interval_ms: f64, repeats: bool) -> Timer {
+        let interval_ns = (interval_ms * 1e6) as u64;
+        Timer {
+            start_time: Instant::now(),
+            interval: Duration::from_nanos(interval_ns),
+            repeats,
+            step: 0,
+        }
+    }
 }
