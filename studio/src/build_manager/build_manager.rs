@@ -466,9 +466,11 @@ impl BuildManager {
                 item.redraw(cx);
             }
         }
-        if let Some(change) = item.check_box(id!(check)).changed(actions) {
-            let binary = &self.binaries[bin as usize];
-            log!("Run target {} {} {}", change, binary.name, BuildTarget::index(tgt).name())
+        else{
+            if let Some(change) = item.check_box(id!(check)).changed(actions) {
+                let binary = &self.binaries[bin as usize];
+                log!("Run target {} {} {}", change, binary.name, BuildTarget::index(tgt - 1).name())
+            }
         }
     }
     
