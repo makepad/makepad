@@ -273,8 +273,6 @@ impl Cx {
                                     (*callback)(frames_group);
                                 }
                             }
-                        } else {
-                            // TODO: handle error
                         }
                     },
                     FromJavaMessage::VideoChunkDecoded {video_id} => {
