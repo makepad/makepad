@@ -222,6 +222,37 @@ live_design!{
         }
     }
     
+    RunList = <ListView> {
+        grab_key_focus: true
+        auto_tail: true
+        drag_scrolling: false
+        height: Fill, width: Fill
+        flow: Down
+        Target = <LogItem> {
+            icon = <LogIcon> {},
+            location = <LinkLabel> {margin:0, text:""}
+            body = <Label> {width: Fill, margin:{left:5}, padding:0, draw_text: {wrap: Word}}
+        }
+        Bare = <LogItem> {
+            icon = <LogIcon> {},
+            body = <Label> {width: Fill, margin:0, padding:0, draw_text: {wrap: Word}}
+        }
+        Empty = <RectView> {
+            height: 20, width: Fill
+            draw_bg: {
+                instance is_even: 0.0
+                fn pixel(self) -> vec4 {
+                    return mix(
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
+                        self.is_even
+                    )
+                }
+            }
+        }
+    }
+    
+    
     BuildManager = {{BuildManager}} {
         recompile_timeout: 0.2
     }
@@ -245,6 +276,8 @@ pub struct BuildManager {
     #[rust] pub clients: Vec<BuildClientWrap>,
     #[rust] recompile_timer: Timer,
     #[rust] pub log: Vec<LogItem>,
+    #[rust] pub build_targets: Vec<LogItem>,
+    #[rust] pub binaries: Vec<String>
 }
 
 pub enum BuildManagerAction {
@@ -300,6 +333,10 @@ impl BuildManager {
             }
         }
         //profile_end!(dt);
+    }
+    
+    pub fn draw_run_list(&self, _cx: &mut Cx2d, _list: &mut ListView) {
+        
     }
     
     pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {

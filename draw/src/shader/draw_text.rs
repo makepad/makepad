@@ -44,7 +44,7 @@ live_design!{
                 self.font_t2.xy,
                 normalized.xy
             )
-            
+            /*
             self.tex_coord2 = mix(
                 self.font_t1.xy,
                 self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.75,
@@ -56,7 +56,7 @@ live_design!{
                 self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.6,
                 normalized.xy
             )
-            
+            */
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 self.clipped.x,
                 self.clipped.y,
@@ -71,14 +71,14 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             
-            let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
-            let dp = 1.0 / 2048.0;
+            //let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
+            //let dp = 1.0 / 2048.0;
             
             // basic hardcoded mipmapping so it stops 'swimming' in VR
             // mipmaps are stored in red/green/blue channel
-            let s = 1.0;
+            //let s = 1.0;
             
-            if dx > 7.0 {
+            /*if dx > 7.0 {
                 s = 0.7;
             }
             else if dx > 2.75 {
@@ -95,9 +95,9 @@ live_design!{
             else if dx > 1.3 {
                 s = sample2d_rt(self.tex, self.tex_coord2.xy).y;
             }
-            else {
-                s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
-            }
+            else {*/
+                let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
+            /*}*/
             
             s = pow(s, self.curve);
             let col = self.get_color(); //color!(white);//get_color();
@@ -423,8 +423,15 @@ impl DrawText {
                         (subpixel_x_fract * dpi_factor * 7.0) as usize
                     };
                     
-                    let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
-                        //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
+                    let subpixel_map = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
+                        tc
+                    }
+                    else{
+                        atlas_page.atlas_glyphs.insert(glyph_id, [None; crate::font_atlas::ATLAS_SUBPIXEL_SLOTS]);
+                        atlas_page.atlas_glyphs.get_mut(&glyph_id).unwrap()
+                    };
+                    
+                    let tc = if let Some(tc) = &subpixel_map[subpixel_id]{
                         tc
                     }
                     else {
@@ -439,11 +446,10 @@ impl DrawText {
                             subpixel_id
                         });
                         
-                        atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
+                        subpixel_map[subpixel_id] = Some(
                             fonts_atlas.alloc.alloc_atlas_glyph(w, h)
                         );
-                        
-                        atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
+                        subpixel_map[subpixel_id].as_ref().unwrap()
                     };
                     
                     let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;

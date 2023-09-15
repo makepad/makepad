@@ -1,12 +1,10 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    
+    import makepad_draw::shader::std::*;
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
-    //self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
     LOGO = dep("crate://self/resources/logo.svg")
@@ -19,10 +17,12 @@ live_design!{
     ICO_USER = dep("crate://self/resources/icon_user.svg")
     ICO_ADD = dep("crate://self/resources/icon_add.svg")
     
+    
     FONT_SIZE_SUB = 9.5
     FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
+        
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
@@ -349,7 +349,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-    }
+    } 
 }
 
 impl AppMain for App {

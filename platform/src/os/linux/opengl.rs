@@ -246,8 +246,7 @@ impl Cx {
     pub fn setup_render_pass(&mut self, pass_id: PassId,) -> Option<DVec2> {
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
-        
+        let pass_rect = self.get_pass_rect2(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].paint_dirty = false;
         
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
@@ -815,7 +814,8 @@ impl CxOsTexture {
         }
         unsafe {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);            
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
             gl_sys::TexImage2D(

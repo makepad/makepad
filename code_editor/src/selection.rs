@@ -255,7 +255,7 @@ impl Cursor {
     }
 
     pub fn is_at_last_line(self, line_count: usize) -> bool {
-        self.position.line_index == line_count
+        self.position.line_index == line_count - 1
     }
 
     pub fn is_at_start_of_line(self) -> bool {
