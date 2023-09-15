@@ -19,12 +19,13 @@ use {
         },
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
+        window::CxWindowPool,
     }
 };
 
 impl Cx {
     
-    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+    pub fn event_loop(cx: Rc<RefCell<Cx >>) {
         
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Windows;
@@ -43,36 +44,35 @@ impl Cx {
         
         init_win32_app_global(Box::new({
             let cx = cx.clone();
-            move | win32_app,
-            event | {
+            move | event | {
+                get_win32_app_global();
                 let mut cx = cx.borrow_mut();
                 let mut d3d11_cx = d3d11_cx.borrow_mut();
                 let mut d3d11_windows = d3d11_windows.borrow_mut();
-                cx.win32_event_callback(win32_app, event, &mut d3d11_cx, &mut d3d11_windows)
+                cx.win32_event_callback(event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
         
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
         get_win32_app_global().start_signal_poll();
-        get_win32_app_global().event_loop();
+        Win32App::event_loop();
     }
     
     fn win32_event_callback(
         &mut self,
-        win32_app: &mut Win32App,
         event: Win32Event,
         d3d11_cx: &mut D3d11Cx,
         d3d11_windows: &mut Vec<D3d11Window>
     ) -> EventFlow {
-        if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx, win32_app){
+        if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx) {
             return EventFlow::Exit
         }
         
         let mut paint_dirty = false;
-    
+        
         //self.process_desktop_pre_event(&mut event);
-        match event { 
+        match event {
             Win32Event::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in d3d11_windows.iter_mut() {
                     if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
@@ -123,7 +123,7 @@ impl Cx {
             }
             Win32Event::Paint => {
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(win32_app.time_now());
+                    self.call_next_frame_event(get_win32_app_global().time_now());
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
@@ -147,6 +147,7 @@ impl Cx {
                 self.fingers.switch_captures();
             }
             Win32Event::MouseUp(e) => {
+                
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
@@ -165,13 +166,24 @@ impl Cx {
                 self.call_event_handler(&Event::TextInput(e))
             }
             Win32Event::Drag(e) => {
-                self.call_event_handler(&Event::Drag(e))
-            }
+                self.call_event_handler(&Event::Drag(e));
+                self.drag_drop.cycle_drag();
+            },
             Win32Event::Drop(e) => {
-                self.call_event_handler(&Event::Drop(e))
-            }
+                self.call_event_handler(&Event::Drop(e));
+                self.drag_drop.cycle_drag();
+            },
             Win32Event::DragEnd => {
-                self.call_event_handler(&Event::DragEnd)
+                // send MouseUp
+                self.call_event_handler(&Event::MouseUp(MouseUpEvent {
+                    abs: dvec2(-100000.0, -100000.0),
+                    button: 0,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0
+                }));
+                self.fingers.mouse_up(0);
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
             Win32Event::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
@@ -191,7 +203,7 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(e))
             }
             Win32Event::Signal => {
-                if Signal::check_and_clear_ui_signal(){
+                if Signal::check_and_clear_ui_signal() {
                     self.handle_media_signals();
                     self.call_event_handler(&Event::Signal);
                 }
@@ -230,10 +242,10 @@ impl Cx {
         }
     }
     
-    pub(crate) fn handle_networking_events(&mut self) {
+    pub (crate) fn handle_networking_events(&mut self) {
     }
     
-    fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App)->EventFlow {
+    fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx) -> EventFlow {
         let mut ret = EventFlow::Poll;
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -285,7 +297,7 @@ impl Cx {
                 CxOsOp::SetTopmost(_window_id, _is_topmost) => {
                     todo!()
                 }
-                CxOsOp::ShowClipboardActions(_) =>{
+                CxOsOp::ShowClipboardActions(_) => {
                 }
                 CxOsOp::XrStartPresenting => {
                     //todo!()
@@ -300,28 +312,29 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::SetCursor(cursor) => {
-                    win32_app.set_mouse_cursor(cursor);
+                    get_win32_app_global().set_mouse_cursor(cursor);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    win32_app.start_timer(timer_id, interval, repeats);
+                    get_win32_app_global().start_timer(timer_id, interval, repeats);
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    win32_app.stop_timer(timer_id);
+                    get_win32_app_global().stop_timer(timer_id);
                 },
-                CxOsOp::StartDragging(_dragged_item) => {
+                CxOsOp::StartDragging(dragged_item) => {
+                    get_win32_app_global().start_dragging(dragged_item);
                 },
                 CxOsOp::UpdateMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{request_id:_, request:_} => {
+                CxOsOp::HttpRequest {request_id: _, request: _} => {
                     //todo!()
                 },
-                CxOsOp::WebSocketOpen{request_id:_, request:_,}=>{
+                CxOsOp::WebSocketOpen {request_id: _, request: _,} => {
                     //todo!()
                 }
-                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
+                CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
                     //todo!()
                 }
-                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
+                CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     //todo!()
                 }
             }

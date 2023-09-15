@@ -116,15 +116,13 @@ class MakepadSurface
             return;
         }
 
-        if (insets.isVisible(WindowInsets.Type.ime())) {
-            Rect r = new Rect();
-            this.getWindowVisibleDisplayFrame(r);
-            int screenHeight = this.getRootView().getHeight();
-            int visibleHeight = r.height();
-            int keyboardHeight = screenHeight - visibleHeight;
+        Rect r = new Rect();
+        this.getWindowVisibleDisplayFrame(r);
+        int screenHeight = this.getRootView().getHeight();
+        int visibleHeight = r.height();
+        int keyboardHeight = screenHeight - visibleHeight;
 
-            MakepadNative.surfaceOnResizeTextIME(keyboardHeight);
-        }
+        MakepadNative.surfaceOnResizeTextIME(keyboardHeight, insets.isVisible(WindowInsets.Type.ime()));
     }
 
     // docs says getCharacters are deprecated
@@ -139,7 +137,8 @@ class MakepadSurface
         }
 
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
-            MakepadNative.surfaceOnKeyUp(keyCode);
+            int metaState = event.getMetaState();
+            MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
         
         if (event.getAction() == KeyEvent.ACTION_UP || event.getAction() == KeyEvent.ACTION_MULTIPLE) {

@@ -9,7 +9,7 @@ use {
     self::super::{
         android_media::CxAndroidMedia,
         jni_sys::jobject,
-        android_jni::{self,*},
+        android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
         ndk_sys,
@@ -24,6 +24,7 @@ use {
         thread::Signal,
         live_id::LiveId,
         event::{
+            VirtualKeyboardEvent,
             NetworkResponseEvent,
             NetworkResponse,
             HttpResponse,
@@ -72,6 +73,7 @@ impl Cx {
                         width,
                         height,
                     } => {
+                        
                         unsafe {
                             self.os.display.as_mut().unwrap().update_surface(window);
                         }
@@ -111,7 +113,7 @@ impl Cx {
                         for touch in &mut touches {
                             // When the software keyboard shifted the UI in the vertical axis,
                             //we need to make the math here to keep touch events positions synchronized.
-                            if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
+                            //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
                             //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
                             touch.abs /= dpi_factor;
                         }
@@ -149,7 +151,7 @@ impl Cx {
                             let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
                             let is_shortcut = control || alt;
                             if is_shortcut {
-                                if makepad_keycode == KeyCode::KeyC {  
+                                if makepad_keycode == KeyCode::KeyC {
                                     let response = Rc::new(RefCell::new(None));
                                     e = Event::TextCopy(TextClipboardEvent {
                                         response: response.clone()
@@ -169,7 +171,7 @@ impl Cx {
                                     // if let Some(response) = response.as_ref(){
                                     //     to_java.copy_to_clipboard(response);
                                     // }
-                                } else if makepad_keycode == KeyCode::KeyV {  
+                                } else if makepad_keycode == KeyCode::KeyV {
                                     //to_java.paste_from_clipboard();
                                 }
                             } else {
@@ -185,18 +187,39 @@ impl Cx {
                             }
                         }
                     }
-                    FromJavaMessage::KeyUp {keycode: _} => {
-                        /*match keycode {
-                            KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = false,
-                            KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = false,
-                            KeyCode::LeftAlt | KeyCode::RightAlt => self.keymods.alt = false,
-                            KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
-                            _ => {}
-                        }
-                        self.event_handler.key_up_event(keycode, self.keymods);*/
+                    FromJavaMessage::KeyUp {keycode, meta_state} => {
+                        let makepad_keycode = android_to_makepad_key_code(keycode);
+                        let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                        let alt = meta_state & ANDROID_META_ALT_MASK != 0; 
+                        let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+
+                        let e = Event::KeyUp(
+                            KeyEvent {
+                                key_code: makepad_keycode,
+                                is_repeat: false,
+                                modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
+                                time: self.os.time_now()
+                            }
+                        );
+                        self.call_event_handler(&e);
                     }
-                    FromJavaMessage::ResizeTextIME {keyboard_height} => {
-                        self.panning_adjust_for_text_ime(keyboard_height);
+                    FromJavaMessage::ResizeTextIME {keyboard_height, is_open} => {
+                        let keyboard_height = (keyboard_height as f64) / self.os.dpi_factor;
+                        if !is_open{
+                            self.os.keyboard_closed = keyboard_height;
+                        }
+                        if is_open {
+                            self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidShow {
+                                height: keyboard_height - self.os.keyboard_closed,
+                                time: self.os.time_now()
+                            }))
+                        } 
+                        else {
+                            self.text_ime_was_dismissed();
+                            self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidHide {
+                                time: self.os.time_now()
+                            }))
+                        }
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
                         let e = Event::NetworkResponses(vec![
@@ -221,7 +244,7 @@ impl Cx {
                         ]);
                         self.call_event_handler(&e);
                     }
-                    FromJavaMessage::MidiDeviceOpened{name,midi_device}=>{
+                    FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
                     }
                     FromJavaMessage::Pause => {
@@ -284,9 +307,9 @@ impl Cx {
         
         // lets start a thread
         std::thread::spawn(move || {
-            
+            unsafe{attach_jni_env()};
             let mut cx = startup();
-            
+            cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
             
             let window = loop {
@@ -306,13 +329,11 @@ impl Cx {
                     _ => {}
                 }
             };
-            
             let (egl_context, egl_config, egl_display) = unsafe {egl_sys::create_egl_context(
                 &mut libegl,
                 std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
                 false,
             ).expect("Cant create EGL context")};
-            
             unsafe {gl_sys::load_with( | s | {
                 let s = CString::new(s).unwrap();
                 libegl.eglGetProcAddress.unwrap()(s.as_ptr())
@@ -354,16 +375,7 @@ impl Cx {
         });
     }
     
-    /*
-    pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32) {
-        let dt = crate::profile_start();
-        self.os.keyboard_visible = true;
-        self.panning_adjust_for_text_ime(ime_height);
-        self.redraw_all();
-        self.after_every_event(&to_java);
-        crate::profile_end!(dt);
-    }
-    
+    /*    
     pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
         if let Some(text) = content {
             let e = Event::TextInput(
@@ -388,7 +400,7 @@ impl Cx {
         self.after_every_event(&to_java);
     }
    */
-
+    
     pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
             if let Some(data) = unsafe {to_java_load_asset(path)} {
@@ -401,7 +413,7 @@ impl Cx {
             }
         }
     }
-        
+    
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
@@ -412,10 +424,10 @@ impl Cx {
         
         // keep repainting in a loop
         self.passes[pass_id].paint_dirty = false;
-        let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
+        //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
         
         unsafe {
-            gl_sys::Viewport(0, panning_offset, self.os.display_size.x as i32, self.os.display_size.y as i32);
+            gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -487,27 +499,7 @@ impl Cx {
         
         
     }
-    
-    fn panning_adjust_for_text_ime(&mut self, android_ime_height: u32) {
-        self.os.keyboard_visible = true;
-        
-        let screen_height = (self.os.display_size.y / self.os.dpi_factor) as i32;
-        let vertical_offset = self.os.keyboard_trigger_position.y as i32;
-        let ime_height = (android_ime_height as f64 / self.os.dpi_factor) as i32;
-        
-        // Make sure there is some room between the software keyword and the text input or widget that triggered
-        // the TextIME event
-        let vertical_space = ime_height / 3;
-        
-        let should_be_panned = vertical_offset > screen_height - ime_height;
-        if should_be_panned {
-            let panning_offset = vertical_offset - (screen_height - ime_height) + vertical_space;
-            self.os.keyboard_panning_offset = (panning_offset as f64 * self.os.dpi_factor) as i32;
-        } else {
-            self.os.keyboard_panning_offset = 0;
-        }
-    }
-    
+
     fn handle_platform_ops(&mut self) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -538,12 +530,12 @@ impl Cx {
                     //to_java.cancel_timeout(timer_id as i64);
                     //android_app.stop_timer(timer_id);
                 },
-                CxOsOp::ShowTextIME(area, _pos) => {
-                    self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
+                CxOsOp::ShowTextIME(_area, _pos) => {
+                    //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
                     unsafe {android_jni::to_java_show_keyboard(true);}
                 },
                 CxOsOp::HideTextIME => {
-                    self.os.keyboard_visible = false;
+                    //self.os.keyboard_visible = false;
                     unsafe {android_jni::to_java_show_keyboard(false);}
                 },
                 CxOsOp::ShowClipboardActions(_selected) => {
@@ -579,9 +571,10 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             time_start: Instant::now(),
-            keyboard_visible: false,
-            keyboard_trigger_position: DVec2::default(),
-            keyboard_panning_offset: 0,
+            keyboard_closed: 0.0, 
+            //keyboard_visible: false,
+            //keyboard_trigger_position: DVec2::default(),
+            //keyboard_panning_offset: 0,
             media: CxAndroidMedia::default(),
             display: None,
             quit: false,
@@ -607,10 +600,11 @@ pub struct CxOs {
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
+    pub keyboard_closed: f64,
     
-    pub keyboard_visible: bool,
-    pub keyboard_trigger_position: DVec2,
-    pub keyboard_panning_offset: i32,
+    //pub keyboard_visible: bool,
+    //pub keyboard_trigger_position: DVec2,
+    //pub keyboard_panning_offset: i32,
     
     pub quit: bool,
     pub fullscreen: bool,

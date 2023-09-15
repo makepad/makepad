@@ -293,6 +293,7 @@ use {
                 IPropertyStore,
                 PROPERTYKEY
             },
+            Win32::UI::Shell::HDROP,
             Win32::Security::{
                 SECURITY_ATTRIBUTES
             },
@@ -371,7 +372,10 @@ use {
                 CY,
                 ADVANCED_FEATURE_FLAGS,
                 SAFEARRAYBOUND,
-                CY_0, 
+                CY_0,
+                DATADIR,
+                TYMED,
+                DVASPECT,
             },
             Win32::System::Ole::{  
                 CLIPBOARD_FORMAT,

@@ -2,8 +2,10 @@ use {
     crate::{
         makepad_math::*,
         makepad_objc_sys::runtime::{ObjcId},
-        event::TouchState,
+        event::{TouchState, VirtualKeyboardEvent},
+        animator::Ease,
         os::{
+            apple::ios_app::IosApp,
             apple::apple_util::nsstring_to_string,
             apple::apple_sys::*,
             apple::ios_app::get_ios_app_global,
@@ -22,8 +24,7 @@ pub fn define_ios_app_delegate() -> *const Class {
         _: ObjcId,
         _: ObjcId,
     ) -> BOOL {
-        let ca = get_ios_app_global();
-        ca.did_finish_launching_with_options();
+        get_ios_app_global().did_finish_launching_with_options();
         YES
     }
     
@@ -67,22 +68,22 @@ pub fn define_mtk_view() -> *const Class {
     
     extern "C" fn touches_began(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Start);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     extern "C" fn touches_moved(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Move);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     extern "C" fn touches_ended(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Stop);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     extern "C" fn touches_canceled(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Stop);
-        get_ios_app_global().send_touch_update();
+        IosApp::send_touch_update();
     }
     
     unsafe {
@@ -112,12 +113,12 @@ pub fn define_mtk_view_delegate() -> *const Class {
     let mut decl = ClassDecl::new("MakepadViewDlg", class!(NSObject)).unwrap();
     
     extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
-        get_ios_app_global().draw_in_rect();
+        IosApp::draw_in_rect();
     }
     
     extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
         crate::log!("Draw size will change");
-        get_ios_app_global().draw_size_will_change();
+        IosApp::draw_size_will_change();
     }
     unsafe {
         decl.add_method(
@@ -137,11 +138,11 @@ pub fn define_mtk_view_delegate() -> *const Class {
 pub fn define_ios_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
-        get_ios_app_global().send_timer_received(nstimer);
+        IosApp::send_timer_received(nstimer);
     }
     
     extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        get_ios_app_global().send_paint_event();
+        IosApp::send_paint_event();
     }
     
     let superclass = class!(NSObject);
@@ -161,10 +162,82 @@ pub fn define_textfield_delegate() -> *const Class {
     
     // those 3 callbacks are for resizing the canvas when keyboard is opened
     // which is not currenlty supported by miniquad
-    extern "C" fn keyboard_was_shown(_: &Object, _: Sel, _notif: ObjcId) {}
-    extern "C" fn keyboard_will_be_hidden(_: &Object, _: Sel, _notif: ObjcId) {}
-    extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
+    fn get_height_delta(notif: ObjcId) -> f64 {
+        unsafe {
+            let info: ObjcId = msg_send![notif, userInfo];
+            let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardFrameBeginUserInfoKey];
+            let begin: NSRect = msg_send![obj, CGRectValue];
+            let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardFrameEndUserInfoKey];
+            let end: NSRect = msg_send![obj, CGRectValue];
+            begin.origin.y - end.origin.y
+        }
+    }
+    fn get_curve_duration(notif: ObjcId) -> (f64, Ease) {
+        unsafe {
+            let info: ObjcId = msg_send![notif, userInfo];
+            let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardAnimationDurationUserInfoKey];
+            let duration: f64 = msg_send![obj, doubleValue];
+            let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardAnimationCurveUserInfoKey];
+            let curve: i64 = msg_send![obj, intValue];
+            
+            let ease = match curve >> 16 {
+                0 => Ease::Bezier { // this is not the right curve.
+                    cp0: 0.25,
+                    cp1: 0.1,
+                    cp2: 0.25,
+                    cp3: 0.1
+                }, //::UIViewAnimationOptionCurveEaseInOut = 0 << 16,
+                1 => Ease::InExp, //UIViewAnimationOptionCurveEaseIn = 1 << 16,
+                2 => Ease::OutExp, //UIViewAnimationOptionCurveEaseOut = 2 << 16,
+                _ => Ease::Linear //UIViewAnimationOptionCurveLinear = 3 << 16,
+            };
+            (duration, ease)
+        }
+    }
     
+    extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, _notif: ObjcId) {
+    }
+    
+    extern "C" fn keyboard_will_change_frame(_: &Object, _: Sel, _notif: ObjcId) {
+    }
+    
+    extern "C" fn keyboard_will_hide(_: &Object, _: Sel, notif: ObjcId) {
+        let height = get_height_delta(notif);
+        let (duration, ease) = get_curve_duration(notif);
+        let time = get_ios_app_global().time_now();
+        get_ios_app_global().queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
+            time,
+            ease,
+            height: -height,
+            duration
+        });
+    }
+    
+    extern "C" fn keyboard_did_hide(_: &Object, _: Sel, _notif: ObjcId) {
+        let time = get_ios_app_global().time_now();
+        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidHide {
+            time,
+        });
+    }
+    extern "C" fn keyboard_will_show(_: &Object, _: Sel, notif: ObjcId) {
+        let height = get_height_delta(notif);
+        let (duration, ease) = get_curve_duration(notif);
+        let time = get_ios_app_global().time_now();
+        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
+            time,
+            height,
+            ease,
+            duration
+        });
+    }
+    extern "C" fn keyboard_did_show(_: &Object, _: Sel, notif: ObjcId) {
+        let height = get_height_delta(notif);
+        let time = get_ios_app_global().time_now();
+        IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidShow {
+            time,
+            height: height
+        });
+    }
     extern "C" fn should_change_characters_in_range(
         _this: &Object,
         _: Sel,
@@ -176,32 +249,25 @@ pub fn define_textfield_delegate() -> *const Class {
             let len: u64 = msg_send![string, length];
             if len > 0 {
                 let string = nsstring_to_string(string);
-                get_ios_app_global().send_text_input(string, range.length != 0);
+                IosApp::send_text_input(string, range.length != 0);
             } else {
-                get_ios_app_global().send_backspace();
+                IosApp::send_backspace();
             }
         }
         NO
     }
-    extern "C" fn draw_in_rect(_this: &Object, _: Sel, _: ObjcId) {
-    }
+    
     unsafe {
         /*decl.add_method(
             sel!(drawInMTKView:),
             draw_in_rect as extern "C" fn(&Object, Sel, ObjcId),
         );*/
-        decl.add_method(
-            sel!(keyboardWasShown:),
-            keyboard_was_shown as extern "C" fn(&Object, Sel, ObjcId),
-        );
-        decl.add_method(
-            sel!(keyboardWillBeHidden:),
-            keyboard_will_be_hidden as extern "C" fn(&Object, Sel, ObjcId),
-        );
-        decl.add_method(
-            sel!(keyboardDidChangeFrame:),
-            keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),
-        );
+        decl.add_method(sel!(keyboardDidChangeFrame:), keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
+        decl.add_method(sel!(keyboardWillChangeFrame:), keyboard_will_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
+        decl.add_method(sel!(keyboardWillShow:), keyboard_will_show as extern "C" fn(&Object, Sel, ObjcId),);
+        decl.add_method(sel!(keyboardDidShow:), keyboard_did_show as extern "C" fn(&Object, Sel, ObjcId),);
+        decl.add_method(sel!(keyboardWillHide:), keyboard_will_hide as extern "C" fn(&Object, Sel, ObjcId),);
+        decl.add_method(sel!(keyboardDidHide:), keyboard_did_hide as extern "C" fn(&Object, Sel, ObjcId),);
         decl.add_method(
             sel!(textField: shouldChangeCharactersInRange: replacementString:),
             should_change_characters_in_range

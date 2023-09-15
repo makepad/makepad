@@ -511,9 +511,11 @@ pub struct D3d11Window {
 
 impl D3d11Window {
     pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: DVec2, position: Option<DVec2>, title: &str) -> D3d11Window {
-        let mut win32_window = Box::new(Win32Window::new(window_id));
-        
-        win32_window.init(title, inner_size, position);
+
+        // create window, and then initialize it; this is needed because
+        // GWLP_USERDATA needs to reference a stable and existing window
+        let mut win32_window = Box::new(Win32Window::new(window_id, title, position));
+        win32_window.init(inner_size);
         
         let wg = win32_window.get_window_geom();
         
@@ -534,7 +536,7 @@ impl D3d11Window {
         unsafe {
             let swap_chain = d3d11_cx.factory.CreateSwapChainForHwnd(
                 &d3d11_cx.device,
-                win32_window.hwnd.unwrap(),
+                win32_window.hwnd,
                 &sc_desc,
                 None,
                 None,
@@ -962,8 +964,6 @@ impl CxOsTexture {
             // get shared handle of this resource
             let handle = unsafe { dxgi_resource.GetSharedHandle().unwrap() };
 
-            println!("host: new shared handle to be sent: {:?}",handle);
-
             self.width = width;
             self.height = height;
             self.texture = texture;
@@ -977,10 +977,7 @@ impl CxOsTexture {
         handle: HANDLE,
     ) {
         let mut texture: Option<ID3D11Texture2D> = None;
-        log!("client: got texture handle {:?} from host",handle);
         if let Ok(()) = unsafe { d3d11_cx.device.OpenSharedResource(handle,&mut texture) } {
-
-            log!("newly generated 2D texture for handle {:?}: {:?}",handle,texture);
 
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
@@ -991,9 +988,6 @@ impl CxOsTexture {
             self.texture = texture;
             self.render_target_view = render_target_view;
             self.shader_resource_view = shader_resource_view;
-        }
-        else {
-            log!("unable to use handle {:?}, flushing...",handle);
         }
     }
 }

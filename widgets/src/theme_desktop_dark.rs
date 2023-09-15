@@ -674,7 +674,7 @@ live_design!{
         }
     }
     
-    DesktopWindow = <DesktopWindowBase> {
+    Window = <WindowBase> {
         pass: {clear_color: (THEME_COLOR_CLEAR)}
         flow: Down
         nav_control: <NavControl> {}
@@ -712,6 +712,13 @@ live_design!{
                 xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
             }
         }
+        
+        body = <KeyboardView>{
+            keyboard_min_shift: 30,
+            width: Fill,
+            height: Fill
+        }
+        
         cursor: Default
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
