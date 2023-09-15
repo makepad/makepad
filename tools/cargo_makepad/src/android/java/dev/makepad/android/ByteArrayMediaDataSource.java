@@ -30,6 +30,6 @@ public class ByteArrayMediaDataSource extends MediaDataSource {
 
     @Override
     public void close() throws IOException {
-        // TODO: clear data array here?
+        data = null;
     }
 }
