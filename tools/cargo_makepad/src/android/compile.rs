@@ -99,9 +99,9 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
 
         let target_str = android_target.to_str();
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_str);
-        
+         
         shell_env(
-            &[
+            &[ 
                 (&android_target.linker_env_var(), (sdk_dir.join(linker).to_str().unwrap())),
                 ("RUSTFLAGS", &cfg_flag),
                 ("MAKEPAD", "lines"),
@@ -360,7 +360,7 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
 
         let assets = ls(&dst_dir) ?;
         for path in &assets {
-            let path = path.display().to_string().replace("\\","/");
+            let path = path.display().to_string();
             assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
         }
     }
