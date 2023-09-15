@@ -347,9 +347,25 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
+                modifiers: KeyModifiers {
+                    shift: false,
+                    ..
+                },
                 ..
             }) => {
-                session.tab();
+                session.indent();
+                cx.redraw_all();
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Tab,
+                modifiers: KeyModifiers {
+                    shift: true,
+                    ..
+                },
+                ..
+            }) => {
+                session.outdent();
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
@@ -366,25 +382,6 @@ impl CodeEditor {
                 ..
             }) => {
                 session.backspace();
-                cx.redraw_all();
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
-            }
-
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::RBracket,
-                modifiers: KeyModifiers { logo: true, .. },
-                ..
-            }) => {
-                session.indent();
-                cx.redraw_all();
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
-            }
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::LBracket,
-                modifiers: KeyModifiers { logo: true, .. },
-                ..
-            }) => {
-                session.outdent();
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
