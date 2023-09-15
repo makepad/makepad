@@ -201,8 +201,8 @@ public class VideoDecoder {
                         }
 
                         // Construct the ByteBuffer for the frame and metadata
-                        // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | Frame data length (4B) | Pixel Data |
-                        int metadataSize = 24;
+                        // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | isEoS (1B) | Frame data length (4B) | Pixel Data |
+                        int metadataSize = 25;
                         int totalSize = metadataSize + mInfo.size;
 
                         ByteBuffer frameBuffer = acquireBuffer(totalSize);
@@ -211,6 +211,7 @@ public class VideoDecoder {
                         frameBuffer.putInt(yStride);
                         frameBuffer.putInt(uStride);
                         frameBuffer.putInt(vStride);
+                        frameBuffer.put((byte) (mInputEos ? 1 : 0));
                         frameBuffer.putInt(mInfo.size);
 
                         int oldLimit = outputBuffer.limit();
