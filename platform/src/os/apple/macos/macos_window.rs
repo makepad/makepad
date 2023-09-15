@@ -56,7 +56,7 @@ pub struct MacosWindow {
 
 impl MacosWindow {
     
-    pub fn new(cocoa_app: &mut MacosApp, window_id: WindowId) -> MacosWindow {
+    pub fn new(window_id: WindowId) -> MacosWindow {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -65,7 +65,7 @@ impl MacosWindow {
             let view: ObjcId = msg_send![get_macos_class_global().view, alloc];
             
             let () = msg_send![pool, drain];
-            cocoa_app.cocoa_windows.push((window, view));
+            get_macos_app_global().cocoa_windows.push((window, view));
             MacosWindow {
                 is_fullscreen: false,
                 live_resize_timer: nil,
@@ -243,7 +243,7 @@ impl MacosWindow {
     }
     
     pub fn do_callback(&mut self, event: MacosEvent) {
-        get_macos_app_global().do_callback(event);
+        MacosApp::do_callback(event);
     }
     
     pub fn set_position(&mut self, pos: DVec2) {

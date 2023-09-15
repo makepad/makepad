@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_draw::*,
         scroll_bars::ScrollBars,
-        tab::{TabAction, Tab},
+        tab::{TabAction, Tab, TabClosable},
     },
 };
 
@@ -72,7 +72,7 @@ impl TabBar {
         self.scroll_bars.end(cx);
     }
     
-    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str) {
+    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str, closable:TabClosable) {
         if let Some(selected_tab) = self.selected_tab {
             let tab_order_len = self.tab_order.len();
             let tab = self.get_or_create_tab(cx, tab_id);
@@ -82,7 +82,7 @@ impl TabBar {
             else {
                 tab.set_is_selected(cx, false, Animate::No);
             }
-            tab.draw(cx, name);
+            tab.draw(cx, name, closable);
             if tab_order_len == selected_tab {
                 self.selected_tab_id = Some(tab_id);
             }
@@ -91,7 +91,7 @@ impl TabBar {
         else {
             self.tab_order.push(tab_id);
             let tab = self.get_or_create_tab(cx, tab_id);
-            tab.draw(cx, name);
+            tab.draw(cx, name, closable);
         }
     }
     

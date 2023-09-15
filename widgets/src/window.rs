@@ -67,8 +67,10 @@ impl LiveHook for Window {
         }
         match cx.os_type() {
             OsType::Windows => {
-                self.view(id!(caption_bar)).set_visible(true);
-                self.view(id!(windows_buttons)).set_visible(true);
+                if !cx.in_makepad_studio(){
+                    self.view(id!(caption_bar)).set_visible(true);
+                    self.view(id!(windows_buttons)).set_visible(true);
+                }
             }
             OsType::Macos => {
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);

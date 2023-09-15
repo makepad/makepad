@@ -101,6 +101,8 @@ extern {
     pub fn dispatch_queue_create(label: *const u8, attr: ObjcId,) -> ObjcId;
     pub fn dispatch_get_global_queue(ident:u64, flags: u64) -> ObjcId;
     pub fn dispatch_release(object: ObjcId);
+    pub fn _NSGetExecutablePath(buf: *mut u8, buf_size: &mut u32);
+
 
     pub static NSNotificationCenter: ObjcId;
     pub static NSRunLoopCommonModes: ObjcId;
