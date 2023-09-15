@@ -12,8 +12,6 @@ live_design!{
 pub struct FoldButton {
     #[animator] animator: Animator,
     
-    #[live] opened: f32,
-    
     #[live] draw_bg: DrawQuad,
     #[live] abs_size: DVec2,
     #[live] abs_offset: DVec2,
@@ -31,7 +29,7 @@ pub enum FoldButtonAction {
     None,
     Opening,
     Closing,
-    Animating(f32)
+    Animating(f64)
 }
 
 impl FoldButton {
@@ -44,7 +42,9 @@ impl FoldButton {
     ) {
         if self.animator_handle_event(cx, event).is_animating() {
             if self.animator.is_track_animating(cx, id!(open)) {
-                dispatch_action(cx, FoldButtonAction::Animating(self.opened))
+                let mut value = [0.0];
+                self.draw_bg.get_instance(cx, live_id!(open),&mut value);
+                dispatch_action(cx, FoldButtonAction::Animating(value[0] as f64))
             }
         };
         
@@ -122,3 +122,38 @@ impl Widget for FoldButton {
         WidgetDraw::done()
     }
 }
+
+
+#[derive(Clone, Debug, PartialEq, WidgetRef)]
+pub struct FoldButtonRef(WidgetRef); 
+
+impl FoldButtonRef {
+    
+    pub fn opening(&self, actions:&WidgetActions) -> bool {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FoldButtonAction::Opening = item.action() {
+                return true
+            }
+        }
+        false
+    }
+
+    pub fn closing(&self, actions:&WidgetActions) -> bool {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FoldButtonAction::Closing = item.action() {
+                return true
+            }
+        }
+        false
+    }
+    
+    pub fn animating(&self, actions:&WidgetActions) -> Option<f64> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FoldButtonAction::Animating(v) = item.action() {
+                return Some(v)
+            }
+        }
+        None
+    }
+}
+

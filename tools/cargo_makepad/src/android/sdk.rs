@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     android::*,
-    shell::*
+    makepad_shell::*,
 };
 
 const URL_PLATFORM_33: &str = "https://dl.google.com/android/repository/platform-33-ext4_r01.zip";

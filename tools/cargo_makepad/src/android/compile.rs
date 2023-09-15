@@ -3,7 +3,8 @@ use std::{
     collections::HashSet,
 };
 use crate::android::{HostOs, AndroidTarget};
-use crate::shell::*;
+use crate::utils::*;
+use crate::makepad_shell::*;
 
 struct BuildPaths {
     tmp_dir: PathBuf,
