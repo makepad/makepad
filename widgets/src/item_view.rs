@@ -44,7 +44,6 @@ pub struct ItemView {
     #[live(true)] align_top_when_empty: bool,
     #[live(false)] grab_key_focus: bool,
     #[live(true)] drag_scrolling: bool,
-    #[live(false)] skip_empty: bool,
     
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bars: ScrollBars,

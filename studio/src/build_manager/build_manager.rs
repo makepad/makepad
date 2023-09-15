@@ -256,7 +256,6 @@ live_design!{
     RunList = <ItemView> {
         grab_key_focus: true
         drag_scrolling: false
-        skip_empty: true,
         height: Fill,
         width: Fill
         flow: Down
@@ -402,7 +401,7 @@ impl BuildManager {
                         item.widget(id!(body)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
-                    _ => ()
+                    _=>()
                 }
             }
             else { // draw empty items
@@ -606,9 +605,9 @@ impl BuildManager {
             wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
                 //let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
-                match &wrap.item {
-                    LogItem::Location(_loc) => {
-                        log.push(wrap.item);
+                match wrap.item {
+                    LogItem::Location(loc) => {
+                        log.push(LogItem::Location(loc));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
                         /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                             let doc = &mut editor_state.documents[*doc_id];
@@ -636,6 +635,10 @@ impl BuildManager {
                                 });
                             }
                             Err(_) => { // we should output a log string
+                                log.push(LogItem::Bare(LogItemBare {
+                                    level: LogItemLevel::Log,
+                                    line:line.trim().to_string()
+                                }));
                                 /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                     level: BuildMsgLevel::Log,
                                     line

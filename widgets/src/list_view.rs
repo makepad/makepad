@@ -64,8 +64,6 @@ pub struct ListView {
     #[live(true)] align_top_when_empty: bool,
     #[live(false)] grab_key_focus: bool,
     #[live(true)] drag_scrolling: bool,
-    #[live(false)] skip_empty: bool,
-    
     #[rust] first_id: u64,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
@@ -79,7 +77,7 @@ pub struct ListView {
     #[rust(false)] tail_range: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<u64, (LiveId,WidgetRef)>,
+    #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
     //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
@@ -111,7 +109,7 @@ impl LiveHook for ListView {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, live_ptr);
                     // lets apply this thing over all our childnodes with that template
-                    for (templ_id,node) in self.items.values_mut() {
+                    for ((_, templ_id), node) in self.items.iter_mut() {
                         if *templ_id == id {
                             node.apply(cx, from, index, nodes);
                         }
@@ -325,7 +323,7 @@ impl ListView {
                 }
                 ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
                     let is_down_again = draw_state.is_down_again();
-                    let did_draw = cx.turtle_has_align_items() || self.skip_empty;
+                    let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -380,7 +378,7 @@ impl ListView {
                     return Some(index + 1)
                 }
                 ListDrawState::Up {index, pos, hit_bottom, viewport} => {
-                    let did_draw = cx.turtle_has_align_items() || self.skip_empty;
+                    let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -445,8 +443,8 @@ impl ListView {
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let (_,entry) = self.items.get_or_insert(cx, entry_id, | cx | {
-                (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
+            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+                WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
             return Some(entry.clone())
         }
@@ -516,7 +514,7 @@ impl Widget for ListView {
             self.area.redraw(cx);
         }
         
-        for (_,item) in self.items.values_mut() {
+        for item in self.items.values_mut() {
             let item_uid = item.widget_uid();
             item.handle_widget_event_with(cx, event, &mut | cx, action | {
                 dispatch_action(cx, action.with_container(uid).with_item(item_uid))
@@ -781,7 +779,7 @@ impl ListViewRef {
             if action.container_uid == uid {
                 
                 if let Some(inner) = self.borrow() {
-                    for (item_id, (_,item)) in inner.items.iter() {
+                    for ((item_id, _), item) in inner.items.iter() {
                         
                         if item.widget_uid() == action.item_uid {
                             set.push((*item_id, item.clone()))
