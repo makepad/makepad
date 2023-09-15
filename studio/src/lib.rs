@@ -21,6 +21,7 @@ pub use makepad_platform::makepad_micro_serde;
 pub use makepad_platform::makepad_live_id;
 pub use makepad_platform::makepad_error_log;
 pub use makepad_code_editor;
+pub use makepad_shell;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_platform::makepad_wasm_bridge;
