@@ -68,9 +68,55 @@ enum StdErrState{
     Running,
 }
 
+#[derive(Debug)]
+pub enum BuildTarget {
+    Release,
+    Debug,
+    ReleaseStudio,
+    DebugStudio,
+    Profiler,
+    IosSim,
+    IosReal,
+    Android,
+    Wasm
+}
+
+
+
+impl BuildTarget {
+    pub fn len() -> u64 {9}
+    pub fn index(idx: u64) -> BuildTarget {
+        match idx {
+            0 => Self::Release,
+            1 => Self::Debug,
+            2 => Self::ReleaseStudio,
+            3 => Self::DebugStudio,
+            4 => Self::Profiler,
+            5 => Self::IosSim,
+            6 => Self::IosReal,
+            7 => Self::Android,
+            _ => Self::Wasm,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Release => "Release",
+            Self::Debug => "Debug",
+            Self::ReleaseStudio => "Release Studio",
+            Self::DebugStudio => "Debug Studio",
+            Self::Profiler => "Profiler",
+            Self::IosSim => "iOS simulator",
+            Self::IosReal => "iOS device",
+            Self::Android => "Android adb",
+            Self::Wasm => "WASM",
+        }
+    }
+}
+
+
 impl BuildConnection {
     
-    pub fn cargo_run(&self, what: &str, cmd_id: BuildCmdId) {
+    pub fn cargo_run(&self, what: &str, target:&BuildTarget, cmd_id: BuildCmdId) {
 
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
@@ -83,6 +129,40 @@ impl BuildConnection {
                 let _ = line_sender.send(ChildStdIO::Kill);
             }
         }
+        /*
+        let _args:&[&str] = match target{
+            BuildTarget::Release=>&[
+                "run",
+                "nightly",
+                "cargo",
+                "run",
+                "-p",
+                what,
+                "--message-format=json",
+                "--release",
+                "--",
+                "--message-format=json",
+            ],
+            BuildTarget::ReleaseStudio=>&[
+                "run",
+                "nightly",
+                "cargo",
+                "run",
+                "-p",
+                what,
+                "--message-format=json",
+                "--",
+                "--message-format=json",
+                "--stdin-loop",
+            ],
+            BuildTarget::Debug=>&[],
+            BuildTarget::DebugStudio=>&[],
+            BuildTarget::Profiler=>&[],
+            BuildTarget::IosSim=>&[],
+            BuildTarget::IosReal=>&[],
+            BuildTarget::Android=>&[],
+            BuildTarget::Wasm=>&[],
+        };*/
         
         let args = [
             "run",
@@ -140,7 +220,6 @@ impl BuildConnection {
                             }
                             Err(_) => { // we should output a log string
                                 //eprintln!("GOT ERROR {:?}", err);
-                                //log!("{:?}", err);
                                 msg_sender.send_stdin_to_host_msg(cmd_id, line);
                             }
                         }
@@ -194,7 +273,7 @@ impl BuildConnection {
         match cmd_wrap.cmd {
             BuildCmd::CargoRun {what} => {
                 // lets kill all other 'whats'
-                self.cargo_run(&what, cmd_wrap.cmd_id);
+                //self.cargo_run(&what, cmd_wrap.cmd_id);
             }
             BuildCmd::HostToStdin(msg)=>{
                 // ok lets fetch the running process from the cmd_id
