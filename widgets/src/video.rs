@@ -13,12 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_FRAMES_TO_DECODE: usize = 30;
+const MAX_FRAMES_TO_DECODE: usize = 20;
 const FRAME_BUFFER_LOW_WATER_MARK: usize = MAX_FRAMES_TO_DECODE / 3;
 
 // Usage
 // is_looping - determines if the video should be played in a loop. defaults to false.
 // hold_to_pause - determines if the video should be paused when the user hold the pause button. defaults to false.
+// autoplay - determines if the video should start playback when the widget is created. defaults to false.
 
 live_design! {
     VideoBase = {{Video}} {}
@@ -63,8 +64,10 @@ pub struct Video {
     is_looping: bool,
     #[live(false)]
     hold_to_pause: bool,
+    #[live(false)]
+    autoplay: bool,
     #[rust]
-    is_paused: bool, 
+    playback_state: PlaybackState,
     #[rust]
     pause_time: Option<Instant>,
     #[rust]
@@ -95,8 +98,6 @@ pub struct Video {
     start_time: Option<Instant>,
     #[rust]
     tick: Timer,
-    #[rust]
-    playback_finished: bool,
 
     // Decoding
     #[rust]
@@ -115,6 +116,40 @@ pub struct Video {
 #[derive(Clone, Default, PartialEq, WidgetRef)]
 pub struct VideoRef(WidgetRef);
 
+impl VideoRef {
+    pub fn begin_decoding(&mut self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.initialize_decoding(cx);
+        }
+    }
+
+    // it will initialize decoding if not already initialized
+    pub fn begin_playback(&mut self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.begin_playback(cx);
+        }
+    }
+
+    pub fn pause_playback(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.pause_playback();
+        }
+    }
+
+    pub fn resume_playback(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.resume_playback();
+        }
+    }
+
+    // it will finish playback and cleanup decoding
+    pub fn end_playback(&mut self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.end_playback(cx);
+        }
+    }
+}
+
 #[derive(Clone, Default, WidgetSet)]
 pub struct VideoSet(WidgetSet);
 
@@ -127,6 +162,15 @@ enum DecodingState {
     Initializing,
     Initialized,
     Decoding,
+    ChunkFinished,
+}
+
+#[derive(Default, PartialEq)]
+enum PlaybackState {
+    #[default]
+    NotStarted,
+    Playing,
+    Paused,
     Finished,
 }
 
@@ -137,7 +181,9 @@ impl LiveHook for Video {
 
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.id = LiveId::unique();
-        self.initialize_decoding(cx);
+        if self.autoplay {
+            self.begin_playback(cx);
+        }
     }
 }
 
@@ -196,7 +242,7 @@ impl Video {
 
         if let Event::VideoChunkDecoded(video_id) = event {
             if *video_id == self.id {
-                self.decoding_state = DecodingState::Finished;
+                self.decoding_state = DecodingState::ChunkFinished;
                 self.available_to_fetch = true;
             }
         }
@@ -286,50 +332,48 @@ impl Video {
     }
     
     fn maybe_advance_playback(&mut self, cx: &mut Cx) {
-        if self.is_paused || self.playback_finished {
-            return;
-        }
+        if self.playback_state == PlaybackState::Playing {
+            let now = Instant::now();
+            let video_time_us = match self.start_time {
+                Some(start_time) => now.duration_since(start_time).as_micros(),
+                None => 0,
+            };
 
-        let now = Instant::now();
-        let video_time_us = match self.start_time {
-            Some(start_time) => now.duration_since(start_time).as_micros(),
-            None => 0,
-        };
+            if video_time_us >= self.next_frame_ts || self.start_time.is_none() {
+                let maybe_current_frame = { self.frames_buffer.lock().unwrap().get() };
 
-        if video_time_us >= self.next_frame_ts || self.start_time.is_none() {
-            let maybe_current_frame = { self.frames_buffer.lock().unwrap().get() };
-
-            match maybe_current_frame {
-                Some(current_frame) => {
-                    if self.start_time.is_none() {
-                        self.start_time = Some(now);
-                        self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
-                        self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
-                    }
-
-                    self.update_textures(cx, current_frame.pixel_data);
-                    self.redraw(cx);
-
-                    // if at the last frame, loop or stop
-                    if current_frame.is_eos {
-                        self.next_frame_ts = 0;
-                        if let Some(start_time) = self.start_time {
-                            self.start_time = Some(
-                                start_time + Duration::from_micros(self.total_duration as u64),
-                            );
+                match maybe_current_frame {
+                    Some(current_frame) => {
+                        if self.start_time.is_none() {
+                            self.start_time = Some(now);
+                            self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
+                            self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
                         }
-                        if !self.is_looping {
-                            self.draw_bg.set_uniform(cx, id!(is_last_frame), &[1.0]);
-                            self.playback_finished = true;
-                            self.start_time = None;
+
+                        self.update_textures(cx, current_frame.pixel_data);
+                        self.redraw(cx);
+
+                        // if at the last frame, loop or stop
+                        if current_frame.is_eos {
+                            self.next_frame_ts = 0;
+                            if let Some(start_time) = self.start_time {
+                                self.start_time = Some(
+                                    start_time + Duration::from_micros(self.total_duration as u64),
+                                );
+                            }
+                            if !self.is_looping {
+                                self.draw_bg.set_uniform(cx, id!(is_last_frame), &[1.0]);
+                                self.playback_state = PlaybackState::Finished;
+                                self.start_time = None;
+                            }
+                        } else {
+                            self.next_frame_ts =
+                                current_frame.timestamp_us + self.frame_ts_interval.ceil() as u128;
                         }
-                    } else {
-                        self.next_frame_ts =
-                            current_frame.timestamp_us + self.frame_ts_interval.ceil() as u128;
                     }
+                    // empty buffer, deocder is falling behind
+                    None => {}
                 }
-                // empty buffer, deocder is falling behind
-                None => {}
             }
         }
     }
@@ -385,9 +429,16 @@ impl Video {
         }
     }
 
+    fn begin_playback(&mut self, cx: &mut Cx) {
+        if self.decoding_state == DecodingState::NotStarted {
+            self.initialize_decoding(cx);
+        }
+        self.playback_state = PlaybackState::Playing;
+    }
+
     fn pause_playback(&mut self) {
         self.pause_time = Some(Instant::now());
-        self.is_paused = true;
+        self.playback_state = PlaybackState::Paused;
     }
 
     fn resume_playback(&mut self) {
@@ -398,7 +449,12 @@ impl Video {
                 *start_time += pause_duration;
             }
         }
-        self.is_paused = false;
+        self.playback_state = PlaybackState::Playing;
+    }
+
+    fn end_playback(&mut self, cx: &mut Cx) {
+        self.playback_state = PlaybackState::Finished;
+        self.cleanup_decoding(cx);
     }
 
     fn should_fetch(&self) -> bool {
@@ -408,7 +464,7 @@ impl Video {
 
     fn should_request_decoding(&self) -> bool {
         match self.decoding_state {
-            DecodingState::Finished => {
+            DecodingState::ChunkFinished => {
                 self.is_buffer_running_low()
             }
             _ => false,
@@ -419,9 +475,10 @@ impl Video {
         self.frames_buffer.lock().unwrap().data.len() < FRAME_BUFFER_LOW_WATER_MARK
     }
     
-    fn _cleanup_decoding(&mut self, cx: &mut Cx) {
+    fn cleanup_decoding(&mut self, cx: &mut Cx) {
         cx.cleanup_video_decoding(self.id);
-        // self.frames_buffer.lock().unwrap().clear();
+        self.frames_buffer.lock().unwrap().clear();
+        self.decoding_state = DecodingState::NotStarted;
     }
 }
 
@@ -450,7 +507,7 @@ impl RingBuffer {
         }
     }
 
-    fn _clear(&mut self) {
+    fn clear(&mut self) {
         self.data.clear();
         self.last_added_index = None;
     }
