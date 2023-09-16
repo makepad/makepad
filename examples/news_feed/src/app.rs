@@ -349,7 +349,10 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        /*unsafe{
+        for i in 0..10000000{
+            println!("{} hello \nhello",i)
+        }
+            /*unsafe{ 
             let d:*mut f32 = 0 as *mut f32;
             *d = 0.0;
         }
