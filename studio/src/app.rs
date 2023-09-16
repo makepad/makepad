@@ -310,7 +310,8 @@ impl AppMain for App {
             match action {
                 FileSystemAction::RecompileNeeded => {
                     self.build_manager.start_recompile_timer(cx);
-                    //run_view.recompile_started(cx);
+                    let view = self.ui.run_view(id!(run1));
+                    view.recompile_started(cx);
                 }
                 FileSystemAction::LiveReloadNeeded => {
                     self.build_manager.clear_log();

@@ -140,8 +140,6 @@ impl BuildConnection {
                             }
                             Err(_) => { // we should output a log string
                                 //eprintln!("GOT ERROR {:?}", err);
-                                println!("GOT {}", line);
-                                
                                 msg_sender.send_stdin_to_host_msg(cmd_id, line);
                             }
                         }
