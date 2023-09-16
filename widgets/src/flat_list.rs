@@ -7,7 +7,7 @@ use crate::{
 };
 
 live_design!{
-    ItemViewBase = {{ItemView}} {}
+    FlatListBase = {{FlatList}} {}
 }
 /*
 #[derive(Clone,Copy)]
@@ -24,13 +24,13 @@ enum ScrollState {
 }
 */
 #[derive(Clone, WidgetAction)]
-pub enum ItemViewAction {
+pub enum FlatListAction {
     Scroll,
     None
 }
 
 #[derive(Live)]
-pub struct ItemView {
+pub struct FlatList {
     //#[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -57,9 +57,9 @@ pub struct ItemView {
 }
 
 
-impl LiveHook for ItemView {
+impl LiveHook for FlatList {
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, ItemView)
+        register_widget!(cx, FlatList)
     }
     
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
@@ -102,7 +102,7 @@ impl LiveHook for ItemView {
     }
 }
 
-impl ItemView {
+impl FlatList {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, self.layout);
@@ -139,7 +139,7 @@ impl ItemView {
 }
 
 
-impl Widget for ItemView {
+impl Widget for FlatList {
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }
@@ -171,7 +171,7 @@ impl Widget for ItemView {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, true);
-                        dispatch_action(cx, ItemViewAction::Scroll.into_action(uid));
+                        dispatch_action(cx, FlatListAction::Scroll.into_action(uid));
                         self.scroll_bars.redraw(cx);
                     } else {
                         self.scroll_state = ScrollState::Stopped;
@@ -188,7 +188,7 @@ impl Widget for ItemView {
                         }
                         else {
                             *next_frame = cx.new_next_frame();
-                            dispatch_action(cx, ItemViewAction::Scroll.into_action(uid));
+                            dispatch_action(cx, FlatListAction::Scroll.into_action(uid));
                         }
                         self.scroll_bars.redraw(cx);
                     }
@@ -211,7 +211,7 @@ impl Widget for ItemView {
                 Hit::FingerScroll(e) => {
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
-                    dispatch_action(cx, ItemViewAction::Scroll.into_action(uid));
+                    dispatch_action(cx, FlatListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 },
                 
@@ -301,9 +301,9 @@ impl Widget for ItemView {
 }
 
 #[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct ItemViewRef(WidgetRef);
+pub struct FlatListRef(WidgetRef);
 
-impl ItemViewRef {
+impl FlatListRef {
    
     pub fn item(&self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(mut inner) = self.borrow_mut() {
@@ -339,9 +339,9 @@ impl ItemViewRef {
 }
 
 #[derive(Clone, Default, WidgetSet)]
-pub struct ItemViewSet(WidgetSet);
+pub struct FlatListSet(WidgetSet);
 
-impl ItemViewSet {
+impl FlatListSet {
     pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(LiveId, WidgetRef)> {
         let mut set = Vec::new();
         for list in self.iter() {

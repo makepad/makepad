@@ -253,8 +253,8 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
-        let log_list = self.ui.list_view(id!(log1));
-        let run_list = self.ui.item_view(id!(run_list));
+        let log_list = self.ui.portal_list(id!(log1));
+        let run_list = self.ui.flat_list(id!(run_list));
         if let Event::Draw(event) = event {
             //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);

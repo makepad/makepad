@@ -1880,7 +1880,7 @@ live_design!{
     }
     
     
-    ListView = <ListViewBase> {
+    PortalList = <PortalListBase> {
         width: Fill
         height: Fill
         capture_overload: true
@@ -1888,7 +1888,7 @@ live_design!{
         flow: Down
     }
     
-    ItemView = <ItemViewBase> {
+    FlatList = <FlatListBase> {
         width: Fill
         height: Fill
         capture_overload: true
