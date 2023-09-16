@@ -294,6 +294,7 @@ impl Cx {
                         }
                         self.redraw_all();
                         self.reinitialise_media();
+                        self.call_event_handler(&Event::Resume);
                     }
                     FromJavaMessage::Destroy => {
                         self.os.quit = true;
