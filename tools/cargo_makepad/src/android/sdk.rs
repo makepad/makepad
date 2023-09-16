@@ -224,8 +224,11 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
             for target in targets{
                 let sys_dir = target.sys_dir();
                 let clang = target.clang();
+                
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
+                let UNWIND_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/aarch64"); 
+                
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), false),
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang.cmd")), false),
@@ -248,7 +251,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                     (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libmediandk.so"), false),
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
-                    (format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
+                    (format!("{UNWIND_IN}/libunwind.a|{SYS_OUT}/libunwind.a"), false),
                 ]);
             }
             let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
@@ -330,6 +333,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                 let clang = target.clang();
                 let SYS_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
+                let UNWIND_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/aarch64"); 
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
                     (copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
@@ -352,7 +356,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                     (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libmediandk.so"), false),
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
-                    (format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
+                    (format!("{UNWIND_IN}/libunwind.a|{SYS_OUT}/libunwind.a"), false),
                 ]);
             }
             let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
@@ -409,6 +413,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                 let clang = target.clang();
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
+                let UNWIND_IN = &format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/aarch64"); 
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
                     (copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
@@ -435,7 +440,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                     (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
                     (copy_map(SYS_IN, SYS_OUT, "libmediandk.so"), false),
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
-                    (format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
+                    (format!("{UNWIND_IN}/libunwind.a|{SYS_OUT}/libunwind.a"), false),
                 ]);
             }
             let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
