@@ -20,7 +20,8 @@ live_design!{
     import crate::popup_menu::PopupMenuBase;
     import crate::label::LabelBase;
     import crate::link_label::LinkLabelBase;
-    import crate::list_view::ListViewBase;
+    import crate::portal_list::PortalListBase;
+    import crate::flat_list::FlatListBase;
     import crate::scroll_bars::ScrollBarsBase;
     import crate::view::ViewBase;
     import crate::nav_control::NavControlBase;
@@ -591,7 +592,8 @@ live_design!{
     VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}
-    ListViewBase = <ListViewBase> {}
+    PortalListBase = <PortalListBase> {}
+    FlatListBase = <FlatListBase>{}
     NavControlBase = <NavControlBase> {}
     PopupMenuBase = <PopupMenuBase> {}
     PopupMenuItemBase = <PopupMenuItemBase> {}

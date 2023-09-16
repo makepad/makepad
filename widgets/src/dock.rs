@@ -387,7 +387,7 @@ impl Dock {
             return Some(entry.1.clone())
         }
         else{
-            log!("ListView template not found {}", template);
+            log!("PortalList template not found {}", template);
         }
         None
     }

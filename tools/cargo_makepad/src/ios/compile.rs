@@ -1,7 +1,8 @@
-use crate::shell::*;
+use crate::makepad_shell::*;
 use crate::ios::{IosTarget};
 use std::path::{PathBuf, Path};
 use std::collections::HashSet;
+use crate::utils::*;
 
 pub struct PlistValues {
     identifier: String,
