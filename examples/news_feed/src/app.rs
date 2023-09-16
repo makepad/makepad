@@ -315,7 +315,7 @@ live_design!{
                 },
                 
                 
-                news_feed = <ListView> {
+                news_feed = <PortalList> {
                     height: Fill,
                     width: Fill
                     flow: Down
@@ -349,10 +349,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        for i in 0..10000000{
-            println!("{} hello \nhello",i)
-        }
-            /*unsafe{ 
+            /*unsafe{  
             let d:*mut f32 = 0 as *mut f32;
             *d = 0.0;
         }
@@ -362,7 +359,7 @@ impl LiveHook for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let news_feeds = self.ui.list_view_set(ids!(news_feed));
+        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {

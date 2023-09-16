@@ -27,7 +27,7 @@ pub mod dock;
 pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
-pub mod list_view;
+pub mod portal_list;
 pub mod desktop_button;
 pub mod window;
 pub mod scroll_shadow;
@@ -35,7 +35,7 @@ pub mod rotated_image;
 pub mod slide_panel;
 pub mod page_flip;
 pub mod keyboard_view;
-pub mod item_view;
+pub mod flat_list;
 
 pub mod file_tree;
 pub mod slides_view;
@@ -68,8 +68,8 @@ pub use crate::{
     radio_button::*,
     text_input::*,
     link_label::*,
-    list_view::*,
-    item_view::*,
+    portal_list::*,
+    flat_list::*,
     page_flip::*,
     slide_panel::*,
     fold_button::*,
@@ -129,8 +129,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
-    crate::list_view::live_design(cx);
-    crate::item_view::live_design(cx);
+    crate::portal_list::live_design(cx);
+    crate::flat_list::live_design(cx);
     crate::slide_panel::live_design(cx);
     crate::tab::live_design(cx);
     crate::tab_bar::live_design(cx);

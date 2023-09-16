@@ -11,7 +11,7 @@ use {
         },
         build_manager::{
             build_protocol::*,
-            build_server::{BuildConnection, BuildServer},
+            build_server::{BuildTarget, BuildConnection, BuildServer},
             build_client::BuildClient
         },
         makepad_file_protocol::{
@@ -21,7 +21,7 @@ use {
         },
         makepad_shell::*,
         makepad_widgets::*,
-        makepad_widgets::list_view::ListView,
+        makepad_widgets::portal_list::PortalList,
     },
     std::{
         collections::HashMap,
@@ -221,7 +221,7 @@ live_design!{
     
     
     
-    LogList = <ListView> {
+    LogList = <PortalList> {
         grab_key_focus: true
         auto_tail: true
         drag_scrolling: false
@@ -253,7 +253,7 @@ live_design!{
         }
     }
     
-    RunList = <ItemView> {
+    RunList = <FlatList> {
         grab_key_focus: true
         drag_scrolling: false
         height: Fill,
@@ -325,38 +325,6 @@ struct BuildBinary {
     name: String
 }
 
-enum BuildTarget {
-    Release,
-    ReleaseView,
-    IosSim,
-    IosReal,
-    Android,
-    Wasm
-}
-
-impl BuildTarget {
-    fn len() -> u64 {6}
-    fn index(idx: u64) -> BuildTarget {
-        match idx {
-            0 => Self::Release,
-            1 => Self::ReleaseView,
-            2 => Self::IosSim,
-            3 => Self::IosReal,
-            4 => Self::Android,
-            _ => Self::Wasm,
-        }
-    }
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Release => "Release",
-            Self::ReleaseView => "Release-view",
-            Self::IosSim => "iOS simulator",
-            Self::IosReal => "iOS device",
-            Self::Android => "Android adb",
-            Self::Wasm => "WASM",
-        }
-    }
-}
 
 pub enum BuildManagerAction {
     RedrawDoc, // {doc_id: DocumentId},
@@ -370,7 +338,7 @@ const WHAT_TO_BUILD: &'static str = "makepad-example-news-feed";
 
 impl BuildManager {
     
-    pub fn draw_log(&self, cx: &mut Cx2d, list: &mut ListView) {
+    pub fn draw_log(&self, cx: &mut Cx2d, list: &mut PortalList) {
         //let dt = profile_start();
         list.set_item_range(cx, 0, self.log.len() as u64);
         while let Some(item_id) = list.next_visible_item(cx) {
@@ -413,7 +381,7 @@ impl BuildManager {
         //profile_end!(dt);
     }
     
-    pub fn draw_run_list(&self, cx: &mut Cx2d, list: &mut ItemView) {
+    pub fn draw_run_list(&self, cx: &mut Cx2d, list: &mut FlatList) {
         let mut counter = 0;
         for (index, binary) in self.binaries.iter().enumerate() {
             let is_even = counter & 1 == 0;
