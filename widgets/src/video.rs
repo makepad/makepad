@@ -214,6 +214,7 @@ impl Video {
         }
 
         self.handle_gestures(cx, event);
+        self.handle_activity_events(event);
     }
 
     fn initialize_decoding(&mut self, cx: &mut Cx) {
@@ -372,6 +373,14 @@ impl Video {
                     self.resume_playback();
                 }
             }
+            _ => (),
+        }
+    }
+
+    fn handle_activity_events(&mut self, event: &Event) {
+        match event {
+            Event::Pause => self.pause_playback(),
+            Event::Resume => self.resume_playback(),
             _ => (),
         }
     }
