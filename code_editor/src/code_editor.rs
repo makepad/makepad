@@ -257,7 +257,7 @@ impl CodeEditor {
             session.selections()[session.last_added_selection_index().unwrap()];
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-        let (x, y) = session.layout().logical_to_normalized_position(
+        let (_x, _y) = session.layout().logical_to_normalized_position(
             last_added_selection.cursor.position,
             last_added_selection.cursor.affinity,
         );
