@@ -22,6 +22,14 @@ pub enum BuildTarget {
 }
 
 impl BuildTarget {
+    pub fn runs_in_studio(&self)->bool{
+        match self{
+            Self::ReleaseStudio=>true,
+            Self::DebugStudio=>true,
+            _=>false
+        }
+    }
+    
     pub const RELEASE_STUDIO:u64 = 0;
     pub const DEBUG_STUDIO:u64 = 1;
     pub const RELEASE:u64 = 2;
