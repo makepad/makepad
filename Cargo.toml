@@ -11,13 +11,13 @@ workspace.members = [
 #    "libs/futures",
 #    "libs/wasm_bridge/test",
     "studio",
-    "tools/video_mixer",
+#    "tools/video_mixer",
     "tools/cargo_makepad",
-    "tools/windows_strip",
-    "tools/auto_version",
-    "tools/web_server", 
-    "tools/file_router", 
-    "tools/wasm_strip",
+#    "tools/windows_strip",
+#    "tools/auto_version",
+#    "tools/web_server", 
+#    "tools/file_router", 
+#    "tools/wasm_strip",
 ]
 
 workspace.resolver = "2"

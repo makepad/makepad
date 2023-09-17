@@ -378,13 +378,13 @@ live_design!{
     
     
     
-    CheckBox = <CheckBoxBase> {
+ CheckBox = <CheckBoxBase> {
         
         width: Fit,
         height: Fit
         
         label_walk: {
-            margin: {left: 20.0, top: 1, bottom: 1, right: 1}
+            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
             width: Fit,
             height: Fit,
         }

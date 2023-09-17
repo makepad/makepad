@@ -251,7 +251,6 @@ impl Cx {
                         self.call_event_handler(&Event::Pause);
                     }
                     FromJavaMessage::Stop => {
-                        
                     }
                     FromJavaMessage::Resume => {
                         if self.os.fullscreen {
@@ -264,6 +263,7 @@ impl Cx {
                         self.reinitialise_media();
                     }
                     FromJavaMessage::Destroy => {
+                        self.call_event_handler(&Event::Destruct);
                         self.os.quit = true;
                     }
                     FromJavaMessage::Init(_) => {
