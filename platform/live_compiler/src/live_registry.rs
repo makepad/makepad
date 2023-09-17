@@ -82,7 +82,6 @@ pub struct LiveFileChange {
     pub content: String
 }
 
-
 impl LiveRegistry {
     
     pub fn generation_valid(&self, live_ptr: LivePtr) -> bool {
