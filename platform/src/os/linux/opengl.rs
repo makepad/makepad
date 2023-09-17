@@ -818,7 +818,7 @@ pub struct CxOsTexture {
     pub gl_texture: Option<u32>,
     pub gl_renderbuffer: Option<u32>,
     #[cfg(target_os = "linux")]
-    pub dma_buf_exported_image: Option<Box<linux_dma_buf::Image<os::fd::OwnedFd>>>,
+    pub dma_buf_exported_image: Option<Box<linux_dma_buf::Image<std::os::fd::OwnedFd>>>,
 }
 
 impl CxOsTexture {
