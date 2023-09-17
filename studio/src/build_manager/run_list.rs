@@ -41,6 +41,48 @@ live_design!{
         }
     }
     
+    RunButton = <CheckBox> {
+        width: Fill,
+        height: 25,
+        margin: {left: 1},
+        label_walk: {margin: {top: 7}}
+        draw_check: {
+            uniform size: 4.0;
+            instance open: 0.0
+            uniform length: 3.0
+            uniform width: 1.0
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                match self.check_type {
+                    CheckType::Check => {
+                        let left = 2;
+                        let sz = self.size;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        
+                        // PAUSE
+                        sdf.box(sz * 0.25, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(sz * 1.75, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
+
+                        sdf.fill(mix(#fff0, mix(#A, #F, self.hover), self.selected));
+
+                        // PLAY
+                        sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                        sdf.move_to(c.x - sz, c.y + sz);
+                        sdf.line_to(c.x, c.y - sz);
+                        sdf.line_to(c.x + sz, c.y + sz);
+                        sdf.close_path();
+                        sdf.fill(mix(mix(#44, #8, self.hover), #fff0, self.selected));
+
+                    }
+                }
+                return sdf.result
+            }
+        }
+        draw_text: {text_style: <THEME_FONT_LABEL> {}}
+    }
+    
+    
     RunList = <FlatList> {
         grab_key_focus: true
         drag_scrolling: false
@@ -50,32 +92,43 @@ live_design!{
         Target = <BuildItem> {
             padding: {top: 0, bottom: 0}
             //label = <Label> {width: Fill, margin:{left:35}, padding:0, draw_text: {wrap: Word}}
-            check = <CheckBox> {
-                width: Fill,
-                height: 25,
-                margin: {left: 21},
-                label_walk: {margin: {top: 7}}
-                draw_check: {check_type: Radio}
-                draw_text: {text_style: <THEME_FONT_LABEL> {}}
-            }
+            check = <RunButton> { margin: {left: 21} }
         }
         Binary = <BuildItem> {
             padding: {top: 0, bottom: 0}
             flow: Right
-            fold = <FoldButton> {animator: {open = {default: no}}, height: 25, width: 15 margin: {left: 5}}
-            //label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
-            check = <CheckBox> {
-                width: Fill,
-                height: 25,
-                margin: {left: 1},
-                label_walk: {margin: {top: 7}}
-                draw_check: {check_type: Radio}
-                draw_text: {text_style: <THEME_FONT_LABEL> {}}
+            fold = <FoldButton> {
+                animator: {open = {default: no}}, height: 25, width: 15 margin: {left: 5}
+                draw_bg: {
+                    uniform size: 4.0;
+                    instance open: 0.0
+                    uniform length: 3.0
+                    uniform width: 1.0
+                    
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                        let left = 2;
+                        let sz = self.size;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        
+                        // PLUS
+                        sdf.box(0, sz * 3.0, sz * 2.5, sz * 0.5, 1.0); // rounding = 3rd value
+                        // vertical
+                        sdf.fill_keep(mix(#8F, #FF, self.hover));
+                        sdf.box(sz, sz * 2.0, sz * 0.5, sz * 2.5, 1.0); // rounding = 3rd value
+
+                        sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.open))
+
+                        return sdf.result
+                    }
+                }
             }
+            //label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
+            check = <RunButton> {}
         }
         Empty = <BuildItem> {
             cursor: Default
-            height: 20,
+            height: 24,
             width: Fill
         }
     }
@@ -150,7 +203,7 @@ impl BuildManager {
                     run_list.redraw(cx);
                     for i in 0..if change{1}else{BuildTarget::len()} {
                         let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
-                        Self::toggle_active_build(&mut self.active, &self.clients[0],cx, id, &binary_name, i, change, &mut out);
+                        Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0],cx, id, &binary_name, i, change, &mut out);
                         self.log.clear();
                     }
                 };
@@ -161,7 +214,7 @@ impl BuildManager {
                     if item_id == id{
                         if let Some(change) = item.check_box(id!(check)).changed(actions) {
                             run_list.redraw(cx);
-                            Self::toggle_active_build(&mut self.active, &self.clients[0], cx, item_id, &binary_name, i, change, &mut out);
+                            Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], cx, item_id, &binary_name, i, change, &mut out);
                             self.log.clear();
                         }
                     }
@@ -192,7 +245,7 @@ impl BuildManager {
         }
     }
     
-    pub fn toggle_active_build(active:&mut ActiveBuilds, client:&BuildClient, cx: &mut Cx, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
+    pub fn toggle_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient, cx: &mut Cx, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
         let target = Self::target_id_to_target(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
@@ -206,7 +259,7 @@ impl BuildManager {
                     item_id,
                     process: process.clone(),
                     run_view_id,
-                    cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone()))),
+                    cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
                     texture: Texture::new(cx)
                 });
             }
