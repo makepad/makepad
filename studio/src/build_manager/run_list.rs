@@ -90,7 +90,7 @@ impl BuildManager {
     
     pub fn draw_run_list(&self, cx: &mut Cx2d, list: &mut FlatList){
         let mut counter = 0u32;
-        for (index, binary) in self.binaries.iter().enumerate() {
+        for binary in &self.binaries {
             let is_even = counter & 1 == 0;
             
             let item_id = LiveId::from_str(&binary.name);
@@ -99,6 +99,7 @@ impl BuildManager {
                 check = {text:(&binary.name)}
                 draw_bg: {is_even: (if is_even {1.0} else {0.0})}
             });
+            item.check_box(id!(check)).set_selected(cx, self.active.any_binary_active(&binary.name));
             item.draw_widget_all(cx);
             counter += 1;
             
@@ -113,6 +114,7 @@ impl BuildManager {
                         draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         check = {text: (BuildTarget::name(i))}
                     });
+                    item.check_box(id!(check)).set_selected(cx, self.active.item_id_active(item_id));
                     item.draw_widget_all(cx);
                     counter += 1;
                 }
@@ -132,7 +134,7 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_run_list(&mut self, cx: &mut Cx, item_id: LiveId, item: WidgetRef, actions: &WidgetActions)->RunListAction{
+    pub fn handle_run_list(&mut self, cx: &mut Cx, run_list: &FlatListRef, item_id: LiveId, item: WidgetRef, actions: &WidgetActions)->RunListAction{
         // ok lets see if someone clicked our
         for binary in &mut self.binaries {
             let binary_name = binary.name.clone();
@@ -143,7 +145,9 @@ impl BuildManager {
                     item.redraw(cx);
                 }
                 if let Some(change) = item.check_box(id!(check)).changed(actions) {
-                    return self.toggle_active_build(cx, binary_name, 0, change)
+                    let id = LiveId::from_str(&binary.name).bytes_append(&0usize.to_be_bytes());
+                    run_list.redraw(cx);
+                    return self.toggle_active_build(cx, id, binary_name, 0, change)
                 };
             }
             else{
@@ -151,7 +155,8 @@ impl BuildManager {
                     let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
                     if item_id == id{
                         if let Some(change) = item.check_box(id!(check)).changed(actions) {
-                            return self.toggle_active_build(cx, binary_name, i, change)
+                            run_list.redraw(cx);
+                            return self.toggle_active_build(cx, item_id, binary_name, i, change)
                         }
                     }
                 }
@@ -161,7 +166,7 @@ impl BuildManager {
     }
     
     
-    pub fn toggle_active_build(&mut self, cx: &mut Cx, binary: String, tgt: u64, run: bool)->RunListAction {
+    pub fn toggle_active_build(&mut self, cx: &mut Cx, item_id: LiveId, binary: String, tgt: u64, run: bool)->RunListAction {
         let target = match tgt {
             BuildTarget::RELEASE => BuildTarget::Release,
             BuildTarget::DEBUG => BuildTarget::Debug,
@@ -191,6 +196,7 @@ impl BuildManager {
             let run_view_id = LiveId::unique();
             if self.active.builds.get(&build_id).is_none() {
                 self.active.builds.insert(build_id, ActiveBuild {
+                    item_id,
                     process: process.clone(),
                     run_view_id,
                     cmd_id: Some(self.clients[0].send_cmd(BuildCmd::Run(process.clone()))),

@@ -33,6 +33,7 @@ live_design!{
 
 
 pub struct ActiveBuild {
+    pub item_id: LiveId,
     pub process: BuildProcess,
     pub run_view_id: LiveId,
     pub texture: Texture,
@@ -48,6 +49,23 @@ pub struct ActiveBuilds {
 }
 
 impl ActiveBuilds {
+    pub fn item_id_active(&self, item_id:LiveId)->bool{
+        for (_k, v) in &self.builds {
+            if v.item_id == item_id{
+                return true
+            }
+        }
+        false
+    }
+    
+    pub fn any_binary_active(&self, binary:&str)->bool{
+        for (_k, v) in &self.builds {
+            if v.process.binary == binary{
+                return true
+            }
+        }
+        false
+    }
     
     pub fn build_id_from_cmd_id(&self, cmd_id: BuildCmdId) -> Option<ActiveBuildId> {
         for (k, v) in &self.builds {
