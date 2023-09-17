@@ -179,8 +179,7 @@ impl Cx {
     
     pub fn start_disk_live_file_watcher(&mut self, milis:u64){
         let live_registry = self.live_registry.borrow();
-        let (send, recv) = std::sync::mpsc::channel();
-        self.live_file_change_receiver = Some(recv);
+
         let mut file_list:Vec<(String,String, Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
             if let Some(start) = file.file_name.find("src/"){
@@ -188,6 +187,7 @@ impl Cx {
                 file_list.push((path, file.file_name.clone(), None));
             }
         }
+        let send = self.live_file_change_sender.clone();
         std::thread::spawn(move || loop{
             let mut changed_files = Vec::new();
             for (full_path, file_name, content) in &mut file_list{
@@ -221,10 +221,8 @@ impl Cx {
         // what we can do is tokenize the entire file
         // then find the token-slice we need
         let mut all_changes = Vec::new();
-        if let Some(live_file_change_receiver) = &self.live_file_change_receiver{
-            while let Ok(changes) = live_file_change_receiver.try_recv(){
-                all_changes.extend(changes);
-            }
+        while let Ok(changes) = self.live_file_change_receiver.try_recv(){
+            all_changes.extend(changes);
         }
         if all_changes.len()>0{
             let mut live_registry = self.live_registry.borrow_mut();
