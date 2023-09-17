@@ -33,12 +33,19 @@ public class VideoDecoder {
         mChunkSize = chunkSize;
 
         try {
+            Activity activity = mActivityReference.get();
+
             ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource(video);
             mExtractor.setDataSource(dataSource);
 
             int trackIndex = selectTrack(mExtractor);
             if (trackIndex < 0) {
-                throw new RuntimeException("No video track found in video");
+                if (activity != null) {
+                    activity.runOnUiThread(() -> {
+                        MakepadNative.onVideoDecodingError(mVideoId, "No video track found in video");
+                    });
+                }
+                return;
             }
             mExtractor.selectTrack(trackIndex);
             MediaFormat format = mExtractor.getTrackFormat(trackIndex);
@@ -105,7 +112,6 @@ public class VideoDecoder {
             mVideoWidth = format.getInteger(MediaFormat.KEY_WIDTH);
             mVideoHeight = format.getInteger(MediaFormat.KEY_HEIGHT);
 
-            Activity activity = mActivityReference.get();
             if (activity != null) {
                 activity.runOnUiThread(() -> {
                     MakepadNative.onVideoDecodingInitialized( 
@@ -119,6 +125,7 @@ public class VideoDecoder {
             }
         } catch (Exception e) {
             Log.e("Makepad", "Error initializing video decoding", e);
+            MakepadNative.onVideoDecodingError(mVideoId, e.getMessage());
         }
     }
 
@@ -155,14 +162,18 @@ public class VideoDecoder {
     public void decodeVideoChunk(int maxFramesToDecode) {
         try {
             synchronized (this) {
+                Activity activity = mActivityReference.get();
+
                 if (mIsDecoding) {
-                    Log.e("Makepad", "Already decoding");
                     return;
                 }
                 mIsDecoding = true;
-
                 if (mExtractor == null || mCodec == null) {
-                    throw new IllegalStateException("Decoding hasn't been initialized");
+                    if (activity != null) {
+                        activity.runOnUiThread(() -> {
+                            MakepadNative.onVideoDecodingError(mVideoId, "Decoding hasn't been initialized for this video");
+                        });
+                    }
                 }
 
                 long framesDecodedThisChunk = 0;
@@ -237,7 +248,6 @@ public class VideoDecoder {
                 };
 
                 mIsDecoding = false;
-                Activity activity = mActivityReference.get();
                 if (activity != null) {
                     activity.runOnUiThread(() -> {
                         MakepadNative.onVideoChunkDecoded(mVideoId);
