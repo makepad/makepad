@@ -4,6 +4,8 @@ use {
         makepad_micro_serde::*,
         makepad_platform::*,
         makepad_widgets::*,
+        makepad_platform::makepad_live_compiler::LiveFileChange,
+        makepad_platform::thread::*,
         makepad_platform::os::cx_stdin::{
             HostToStdin,
             StdinToHost,
@@ -15,10 +17,16 @@ use {
         },
         makepad_shell::*,
     },
+    makepad_http::server::*,
     std::{
         collections::{HashMap},
         env,
     },
+    std::sync::mpsc,
+    std::thread,
+    std::time,
+    std::net::{UdpSocket,SocketAddr},
+    std::time::{Instant, Duration},
 };
 
 live_design!{
@@ -114,7 +122,10 @@ pub struct BuildManager {
     #[live] recompile_timeout: f64,
     #[rust] recompile_timer: Timer,
     #[rust] pub binaries: Vec<BuildBinary>,
-    #[rust] pub active: ActiveBuilds
+    #[rust] pub active: ActiveBuilds,
+    #[rust] pub studio_http: String,
+    #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>,
+    #[rust] pub send_file_change: FromUISender<LiveFileChange>
 }
 
 pub struct BuildBinary {
@@ -134,9 +145,12 @@ pub enum BuildManagerAction {
 impl BuildManager {
     
     pub fn init(&mut self, cx: &mut Cx) {
+        // not great but it will do.
+        
         self.clients = vec![BuildClient::new_with_local_server(&self.path)];
         self.update_run_list(cx);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
+        self.discover_external_ip(cx);
     }
     
     
@@ -207,7 +221,7 @@ impl BuildManager {
             if let Some(cmd_id) = active_build.cmd_id {
                 self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
             }
-            let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone()));
+            let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
             active_build.cmd_id = Some(cmd_id);
         }
     }
@@ -241,7 +255,27 @@ impl BuildManager {
         actions
     }
     
+    pub fn live_reload_needed(&mut self, live_file_change:LiveFileChange){
+        // lets send this filechange to all our stdin stuff
+        for active_build in self.active.builds.values_mut() {
+            if let Some(cmd_id) = active_build.cmd_id{
+                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile{
+                    file: live_file_change.file_name.clone(),
+                    contents: live_file_change.content.clone()
+                }.to_json()));
+            }
+        }
+        let _ = self.send_file_change.send(live_file_change);
+    }
+    
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+        if let Event::Signal = event{
+            if let Ok(addr) = self.recv_external_ip.try_recv(){
+                // alright lets start our http server
+                self.start_http_server(addr);
+            }
+        }
+        
         if self.recompile_timer.is_event(event) {
             self.start_recompile(cx);
             self.clear_log();
@@ -307,6 +341,113 @@ impl BuildManager {
                         }
                     }
                 }
+            }
+        });
+    }
+    
+    pub fn start_http_server(&mut self, mut addr: SocketAddr){
+        addr.set_port(41535);
+        let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
+        
+        self.studio_http = format!("{}",addr);
+        log!("Build manager mobile file change http server at {}", self.studio_http);
+        start_http_server(HttpServer{
+            listen_address:addr,
+            post_max_size: 1024*1024,
+            request: tx_request
+        });
+        let receiver = self.send_file_change.receiver();
+        std::thread::spawn(move || {
+            // lets receive incoming http requests
+            // if will answer it with a filechange if we have one
+            // otherwise we just return nothing
+            let mut change_slot = None;
+            let mut addrs = Vec::new();
+            while let Ok(message) = rx_request.recv() {
+                // only store last change, fix later
+                while let Ok(change) = receiver.try_recv(){
+                    change_slot = Some(change);
+                    addrs.clear();
+                }
+                
+                match message{
+                    HttpServerRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
+                    },
+                    HttpServerRequest::DisconnectWebSocket {web_socket_id:_}=>{
+                    },
+                    HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
+                    }
+                    HttpServerRequest::Get{headers, response_sender}=>{
+                        let mut addr = headers.addr.clone();
+                        addr.set_port(0);
+                        let body = if addrs.contains(&addr){
+                            "".to_string().as_bytes().to_vec()
+                        }
+                        else{
+                            addrs.push(addr);
+                            if let Some(change) = &change_slot{
+                                format!("{}$$$makepad_live_change$$${}",change.file_name, change.content).as_bytes().to_vec()
+                            }
+                            else{
+                                "".to_string().as_bytes().to_vec()
+                            }
+                        };
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                            Content-Type: application/json\r\n\
+                            Content-encoding: none\r\n\
+                            Cache-Control: max-age:0\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse{header, body});
+                        // protect a little bit against flooding
+                        thread::sleep(time::Duration::from_millis(50));
+                    }
+                    HttpServerRequest::Post{..}=>{//headers, body, response}=>{
+                    }
+                }
+            }
+        });
+    }
+    
+    pub fn discover_external_ip(&mut self, _cx:&mut Cx){
+        // figure out some kind of unique id. bad but whatever.
+        let studio_uid = LiveId::from_str(&format!("{:?}{:?}", Instant::now(), std::time::SystemTime::now()));
+        
+        let write_discovery = UdpSocket::bind("0.0.0.0:41534");
+        if write_discovery.is_err(){
+            return
+        }
+        let write_discovery = write_discovery.unwrap();
+        write_discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
+        write_discovery.set_broadcast(true).unwrap();
+        // start a broadcast
+        std::thread::spawn(move || {
+            let dummy = studio_uid.0.to_be_bytes();
+            loop {
+                write_discovery.send_to(&dummy, "255.255.255.255:41533").unwrap();
+                thread::sleep(time::Duration::from_millis(100));
+            }
+        });
+        // listen for bounced back udp packets to get our external ip
+        let ip_sender = self.recv_external_ip.sender();
+        std::thread::spawn(move || {
+            let discovery = UdpSocket::bind("0.0.0.0:41533").unwrap();
+            discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
+            discovery.set_broadcast(true).unwrap();
+            
+            let mut other_uid = [0u8; 8];
+            'outer: loop{
+                while let Ok((_, addr)) = discovery.recv_from(&mut other_uid) {
+                    let recv_uid = u64::from_be_bytes(other_uid);
+                    if studio_uid.0 == recv_uid {
+                        let _ = ip_sender.send(addr);
+                        break 'outer;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
     }
