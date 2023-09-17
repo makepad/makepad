@@ -91,7 +91,7 @@ impl BuildCmdId{
 
 #[derive(Clone, Debug)]
 pub enum BuildCmd {
-    Kill,
+    Stop,
     Run(BuildProcess),
     HostToStdin(String)
 }

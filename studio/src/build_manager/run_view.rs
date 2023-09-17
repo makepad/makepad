@@ -88,6 +88,7 @@ impl RunView {
             
             // what shall we do, a timer? or do we do a next-frame
             manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
+                buffer_id: run_view_id.0,
                 frame: self.frame,
                 time: self.time
             })

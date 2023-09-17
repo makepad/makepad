@@ -6,7 +6,6 @@ use {
         makepad_draw::*,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
-        makepad_widgets::dock::*,
         file_system::FileClient,
         makepad_file_protocol::{
             FileRequest,

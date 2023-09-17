@@ -71,7 +71,7 @@ enum StdErrState {
 
 impl BuildConnection {
     
-    pub fn kill(&self, cmd_id: BuildCmdId) {
+    pub fn stop(&self, cmd_id: BuildCmdId) {
         let shared = self.shared.clone();
         
         let shared = shared.write().unwrap();
@@ -293,9 +293,9 @@ impl BuildConnection {
                 // lets kill all other 'whats'
                 self.run(process, cmd_wrap.cmd_id);
             }
-            BuildCmd::Kill => {
+            BuildCmd::Stop => {
                 // lets kill all other 'whats'
-                self.kill(cmd_wrap.cmd_id);
+                self.stop(cmd_wrap.cmd_id);
             }
             BuildCmd::HostToStdin(msg) => {
                 // ok lets fetch the running process from the cmd_id
