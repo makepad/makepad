@@ -7,8 +7,8 @@ live_design!{
 
     App = {{App}} {
         ui:<Window>{
-            <ScrollYView>{
-                draw_bg:{color:#5}
+            draw_bg:{color:#5}
+            body={
                 <NumberGrid>{
                 }
             }
