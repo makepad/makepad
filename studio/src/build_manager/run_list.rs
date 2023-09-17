@@ -150,7 +150,7 @@ impl BuildManager {
                     run_list.redraw(cx);
                     for i in 0..if change{1}else{BuildTarget::len()} {
                         let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
-                        Self::toggle_active_build(&mut self.active, &self.clients[0],cx, id, &binary_name, i, change, &mut out);
+                        Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0],cx, id, &binary_name, i, change, &mut out);
                         self.log.clear();
                     }
                 };
@@ -161,7 +161,7 @@ impl BuildManager {
                     if item_id == id{
                         if let Some(change) = item.check_box(id!(check)).changed(actions) {
                             run_list.redraw(cx);
-                            Self::toggle_active_build(&mut self.active, &self.clients[0], cx, item_id, &binary_name, i, change, &mut out);
+                            Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], cx, item_id, &binary_name, i, change, &mut out);
                             self.log.clear();
                         }
                     }
@@ -192,7 +192,7 @@ impl BuildManager {
         }
     }
     
-    pub fn toggle_active_build(active:&mut ActiveBuilds, client:&BuildClient, cx: &mut Cx, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
+    pub fn toggle_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient, cx: &mut Cx, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
         let target = Self::target_id_to_target(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
@@ -206,7 +206,7 @@ impl BuildManager {
                     item_id,
                     process: process.clone(),
                     run_view_id,
-                    cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone()))),
+                    cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
                     texture: Texture::new(cx)
                 });
             }

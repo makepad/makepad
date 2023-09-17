@@ -21,7 +21,7 @@ use {
         /*makepad_math::*,*/
         cx::Cx,
         cx::CxDependency,
-    }
+    },
 };
 
 pub struct LiveBody {
@@ -176,7 +176,7 @@ impl Cx {
         }
     }
     
-    pub fn start_live_file_watcher(&mut self){
+    pub fn start_disk_live_file_watcher(&mut self, milis:u64){
         let live_registry = self.live_registry.borrow();
         let (send, recv) = std::sync::mpsc::channel();
         self.live_file_changes = Some(recv);
@@ -210,7 +210,7 @@ impl Cx {
             if changed_files.len()>0{
                 send.send(changed_files).unwrap();
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(std::time::Duration::from_millis(milis));
         });
     }
     

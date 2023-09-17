@@ -341,7 +341,13 @@ impl CxOsApi for Cx {
         }
         
         self.live_expand();
-        self.start_live_file_watcher();
+
+        #[cfg(ios_sim)]
+        self.start_disk_live_file_watcher();
+        
+        #[cfg(not(ios_sim))]
+        self.start_network_live_file_watcher();
+        
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
         #[cfg(ios_sim)]
