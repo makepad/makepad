@@ -1,12 +1,20 @@
 use {
     std::{
         rc::Rc,
-        cell::RefCell,
+        cell::{
+            Cell,
+            RefCell,
+        },
+        sync::{
+            Arc,
+            Mutex,
+        },
     },
     makepad_objc_sys::{
         msg_send,
         sel,
         sel_impl,
+        runtime::ObjcId,
     },
     crate::{
         makepad_live_id::*,
@@ -43,6 +51,7 @@ use {
         window::CxWindowPool,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
+        texture::Texture,
     }
 };
 
@@ -141,7 +150,10 @@ impl Cx {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
-        //let cx = Rc::new(RefCell::new(self));
+
+        // store device object ID for double buffering
+        cx.borrow_mut().os.metal_device = Cell::new(Some(metal_cx.borrow().device));
+
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
@@ -561,5 +573,9 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
-}
 
+    pub metal_device: Cell<Option<ObjcId>>,
+    pub (crate) swapchain: Option<[Texture; 2]>,  // Option to satisfy Default
+    pub (crate) maybe_new_handles: [Arc<Mutex<Option<RcObjcId>>>; 2],
+    pub (crate) present_index: Arc<Mutex<usize>>,
+}
