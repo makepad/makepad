@@ -11,6 +11,7 @@ use {
         os::{
             windows::{
                 windows_media::CxWindowsMedia,
+                windows_decoding::CxWindowsDecoding,
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
@@ -340,7 +341,11 @@ impl Cx {
                 }
                 CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     //todo!()
-                }
+                },
+                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
+                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
+                CxOsOp::CleanupVideoDecoding(_) => todo!(),
             }
         }
         ret
@@ -362,4 +367,5 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
+    pub (crate) decoding: CxWindowsDecoding,
 }
