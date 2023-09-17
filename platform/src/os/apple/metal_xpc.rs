@@ -73,7 +73,7 @@ pub fn xpc_service_proxy() -> RcObjcId {
         let () = msg_send![connection, setRemoteObjectInterface: iface];
         let () = msg_send![connection, resume];
         
-        let error_handler = objc_block!(move | error: ObjcId | {
+        let _error_handler = objc_block!(move | error: ObjcId | {
             let desc: ObjcId = msg_send![error, localizedDescription];
             log!("xpc_service_proxy got error: {}", nsstring_to_string(desc));
         });
