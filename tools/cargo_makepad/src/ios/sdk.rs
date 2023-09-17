@@ -1,4 +1,4 @@
-use crate::shell::*;
+use crate::makepad_shell::*;
 use crate::ios::{IosTarget};
 
 pub fn rustup_toolchain_install(ios_targets:&[IosTarget]) -> Result<(), String> {

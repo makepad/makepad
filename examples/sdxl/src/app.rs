@@ -794,7 +794,7 @@ live_design!{
                                     }
                                 }
                             }
-                            image_list = <ListView> {
+                            image_list = <PortalList> {
                                 height: Fill,
                                 width: Fill,
                                 margin: {top: 0}
@@ -1253,12 +1253,12 @@ impl App {
     
     fn play(&mut self, cx: &mut Cx) {
         self.set_current_image_by_item_id_and_row(cx, 0, 0);
-        self.ui.list_view(id!(image_list)).set_first_id_and_scroll(0, 0.0);
+        self.ui.portal_list(id!(image_list)).set_first_id_and_scroll(0, 0.0);
         self.set_slide_show(cx, true);
     }
     
     fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.list_view(id!(image_list));
+        let image_list = self.ui.portal_list(id!(image_list));
         for event in event.network_responses() {
             match &event.response {
                 NetworkResponse::WebSocketString(s) => {
@@ -1360,7 +1360,7 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.list_view(id!(image_list));
+        let image_list = self.ui.portal_list(id!(image_list));
         
         if self.db.handle_decoded_images(cx) {
             self.ui.redraw(cx);

@@ -36,6 +36,7 @@ pub struct CxFontsAtlas {
 #[derive(Default)]
 pub struct CxFontsAtlasAlloc {
     pub texture_size: DVec2,
+    pub full: bool,
     pub xpos: f64,
     pub ypos: f64,
     pub hmax: f64,
@@ -50,7 +51,8 @@ impl CxFontsAtlas {
             texture_id,
             clear_buffer: false,
             alloc: CxFontsAtlasAlloc {
-                texture_size: DVec2 {x: 2048.0, y: 4096.0},
+                full: false,
+                texture_size: DVec2 {x: 4096.0, y: 4096.0},
                 xpos: 0.0,
                 ypos: 0.0,
                 hmax: 0.0,
@@ -67,6 +69,8 @@ impl CxFontsAtlasAlloc {
             self.hmax = 0.0;
         }
         if h + self.ypos >= self.texture_size.y {
+            // ok so the fontatlas is full..
+            self.full = true;
             println!("FONT ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
         }
         if h > self.hmax {

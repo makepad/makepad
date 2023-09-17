@@ -77,7 +77,7 @@ impl CheckBox {
         
         match event.hits(cx, self.draw_check.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Arrow);
+                cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
