@@ -472,11 +472,10 @@ MidiManager.OnDeviceOpenedListener{
 
     public void decodeNextVideoChunk(long videoId, int maxFramesToDecode) {
         VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
-        if(runnable == null) {
-            throw new IllegalStateException("No video decoding initialized with ID: " + videoId);
+        if(runnable != null) {
+            runnable.setMaxFramesToDecode(maxFramesToDecode);
+            mDecoderHandler.post(runnable);
         }
-        runnable.setMaxFramesToDecode(maxFramesToDecode);
-        mDecoderHandler.post(runnable);
     } 
 
     public void fetchNextVideoFrames(long videoId, int numberFrames) {
