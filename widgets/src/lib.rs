@@ -31,6 +31,9 @@ pub mod portal_list;
 pub mod desktop_button;
 pub mod window;
 pub mod scroll_shadow;
+// Only available on Android at the moment
+// #[cfg(target_os="android")]
+pub mod video;
 pub mod rotated_image;
 pub mod slide_panel;
 pub mod page_flip;
@@ -65,6 +68,7 @@ pub use crate::{
     slider::*,
     check_box::*,
     drop_down::*,
+    video::*,
     radio_button::*,
     text_input::*,
     link_label::*,
@@ -111,6 +115,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
     crate::rotated_image::live_design(cx);
+    crate::video::live_design(cx);
     crate::view::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
