@@ -184,16 +184,32 @@ impl RunView {
             if new_size != self.last_size {
                 self.last_size = new_size;
                 
-                texture.set_desc(cx, TextureDesc {
+                let desc = TextureDesc {
                     format: TextureFormat::SharedBGRA(run_view_id.0),
                     width: Some(new_size.0.max(1)),
                     height: Some(new_size.1.max(1)),
-                });
+                };
+                texture.set_desc(cx, desc);
                 
                 manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
                     width: rect.size.x,
                     height: rect.size.y,
                     dpi_factor: dpi_factor,
+
+                    #[cfg(target_os = "linux")]
+                    swapchain_handles: [{
+                        // HACK(eddyb) normally this would be triggered later,
+                        // but we need it *before* `get_shared_texture_dma_buf_image`.
+                        {
+                            let cxtexture = &mut cx.cx.textures[texture.texture_id()];
+
+                            // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
+                            #[cfg(not(any(linux_direct, target_os="android")))]
+                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc);
+                        }
+
+                        cx.get_shared_texture_dma_buf_image(&texture)
+                    }]
                 }));
             }
             
