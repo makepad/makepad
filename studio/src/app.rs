@@ -4,13 +4,17 @@ use crate::{
     makepad_draw::*,
     makepad_widgets::*,
     makepad_widgets::file_tree::*,
-    makepad_widgets::dock::*,
     file_system::file_system::*,
-    run_view::*,
-    build_manager::build_manager::{
-        BuildManager,
-        BuildManagerAction
-    },
+    build_manager::{
+        run_view::*,
+        run_list::{
+            RunListAction
+        },
+        build_manager::{
+            BuildManager,
+            BuildManagerAction
+        },
+    }
 };
 
 live_design!{
@@ -19,9 +23,9 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
     
-    import makepad_studio::run_view::RunView;
-    import makepad_studio::build_manager::build_manager::LogList;
-    import makepad_studio::build_manager::build_manager::RunList;
+    import makepad_studio::build_manager::run_view::RunView;
+    import makepad_studio::build_manager::log_list::LogList;
+    import makepad_studio::build_manager::run_list::RunList;
     
     Logo = <Button> {
         draw_icon: {
@@ -74,27 +78,23 @@ live_design!{
                 
                 file_tree_tabs = Tabs {
                     tabs: [file_tree, search, run_list],
-                    closable: false,
                     selected: 2
                 }
                 
                 edit_tabs = Tabs {
                     tabs: [edit_first, file1],
-                    closable: false,
                     selected: 1
                 }
                 
                 log_tabs = Tabs {
                     tabs: [log_list],
-                    closable: false,
                     selected: 0
                 }
                 
                 run_tabs = Tabs {
-                    tabs: [run_first, run1],
-                    selected: 1
+                    tabs: [run_first],
+                    selected: 0
                 }
-                
                 
                 file_tree = Tab {
                     name: "Explore",
@@ -205,7 +205,9 @@ impl LiveHook for App {
         crate::makepad_widgets::live_design(cx);
         crate::makepad_code_editor::live_design(cx);
         crate::build_manager::build_manager::live_design(cx);
-        crate::run_view::live_design(cx);
+        crate::build_manager::run_list::live_design(cx);
+        crate::build_manager::log_list::live_design(cx);
+        crate::build_manager::run_view::live_design(cx);
         // for macos
         cx.start_stdin_service();
     }
@@ -251,7 +253,6 @@ impl AppMain for App {
                 else if let Some(mut run_list) = run_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_run_list(cx, &mut *run_list);
                 }
-                
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
                     let current_id = dock.drawing_item_id().unwrap();
@@ -287,9 +288,7 @@ impl AppMain for App {
         for action in self.file_system.handle_event(cx, event, &self.ui) {
             match action {
                 FileSystemAction::RecompileNeeded => {
-                    self.build_manager.start_recompile_timer(cx);
-                    let view = self.ui.run_view(id!(run1));
-                    view.recompile_started(cx);
+                    self.build_manager.start_recompile_timer(cx, &self.ui);
                 }
                 FileSystemAction::LiveReloadNeeded => {
                     self.build_manager.clear_log();
@@ -334,9 +333,19 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        // dock drag drop and tabs
         for (item_id, item) in run_list.items_with_actions(&actions) {
-            self.build_manager.handle_run_list(cx, item_id, item, &actions);
+            match self.build_manager.handle_run_list(cx, item_id, item, &actions){
+                RunListAction::Create(run_view_id, name)=>{
+                    let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
+                    dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::No);
+                    dock.redraw(cx);
+                }
+                RunListAction::Destroy(run_view_id)=>{
+                    dock.close_tab(cx, run_view_id);
+                    dock.redraw(cx);
+                }
+                _=>()
+            }
             log_list.redraw(cx);
         }
             
@@ -377,7 +386,7 @@ impl AppMain for App {
                 else { // external file, we have to create a new tab
                     let tab_id = LiveId::unique();
                     self.file_system.request_open_file(tab_id, path.to_string());
-                    dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), path.clone());
+                    dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), path.clone(), TabClosable::Yes);
                 }
             }
         }
@@ -399,7 +408,7 @@ impl AppMain for App {
             self.file_system.request_open_file(tab_id, file_path);
             
             // lets add a file tab 'somewhere'
-            dock.create_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), tab_name);
+            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), tab_name, TabClosable::Yes);
         }
     }
 }

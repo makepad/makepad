@@ -99,7 +99,7 @@ live_design! {
         scroll_bars: <ScrollBars>{}
         draw_bg:{
             draw_depth: 0.0,
-            color:#3
+            color:#2a
         }
         draw_gutter: {
             draw_depth: 1.0,

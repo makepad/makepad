@@ -58,6 +58,7 @@ impl LiveHook for Window {
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
+        //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {

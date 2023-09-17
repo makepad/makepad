@@ -47,6 +47,15 @@ pub enum TabClosable{
     No
 }
 
+impl TabClosable{
+    pub fn as_bool(&self)->bool{
+        match self{
+            Self::Yes=>true,
+            Self::No=>false
+        }
+    }
+}
+
 impl Tab {
     
     pub fn is_selected(&self) -> bool {
