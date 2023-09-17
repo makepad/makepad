@@ -663,25 +663,17 @@ unsafe fn de_json_array_impl_inner<T>(top: *mut T, count: usize, s: &mut DeJsonS
     Ok(())
 }
 
-macro_rules!de_json_array_impl {
-    ( $($count:expr),*) => {
-        $(
-        impl<T> DeJson for [T; $count] where T: DeJson {
-            fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<Self,
-            DeJsonErr> {
-                unsafe{
-                    let mut to = std::mem::MaybeUninit::<[T; $count]>::uninit();
-                    let top: *mut T = &mut to as *mut _ as *mut T;
-                    de_json_array_impl_inner(top, $count, s, i)?;
-                    Ok(to.assume_init())
-                }
-            }
+impl<T, const N: usize> DeJson for [T; N] where T: DeJson {
+    fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<Self,
+    DeJsonErr> {
+        unsafe{
+            let mut to = std::mem::MaybeUninit::<[T; N]>::uninit();
+            let top: *mut T = &mut to as *mut _ as *mut T;
+            de_json_array_impl_inner(top, N, s, i)?;
+            Ok(to.assume_init())
         }
-        )*
     }
 }
-
-de_json_array_impl!(2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32);
 
 fn de_json_comma_block<T>(s: &mut DeJsonState, i: &mut Chars) -> Result<T, DeJsonErr> where T: DeJson {
     let t = DeJson::de_json(s, i);
