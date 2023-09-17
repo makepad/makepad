@@ -11,19 +11,19 @@ use crate::utils::*;
 #[derive(Clone)]
 pub struct HttpServer {
     pub listen_address: SocketAddr,
-    pub request: mpsc::Sender<HttpRequest>,
+    pub request: mpsc::Sender<HttpServerRequest>,
     pub post_max_size: u64
 }
 
-pub struct HttpResponse {
+pub struct HttpServerResponse {
     pub header: String,
     pub body: Vec<u8>
 }
 
-pub enum HttpRequest {
+pub enum HttpServerRequest {
     ConnectWebSocket {
         web_socket_id: u64,
-        headers:HttpHeaders,
+        headers:HttpServerHeaders,
         response_sender: mpsc::Sender<Vec<u8 >>,
     },
     DisconnectWebSocket {
@@ -35,13 +35,13 @@ pub enum HttpRequest {
         data: Vec<u8>
     },
     Get {
-        headers: HttpHeaders,
-        response_sender: mpsc::Sender<HttpResponse>,
+        headers: HttpServerHeaders,
+        response_sender: mpsc::Sender<HttpServerResponse>,
     },
     Post {
-        headers: HttpHeaders,
+        headers: HttpServerHeaders,
         body: Vec<u8>,
-        response: mpsc::Sender<HttpResponse>,
+        response: mpsc::Sender<HttpServerResponse>,
     }
 }
 
@@ -66,7 +66,7 @@ pub fn start_http_server(
                 connection_counter += 1;
                 let _read_thread = std::thread::spawn(move || {
                     
-                    let headers = HttpHeaders::from_tcp_stream(&mut tcp_stream);
+                    let headers = HttpServerHeaders::from_tcp_stream(&mut tcp_stream);
                     if headers.is_none() {
                         return http_error_out(tcp_stream, 500);
                     }
@@ -89,7 +89,7 @@ pub fn start_http_server(
     Some(listen_thread)
 }
 
-fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpHeaders) {
+fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders) {
     // we have to have a content-length or bust
     if headers.content_length.is_none() {
         return http_error_out(tcp_stream, 500);
@@ -116,8 +116,8 @@ fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: Http
         bytes_left -= bytes_read;
     }
     
-    let (tx_socket, rx_socket) = mpsc::channel::<HttpResponse> ();
-    if http_server.request.send(HttpRequest::Post {
+    let (tx_socket, rx_socket) = mpsc::channel::<HttpServerResponse> ();
+    if http_server.request.send(HttpServerRequest::Post {
         headers,
         body,
         response: tx_socket
@@ -132,7 +132,7 @@ fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: Http
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }
 
-fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpHeaders, web_socket_id: u64) {
+fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders, web_socket_id: u64) {
     let upgrade_response = WebSocket::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
 
     write_bytes_to_tcp_stream_no_error(&mut tcp_stream, upgrade_response.as_bytes());
@@ -165,7 +165,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
         let _ = write_tcp_stream.shutdown(Shutdown::Both);
     });
     
-    if http_server.request.send(HttpRequest::ConnectWebSocket {
+    if http_server.request.send(HttpServerRequest::ConnectWebSocket {
         headers,
         web_socket_id,
         response_sender: tx_socket.clone()
@@ -195,7 +195,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                             println!("Websocket text");
                         }
                         Ok(WebSocketMessage::Binary(data)) => {
-                            if http_server.request.send(HttpRequest::BinaryMessage {
+                            if http_server.request.send(HttpServerRequest::BinaryMessage {
                                 web_socket_id,
                                 response_sender: tx_socket.clone(),
                                 data: data.to_vec(),
@@ -225,15 +225,15 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
         }
     }
     
-    let _ =  http_server.request.send(HttpRequest::DisconnectWebSocket {
+    let _ =  http_server.request.send(HttpServerRequest::DisconnectWebSocket {
         web_socket_id,
     });
 }
 
-fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpHeaders) {
+fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders) {
     // send our channel the post
-    let (tx_socket, rx_socket) = mpsc::channel::<HttpResponse> ();
-    if http_server.request.send(HttpRequest::Get {
+    let (tx_socket, rx_socket) = mpsc::channel::<HttpServerResponse> ();
+    if http_server.request.send(HttpServerRequest::Get {
         headers,
         response_sender: tx_socket
     }).is_err() {
