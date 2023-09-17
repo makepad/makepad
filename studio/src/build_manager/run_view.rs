@@ -19,7 +19,7 @@ live_design!{
                 //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
                 let fb = sample2d_rt(self.tex, self.pos)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
-                    return #4
+                    return #2
                 }
                 return mix(fb, #4, self.recompiling * 0.4);
             }
