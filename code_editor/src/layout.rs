@@ -3,9 +3,9 @@ use {
         document::{DocumentLayout, IndentState},
         inlays::{BlockInlay, InlineInlay},
         selection::Affinity,
-        state::SessionLayout,
+        session::SessionLayout,
         str::StrExt,
-        text::Text,
+        text::{Position, Text},
         widgets::{BlockWidget, InlineWidget},
         wrap::WrapData,
         Token,
@@ -53,6 +53,18 @@ impl<'a> Layout<'a> {
             Ok(line) => line + 1,
             Err(line) => line,
         }
+    }
+
+    pub fn logical_to_normalized_position(
+        &self,
+        position: Position,
+        affinity: Affinity,
+    ) -> (f64, f64) {
+        let line = self.line(position.line_index);
+        let (row_index, column_index) =
+            line.logical_to_grid_position(position.byte_index, affinity);
+        let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+        (x, line.y() + y)
     }
 
     pub fn line(&self, index: usize) -> Line<'_> {

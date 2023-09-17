@@ -2,8 +2,8 @@ use {
     crate::{
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
+        session::Session,
         settings::Settings,
-        state::Session,
         str::StrExt,
         text::Position,
         token::TokenKind,
@@ -99,7 +99,7 @@ live_design! {
         scroll_bars: <ScrollBars>{}
         draw_bg:{
             draw_depth: 0.0,
-            color:#3
+            color:#2a
         }
         draw_gutter: {
             draw_depth: 1.0,
@@ -252,6 +252,16 @@ impl CodeEditor {
         self.draw_indent_guide_layer(cx, session);
         self.draw_selection_layer(cx, session);
 
+        // Get the last added selection.
+        let last_added_selection =
+            session.selections()[session.last_added_selection_index().unwrap()];
+        // Get the normalized cursor position. To go from normalized to screen position, multiply by
+        // the cell size, then shift by the viewport origin.
+        let (_x, _y) = session.layout().logical_to_normalized_position(
+            last_added_selection.cursor.position,
+            last_added_selection.cursor.affinity,
+        );
+
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
             session.layout().height() * self.cell_size.y,
@@ -347,9 +357,19 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
+                modifiers: KeyModifiers { shift: false, .. },
                 ..
             }) => {
-                session.tab();
+                session.indent();
+                cx.redraw_all();
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Tab,
+                modifiers: KeyModifiers { shift: true, .. },
+                ..
+            }) => {
+                session.outdent();
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
@@ -366,25 +386,6 @@ impl CodeEditor {
                 ..
             }) => {
                 session.backspace();
-                cx.redraw_all();
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
-            }
-
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::RBracket,
-                modifiers: KeyModifiers { logo: true, .. },
-                ..
-            }) => {
-                session.indent();
-                cx.redraw_all();
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
-            }
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::LBracket,
-                modifiers: KeyModifiers { logo: true, .. },
-                ..
-            }) => {
-                session.outdent();
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
@@ -485,7 +486,7 @@ impl CodeEditor {
     }
 
     fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
-        let enclosing_brackets = session.enclosing_brackets();
+        let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
@@ -548,7 +549,10 @@ impl CodeEditor {
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
                                     if let TokenKind::Delimiter = token.kind {
-                                        if enclosing_brackets.contains(&Position { line_index, byte_index }) {
+                                        if highlighted_delimiter_positions.contains(&Position {
+                                            line_index,
+                                            byte_index,
+                                        }) {
                                             self.draw_text.color = vec4(1.0, 0.0, 0.0, 1.0);
                                         }
                                     }

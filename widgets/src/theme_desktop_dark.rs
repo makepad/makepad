@@ -18,7 +18,7 @@ live_design!{
         }
     }
     
-    THEME_FONT_META = {
+    THEME_FONT_META = { 
         font_size: 9.4,
         top_drop: 1.2,
         font: {
@@ -378,7 +378,7 @@ live_design!{
     
     
     
-    CheckBox = <CheckBoxBase> {
+     CheckBox = <CheckBoxBase> {
         
         width: Fit,
         height: Fit
@@ -534,7 +534,6 @@ live_design!{
                     }
                 }
                 on = {
-                    cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_check: {selected: 1.0}
@@ -684,7 +683,7 @@ live_design!{
             flow: Right
             
             draw_bg: {color: (THEME_COLOR_BG_APP)}
-            height: 29
+            height: 27
             caption_label = <View> {
                 width: Fill,
                 height: Fill
@@ -1041,7 +1040,7 @@ live_design!{
         border_size: (BORDER_SIZE)
         
         flow: Down
-        padding: {left: (BORDER_SIZE), top: (BORDER_SIZE), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
+        padding: {left: (BORDER_SIZE), top: (0), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
         padding_fill: {color: (THEME_COLOR_BG_APP)}
         drag_quad: {
             draw_depth: 10.0
@@ -1520,7 +1519,7 @@ live_design!{
     
     FoldButton = <FoldButtonBase> {
         draw_bg: {
-            instance opened: 0.0
+            instance open: 0.0
             instance hover: 0.0
             
             uniform fade: 1.0
@@ -1532,7 +1531,7 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.clear(vec4(0.));
                 // we have 3 points, and need to rotate around its center
-                sdf.rotate(self.opened * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
                 sdf.move_to(c.x - sz, c.y + sz);
                 sdf.line_to(c.x, c.y - sz);
                 sdf.line_to(c.x + sz, c.y + sz);
@@ -1569,8 +1568,7 @@ live_design!{
                     ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
-                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        draw_bg: {opened: (opened)}
+                        draw_bg: {open: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
                 yes = {
@@ -1578,8 +1576,7 @@ live_design!{
                     ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
-                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
-                        draw_bg: {opened: (opened)}
+                        draw_bg: {open: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                     }
                 }
             }
@@ -1882,7 +1879,7 @@ live_design!{
     }
     
     
-    ListView = <ListViewBase> {
+    PortalList = <PortalListBase> {
         width: Fill
         height: Fill
         capture_overload: true
@@ -1890,6 +1887,13 @@ live_design!{
         flow: Down
     }
     
+    FlatList = <FlatListBase> {
+        width: Fill
+        height: Fill
+        capture_overload: true
+        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+        flow: Down
+    }
     
     CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}

@@ -58,6 +58,7 @@ impl LiveHook for Window {
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
+        //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
@@ -269,7 +270,7 @@ impl Widget for Window {
         self.view.find_widgets(path, cached, results);
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();
@@ -278,19 +279,7 @@ impl Widget for Window {
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get() {
-            match self.view.draw_widget(cx){
-                Err(result)=>{
-                    if let Some(step) = self.view.is_in_draw_step(){
-                        log!("IN STEP: {}", step);
-                        self.draw_walk_widget(cx, _walk)?;
-                    }
-                    else{
-                        return Err(result);
-                    }
-                }
-                Ok(_)=>()
-            }
-            
+            self.view.draw_walk_widget(cx, walk)?;
             self.draw_state.end();
             self.end(cx);
         }

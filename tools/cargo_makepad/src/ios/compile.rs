@@ -1,7 +1,8 @@
-use crate::shell::*;
+use crate::makepad_shell::*;
 use crate::ios::{IosTarget};
 use std::path::{PathBuf, Path};
 use std::collections::HashSet;
+use crate::utils::*;
 
 pub struct PlistValues {
     identifier: String,
@@ -127,12 +128,12 @@ pub fn build(org: &str, product: &str, args: &[String], ios_target: IosTarget) -
     })
 }
 
-pub fn run_sim(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
-    if signing.org.is_none() || signing.product.is_none() {
-        return Err("Please set --org=org --product=app on the commandline inbetween ios and run-sim.".to_string());
+pub fn run_on_sim(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
+    if signing.org.is_none() || signing.app.is_none() {
+        return Err("Please set --org=org --app=app on the commandline inbetween ios and run-sim.".to_string());
     }
     
-    let result = build(&signing.org.unwrap_or("orgname".to_string()), &signing.product.unwrap_or("productname".to_string()), args, ios_target) ?;
+    let result = build(&signing.org.unwrap_or("orgname".to_string()), &signing.app.unwrap_or("productname".to_string()), args, ios_target) ?;
     
     let cwd = std::env::current_dir().unwrap();
     shell_env(&[], &cwd, "xcrun", &[
@@ -373,19 +374,19 @@ pub struct SigningArgs {
     pub provisioning_profile: Option<String>,
     pub device_uuid: Option<String>,
     pub org: Option<String>,
-    pub product: Option<String>
+    pub app: Option<String>
 }
 
-pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
+pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
     
-    if signing.org.is_none() || signing.product.is_none() {
-        return Err("Please set --org=org --product=app on the commandline inbetween ios and run-real, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
+    if signing.org.is_none() || signing.app.is_none() {
+        return Err("Please set --org=org --app=app on the commandline inbetween ios and run-real, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
     }
     let org = signing.org.unwrap();
-    let product = signing.product.unwrap();
+    let app = signing.app.unwrap();
     
     let build_crate = get_build_crate_from_args(args) ?;
-    let result = build(&org, &product, args, ios_target) ?;
+    let result = build(&org, &app, args, ios_target) ?;
     let cwd = std::env::current_dir().unwrap();
     
     // parse identities for code signing
@@ -417,7 +418,7 @@ pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) ->
     for profile in profiles {
         // lets read it
         let profile_path = profile.unwrap().path();
-        if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{product}")) {
+        if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{app}")) {
             found_profiles.push(prov);
         }
         else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.*", org)) {
@@ -437,7 +438,7 @@ pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) ->
         // if no argument passed, take first profile found
         &found_profiles[0]
     } else {
-        return Err(format!("Could not find a matching mobile provision profile for name {org}.{product}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again."))
+        return Err(format!("Could not find a matching mobile provision profile for name {org}.{app}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again."))
     };
     println!("Selected provisioning profile {:?}, for team_ident {}", provision.path, provision.team_ident);
     
@@ -461,7 +462,7 @@ pub fn run_real(signing: SigningArgs, args: &[String], ios_target: IosTarget) ->
     // we can also find the team ids from there to build the scent
     // and the device id as well
     let scent = Scent {
-        app_id: format!("{}.{}.{}", provision.team_ident, org, product),
+        app_id: format!("{}.{}.{}", provision.team_ident, org, app),
         team_id: provision.team_ident.to_string()
     };
     

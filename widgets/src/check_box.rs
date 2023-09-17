@@ -37,7 +37,7 @@ pub struct CheckBox {
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[animator] animator: Animator,
-
+    
     #[live] icon_walk: Walk,
     #[live] label_walk: Walk,
     #[live] label_align: Align,
@@ -45,15 +45,15 @@ pub struct CheckBox {
     #[live] draw_check: DrawCheckBox,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
-
+    
     #[live] text: RcStringMut,
     
     #[live] bind: String,
 }
 
-impl LiveHook for CheckBox{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,CheckBox)
+impl LiveHook for CheckBox {
+    fn before_live_design(cx: &mut Cx) {
+        register_widget!(cx, CheckBox)
     }
 }
 
@@ -77,7 +77,7 @@ impl CheckBox {
         
         match event.hits(cx, self.draw_check.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Arrow);
+                cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
@@ -112,8 +112,8 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-
-    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+    
+    fn widget_to_data(&self, _cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         match actions.single_action(self.widget_uid()) {
             CheckBoxAction::Change(v) => {
                 nodes.write_field_value(path, LiveValue::Bool(v));
@@ -123,7 +123,7 @@ impl Widget for CheckBox {
         }
     }
     
-    fn data_to_widget(&mut self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+    fn data_to_widget(&mut self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(value) = nodes.read_field_value(path) {
             if let Some(value) = value.as_bool() {
                 self.animator_toggle(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
@@ -142,18 +142,18 @@ impl Widget for CheckBox {
         });
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
     
-    fn text(&self)->String{
+    fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
     
-    fn set_text(&mut self,v:&str){
+    fn set_text(&mut self, v: &str) {
         self.text.as_mut_empty().push_str(v);
     }
 }
@@ -162,7 +162,7 @@ impl Widget for CheckBox {
 pub struct CheckBoxRef(WidgetRef);
 
 impl CheckBoxRef {
-    pub fn changed(&self, actions: &WidgetActions)->Option<bool>{
+    pub fn changed(&self, actions: &WidgetActions) -> Option<bool> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let CheckBoxAction::Change(b) = item.action() {
                 return Some(b)
@@ -170,25 +170,25 @@ impl CheckBoxRef {
         }
         None
     }
-
-    pub fn set_text(&self, text:&str){
-        if let Some(mut inner) = self.borrow_mut(){
+    
+    pub fn set_text(&self, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
             let s = inner.text.as_mut_empty();
             s.push_str(text);
         }
     }
-
-    pub fn selected(&self, cx: &Cx)->bool {
-        if let Some(inner) = self.borrow(){
+    
+    pub fn selected(&self, cx: &Cx) -> bool {
+        if let Some(inner) = self.borrow() {
             inner.animator_in_state(cx, id!(selected.on))
         }
-        else{
+        else {
             false
         }
     }
-
-    pub fn set_selected(&self, cx: &mut Cx, value:bool) {
-        if let Some(mut inner) = self.borrow_mut(){
+    
+    pub fn set_selected(&self, cx: &mut Cx, value: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.animator_toggle(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
         }
     }

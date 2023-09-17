@@ -61,7 +61,9 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     // render to swapchain
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                    if window_id == CxWindowPool::id_zero() {
+                        self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                    }
 
                     // and then wait for GPU, which calls stdin_send_draw_complete when its done
                 }
@@ -316,17 +318,14 @@ impl Cx {
     fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, main_texture: &Texture) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::CreateWindow(window_id) => {
-                    if window_id != CxWindowPool::id_zero() {
-                        panic!("ONLY ONE WINDOW SUPPORTED");
-                    }
+                CxOsOp::CreateWindow(_window_id) => {
                     let window = &mut self.windows[CxWindowPool::id_zero()];
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                        //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                        clear_color: PassClearColor::ClearWith(pass.clear_color),
                         texture_id: main_texture.texture_id()
                     }];
                 },
