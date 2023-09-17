@@ -23,8 +23,8 @@ use {
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
+        makepad_live_id::*,
         thread::Signal,
-        live_id::LiveId,
         event::{
             VirtualKeyboardEvent,
             NetworkResponseEvent,
@@ -44,6 +44,7 @@ use {
             VideoDecodingInitializedEvent,
             VideoColorFormat,
             VideoStreamEvent,
+            HttpRequest, HttpMethod,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -62,6 +63,8 @@ impl Cx {
         
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
+        
+        self.start_network_live_file_watcher();
         
         while !self.os.quit {
             self.handle_timers();
@@ -228,7 +231,7 @@ impl Cx {
                         }
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
-                        let e = Event::NetworkResponses(vec![
+                        let mut e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpResponse(HttpResponse::new(
@@ -239,16 +242,20 @@ impl Cx {
                                 ))
                             }
                         ]);
-                        self.call_event_handler(&e);
+                        if self.studio_http_connection(&mut e){
+                            self.call_event_handler(&e);
+                        }
                     }
                     FromJavaMessage::HttpRequestError {request_id, error, ..} => {
-                        let e = Event::NetworkResponses(vec![
+                        let mut e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpRequestError(error)
                             }
                         ]);
-                        self.call_event_handler(&e);
+                        if self.studio_http_connection(&mut e){
+                            self.call_event_handler(&e);
+                        }
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -408,6 +415,77 @@ impl Cx {
         });
     }
     
+    pub fn studio_http_connection(&mut self, event:&mut Event)->bool{
+        if let Event::NetworkResponses(res) = event{
+            res.retain(|res|{
+                if res.request_id == live_id!(live_reload){
+                    // alright lets see if we need to live reload from the body
+                    match &res.response{
+                        NetworkResponse::HttpResponse(res)=>{
+                            // lets check our response
+
+                            Self::poll_studio_http();
+                        },
+                        _=>()
+                    }
+                    false
+                }
+                else{
+                    true
+                }
+            });
+            if res.len()>0{
+                return true
+            }
+        }
+        false
+    }
+    
+    fn poll_studio_http(){
+        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
+        if studio_http.is_none(){
+            return
+        }
+        let url = format!("http://{}/live_file",studio_http.unwrap());
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        unsafe {android_jni::to_java_http_request(live_id!(live_reload), request);}
+    }
+    
+    pub fn start_network_live_file_watcher(&mut self){
+        Self::poll_studio_http();
+        /*
+        log!("WATCHING NETWORK FOR FILE WATCHER");
+        let studio_uid: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_UID");
+        if studio_uid.is_none(){
+            return
+        }
+        let studio_uid:u64 = studio_uid.unwrap().parse().unwrap_or(0);
+        std::thread::spawn(move || {
+            let discovery = UdpSocket::bind("0.0.0.0:41533").unwrap();
+            discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
+            discovery.set_broadcast(true).unwrap();
+            
+            let mut other_uid = [0u8; 8];
+            let mut host_addr = None;
+            // nonblockingly (timeout=1ns) check our discovery socket for peers
+            'outer: loop{
+                while let Ok((_, mut addr)) = discovery.recv_from(&mut other_uid) {
+                    let recv_uid = u64::from_be_bytes(other_uid);
+                    log!("GOT ADDR {} {}",studio_uid, recv_uid);
+                    if studio_uid == recv_uid {
+                        // we found our host. lets connect to it
+                        host_addr = Some(addr);
+                        break 'outer;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let host_addr = host_addr.unwrap();
+            // ok we can connect
+            log!("WE CAN CONNECT {:?}", host_addr);
+        });*/
+    }
+    
     /*    
     pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
         if let Some(text) = content {
@@ -433,6 +511,7 @@ impl Cx {
         self.after_every_event(&to_java);
     }
    */
+   
     
     pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
@@ -639,6 +718,7 @@ impl CxOsApi for Cx {
         self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         self.live_expand();
         self.live_scan_dependencies();
+        
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {

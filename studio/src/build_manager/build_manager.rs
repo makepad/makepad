@@ -4,6 +4,7 @@ use {
         makepad_micro_serde::*,
         makepad_platform::*,
         makepad_widgets::*,
+        makepad_platform::thread::*,
         makepad_platform::os::cx_stdin::{
             HostToStdin,
             StdinToHost,
@@ -15,10 +16,16 @@ use {
         },
         makepad_shell::*,
     },
+    makepad_http::server::*,
     std::{
         collections::{HashMap},
         env,
     },
+    std::sync::mpsc,
+    std::thread,
+    std::time,
+    std::net::{UdpSocket,SocketAddr},
+    std::time::{Instant, Duration},
 };
 
 live_design!{
@@ -108,13 +115,16 @@ impl ActiveBuilds {
 
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
+    #[rust] pub studio_uid: LiveId,
     #[live] path: String,
     #[rust] pub clients: Vec<BuildClient>,
     #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
     #[live] recompile_timeout: f64,
     #[rust] recompile_timer: Timer,
     #[rust] pub binaries: Vec<BuildBinary>,
-    #[rust] pub active: ActiveBuilds
+    #[rust] pub active: ActiveBuilds,
+    #[rust] pub studio_http: String,
+    #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>
 }
 
 pub struct BuildBinary {
@@ -134,9 +144,12 @@ pub enum BuildManagerAction {
 impl BuildManager {
     
     pub fn init(&mut self, cx: &mut Cx) {
+        // not great but it will do.
+        
         self.clients = vec![BuildClient::new_with_local_server(&self.path)];
         self.update_run_list(cx);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
+        self.discover_external_ip(cx);
     }
     
     
@@ -207,7 +220,7 @@ impl BuildManager {
             if let Some(cmd_id) = active_build.cmd_id {
                 self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
             }
-            let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone()));
+            let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
             active_build.cmd_id = Some(cmd_id);
         }
     }
@@ -242,6 +255,13 @@ impl BuildManager {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+        if let Event::Signal = event{
+            if let Ok(mut addr) = self.recv_external_ip.try_recv(){
+                // alright lets start our http server
+                self.start_http_server(addr);
+            }
+        }
+        
         if self.recompile_timer.is_event(event) {
             self.start_recompile(cx);
             self.clear_log();
@@ -309,5 +329,96 @@ impl BuildManager {
                 }
             }
         });
+    }
+    
+    pub fn start_http_server(&mut self, mut addr: SocketAddr){
+        addr.set_port(41535);
+        let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
+        
+        self.studio_http = format!("{}",addr);
+        log!("start_http_server {}", self.studio_http);
+        start_http_server(HttpServer{
+            listen_address:addr,
+            post_max_size: 1024*1024,
+            request: tx_request
+        });
+        std::thread::spawn(move || {
+            // lets receive incoming http requests
+            // if will answer it with a filechange if we have one
+            // otherwise we just return nothing
+            while let Ok(message) = rx_request.recv() {
+                match message{
+                    HttpServerRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
+                    },
+                    HttpServerRequest::DisconnectWebSocket {web_socket_id:_}=>{
+                    },
+                    HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
+                    }
+                    HttpServerRequest::Get{headers:_, response_sender}=>{
+                        let body = "".to_string().as_bytes().to_vec();
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                            Content-Type: application/json\r\n\
+                            Content-encoding: none\r\n\
+                            Cache-Control: max-age:0\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse{header, body});
+                    }
+                    HttpServerRequest::Post{..}=>{//headers, body, response}=>{
+                    }
+                }
+            }
+        });
+    }
+    
+    pub fn discover_external_ip(&mut self, _cx:&mut Cx){
+        // figure out some kind of unique id. bad but whatever.
+        let studio_uid = LiveId::from_str(&format!("{:?}{:?}", Instant::now(), std::time::SystemTime::now()));
+        
+        let write_discovery = UdpSocket::bind("0.0.0.0:41534").unwrap();
+        write_discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
+        write_discovery.set_broadcast(true).unwrap();
+        // start a broadcast
+        let studio_uid = self.studio_uid.0;
+        std::thread::spawn(move || {
+            let dummy = studio_uid.to_be_bytes();
+            loop {
+                write_discovery.send_to(&dummy, "255.255.255.255:41533").unwrap();
+                thread::sleep(time::Duration::from_millis(100));
+            }
+        });
+        // listen for bounced back udp packets to get our external ip
+        let ip_sender = self.recv_external_ip.sender();
+        std::thread::spawn(move || {
+            let discovery = UdpSocket::bind("0.0.0.0:41533").unwrap();
+            discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
+            discovery.set_broadcast(true).unwrap();
+            
+            let mut other_uid = [0u8; 8];
+            'outer: loop{
+                while let Ok((_, addr)) = discovery.recv_from(&mut other_uid) {
+                    let recv_uid = u64::from_be_bytes(other_uid);
+                    if studio_uid == recv_uid {
+                        let _ = ip_sender.send(addr);
+                        break 'outer;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        // lets start a webserver
+        
+        
+        // this thread does udp broadcast every second to announce our existence
+        /*std::thread::spawn(move || {
+            let dummy = client_uid.to_be_bytes();
+            loop {
+                write_discovery.send_to(&dummy, "255.255.255.255:41531").unwrap();
+                thread::sleep(time::Duration::from_secs(1));
+            }
+        });*/
     }
 }

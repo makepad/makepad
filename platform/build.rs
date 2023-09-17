@@ -9,7 +9,7 @@ fn main() {
             match config{
                 "lines"=>println!("cargo:rustc-cfg=lines"), 
                 "linux_direct"=>println!("cargo:rustc-cfg=linux_direct"), 
-                _=>()
+                _=>{}
             }
         }
     }

@@ -8,7 +8,7 @@ use std::{
 };
 
 fn main() {
-    let (tx_request, rx_request) = mpsc::channel::<HttpRequest> ();
+    let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
     
     #[cfg(target_os = "linux")]
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
@@ -44,16 +44,16 @@ fn main() {
     ];
     while let Ok(message) = rx_request.recv() {
         match message{
-            HttpRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
+            HttpServerRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
                 
             },
-            HttpRequest::DisconnectWebSocket {web_socket_id:_}=>{
+            HttpServerRequest::DisconnectWebSocket {web_socket_id:_}=>{
                 
             },
-            HttpRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
+            HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
                 
             }
-            HttpRequest::Get{headers, response_sender}=>{
+            HttpServerRequest::Get{headers, response_sender}=>{
                 let path = &headers.path;
                 
                 
@@ -61,13 +61,13 @@ fn main() {
                     let header = "HTTP/1.1 200 OK\r\n\
                             Cache-Control: max-age:0\r\n\
                             Connection: close\r\n\r\n".to_string();
-                    let _ = response_sender.send(HttpResponse{header, body:vec![]});
+                    let _ = response_sender.send(HttpServerResponse{header, body:vec![]});
                     continue
                 }
                 
                 if path == "/favicon.ico"{
                     let header = "HTTP/1.1 200 OK\r\n\r\n".to_string();
-                    let _ = response_sender.send(HttpResponse{header, body:vec![]});
+                    let _ = response_sender.send(HttpServerResponse{header, body:vec![]});
                     continue
                 }
                 
@@ -108,12 +108,12 @@ fn main() {
                                 mime_type,
                                 body.len()
                             );
-                            let _ = response_sender.send(HttpResponse{header, body});
+                            let _ = response_sender.send(HttpServerResponse{header, body});
                         }
                     }
                 }
             }
-            HttpRequest::Post{..}=>{//headers, body, response}=>{
+            HttpServerRequest::Post{..}=>{//headers, body, response}=>{
             }
         }
     }
