@@ -61,8 +61,8 @@ live_design!{
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         
                         // PAUSE
-                        sdf.box(0.0, sz * 1.5, sz * 1.0, sz * 3.0, 1.0); // rounding = 3rd value
-                        sdf.box(sz * 1.5, sz * 1.5, sz * 1.0, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(sz * 0.25, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(sz * 1.75, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
 
                         sdf.fill(mix(#fff0, mix(#A, #F, self.hover), self.selected));
 
