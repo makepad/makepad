@@ -10,6 +10,7 @@ use {
     },
     std::{
         env,
+        cell::Cell,
     },
 };
 
@@ -207,7 +208,8 @@ impl BuildManager {
                     process: process.clone(),
                     run_view_id,
                     cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone()))),
-                    texture: Texture::new(cx)
+                    swapchain: [Texture::new(cx),Texture::new(cx),],
+                    present_index: Cell::new(0),
                 });
             }
             if process.target.runs_in_studio(){

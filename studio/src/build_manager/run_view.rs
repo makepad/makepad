@@ -136,7 +136,7 @@ impl RunView {
         }
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost, run_view_id: LiveId, manager: &BuildManager) {
         match msg {
 
             StdinToHost::SetCursor(cursor) => {
@@ -151,13 +151,10 @@ impl RunView {
             StdinToHost::DrawCompleteAndFlip(present_index) => {
 
                 // client is ready with new image on swapchain[present_index]
-
-                // hack, only run part inside loops for the process associated with this RunView
-                for client in manager.clients.iter_mut() {
-                    for process in client.processes.values_mut() {
-
-                        process.present_index = *present_index;
-                        self.draw_app.set_texture(0, &process.swapchain[*present_index]);
+                for v in manager.active.builds.values() {
+                    if v.run_view_id == run_view_id {
+                        v.present_index.set(*present_index);
+                        self.draw_app.set_texture(0, &v.swapchain[*present_index]);
                     }
                 }
 
@@ -180,9 +177,8 @@ impl RunView {
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
 
-        // TODO: figure out how to get only the current process from manager
-        for client in manager.clients.iter() {
-            for process in client.processes.values() {
+        for v in manager.active.builds.values() {
+            if v.run_view_id == run_view_id {
                 
                 // update texture size and indicate new size to client if needed
                 let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
@@ -190,12 +186,12 @@ impl RunView {
                     self.last_size = new_size;
 
                     // update descriptors for swapchain textures
-                    process.swapchain[0].set_desc(cx,TextureDesc {
+                    v.swapchain[0].set_desc(cx,TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),    
                     });
-                    process.swapchain[1].set_desc(cx,TextureDesc {
+                    v.swapchain[1].set_desc(cx,TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),    
@@ -209,11 +205,11 @@ impl RunView {
                     {
                         let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
 
-                        let cxtexture = &mut cx.textures[process.swapchain[0].texture_id()];
+                        let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
                         cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
                         handles[0] = cxtexture.os.shared_handle.0 as u64;
 
-                        let cxtexture = &mut cx.textures[process.swapchain[1].texture_id()];
+                        let cxtexture = &mut cx.textures[v.swapchain[1].texture_id()];
                         cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
                         handles[1] = cxtexture.os.shared_handle.0 as u64;
 
@@ -224,14 +220,14 @@ impl RunView {
                     {
                         let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
 
-                        let cxtexture = &mut cx.textures[process.swapchain[0].texture_id()];
+                        let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
                         cxtexture.os.update_shared_texture(metal_device,&TextureDesc {
                             format: TextureFormat::SharedBGRA(0),  // index to XPS server textures
                             width: Some(new_size.0.max(1)),
                             height: Some(new_size.0.max(1)),
                         });
 
-                        let cxtexture = &mut cx.textures[process.swapchain[1].texture_id()];
+                        let cxtexture = &mut cx.textures[v.swapchain[1].texture_id()];
                         cxtexture.os.update_shared_texture(metal_device,&TextureDesc {
                             format: TextureFormat::SharedBGRA(1),  // index to XPS server textures
                             width: Some(new_size.0.max(1)),
@@ -245,7 +241,7 @@ impl RunView {
                     }
 
                     // send size update to client
-                    manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
+                    manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
                         width: rect.size.x,
                         height: rect.size.y,
                         dpi_factor: dpi_factor,
@@ -254,13 +250,11 @@ impl RunView {
                 }
 
                 // make sure it's going to present the right texture
-                let texture = &process.swapchain[process.present_index];
+                let texture = &v.swapchain[v.present_index.get()];
                 self.draw_app.set_texture(0, texture);
                 
                 break
             }
-            
-            self.draw_app.set_texture(0, &texture);
         }
         
         self.draw_app.draw_abs(cx, rect);
