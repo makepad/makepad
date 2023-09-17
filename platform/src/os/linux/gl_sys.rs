@@ -61,6 +61,7 @@ pub const TEXTURE_WRAP_S: types::GLenum = 0x2802;
 pub const TEXTURE_WRAP_T: types::GLenum = 0x2803;
 pub const CLAMP_TO_EDGE: types::GLenum = 0x812F;
 pub const PROGRAM_BINARY_LENGTH: types::GLenum = 0x8741;
+pub const NO_ERROR: types::GLenum = 0x0;
 
 #[inline] pub unsafe fn GenVertexArrays(n: types::GLsizei, arrays: *mut types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenVertexArrays.f)(n, arrays)}
 #[inline] pub unsafe fn BindVertexArray(array: types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::BindVertexArray.f)(array)}

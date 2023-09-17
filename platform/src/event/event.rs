@@ -15,6 +15,7 @@ use {
             xr::*,
             drag_drop::*,
             network::*,
+            video_decoding::*,
         },
         animator::Ease,
         audio::AudioDevicesEvent,
@@ -76,6 +77,10 @@ pub enum Event {
     VideoInputs(VideoInputsEvent),
     NetworkResponses(Vec<NetworkResponseEvent>),
 
+    VideoStream(VideoStreamEvent),
+    VideoDecodingInitialized(VideoDecodingInitializedEvent),
+    VideoChunkDecoded(LiveId),
+ 
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
