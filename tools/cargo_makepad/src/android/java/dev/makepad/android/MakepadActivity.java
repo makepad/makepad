@@ -4,6 +4,21 @@ import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 import android.app.Activity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
+import android.content.Context;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
+
+import java.util.HashMap;
+import java.util.ArrayList;
+import java.io.OutputStream;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.LinkedList;
+
 import android.os.Bundle;
 import android.os.Build;
 import android.util.Log;
@@ -49,6 +64,15 @@ import android.graphics.Rect;
 import java.util.concurrent.CompletableFuture;
 import java.util.ArrayList;
 import java.util.Set;
+
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
+
+import java.nio.ByteBuffer;
+import android.media.MediaDataSource;
+import java.io.IOException;
 
 import dev.makepad.android.MakepadNative;
 
@@ -204,6 +228,13 @@ MidiManager.OnDeviceOpenedListener{
     private MakepadSurface view;
     Handler mHandler;
 
+    // video decoding
+    Handler mDecoderHandler;
+    HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
+    private HashMap<Long, BlockingQueue<ByteBuffer>> mVideoFrameQueues = new HashMap<>();
+    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 5; 
+    private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
+
     static {
         System.loadLibrary("makepad");
     }
@@ -221,6 +252,11 @@ MidiManager.OnDeviceOpenedListener{
         setContentView(layout);
 
         MakepadNative.activityOnCreate(this);
+
+        HandlerThread decoderThreadHandler = new HandlerThread("VideoDecoderThread");
+        decoderThreadHandler.start(); // TODO: only start this if its needed.
+        mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
+        mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
@@ -420,6 +456,90 @@ MidiManager.OnDeviceOpenedListener{
         if(info != null){
             String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
             MakepadNative.onMidiDeviceOpened(name, device);
+        }
+    }
+
+    public void initializeVideoDecoding(long videoId, byte[] videoData, int chunkSize) {
+        BlockingQueue<ByteBuffer> videoFrameQueue = new LinkedBlockingQueue<>();
+        mVideoFrameQueues.put(videoId, videoFrameQueue);
+
+        VideoDecoder videoDecoder = new VideoDecoder(this, videoId, videoFrameQueue);
+        VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, chunkSize, videoDecoder);
+
+        mDecoderRunnables.put(videoId, runnable);
+        mDecoderHandler.post(runnable);
+    }
+
+    public void decodeNextVideoChunk(long videoId, int maxFramesToDecode) {
+        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+        if(runnable == null) {
+            throw new IllegalStateException("No video decoding initialized with ID: " + videoId);
+        }
+        runnable.setMaxFramesToDecode(maxFramesToDecode);
+        mDecoderHandler.post(runnable);
+    } 
+
+    public void fetchNextVideoFrames(long videoId, int numberFrames) {
+        BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
+        if (videoFrameQueue != null) {
+            int totalBytes = 0;
+            ArrayList<ByteBuffer> individualFrames = new ArrayList<>();
+
+            for (int i = 0; i < numberFrames; i++) {
+                ByteBuffer frame = videoFrameQueue.poll();
+                if (frame != null) {
+                    individualFrames.add(frame);
+                    totalBytes += frame.remaining();
+                }
+            }
+
+            VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+            ByteBuffer frameGroup = acquireBuffer(totalBytes);
+        
+            for (ByteBuffer frame : individualFrames) {
+                if (frame != null) {
+                    frameGroup.put(frame);
+                    if (runnable != null) {
+                        runnable.releaseBuffer(frame);
+                    }
+                }
+            }
+
+            frameGroup.flip();
+            runOnUiThread(() -> MakepadNative.onVideoStream(videoId, frameGroup));       
+            releaseBuffer(frameGroup);
+        }
+    }
+
+    public void cleanupVideoDecoding(long videoId) {
+        VideoDecoderRunnable runnable = mDecoderRunnables.remove(videoId);
+        if(runnable != null) {
+            runnable.cleanup();
+        }
+        mVideoFrameQueues.remove(videoId);
+    }
+
+    private ByteBuffer acquireBuffer(int size) {
+        synchronized(mVideoChunkBufferPool) {
+            if (!mVideoChunkBufferPool.isEmpty()) {
+                ByteBuffer buffer = mVideoChunkBufferPool.poll();
+                if (buffer.capacity() == size) {
+                    return buffer;
+                } else {
+                    return ByteBuffer.allocate(size);
+                }
+            } else {
+                return ByteBuffer.allocate(size);
+            }
+        }
+    }
+
+    private void releaseBuffer(ByteBuffer buffer) {
+        synchronized(mVideoChunkBufferPool) {
+            if (mVideoChunkBufferPool.size() < VIDEO_CHUNK_BUFFER_POOL_SIZE) {
+                buffer.clear();
+                mVideoChunkBufferPool.offer(buffer);
+            }
         }
     }
 }

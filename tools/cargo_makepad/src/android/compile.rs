@@ -31,6 +31,8 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:allowBackup="true"
             android:supportsRtl="true"
+            android:debuggable="true"
+            android:largeHeap="true"
             tools:targetApi="33">
             <meta-data android:name="android.max_aspect" android:value="2.1" />
             <activity
@@ -209,6 +211,9 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
             (makepad_java_classes_dir.join("MakepadNative.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadNetwork.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("ByteArrayMediaDataSource.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("VideoDecoder.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("VideoDecoderRunnable.java").to_str().unwrap()),
             /*
             (makepad_java_classes_dir.join("Makepad.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
@@ -248,6 +253,9 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
             (compiled_java_classes_dir.join("ResizingLayout.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadNetwork.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("HttpResponse.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("ByteArrayMediaDataSource.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("VideoDecoder.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("VideoDecoderRunnable.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$2.class").to_str().unwrap()),
             /*
