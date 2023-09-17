@@ -367,5 +367,7 @@ impl CxOsApi for Cx {
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
 
-    pub d3d11_device: Cell<Option<ID3D11Device>>,
+    pub (crate) d3d11_device: Cell<Option<ID3D11Device>>,
+    pub (crate) swapchain: [Texture; 2],
+    pub (crate) present_index: usize,
 }
