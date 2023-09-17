@@ -1,7 +1,7 @@
 use {
     makepad_code_editor::{
         code_editor::*,
-        state::{Document, Session},
+        session::{Document, Session},
     },
     makepad_widgets::*,
     std::{cell::RefCell, rc::Rc},

@@ -29,7 +29,7 @@ pub enum ChildStdIn {
 
 impl ChildProcess {
     
-    pub fn start(cmd: &str, args: &[&str], current_dir: PathBuf, env: &[(&str, &str)]) -> Result<ChildProcess, std::io::Error> {
+    pub fn start(cmd: &str, args: &[String], current_dir: PathBuf, env: &[(&str, &str)]) -> Result<ChildProcess, std::io::Error> {
         
         let mut cmd_build = Command::new(cmd);
         

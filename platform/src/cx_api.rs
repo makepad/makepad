@@ -67,10 +67,17 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
+
     HttpRequest{request_id: LiveId, request:HttpRequest},
+
     WebSocketOpen{request_id: LiveId, request:HttpRequest},
     WebSocketSendString{request_id: LiveId, data:String},
     WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
+
+    InitializeVideoDecoding(LiveId, Rc<Vec<u8>>, usize),
+    DecodeNextVideoChunk(LiveId, usize),
+    FetchNextVideoFrames(LiveId, usize),
+    CleanupVideoDecoding(LiveId),
 }
 
 impl Cx { 
@@ -433,6 +440,22 @@ impl Cx {
             request_id,
             data,
         });
+    }
+
+    pub fn initialize_video_decoding(&mut self, video_id: LiveId, video: Rc<Vec<u8>>, chunk_size: usize) {
+        self.platform_ops.push(CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size));
+    }
+
+    pub fn decode_next_video_chunk(&mut self, video_id: LiveId, max_frames_to_decode: usize) {
+        self.platform_ops.push(CxOsOp::DecodeNextVideoChunk(video_id, max_frames_to_decode));
+    }
+
+    pub fn fetch_next_video_frames(&mut self, video_id: LiveId, number_frames: usize) {
+        self.platform_ops.push(CxOsOp::FetchNextVideoFrames(video_id, number_frames));
+    }
+
+    pub fn cleanup_video_decoding(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::CleanupVideoDecoding(video_id));
     }
     
     pub fn println_resources(&self){
