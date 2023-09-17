@@ -142,45 +142,27 @@ impl InitialState {
             ('"', _, _) => self.string(cursor),
             ('(', _, _) => {
                 cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Delimiter
-                )
+                (State::Initial(InitialState), TokenKind::Delimiter)
             }
             (')', _, _) => {
                 cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Delimiter
-                )
+                (State::Initial(InitialState), TokenKind::Delimiter)
             }
             ('[', _, _) => {
                 cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Delimiter
-                )
+                (State::Initial(InitialState), TokenKind::Delimiter)
             }
             (']', _, _) => {
                 cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Delimiter
-                )
+                (State::Initial(InitialState), TokenKind::Delimiter)
             }
             ('{', _, _) => {
                 cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Delimiter
-                )
+                (State::Initial(InitialState), TokenKind::Delimiter)
             }
             ('}', _, _) => {
                 cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Delimiter
-                )
+                (State::Initial(InitialState), TokenKind::Delimiter)
             }
             ('.', char, _) if char.is_digit(10) => self.number(cursor),
             ('!', _, _)
