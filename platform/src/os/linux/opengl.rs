@@ -3,7 +3,6 @@ use {
         fs::File,
         io::prelude::*,
         mem,
-        os,
         ptr,
         ffi::CStr,
     },
@@ -13,7 +12,6 @@ use {
         makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
         cx::Cx,
-        cx_stdin::linux_dma_buf,
         texture::{Texture, TextureDesc, TextureFormat},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
@@ -21,6 +19,9 @@ use {
         draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
     },
 };
+
+#[cfg(target_os = "linux")]
+use crate::cx_stdin::linux_dma_buf;
 
 impl Cx {
     
@@ -816,7 +817,7 @@ pub struct CxOsTexture {
     pub height: u64,
     pub gl_texture: Option<u32>,
     pub gl_renderbuffer: Option<u32>,
-
+    #[cfg(target_os = "linux")]
     pub dma_buf_exported_image: Option<Box<linux_dma_buf::Image<os::fd::OwnedFd>>>,
 }
 
