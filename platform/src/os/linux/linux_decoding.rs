@@ -19,10 +19,6 @@ impl Cx {}
 
 impl CxDecodingApi for Cx {
     fn video_decoding_input_box(&mut self, _video_id: LiveId, _f: VideoDecodingInputFn) {
-        /*let callback = Arc::new(Mutex::new(Some(f)));
-        self.os
-            .decoding
-            .video_decoding_input_cb
-            .insert(video_id, callback);*/
+
     }
 }
