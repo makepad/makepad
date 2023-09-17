@@ -186,23 +186,27 @@ impl RunView {
                     self.last_size = new_size;
 
                     // update descriptors for swapchain textures
-                    v.swapchain[0].set_desc(cx,TextureDesc {
-                        format: TextureFormat::SharedBGRA(0),
+                    let id0 = run_view_id.0 & 0x0000FFFFFFFFFFFF;  // take the lowest bits from run_view_id, and encode texture ID in high bits
+                    let id1 = run_view_id.0 | 0x0001000000000000;
+                    let desc0 = TextureDesc {
+                        format: TextureFormat::SharedBGRA(id0),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),    
-                    });
-                    v.swapchain[1].set_desc(cx,TextureDesc {
-                        format: TextureFormat::SharedBGRA(0),
+                    };
+                    let desc1 = TextureDesc {
+                        format: TextureFormat::SharedBGRA(id1),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),    
-                    });
+                    };
+                    v.swapchain[0].set_desc(cx,desc0);
+                    v.swapchain[1].set_desc(cx,desc1);
 
-                    // make sure the actual shared texture resources exist, and get their handles
-                    #[allow(unused_assignments)]
-                    let mut handles = [0u64,0u64];
-                    
+                    // make sure the actual shared texture resources exist, and get their handles                    
 #[cfg(target_os = "windows")]
-                    {
+                    let handles = {
+
+                        let handles = [0u64,0u64];
+
                         let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
 
                         let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
@@ -214,37 +218,50 @@ impl RunView {
                         handles[1] = cxtexture.os.shared_handle.0 as u64;
 
                         cx.cx.os.d3d11_device.replace(Some(d3d11_device));
-                    }
+
+                        handles
+                    };
 
 #[cfg(target_os = "macos")]
                     {
                         let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
 
                         let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
-                        cxtexture.os.update_shared_texture(metal_device,&TextureDesc {
-                            format: TextureFormat::SharedBGRA(0),  // index to XPS server textures
-                            width: Some(new_size.0.max(1)),
-                            height: Some(new_size.0.max(1)),
-                        });
+                        cxtexture.os.update_shared_texture(metal_device,&desc0);
 
                         let cxtexture = &mut cx.textures[v.swapchain[1].texture_id()];
-                        cxtexture.os.update_shared_texture(metal_device,&TextureDesc {
-                            format: TextureFormat::SharedBGRA(1),  // index to XPS server textures
-                            width: Some(new_size.0.max(1)),
-                            height: Some(new_size.0.max(1)),
-                        });
+                        cxtexture.os.update_shared_texture(metal_device,&desc1);
 
                         cx.cx.os.metal_device.replace(Some(metal_device));
 
                         // on macos, the XPS server takes care of managing the actual texture handles
-                        handles = [0,0];
                     }
+
+#[cfg(target_os = "linux")]
+                    let handles = {
+
+                        // HACK(eddyb) normally this would be triggered later,
+                        // but we need it *before* `get_shared_texture_dma_buf_image`.
+                        {
+                            // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
+                            let cxtexture = &mut cx.cx.textures[v.swapchain[0].texture_id()];
+                            #[cfg(not(any(linux_direct, target_os="android")))]
+                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc0);
+
+                            let cxtexture = &mut cx.cx.textures[v.swapchain[1].texture_id()];
+                            #[cfg(not(any(linux_direct, target_os="android")))]
+                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc1);
+                        }
+
+                        cx.get_shared_texture_dma_buf_image(&texture)
+                    };
 
                     // send size update to client
                     manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
                         width: rect.size.x,
                         height: rect.size.y,
                         dpi_factor: dpi_factor,
+                        #[cfg(any(target_os = "windows",target_os = "linux"))]
                         swapchain_handles: handles,
                     }));
                 }

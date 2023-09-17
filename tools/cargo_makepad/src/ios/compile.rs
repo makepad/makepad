@@ -408,7 +408,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
     } else {
         return Err(format!("Error reading the signing identity security result #{}#", security_result))
     };
-    println!("Selected signing identity {}", selected_identity);
+    //println!("Selected signing identity {}", selected_identity);
     
     let home = std::env::var("HOME").unwrap();
     let profiles = std::fs::read_dir(format!("{}/Library/MobileDevice/Provisioning Profiles/", home)).unwrap();
@@ -440,7 +440,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
     } else {
         return Err(format!("Could not find a matching mobile provision profile for name {org}.{app}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again."))
     };
-    println!("Selected provisioning profile {:?}, for team_ident {}", provision.path, provision.team_ident);
+    //println!("Selected provisioning profile {:?}, for team_ident {}", provision.path, provision.team_ident);
     
     // select device
     let selected_device = if let Some(device_uuid) = &signing.device_uuid {
@@ -456,7 +456,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
     } else {
         return Err(format!("No devices found in provisioning profile {:?}", provision.path))
     };
-    println!("Selected device with UUID: {}", selected_device);
+    //println!("Selected device with UUID: {}", selected_device);
     
     // ok lets find the mobile provision for this application
     // we can also find the team ids from there to build the scent

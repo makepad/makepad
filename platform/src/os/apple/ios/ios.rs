@@ -7,6 +7,7 @@ use {
     },
 
     crate::{
+        makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_objc_sys::runtime::{ObjcId},
         os::{
@@ -29,6 +30,9 @@ use {
         thread::Signal,
         window::CxWindowPool,
         event::{
+            NetworkResponse,
+            HttpRequest,
+            HttpMethod,
             Event,
             NetworkResponseChannel
         },
@@ -96,7 +100,10 @@ impl Cx {
             out.push(event);
         }
         if out.len()>0{
-            self.call_event_handler(&Event::NetworkResponses(out))
+            let mut e = Event::NetworkResponses(out);
+            if self.studio_http_connection(&mut e){
+                self.call_event_handler(&e)
+            }
         }
     }
     
@@ -152,7 +159,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    if self.was_live_edit(){
+                    if self.handle_live_edit(){
                         // self.draw_shaders.ptr_to_item.clear();
                         // self.draw_shaders.fingerprints.clear();
                         self.call_event_handler(&Event::LiveEdit);
@@ -331,6 +338,57 @@ impl Cx {
             }
         }
     }
+
+    #[cfg(ios_sim)]
+    pub fn studio_http_connection(&mut self, _event: &mut Event) -> bool {
+        true
+    }
+    
+    #[cfg(not(ios_sim))]
+    pub fn studio_http_connection(&mut self, event: &mut Event) -> bool {
+        if let Event::NetworkResponses(res) = event {
+            res.retain( | res | {
+                if res.request_id == live_id!(live_reload) {
+                    // alright lets see if we need to live reload from the body
+                    if let NetworkResponse::HttpResponse(res) = &res.response {
+                        // lets check our response
+                        if let Some(body) = res.get_string_body() {
+                            if body.len()>0 {
+                                let mut parts = body.split("$$$makepad_live_change$$$");
+                                if let Some(file_name) = parts.next() {
+                                    let content = parts.next().unwrap().to_string();
+                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                        file_name:file_name.to_string(),
+                                        content
+                                    }]);
+                                }
+                            }
+                        }
+                        self.poll_studio_http();
+                    }
+                    false
+                }
+                else {
+                    true
+                }
+            });
+            if res.len()>0 {
+                return true
+            }
+        }
+        false
+    }
+    
+    fn poll_studio_http(&self) {
+        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
+        if studio_http.is_none() {
+            return
+        }
+        let url = format!("http://{}/live_file", studio_http.unwrap());
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        make_http_request(live_id!(live_reload), request, self.os.network_response.sender.clone());
+    }
+    
 }
 
 impl CxOsApi for Cx {
@@ -341,7 +399,13 @@ impl CxOsApi for Cx {
         }
         
         self.live_expand();
-        self.start_live_file_watcher();
+
+        #[cfg(ios_sim)]
+        self.start_disk_live_file_watcher(50);
+        
+        #[cfg(not(ios_sim))]
+        self.poll_studio_http();
+        
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
         #[cfg(ios_sim)]
@@ -371,6 +435,6 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
-    pub (crate) media: CxAppleDecoding,
+    pub (crate) decoding: CxAppleDecoding,
 }
 
