@@ -22,7 +22,7 @@ workspace.members = [
 
 workspace.resolver = "2"
 [profile.release]
-debug = true
+#debug = true
  
 [profile.small]
 inherits = "release"  
