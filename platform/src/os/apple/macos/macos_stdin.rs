@@ -61,9 +61,7 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     // render to swapchain
-                    if window_id == CxWindowPool::id_zero() {
-                        self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
-                    }
+                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
 
                     // and then wait for GPU, which calls stdin_send_draw_complete when its done
                 }
@@ -157,8 +155,8 @@ impl Cx {
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
                         }
-                        HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
-
+                        HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(ws) = window_size {
+                            
                             // check if new objects arrived from XPC
                             let maybe_handle0 = self.os.maybe_new_handles[0].lock().unwrap().clone();
                             let maybe_handle1 = self.os.maybe_new_handles[1].lock().unwrap().clone();
