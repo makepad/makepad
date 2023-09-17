@@ -117,6 +117,7 @@ impl Cx {
                     opengl_windows.remove(index);
                     if opengl_windows.len() == 0 {
                         xlib_app.terminate_event_loop();
+                        self.call_event_handler(&Event::Destruct);
                         return EventFlow::Exit
                     }
                 }
