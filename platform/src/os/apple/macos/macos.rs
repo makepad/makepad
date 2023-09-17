@@ -143,13 +143,11 @@ impl Cx {
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
-        for arg in std::env::args() {
-            if arg == "--stdin-loop" {
-                let mut cx = cx.borrow_mut();
-                cx.in_makepad_studio = true;
-                let mut metal_cx = metal_cx.borrow_mut();
-                return cx.stdin_event_loop(&mut metal_cx);
-            }
+        if std::env::args().find(|v| v == "--stdin-loop").is_some(){
+            let mut cx = cx.borrow_mut();
+            cx.in_makepad_studio = true;
+            let mut metal_cx = metal_cx.borrow_mut();
+            return cx.stdin_event_loop(&mut metal_cx);
         }
         
         let metal_windows = Rc::new(RefCell::new(Vec::new()));
@@ -255,9 +253,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    if self.was_live_edit(){
-                        self.draw_shaders.ptr_to_item.clear();
-                        self.draw_shaders.fingerprints.clear();
+                    if self.handle_live_edit(){
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
                     }
@@ -537,7 +533,9 @@ impl CxOsApi for Cx {
 
     fn init_cx_os(&mut self) {
         self.live_expand();
-        self.start_live_file_watcher();
+        if std::env::args().find(|v| v == "--stdin-loop").is_none(){
+            self.start_disk_live_file_watcher(100);
+        }
         self.live_scan_dependencies();
         self.native_load_dependencies();
     }

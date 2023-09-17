@@ -9,6 +9,7 @@ use {
         makepad_math::*,
         makepad_error_log::*,
         makepad_micro_serde::*,
+        makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
@@ -70,9 +71,12 @@ impl Cx {
                 
                 match parsed {
                     Ok(msg) => match msg {
-                        HostToStdin::ReloadFile{file:_, contents:_}=>{
+                        HostToStdin::ReloadFile{file, contents}=>{
                             // alright lets reload this file in our DSL system
-                            
+                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                file_name: file,
+                                content: contents
+                            }]);                            
                         }
                         HostToStdin::KeyDown(e) => {
                             self.call_event_handler(&Event::KeyDown(e));
@@ -152,14 +156,16 @@ impl Cx {
                                 self.stdin_handle_platform_ops(&fb_texture);
                             }
                         }
+
                         HostToStdin::Tick {frame: _, time, buffer_id: _} => if let Some(_ws) = window_size {
+
                             // poll the service for updates
                             // check signals
                             if Signal::check_and_clear_ui_signal(){
                                 self.handle_media_signals();
                                 self.call_event_handler(&Event::Signal);
                             }
-                            if self.was_live_edit(){
+                            if self.handle_live_edit(){
                                 self.call_event_handler(&Event::LiveEdit);
                                 self.redraw_all();
                             }
