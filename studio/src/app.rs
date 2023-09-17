@@ -335,19 +335,21 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         for (item_id, item) in run_list.items_with_actions(&actions) {
-            match self.build_manager.handle_run_list(cx, &run_list, item_id, item, &actions){
-                RunListAction::Create(run_view_id, name)=>{
-                    let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
-                    dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::Yes);
-                    dock.redraw(cx);
+            for action in self.build_manager.handle_run_list(cx, &run_list, item_id, item, &actions){
+                match action {
+                    RunListAction::Create(run_view_id, name)=>{
+                        let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
+                        dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::Yes);
+                        dock.redraw(cx);
+                    }
+                    RunListAction::Destroy(run_view_id)=>{
+                        dock.close_tab(cx, run_view_id);
+                        dock.redraw(cx);
+                    }
+                    _=>()
                 }
-                RunListAction::Destroy(run_view_id)=>{
-                    dock.close_tab(cx, run_view_id);
-                    dock.redraw(cx);
-                }
-                _=>()
+                log_list.redraw(cx);
             }
-            log_list.redraw(cx);
         }
             
         if let Some(tab_id) = dock.clicked_tab_close(&actions) {

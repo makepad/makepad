@@ -4,6 +4,7 @@ use {
         build_manager::{
             build_manager::*,
             build_protocol::*,
+            build_client::BuildClient
         },
         makepad_widgets::*,
     },
@@ -134,8 +135,9 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_run_list(&mut self, cx: &mut Cx, run_list: &FlatListRef, item_id: LiveId, item: WidgetRef, actions: &WidgetActions)->RunListAction{
+    pub fn handle_run_list(&mut self, cx: &mut Cx, run_list: &FlatListRef, item_id: LiveId, item: WidgetRef, actions: &WidgetActions)->Vec<RunListAction>{
         // ok lets see if someone clicked our
+        let mut out = Vec::new();
         for binary in &mut self.binaries {
             let binary_name = binary.name.clone();
             let id = LiveId::from_str(&binary.name);
@@ -145,9 +147,12 @@ impl BuildManager {
                     item.redraw(cx);
                 }
                 if let Some(change) = item.check_box(id!(check)).changed(actions) {
-                    let id = LiveId::from_str(&binary.name).bytes_append(&0usize.to_be_bytes());
                     run_list.redraw(cx);
-                    return self.toggle_active_build(cx, id, binary_name, 0, change)
+                    for i in 0..if change{1}else{BuildTarget::len()} {
+                        let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
+                        Self::toggle_active_build(&mut self.active, &self.clients[0],cx, id, &binary_name, i, change, &mut out);
+                        self.log.clear();
+                    }
                 };
             }
             else{
@@ -156,18 +161,18 @@ impl BuildManager {
                     if item_id == id{
                         if let Some(change) = item.check_box(id!(check)).changed(actions) {
                             run_list.redraw(cx);
-                            return self.toggle_active_build(cx, item_id, binary_name, i, change)
+                            Self::toggle_active_build(&mut self.active, &self.clients[0], cx, item_id, &binary_name, i, change, &mut out);
+                            self.log.clear();
                         }
                     }
                 }
             }
         }
-        RunListAction::None
+        out
     }
     
-    
-    pub fn toggle_active_build(&mut self, cx: &mut Cx, item_id: LiveId, binary: String, tgt: u64, run: bool)->RunListAction {
-        let target = match tgt {
+    pub fn target_id_to_target(tgt:u64)->BuildTarget{
+        match tgt {
             BuildTarget::RELEASE => BuildTarget::Release,
             BuildTarget::DEBUG => BuildTarget::Debug,
             BuildTarget::RELEASE_STUDIO => BuildTarget::ReleaseStudio,
@@ -184,37 +189,42 @@ impl BuildManager {
             BuildTarget::ANDROID => BuildTarget::Android,
             BuildTarget::WEBASSEMBLY => BuildTarget::WebAssembly,
             _ => panic!()
-        };
-        // alright so what buildtarget do we use
+        }
+    }
+    
+    pub fn toggle_active_build(active:&mut ActiveBuilds, client:&BuildClient, cx: &mut Cx, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
+        let target = Self::target_id_to_target(tgt);
         let process = BuildProcess {
-            binary,
+            binary: binary.to_string(),
             target
         };
         let build_id = process.as_id().into();
-        self.log.clear();
         if run {
             let run_view_id = LiveId::unique();
-            if self.active.builds.get(&build_id).is_none() {
-                self.active.builds.insert(build_id, ActiveBuild {
+            if active.builds.get(&build_id).is_none() {
+                active.builds.insert(build_id, ActiveBuild {
                     item_id,
                     process: process.clone(),
                     run_view_id,
-                    cmd_id: Some(self.clients[0].send_cmd(BuildCmd::Run(process.clone()))),
+                    cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone()))),
                     texture: Texture::new(cx)
                 });
             }
-            // create the runview tab
-            return RunListAction::Create(run_view_id, process.binary.clone())
-        }
-        else {
-            if let Some(build) = self.active.builds.remove(&build_id) {
-                if let Some(cmd_id) = build.cmd_id {
-                    self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
-                }
-                return RunListAction::Destroy(build.run_view_id)
+            if process.target.runs_in_studio(){
+                // create the runview tab
+                actions.push(RunListAction::Create(run_view_id, process.binary.clone()))
             }
         }
-        RunListAction::None
+        else {
+            if let Some(build) = active.builds.remove(&build_id) {
+                if let Some(cmd_id) = build.cmd_id {
+                    client.send_cmd_with_id(cmd_id, BuildCmd::Stop);
+                }
+                if process.target.runs_in_studio(){
+                     actions.push(RunListAction::Destroy(build.run_view_id))
+                }
+            }
+        }
     }
     
 }
