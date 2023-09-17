@@ -116,6 +116,7 @@ impl From<StdinScroll> for ScrollEvent {
 pub enum HostToStdin{
     WindowSize(StdinWindowSize),
     Tick{
+        buffer_id: u64,
         frame: u64,
         time: f64,
     },

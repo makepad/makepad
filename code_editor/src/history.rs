@@ -1,6 +1,6 @@
 use crate::{
     selection::SelectionSet,
-    state::SessionId,
+    session::SessionId,
     text::{Edit, Text},
 };
 
