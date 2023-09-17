@@ -22,7 +22,7 @@ workspace.members = [
 
 workspace.resolver = "2"
 [profile.release]
-debug = true
+#debug = true
  
 [profile.small]
 inherits = "release"  
@@ -44,25 +44,25 @@ strip = true
 #opt-level = 3
 #[profile.dev.package.makepad-draw]
 #opt-level = 3
-[profile.dev.package.makepad-vector]
-opt-level = 3
-[profile.dev.package.rustybuzz]
-opt-level = 3
-[profile.dev.package.bitflags]
-opt-level = 3
-[profile.dev.package.bytemuck]
-opt-level = 3
-[profile.dev.package.smallvec]
-opt-level = 3
-[profile.dev.package.unicode-bidi-mirroring]
-opt-level = 3
-[profile.dev.package.unicode-ccc]
-opt-level = 3
-[profile.dev.package.unicode-properties]
-opt-level = 3
-[profile.dev.package.unicode-script]
-opt-level = 3
-[profile.dev.package.unicode-bidi]
-opt-level = 3
-[profile.dev.package.ttf-parser]
-opt-level = 3
+#[profile.dev.package.makepad-vector]
+#opt-level = 3
+#[profile.dev.package.rustybuzz]
+#opt-level = 3
+#[profile.dev.package.bitflags]
+#opt-level = 3
+#[profile.dev.package.bytemuck]
+#opt-level = 3
+#[profile.dev.package.smallvec]
+#opt-level = 3
+#[profile.dev.package.unicode-bidi-mirroring]
+#opt-level = 3
+#[profile.dev.package.unicode-ccc]
+#opt-level = 3
+#[profile.dev.package.unicode-properties]
+#opt-level = 3
+#[profile.dev.package.unicode-script]
+#opt-level = 3
+#[profile.dev.package.unicode-bidi]
+#opt-level = 3
+#[profile.dev.package.ttf-parser]
+#opt-level = 3

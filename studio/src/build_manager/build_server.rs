@@ -81,7 +81,7 @@ impl BuildConnection {
         }
     }
     
-    pub fn run(&self, what: BuildProcess, cmd_id: BuildCmdId) {
+    pub fn run(&self, what: BuildProcess, cmd_id: BuildCmdId, http:String) {
         
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
@@ -195,7 +195,10 @@ impl BuildConnection {
             ],
         };
         
-        let env = [("MAKEPAD", "lines")];
+        let env = [
+            ("MAKEPAD_STUDIO_HTTP", http.as_str()),
+            ("MAKEPAD", "lines")
+        ];
         let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
         
         shared.write().unwrap().processes.insert(
@@ -289,9 +292,9 @@ impl BuildConnection {
     
     pub fn handle_cmd(&self, cmd_wrap: BuildCmdWrap) {
         match cmd_wrap.cmd {
-            BuildCmd::Run(process) => {
+            BuildCmd::Run(process, http) => {
                 // lets kill all other 'whats'
-                self.run(process, cmd_wrap.cmd_id);
+                self.run(process, cmd_wrap.cmd_id, http);
             }
             BuildCmd::Stop => {
                 // lets kill all other 'whats'
