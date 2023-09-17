@@ -2,7 +2,7 @@
 use {
     std::collections::HashMap,
     std::cell::RefCell,
-    std::sync::{Mutex},
+    std::sync::Mutex,
     std::ptr::NonNull,
     crate::{
         makepad_error_log::*,
@@ -92,7 +92,6 @@ pub fn fetch_xpc_service_texture(proxy: ObjcId, id: u64, uid:u64, f: Box<dyn Fn(
         let () = msg_send![proxy, fetchTexture: id uid:uid with: completion_block];
     } 
 }
-
 
 pub fn store_xpc_service_texture(id: u64, obj: ObjcId) {
     //log!("STORING {}", obj as *const _ as u64);

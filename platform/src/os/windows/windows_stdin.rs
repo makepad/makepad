@@ -28,7 +28,7 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_handle_repaint(&mut self, d3d11_cx: &mut D3d11Cx,swapchain: &[Texture],present_index: &mut usize) {
+    pub (crate) fn stdin_handle_repaint(&mut self, d3d11_cx: &mut D3d11Cx,swapchain: &[Texture]) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -36,21 +36,21 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
 
-                    // render to fb_texture
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx, &swapchain[*present_index]);
+                    // render to swapchain
+                    self.draw_pass_to_texture(*pass_id, d3d11_cx, &swapchain[self.os.present_index]);
 
                     // wait for GPU to finish rendering
                     d3d11_cx.wait_for_gpu();
 
                     // inform host that a frame is ready
-                    let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(*present_index).to_json().as_bytes());
+                    let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(self.os.present_index).to_json().as_bytes());
 
                     // flip to next one
-                    if *present_index < swapchain.len() - 1 {
-                        *present_index += 1;
+                    if self.os.present_index < self.os.swapchain.len() - 1 {
+                        self.os.present_index += 1;
                     }
                     else {
-                        *present_index = 0;
+                        self.os.present_index = 0;
                     }
                 }
                 CxPassParent::Pass(_) => {
