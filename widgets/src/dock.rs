@@ -254,7 +254,7 @@ impl LiveHook for Dock {
             }
         }
         for (item_id, kind) in items {
-            self.item(cx, item_id, kind);
+            self.item_or_create(cx, item_id, kind);
         }
     }
     
@@ -378,8 +378,14 @@ impl Dock {
         None
     }
     
+    pub fn item(&mut self, entry_id: LiveId) -> Option<WidgetRef> {
+        if let Some(entry) = self.items.get(&entry_id){
+            return Some(entry.1.clone())
+        }
+        None
+    }
     
-    pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+    pub fn item_or_create(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, entry_id, | cx | {
                 (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
@@ -665,7 +671,7 @@ impl Dock {
                 closable: true,
                 kind
             });
-            self.item(cx, item, kind);
+            self.item_or_create(cx, item, kind);
             self.select_tab(cx, item);
             self.area.redraw(cx);
         }
@@ -682,7 +688,7 @@ impl Dock {
                     closable: true,
                     kind
                 });
-                self.item(cx, new_item, kind);
+                self.item_or_create(cx, new_item, kind);
                 self.select_tab(cx, new_item);
             }
         }
@@ -698,11 +704,11 @@ impl Dock {
                 kind
             });
             self.select_tab(cx, item);
-            self.item(cx, item, kind);
+            self.item_or_create(cx, item, kind);
         }
     }
     
-    pub fn get_drawing_item_id(&self) -> Option<LiveId> {
+    pub fn drawing_item_id(&self) -> Option<LiveId> {
         if let Some(stack) = self.draw_state.as_ref() {
             match stack.last() {
                 Some(DrawStackItem::Tab {id}) => {
@@ -889,7 +895,9 @@ impl Widget for Dock {
                             tab_bar.contents_rect = cx.turtle().rect();
                             if tabs.len()>0 && tab_bar.contents_draw_list.begin(cx, Walk::default()).is_redrawing() {
                                 stack.push(DrawStackItem::TabContent {id});
-                                stack.push(DrawStackItem::Tab {id: tabs[*selected]});
+                                if *selected < tabs.len(){
+                                    stack.push(DrawStackItem::Tab {id: tabs[*selected]});
+                                }
                             }
                         }
                     }
@@ -934,6 +942,25 @@ impl Widget for Dock {
 pub struct DockRef(WidgetRef);
 
 impl DockRef {
+    
+    
+    pub fn item(&self, entry_id: LiveId) -> WidgetRef {
+        if let Some(mut dock) = self.borrow_mut() {
+            if let Some(item) = dock.item(entry_id){
+                return item
+            }
+        }
+        WidgetRef::empty()
+    }
+    
+    pub fn item_or_create(&self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+        if let Some(mut dock) = self.borrow_mut() {
+            return dock.item_or_create(cx, entry_id, template);
+        }
+        None
+    }
+  
+    
     pub fn close_tab(&self, cx: &mut Cx, tab_id: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.close_tab(cx, tab_id, false);
@@ -989,9 +1016,9 @@ impl DockRef {
         }
     }
     
-    pub fn get_drawing_item_id(&self) -> Option<LiveId> {
+    pub fn drawing_item_id(&self) -> Option<LiveId> {
         if let Some(dock) = self.borrow() {
-            return dock.get_drawing_item_id();
+            return dock.drawing_item_id();
         }
         None
     }

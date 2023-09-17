@@ -4,7 +4,6 @@ use crate::{
     makepad_platform::os::cx_stdin::*,
     build_manager::{
         build_manager::BuildManager,
-        build_protocol::*,
     }
 };
 
@@ -13,7 +12,7 @@ live_design!{
     
     RunView = {{RunView}} {
         frame_delta: 0.008,
-        draw_app:{
+        draw_app: {
             texture tex: texture2d
             instance recompiling: 0.0
             fn pixel(self) -> vec4 {
@@ -22,7 +21,7 @@ live_design!{
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #4
                 }
-                return mix(fb, #4, self.recompiling*0.4);
+                return mix(fb, #4, self.recompiling * 0.4);
             }
         }
         animator: {
@@ -69,8 +68,8 @@ impl LiveHook for RunView {
 
 impl RunView {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, manager: &mut BuildManager) {
-
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
+        
         self.animator_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
@@ -81,36 +80,36 @@ impl RunView {
             for client in &manager.clients {
                 for process in client.processes.values() {
                     let handle = cx.get_shared_handle(&process.texture);
-
-                    let marshalled_handle = handle.0 as u64;  // hack: unsure if HANDLE is supported in microserde yet, so convert to u64
+                    
+                    let marshalled_handle = handle.0 as u64; // hack: unsure if HANDLE is supported in microserde yet, so convert to u64
                     manager.send_host_to_stdin(None, HostToStdin::Dx11SharedHandle(marshalled_handle));
                 }
             }
             
             // what shall we do, a timer? or do we do a next-frame
-            manager.send_host_to_stdin(None, HostToStdin::Tick {
+            manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
                 frame: self.frame,
                 time: self.time
             })
         }
         // lets send mouse events
-        match event.hits(cx, self.draw_app.area()){
-            Hit::FingerDown(_)=>{
+        match event.hits(cx, self.draw_app.area()) {
+            Hit::FingerDown(_) => {
                 cx.set_key_focus(self.draw_app.area());
             }
-            Hit::KeyDown(e)=>{
-                manager.send_host_to_stdin(None, HostToStdin::KeyDown(e));
+            Hit::KeyDown(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
             }
-            Hit::KeyUp(e)=>{
-                manager.send_host_to_stdin(None, HostToStdin::KeyUp(e));
+            Hit::KeyUp(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyUp(e));
             }
-            _=>()
+            _ => ()
         }
         let rect = self.draw_app.area().get_rect(cx);
         match event {
             Event::MouseDown(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::MouseDown(StdinMouseDown {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseDown(StdinMouseDown {
                     time: e.time,
                     x: rel.x,
                     y: rel.y,
@@ -119,7 +118,7 @@ impl RunView {
             }
             Event::MouseMove(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::MouseMove(StdinMouseMove {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseMove(StdinMouseMove {
                     time: e.time,
                     x: rel.x,
                     y: rel.y,
@@ -127,7 +126,7 @@ impl RunView {
             }
             Event::MouseUp(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::MouseUp(StdinMouseUp {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseUp(StdinMouseUp {
                     time: e.time,
                     button: e.button,
                     x: rel.x,
@@ -136,7 +135,7 @@ impl RunView {
             }
             Event::Scroll(e) => {
                 let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(None, HostToStdin::Scroll(StdinScroll {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::Scroll(StdinScroll {
                     is_mouse: e.is_mouse,
                     time: e.time,
                     x: rel.x,
@@ -149,7 +148,7 @@ impl RunView {
         }
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: &StdinToHost, _manager: &mut BuildManager) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost) {
         match msg {
             StdinToHost::SetCursor(cursor) => {
                 cx.set_cursor(*cursor)
@@ -170,7 +169,7 @@ impl RunView {
         self.draw_app.redraw(cx);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, manager: &BuildManager) {
+    pub fn draw(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &BuildManager) {
         
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
@@ -178,31 +177,28 @@ impl RunView {
         let walk = if let Some(walk) = self.draw_state.get() {walk}else {panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
-        for client in &manager.clients {
-            for process in client.processes.values() {
+        let texture = manager.get_process_texture(run_view_id);
+        if let Some(texture) = texture {
+            let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
+            if new_size != self.last_size {
+                self.last_size = new_size;
                 
-                let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
-                if new_size != self.last_size {
-                    self.last_size = new_size;
-
-                    process.texture.set_desc(cx, TextureDesc {
-                        format: TextureFormat::SharedBGRA(0),
-                        width: Some(new_size.0.max(1)),
-                        height: Some(new_size.1.max(1)),
-                    });
-
-                    manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
-                        width: rect.size.x,
-                        height: rect.size.y,
-                        dpi_factor: dpi_factor,
-                    }));
-                }
+                texture.set_desc(cx, TextureDesc {
+                    format: TextureFormat::SharedBGRA(run_view_id.0),
+                    width: Some(new_size.0.max(1)),
+                    height: Some(new_size.1.max(1)),
+                });
                 
-                self.draw_app.set_texture(0, &process.texture);
-                
-                break
+                manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
+                    width: rect.size.x,
+                    height: rect.size.y,
+                    dpi_factor: dpi_factor,
+                }));
             }
+            
+            self.draw_app.set_texture(0, &texture);
         }
+        
         self.draw_app.draw_abs(cx, rect);
     }
 }
@@ -228,10 +224,10 @@ impl Widget for RunView {
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct RunViewRef(WidgetRef);
 
-impl RunViewRef{
+impl RunViewRef {
     
-    pub fn recompile_started(&self, cx:&mut Cx){
-        if let Some(mut inner) = self.borrow_mut(){
+    pub fn recompile_started(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.animator_play(cx, id!(recompiling.on));
         }
     }
