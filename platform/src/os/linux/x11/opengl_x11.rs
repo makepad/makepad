@@ -3,6 +3,7 @@ use {
         mem,
         os::raw::{c_long, c_void},
         ffi::{CString},
+        os::{self, fd::{AsRawFd as _, FromRawFd as _}},
     },
     self::super::{
         x11_sys,
@@ -11,13 +12,17 @@ use {
     self::super::super::{
         egl_sys::{self, LibEgl},
         gl_sys,
+        opengl::CxOsTexture,
     },
     crate::{
         cx::Cx,
+        cx_stdin::linux_dma_buf,
         window::WindowId,
+        makepad_error_log::*,
         makepad_math::{DVec2},
         pass::{PassClearColor, PassClearDepth, PassId},
         event::*,
+        texture::{Texture, TextureDesc},
     },
 };
 
@@ -27,7 +32,6 @@ impl Cx {
         &mut self,
         pass_id: PassId,
         opengl_window: &mut OpenglWindow,
-        opengl_cx: &OpenglCx,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -36,10 +40,11 @@ impl Cx {
         let egl_surface = opengl_window.egl_surface;
         
         self.passes[pass_id].paint_dirty = false;
-         
+
         let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
         let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
         unsafe {
+            let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
             (opengl_cx.libegl.eglMakeCurrent.unwrap())(opengl_cx.egl_display, egl_surface, egl_surface, opengl_cx.egl_context);
             gl_sys::Viewport(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
@@ -77,9 +82,201 @@ impl Cx {
             &mut zbias,
             zbias_step,
         );
-        
+
         unsafe {
+            let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
             (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface);
+        }
+    }
+
+    pub fn get_shared_texture_dma_buf_image(&self, texture: &Texture) -> linux_dma_buf::Image<linux_dma_buf::RemoteFd> {
+        self.textures[texture.texture_id()].os.dma_buf_exported_image
+            .as_ref().expect("OpenGL texture has not been exported via EGL+DMA-BUF")
+            .as_remote()
+    }
+}
+
+
+impl CxOsTexture {
+    pub fn update_shared_texture(
+        &mut self,
+        opengl_cx: &OpenglCx,
+        desc: &TextureDesc,
+    ) {
+        // we need a width/height for this one.
+        if desc.width.is_none() || desc.height.is_none() {
+            log!("Shared texture width/height is undefined, cannot allocate it");
+            return
+        }
+
+        let width = desc.width.unwrap() as u64;
+        let height = desc.height.unwrap() as u64;
+
+        if self.gl_texture.is_some() && self.width == width && self.height == height && self.alloc_desc == *desc {
+            return;
+        }
+
+        self.alloc_desc = desc.clone();
+        self.width = width;
+        self.height = height;
+
+        unsafe {
+            self.alloc_desc = desc.clone();
+            self.width = width;
+            self.height = height;
+
+            if self.gl_texture.is_none() {
+                let mut gl_texture = std::mem::MaybeUninit::uninit();
+                gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                self.gl_texture = Some(gl_texture.assume_init());
+            }
+
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
+
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+            gl_sys::TexImage2D(
+                gl_sys::TEXTURE_2D,
+                0,
+                gl_sys::RGBA as i32,
+                width as i32,
+                height as i32,
+                0,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                std::ptr::null()
+            );
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+
+            let egl_image = (opengl_cx.libegl.eglCreateImageKHR.unwrap())(
+                opengl_cx.egl_display,
+                opengl_cx.egl_context,
+                egl_sys::EGL_GL_TEXTURE_2D_KHR,
+                self.gl_texture.unwrap() as egl_sys::EGLClientBuffer,
+                std::ptr::null(),
+            );
+            assert!(!egl_image.is_null(), "eglCreateImageKHR failed");
+
+            let (mut fourcc, mut num_planes) = (0, 0);
+            assert!(
+                (
+                    opengl_cx.libegl.eglExportDMABUFImageQueryMESA
+                        .expect("eglExportDMABUFImageQueryMESA unsupported")
+                )(
+                    opengl_cx.egl_display,
+                    egl_image,
+                    &mut fourcc as *mut u32 as *mut i32,
+                    &mut num_planes,
+                    std::ptr::null_mut(),
+                ) != 0,
+                "eglExportDMABUFImageQueryMESA failed",
+            );
+            assert!(
+                num_planes == 1,
+                "planar DRM format {:?} ({fourcc:#x}) unsupported (num_planes={num_planes})",
+                std::str::from_utf8(&u32::to_le_bytes(fourcc))
+            );
+
+            // HACK(eddyb) `modifiers` are reported per-plane, so to avoid UB,
+            // a second query call is used *after* the `num_planes == 1` check.
+            let mut modifiers = 0;
+            assert!(
+                (opengl_cx.libegl.eglExportDMABUFImageQueryMESA.unwrap())(
+                    opengl_cx.egl_display,
+                    egl_image,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut modifiers,
+                ) != 0,
+                "eglExportDMABUFImageQueryMESA failed",
+            );
+
+            let (mut dma_buf_fd, mut offset, mut stride) = (0, 0, 0);
+            assert!(
+                (opengl_cx.libegl.eglExportDMABUFImageMESA.unwrap())(
+                    opengl_cx.egl_display,
+                    egl_image,
+                    &mut dma_buf_fd,
+                    &mut stride as *mut u32 as *mut i32,
+                    &mut offset as *mut u32 as *mut i32,
+                ) != 0,
+                "eglExportDMABUFImageMESA failed",
+            );
+
+            self.dma_buf_exported_image = Some(Box::new(linux_dma_buf::Image {
+                width: width.try_into().unwrap(),
+                height: height.try_into().unwrap(),
+                drm_format: linux_dma_buf::DrmFormat {
+                    fourcc,
+                    modifiers,
+                },
+                planes: [linux_dma_buf::ImagePlane {
+                    dma_buf_fd: os::fd::OwnedFd::from_raw_fd(dma_buf_fd),
+                    offset,
+                    stride,
+                }],
+            }));
+        }
+    }
+
+    pub fn update_from_shared_dma_buf_image(
+        &mut self,
+        opengl_cx: &OpenglCx,
+        dma_buf_image: &linux_dma_buf::Image<os::fd::OwnedFd>,
+    ) {
+        // HACK(eddyb) drain error queue, so that we can check erors below.
+        while unsafe { gl_sys::GetError() } != 0 {}
+        opengl_cx.make_current();
+        while unsafe { gl_sys::GetError() } != 0 {}
+
+        let linux_dma_buf::Image { width, height, drm_format, planes: [ref plane0] } = *dma_buf_image;
+
+        let image_attribs = [
+            egl_sys::EGL_LINUX_DRM_FOURCC_EXT,
+            drm_format.fourcc,
+            egl_sys::EGL_WIDTH,
+            width,
+            egl_sys::EGL_HEIGHT,
+            height,
+            egl_sys::EGL_DMA_BUF_PLANE0_FD_EXT,
+            plane0.dma_buf_fd.as_raw_fd() as u32,
+            egl_sys::EGL_DMA_BUF_PLANE0_OFFSET_EXT,
+            plane0.offset,
+            egl_sys::EGL_DMA_BUF_PLANE0_PITCH_EXT,
+            plane0.stride,
+            egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+            drm_format.modifiers as u32,
+            egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
+            (drm_format.modifiers >> 32) as u32,
+            egl_sys::EGL_NONE,
+        ];
+        let egl_image = unsafe { (opengl_cx.libegl.eglCreateImageKHR.unwrap())(
+            opengl_cx.egl_display,
+            std::ptr::null_mut(),
+            egl_sys::EGL_LINUX_DMA_BUF_EXT,
+            std::ptr::null_mut(),
+            image_attribs.as_ptr() as _,
+        ) };
+        assert!(!egl_image.is_null(), "eglCreateImageKHR failed");
+
+        self.width = width as u64;
+        self.height = height as u64;
+
+        unsafe {
+            let gl_texture = *self.gl_texture.get_or_insert_with(|| {
+                let mut gl_texture = std::mem::MaybeUninit::uninit();
+                gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                assert_eq!(gl_sys::GetError(), 0, "glGenTextures failed");
+                gl_texture.assume_init()
+            });
+
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, gl_texture);
+            assert_eq!(gl_sys::GetError(), 0, "glBindTexture({gl_texture}) failed");
+
+            (opengl_cx.libegl.glEGLImageTargetTexture2DOES.unwrap())(gl_sys::TEXTURE_2D, egl_image);
+            assert_eq!(gl_sys::GetError(), 0, "glEGLImageTargetTexture2DOES failed");
+
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
 }
@@ -283,7 +480,7 @@ impl OpenglWindow {
         }
     }
     
-    pub fn resize_buffers(&mut self, _opengl_cx: &OpenglCx) -> bool {
+    pub fn resize_buffers(&mut self) -> bool {
         let cal_size = DVec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor

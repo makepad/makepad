@@ -33,38 +33,31 @@ impl Cx {
             custom_window_chrome: false
         });
         cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
-        
-        let opengl_cx = Rc::new(RefCell::new(None));
 
-        
         let opengl_windows = Rc::new(RefCell::new(Vec::new()));
         let is_stdin_loop = std::env::args().find(|v| v=="--stdin-loop").is_some();
         init_xlib_app_global(Box::new({
             let cx = cx.clone();
-            let opengl_cx = opengl_cx.clone();
             move | xlib_app,
             events | {
                 if is_stdin_loop{
                     return EventFlow::Wait
                 }
                 let mut cx = cx.borrow_mut();
-                let mut opengl_cx = opengl_cx.borrow_mut();
                 let mut opengl_windows = opengl_windows.borrow_mut();
-                cx.xlib_event_callback(xlib_app, events, opengl_cx.as_mut().unwrap(), &mut *opengl_windows)
+                cx.xlib_event_callback(xlib_app, events, &mut *opengl_windows)
             }
         }));
         
-        *opengl_cx.borrow_mut() = Some(unsafe {
+        cx.borrow_mut().os.opengl_cx = Some(unsafe {
             OpenglCx::from_egl_platform_display(
                 egl_sys::EGL_PLATFORM_X11_EXT,
                 get_xlib_app_global().display,
             )
         });
         
-        if is_stdin_loop{
-            let mut cx = cx.borrow_mut();
-            let mut opengl_cx = opengl_cx.borrow_mut();
-            return cx.stdin_event_loop(opengl_cx.as_mut().unwrap());
+        if is_stdin_loop {
+            return cx.borrow_mut().stdin_event_loop();
         }
         
         cx.borrow_mut().call_event_handler(&Event::Construct);
@@ -77,10 +70,9 @@ impl Cx {
         &mut self,
         xlib_app: &mut XlibApp, 
         event: XlibEvent,
-        opengl_cx: &mut OpenglCx,
         opengl_windows: &mut Vec<OpenglWindow>
     ) -> EventFlow {
-        if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, opengl_cx, xlib_app) {
+        if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, xlib_app) {
             return EventFlow::Exit
         }
         
@@ -134,12 +126,12 @@ impl Cx {
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
-                    opengl_cx.make_current();
+                    self.os.opengl_cx.as_ref().unwrap().make_current();
                     self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
                 
-                self.handle_repaint(opengl_windows, opengl_cx);
+                self.handle_repaint(opengl_windows);
             }
             XlibEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
@@ -220,8 +212,8 @@ impl Cx {
     pub(crate) fn handle_networking_events(&mut self) {
     }
     
-    pub (crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>, opengl_cx: &mut OpenglCx) {
-        opengl_cx.make_current();
+    pub (crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>) {
+        self.os.opengl_cx.as_ref().unwrap().make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -230,22 +222,22 @@ impl Cx {
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         //let dpi_factor = window.window_geom.dpi_factor;
-                        window.resize_buffers(&opengl_cx);
-                        self.draw_pass_to_window(*pass_id, window, opengl_cx);
+                        window.resize_buffers();
+                        self.draw_pass_to_window(*pass_id, window);
                     }
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id);
+                    self.draw_pass_to_magic_texture(*pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id);
+                    self.draw_pass_to_magic_texture(*pass_id);
                 }
             }
         }
     }
     
-    fn handle_platform_ops(&mut self, opengl_windows: &mut Vec<OpenglWindow>, opengl_cx: &OpenglCx, xlib_app: &mut XlibApp) -> EventFlow {
+    fn handle_platform_ops(&mut self, opengl_windows: &mut Vec<OpenglWindow>, xlib_app: &mut XlibApp) -> EventFlow {
         let mut ret = EventFlow::Poll;
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -253,7 +245,7 @@ impl Cx {
                     let window = &mut self.windows[window_id];
                     let opengl_window = OpenglWindow::new(
                         window_id,
-                        &opengl_cx,
+                        self.os.opengl_cx.as_ref().unwrap(),
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title,
@@ -360,5 +352,8 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) media: CxLinuxMedia,
+
+    // HACK(eddyb) generalize this to EGL, properly.
+    pub opengl_cx: Option<OpenglCx>,
 }
 

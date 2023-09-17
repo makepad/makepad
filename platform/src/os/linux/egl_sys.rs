@@ -29,19 +29,32 @@ pub const EGL_WIDTH: u32 = 12375;
 pub const EGL_CONTEXT_CLIENT_VERSION: u32 = 12440;
 pub const EGL_OPENGL_ES_API: u32 = 12448;
 
+pub const EGL_GL_TEXTURE_2D_KHR: u32 = 12465;
+
 pub const EGL_PLATFORM_X11_EXT: u32 = 12757;
 pub const EGL_PLATFORM_GBM_KHR: u32 = 12759;
+
+pub const EGL_LINUX_DMA_BUF_EXT: u32 = 12912;
+pub const EGL_LINUX_DRM_FOURCC_EXT: u32 = 12913;
+pub const EGL_DMA_BUF_PLANE0_FD_EXT: u32 = 12914;
+pub const EGL_DMA_BUF_PLANE0_OFFSET_EXT: u32 = 12915;
+pub const EGL_DMA_BUF_PLANE0_PITCH_EXT: u32 = 12916;
+pub const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: u32 = 13379;
+pub const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: u32 = 13380;
 
 pub type NativeDisplayType = EGLNativeDisplayType;
 pub type NativePixmapType = EGLNativePixmapType;
 pub type NativeWindowType = EGLNativeWindowType;
 pub type EGLint = i32;
+pub type EGLuint64KHR = u64;
 pub type EGLenum = ::std::os::raw::c_uint;
 pub type EGLBoolean = ::std::os::raw::c_uint;
 pub type EGLDisplay = *mut ::std::os::raw::c_void;
 pub type EGLConfig = *mut ::std::os::raw::c_void;
 pub type EGLSurface = *mut ::std::os::raw::c_void;
 pub type EGLContext = *mut ::std::os::raw::c_void;
+pub type EGLClientBuffer = *mut ::std::os::raw::c_void;
+pub type EGLImageKHR = *mut ::std::os::raw::c_void;
 pub type __eglMustCastToProperFunctionPointerType = ::std::option::Option<unsafe extern "C" fn()>;
 pub type PFNEGLBINDAPIPROC = ::std::option::Option<unsafe extern "C" fn(api: EGLenum) -> EGLBoolean>;
 pub type PFNEGLCHOOSECONFIGPROC = ::std::option::Option<
@@ -67,6 +80,15 @@ unsafe extern "C" fn(
     share_context: EGLContext,
     attrib_list: *const EGLint,
 ) -> EGLContext,
+>;
+pub type PFNEGLCREATEIMAGEKHRPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    ctx: EGLContext,
+    target: EGLenum,
+    buffer: EGLClientBuffer,
+    attrib_list: *const EGLint,
+) -> EGLImageKHR,
 >;
 pub type PFNEGLCREATEPBUFFERSURFACEPROC = ::std::option::Option<
 unsafe extern "C" fn(
@@ -184,6 +206,33 @@ unsafe extern "C" fn(
 ) -> EGLDisplay,
 >;
 
+pub type PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    image: EGLImageKHR,
+    fourcc: *mut i32,
+    num_planes: *mut i32,
+    modifiers: *mut EGLuint64KHR,
+) -> EGLBoolean,
+>;
+pub type PFNEGLEXPORTDMABUFIMAGEMESAPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    image: EGLImageKHR,
+    fds: *mut i32,
+    strides: *mut EGLint,
+    offsets: *mut EGLint,
+) -> EGLBoolean,
+>;
+
+// HACK(eddyb) this is actually an OpenGL extension function.
+type PFNGLEGLIMAGETARGETTEXTURE2DOESPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    super::gl_sys::GLenum,
+    EGLImageKHR,
+),
+>;
+
 struct Module(::std::ptr::NonNull<::std::os::raw::c_void>);
 
 pub struct LibEgl {
@@ -217,7 +266,13 @@ pub struct LibEgl {
     pub eglSurfaceAttrib: PFNEGLSURFACEATTRIBPROC,
     pub eglSwapInterval: PFNEGLSWAPINTERVALPROC,
 
+    pub eglCreateImageKHR: PFNEGLCREATEIMAGEKHRPROC,
+    pub eglExportDMABUFImageQueryMESA: PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC,
+    pub eglExportDMABUFImageMESA: PFNEGLEXPORTDMABUFIMAGEMESAPROC,
     pub eglGetPlatformDisplayEXT: PFNEGLGETPLATFORMDISPLAYEXTPROC,
+
+    // HACK(eddyb) this is actually an OpenGL extension function.
+    pub glEGLImageTargetTexture2DOES: PFNGLEGLIMAGETARGETTEXTURE2DOESPROC,
 
     _keep_module_alive: Module,
 }
@@ -303,7 +358,12 @@ impl LibEgl {
             eglSurfaceAttrib: module.get_symbol("eglSurfaceAttrib").ok(),
             eglSwapInterval: module.get_symbol("eglSwapInterval").ok(),
 
+            eglCreateImageKHR: get_ext_fn!("eglCreateImageKHR"),
+            eglExportDMABUFImageQueryMESA: get_ext_fn!("eglExportDMABUFImageQueryMESA"),
+            eglExportDMABUFImageMESA: get_ext_fn!("eglExportDMABUFImageMESA"),
             eglGetPlatformDisplayEXT: get_ext_fn!("eglGetPlatformDisplayEXT"),
+
+            glEGLImageTargetTexture2DOES: get_ext_fn!("glEGLImageTargetTexture2DOES"),
 
             _keep_module_alive: module,
         })
