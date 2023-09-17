@@ -4,6 +4,7 @@ use {
         makepad_micro_serde::*,
         makepad_platform::*,
         makepad_widgets::*,
+        makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_platform::thread::*,
         makepad_platform::os::cx_stdin::{
             HostToStdin,
@@ -124,7 +125,8 @@ pub struct BuildManager {
     #[rust] pub binaries: Vec<BuildBinary>,
     #[rust] pub active: ActiveBuilds,
     #[rust] pub studio_http: String,
-    #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>
+    #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>,
+    #[rust] pub send_file_change: FromUISender<LiveFileChange>
 }
 
 pub struct BuildBinary {
@@ -254,9 +256,13 @@ impl BuildManager {
         actions
     }
     
+    pub fn live_reload_needed(&mut self, live_file_change:LiveFileChange){
+        let _ = self.send_file_change.send(live_file_change);
+    }
+    
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if let Event::Signal = event{
-            if let Ok(mut addr) = self.recv_external_ip.try_recv(){
+            if let Ok(addr) = self.recv_external_ip.try_recv(){
                 // alright lets start our http server
                 self.start_http_server(addr);
             }
@@ -342,12 +348,19 @@ impl BuildManager {
             post_max_size: 1024*1024,
             request: tx_request
         });
+        let receiver = self.send_file_change.receiver();
         std::thread::spawn(move || {
             // lets receive incoming http requests
             // if will answer it with a filechange if we have one
             // otherwise we just return nothing
+            let mut change_slot = None;
+            let mut addrs = Vec::new();
             while let Ok(message) = rx_request.recv() {
-                // lets pull out the filechanges from the UI
+                // only store last change, fix later
+                while let Ok(change) = receiver.try_recv(){
+                    change_slot = Some(change);
+                    addrs.clear();
+                }
                 
                 match message{
                     HttpServerRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
@@ -356,8 +369,19 @@ impl BuildManager {
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
                     }
-                    HttpServerRequest::Get{headers:_, response_sender}=>{
-                        let body = "".to_string().as_bytes().to_vec();
+                    HttpServerRequest::Get{headers, response_sender}=>{
+                        let body = if addrs.contains(&headers.addr){
+                            "".to_string().as_bytes().to_vec()
+                        }
+                        else{
+                            addrs.push(headers.addr);
+                            if let Some(change) = &change_slot{
+                                format!("{}$$$makepad_live_change$$${}",change.file_name, change.content).as_bytes().to_vec()
+                            }
+                            else{
+                                "".to_string().as_bytes().to_vec()
+                            }
+                        };
                         let header = format!(
                             "HTTP/1.1 200 OK\r\n\
                             Content-Type: application/json\r\n\

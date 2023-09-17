@@ -34,6 +34,7 @@ pub struct LiveBody {
     pub live_type_infos: Vec<LiveTypeInfo>
 }
 
+
 #[cfg(not(lines))]
 fn line_nr_error_once(){
     use std::sync::atomic::{AtomicBool,Ordering};
@@ -179,7 +180,7 @@ impl Cx {
     pub fn start_disk_live_file_watcher(&mut self, milis:u64){
         let live_registry = self.live_registry.borrow();
         let (send, recv) = std::sync::mpsc::channel();
-        self.live_file_changes = Some(recv);
+        self.live_file_change_receiver = Some(recv);
         let mut file_list:Vec<(String,String, Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
             if let Some(start) = file.file_name.find("src/"){
@@ -214,14 +215,14 @@ impl Cx {
         });
     }
     
-    pub fn was_live_edit(&mut self)->bool{
+    pub fn handle_live_edit(&mut self)->bool{
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
         // then find the token-slice we need
         let mut all_changes = Vec::new();
-        if let Some(live_file_changes) = &self.live_file_changes{
-            while let Ok(changes) = live_file_changes.try_recv(){
+        if let Some(live_file_change_receiver) = &self.live_file_change_receiver{
+            while let Ok(changes) = live_file_change_receiver.try_recv(){
                 all_changes.extend(changes);
             }
         }

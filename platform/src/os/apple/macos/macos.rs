@@ -255,9 +255,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    if self.was_live_edit(){
-                        self.draw_shaders.ptr_to_item.clear();
-                        self.draw_shaders.fingerprints.clear();
+                    if self.handle_live_edit(){
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
                     }
