@@ -41,6 +41,48 @@ live_design!{
         }
     }
     
+    RunButton = <CheckBox> {
+        width: Fill,
+        height: 25,
+        margin: {left: 1},
+        label_walk: {margin: {top: 7}}
+        draw_check: {
+            uniform size: 4.0;
+            instance open: 0.0
+            uniform length: 3.0
+            uniform width: 1.0
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                match self.check_type {
+                    CheckType::Check => {
+                        let left = 2;
+                        let sz = self.size;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        
+                        // PAUSE
+                        sdf.box(0.0, sz * 1.5, sz * 1.0, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(sz * 1.5, sz * 1.5, sz * 1.0, sz * 3.0, 1.0); // rounding = 3rd value
+
+                        sdf.fill(mix(#fff0, mix(#A, #F, self.hover), self.selected));
+
+                        // PLAY
+                        sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                        sdf.move_to(c.x - sz, c.y + sz);
+                        sdf.line_to(c.x, c.y - sz);
+                        sdf.line_to(c.x + sz, c.y + sz);
+                        sdf.close_path();
+                        sdf.fill(mix(mix(#44, #8, self.hover), #fff0, self.selected));
+
+                    }
+                }
+                return sdf.result
+            }
+        }
+        draw_text: {text_style: <THEME_FONT_LABEL> {}}
+    }
+    
+    
     RunList = <FlatList> {
         grab_key_focus: true
         drag_scrolling: false
@@ -50,28 +92,39 @@ live_design!{
         Target = <BuildItem> {
             padding: {top: 0, bottom: 0}
             //label = <Label> {width: Fill, margin:{left:35}, padding:0, draw_text: {wrap: Word}}
-            check = <CheckBox> {
-                width: Fill,
-                height: 25,
-                margin: {left: 21},
-                label_walk: {margin: {top: 7}}
-                draw_check: {check_type: Radio}
-                draw_text: {text_style: <THEME_FONT_LABEL> {}}
-            }
+            check = <RunButton> { margin: {left: 21} }
         }
         Binary = <BuildItem> {
             padding: {top: 0, bottom: 0}
             flow: Right
-            fold = <FoldButton> {animator: {open = {default: no}}, height: 25, width: 15 margin: {left: 5}}
-            //label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
-            check = <CheckBox> {
-                width: Fill,
-                height: 25,
-                margin: {left: 1},
-                label_walk: {margin: {top: 7}}
-                draw_check: {check_type: Radio}
-                draw_text: {text_style: <THEME_FONT_LABEL> {}}
+            fold = <FoldButton> {
+                animator: {open = {default: no}}, height: 25, width: 15 margin: {left: 5}
+                draw_bg: {
+                    uniform size: 4.0;
+                    instance open: 0.0
+                    uniform length: 3.0
+                    uniform width: 1.0
+                    
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                        let left = 2;
+                        let sz = self.size;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        
+                        // PLUS
+                        sdf.box(0, sz * 3.0, sz * 2.5, sz * 0.5, 1.0); // rounding = 3rd value
+                        // vertical
+                        sdf.fill_keep(mix(#8F, #FF, self.hover));
+                        sdf.box(sz, sz * 2.0, sz * 0.5, sz * 2.5, 1.0); // rounding = 3rd value
+
+                        sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.open))
+
+                        return sdf.result
+                    }
+                }
             }
+            //label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
+            check = <RunButton> {}
         }
         Empty = <BuildItem> {
             cursor: Default
