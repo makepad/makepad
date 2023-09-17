@@ -347,6 +347,8 @@ impl BuildManager {
             // if will answer it with a filechange if we have one
             // otherwise we just return nothing
             while let Ok(message) = rx_request.recv() {
+                // lets pull out the filechanges from the UI
+                
                 match message{
                     HttpServerRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
                     },
@@ -366,6 +368,8 @@ impl BuildManager {
                             body.len()
                         );
                         let _ = response_sender.send(HttpServerResponse{header, body});
+                        // protect a little bit against flooding
+                        thread::sleep(time::Duration::from_millis(50));
                     }
                     HttpServerRequest::Post{..}=>{//headers, body, response}=>{
                     }
