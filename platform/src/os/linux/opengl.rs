@@ -3,6 +3,7 @@ use {
         fs::File,
         io::prelude::*,
         mem,
+        os,
         ptr,
         ffi::CStr,
     },
@@ -12,7 +13,8 @@ use {
         makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
         cx::Cx,
-        texture::{TextureDesc, TextureFormat},
+        cx_stdin::linux_dma_buf,
+        texture::{Texture, TextureDesc, TextureFormat},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
@@ -28,7 +30,6 @@ impl Cx {
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
-        //opengl_cx: &OpenglCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
@@ -42,7 +43,6 @@ impl Cx {
                     sub_list_id,
                     zbias,
                     zbias_step,
-                    //opengl_cx,
                 );
             }
             else {
@@ -191,7 +191,12 @@ impl Cx {
                             continue;
                         };
                         let cxtexture = &mut self.textures[texture_id];
-                        if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
+
+                        if cxtexture.desc.format.is_shared() {
+                            // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
+                            #[cfg(not(any(linux_direct, target_os="android")))]
+                            cxtexture.os.update_shared_texture(self.os.opengl_cx.as_ref().unwrap(), &cxtexture.desc);
+                        } else if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
                             cxtexture.update_image = false;
                             cxtexture.os.update_platform_texture_image2d(
                                 cxtexture.desc.width.unwrap() as u32,
@@ -257,11 +262,19 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         Some(pass_rect.size)
     }
-    
-    
-    pub fn draw_pass_to_texture(
+
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, fb_texture: &Texture) {
+        self.draw_pass_to_texture_inner(pass_id, Some(fb_texture))
+    }
+
+    pub fn draw_pass_to_magic_texture(&mut self, pass_id: PassId) {
+        self.draw_pass_to_texture_inner(pass_id, None)
+    }
+
+    fn draw_pass_to_texture_inner(
         &mut self,
         pass_id: PassId,
+        maybe_fb_texture: Option<&Texture>,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -293,8 +306,17 @@ impl Cx {
         unsafe {
             gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, self.passes[pass_id].os.gl_framebuffer.unwrap());
         }
-        
-        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+
+        let color_textures_from_fb_texture = maybe_fb_texture.map(|fb_texture| {
+            [crate::pass::CxPassColorTexture {
+                clear_color: PassClearColor::ClearWith(self.passes[pass_id].clear_color),
+                texture_id: fb_texture.texture_id(),
+            }]
+        });
+        let color_textures = color_textures_from_fb_texture
+            .as_ref().map_or(&self.passes[pass_id].color_textures[..], |xs| &xs[..]);
+
+        for (index, color_texture) in color_textures.iter().enumerate() {
             match color_texture.clear_color {
                 PassClearColor::InitWith(_clear_color) => {
                     let cxtexture = &mut self.textures[color_texture.texture_id];
@@ -787,13 +809,15 @@ impl CxOsDrawCall {
     }    
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone, Default)]
 pub struct CxOsTexture {
     pub alloc_desc: TextureDesc,
     pub width: u64,
     pub height: u64,
     pub gl_texture: Option<u32>,
-    pub gl_renderbuffer: Option<u32>
+    pub gl_renderbuffer: Option<u32>,
+
+    pub dma_buf_exported_image: Option<Box<linux_dma_buf::Image<os::fd::OwnedFd>>>,
 }
 
 impl CxOsTexture {
@@ -840,7 +864,7 @@ impl CxOsTexture {
         let width = desc.width.unwrap_or(default_size.x as usize) as u64;
         let height = desc.height.unwrap_or(default_size.y as usize) as u64;
         
-        if self.gl_texture.is_some() && self.width == width && self.height == height && self.alloc_desc == *desc {
+        if (self.gl_texture.is_some() || self.gl_renderbuffer.is_some()) && self.width == width && self.height == height && self.alloc_desc == *desc {
             return false
         }
         
