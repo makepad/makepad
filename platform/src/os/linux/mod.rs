@@ -4,6 +4,8 @@ pub mod x11;
 #[cfg(linux_direct)]
 pub mod direct;
 
+pub mod egl_sys;
+
 pub mod gl_sys;
 pub mod libc_sys;
 pub mod opengl;
@@ -27,9 +29,6 @@ pub mod pulse_sys;
 
 #[cfg(target_os="android")]
 pub mod android;
-
-#[cfg(target_os="android")]
-pub mod egl_sys;
 
 #[cfg(target_os="android")]
 pub(crate) use self::android::android::CxOs;
