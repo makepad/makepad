@@ -1,10 +1,11 @@
 mod android;
 mod wasm;
-mod shell;
+mod utils;
 mod ios;
 use android::*;
 use wasm::*;
 use ios::*;
+pub use makepad_shell;
 
 fn show_help(err: &str){
     if !err.is_empty(){

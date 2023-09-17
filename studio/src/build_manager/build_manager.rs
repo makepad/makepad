@@ -11,7 +11,7 @@ use {
         },
         build_manager::{
             build_protocol::*,
-            build_server::{BuildConnection, BuildServer},
+            build_server::{BuildTarget, BuildConnection, BuildServer},
             build_client::BuildClient
         },
         makepad_file_protocol::{
@@ -19,8 +19,9 @@ use {
             FileRequest,
             FileResponse,
         },
+        makepad_shell::*,
         makepad_widgets::*,
-        makepad_widgets::list_view::ListView,
+        makepad_widgets::portal_list::PortalList,
     },
     std::{
         collections::HashMap,
@@ -40,14 +41,16 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     Icon = <View> {
-        show_bg: true, width: 10, height: 10
+        show_bg: true,
+        width: 10,
+        height: 10
     }
-
-    LogIcon = <PageFlip>{
+    
+    LogIcon = <PageFlip> {
         active_page: log
         width: Fit,
         height: Fit,
-        margin:{top: 1, left:5, right:5}
+        margin: {top: 1, left: 5, right: 5}
         wait = <Icon> {
             draw_bg: {
                 fn pixel(self) -> vec4 {
@@ -137,7 +140,8 @@ live_design!{
     }
     
     LogItem = <RectView> {
-        height: Fit, width: Fill
+        height: Fit,
+        width: Fill
         padding: {top: 7, bottom: 7}
         
         draw_bg: {
@@ -192,23 +196,50 @@ live_design!{
         }
     }
     
-    LogList = <ListView> {
+    BuildItem = <RectView> {
+        height: Fit,
+        width: Fill
+        padding: {top: 0, bottom: 0}
+        
+        draw_bg: {
+            instance is_even: 0.0
+            instance selected: 0.0
+            instance hover: 0.0
+            fn pixel(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    THEME_COLOR_BG_SELECTED,
+                    self.selected
+                );
+            }
+        }
+    }
+    
+    
+    
+    LogList = <PortalList> {
         grab_key_focus: true
         auto_tail: true
         drag_scrolling: false
-        height: Fill, width: Fill
+        height: Fill,
+        width: Fill
         flow: Down
         Location = <LogItem> {
             icon = <LogIcon> {},
-            location = <LinkLabel> {margin:0, text:""}
-            body = <Label> {width: Fill, margin:{left:5}, padding:0, draw_text: {wrap: Word}}
+            location = <LinkLabel> {margin: 0, text: ""}
+            body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
         }
         Bare = <LogItem> {
             icon = <LogIcon> {},
-            body = <Label> {width: Fill, margin:0, padding:0, draw_text: {wrap: Word}}
+            body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
         }
         Empty = <RectView> {
-            height: 20, width: Fill
+            height: 20,
+            width: Fill
             draw_bg: {
                 instance is_even: 0.0
                 fn pixel(self) -> vec4 {
@@ -222,23 +253,33 @@ live_design!{
         }
     }
     
-    RunList = <ListView> {
+    RunList = <FlatList> {
         grab_key_focus: true
-        auto_tail: true
         drag_scrolling: false
-        height: Fill, width: Fill
+        height: Fill,
+        width: Fill
         flow: Down
-        Target = <LogItem> {
-            icon = <LogIcon> {},
-            location = <LinkLabel> {margin:0, text:""}
-            body = <Label> {width: Fill, margin:{left:5}, padding:0, draw_text: {wrap: Word}}
+        Target = <BuildItem> {
+            padding: {top: 0, bottom: 0}
+            //label = <Label> {width: Fill, margin:{left:35}, padding:0, draw_text: {wrap: Word}}
+            check = <CheckBox> {
+                width: Fill,
+                height: 25,
+                margin: {left: 25},
+                label_walk: {margin: {top: 7}}
+                draw_check: {check_type: Radio}
+                draw_text: {text_style: <THEME_FONT_LABEL> {}}
+            }
         }
-        Bare = <LogItem> {
-            icon = <LogIcon> {},
-            body = <Label> {width: Fill, margin:0, padding:0, draw_text: {wrap: Word}}
+        Binary = <BuildItem> {
+            padding: {top: 0, bottom: 0}
+            flow: Overlay
+            fold = <FoldButton> {animator: {open = {default: no}}, height: 25, width: Fill margin: {left: 5}}
+            label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Word}}
         }
         Empty = <RectView> {
-            height: 20, width: Fill
+            height: 20,
+            width: Fill
             draw_bg: {
                 instance is_even: 0.0
                 fn pixel(self) -> vec4 {
@@ -275,9 +316,15 @@ pub struct BuildManager {
     #[rust] pub clients: Vec<BuildClientWrap>,
     #[rust] recompile_timer: Timer,
     #[rust] pub log: Vec<LogItem>,
-    #[rust] pub build_targets: Vec<LogItem>,
-    #[rust] pub binaries: Vec<String>
+    #[rust] build_targets: Vec<BuildTarget>,
+    #[rust] binaries: Vec<BuildBinary>
 }
+
+struct BuildBinary {
+    open: f64,
+    name: String
+}
+
 
 pub enum BuildManagerAction {
     RedrawDoc, // {doc_id: DocumentId},
@@ -291,34 +338,34 @@ const WHAT_TO_BUILD: &'static str = "makepad-example-news-feed";
 
 impl BuildManager {
     
-    pub fn draw_log(&self, cx: &mut Cx2d, list: &mut ListView) {
+    pub fn draw_log(&self, cx: &mut Cx2d, list: &mut PortalList) {
         //let dt = profile_start();
         list.set_item_range(cx, 0, self.log.len() as u64);
         while let Some(item_id) = list.next_visible_item(cx) {
-            let is_even = item_id&1 == 0;
-            fn map_level_to_icon(level:LogItemLevel)->LiveId{
-                match level{
-                   LogItemLevel::Warning=>live_id!(warning),
-                   LogItemLevel::Error=>live_id!(error),
-                   LogItemLevel::Log=>live_id!(log),
-                   LogItemLevel::Wait=>live_id!(wait),
-                   LogItemLevel::Panic=>live_id!(panic),
+            let is_even = item_id & 1 == 0;
+            fn map_level_to_icon(level: LogItemLevel) -> LiveId {
+                match level {
+                    LogItemLevel::Warning => live_id!(warning),
+                    LogItemLevel::Error => live_id!(error),
+                    LogItemLevel::Log => live_id!(log),
+                    LogItemLevel::Wait => live_id!(wait),
+                    LogItemLevel::Panic => live_id!(panic),
                 }
             }
-            if let Some(log_item) = self.log.get(item_id as usize){
+            if let Some(log_item) = self.log.get(item_id as usize) {
                 match log_item {
                     LogItem::Bare(msg) => {
                         let item = list.item(cx, item_id, live_id!(Bare)).unwrap().as_view();
-                        item.apply_over(cx, live!{draw_bg:{is_even:(if is_even{1.0} else{0.0})}});
+                        item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
                         item.page_flip(id!(icon)).set_active_page(map_level_to_icon(msg.level));
                         item.widget(id!(body)).set_text(&msg.line);
                         item.draw_widget_all(cx);
                     }
                     LogItem::Location(msg) => {
                         let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
-                        item.apply_over(cx, live!{draw_bg:{is_even:(if is_even{1.0} else{0.0})}});
+                        item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
                         item.page_flip(id!(icon)).set_active_page(map_level_to_icon(msg.level));
-                        item.widget(id!(location)).set_text(&format!("{}: {}:{}",msg.file_name, msg.range.start().line_index, msg.range.start().byte_index));
+                        item.widget(id!(location)).set_text(&format!("{}: {}:{}", msg.file_name, msg.range.start().line_index, msg.range.start().byte_index));
                         item.widget(id!(body)).set_text(&msg.msg);
                         item.draw_widget_all(cx);
                     }
@@ -327,15 +374,71 @@ impl BuildManager {
             }
             else { // draw empty items
                 let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
-                item.apply_over(cx, live!{draw_bg:{is_even:(if is_even{1.0} else{0.0})}});
+                item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
                 item.draw_widget_all(cx);
             }
         }
         //profile_end!(dt);
     }
     
-    pub fn draw_run_list(&self, _cx: &mut Cx2d, _list: &mut ListView) {
-        
+    pub fn draw_run_list(&self, cx: &mut Cx2d, list: &mut FlatList) {
+        let mut counter = 0;
+        for (index, binary) in self.binaries.iter().enumerate() {
+            let is_even = counter & 1 == 0;
+            let item_id = LiveId(index as u64 * (BuildTarget::len() + 1));
+            let item = list.item(cx, item_id, live_id!(Binary)).unwrap().as_view();
+            item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
+            item.widget(id!(label)).set_text(&binary.name);
+            item.draw_widget_all(cx);
+            counter += 1;
+            if binary.open>0.001 {
+                for i in 0..BuildTarget::len() {
+                    let is_even = counter & 1 == 0;
+                    let item_id = LiveId(index as u64 * (BuildTarget::len() + 1) + i as u64 + 1);
+                    let bt = BuildTarget::index(i);
+                    let item = list.item(cx, item_id, live_id!(Target)).unwrap().as_view();
+                    let height = 25.0*binary.open;
+                    item.apply_over(cx, live!{
+                        height: (height)
+                        draw_bg: {is_even: (if is_even {1.0} else {0.0})}
+                    });
+                    item.widget(id!(check)).set_text(bt.name());
+                    item.draw_widget_all(cx);
+                    counter += 1;
+                }
+            }
+        }
+        while list.space_left(cx)>0.0 {
+            let is_even = counter & 1 == 0;
+            let item_id = LiveId(self.binaries.len() as u64 * (BuildTarget::len() + 1) + counter);
+            let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
+            let height = list.space_left(cx).min(20.0);
+            item.apply_over(cx, live!{
+                height: (height)
+                draw_bg: {is_even: (if is_even {1.0} else {0.0})}
+            });
+            item.draw_widget_all(cx);
+            counter += 1;
+        }
+    }
+    
+    pub fn handle_run_list(&mut self, cx: &mut Cx, item_id: LiveId, item: WidgetRef, actions: &WidgetActions) {
+        // ok lets see if someone clicked our
+        let targets = BuildTarget::len() as u64 + 1;
+        let bin = item_id.0 / targets;
+        let tgt = item_id.0 % targets;
+        if tgt == 0 {
+            if let Some(v) = item.fold_button(id!(fold)).animating(actions) {
+                self.binaries[bin as usize].open = v;
+                item.redraw(cx);
+            }
+        }
+        else{
+            if let Some(change) = item.check_box(id!(check)).changed(actions) {
+                let binary = &self.binaries[bin as usize];
+                log!("Run target {} {} {}", change, binary.name, BuildTarget::index(tgt - 1).name())
+            }
+        }
     }
     
     pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {
@@ -361,11 +464,40 @@ impl BuildManager {
         log!("Send host to stdin process not found");
     }
     
+    pub fn update_run_list(&mut self, _cx: &mut Cx) {
+        let cwd = std::env::current_dir().unwrap();
+        self.binaries.clear();
+        match shell_env_cap(&[], &cwd, "cargo", &["run", "--bin"]) {
+            Ok(_) => {}
+            // we expect it on stderr
+            Err(e) => {
+                let mut after_av = false;
+                for line in e.split("\n") {
+                    if after_av {
+                        let binary = line.trim().to_string();
+                        if binary.len()>0 {
+                            self.binaries.push(BuildBinary {
+                                open: 0.0,
+                                name: binary
+                            });
+                        }
+                    }
+                    if line.contains("Available binaries:") {
+                        after_av = true;
+                    }
+                }
+            }
+        }
+    }
+    
     pub fn init(&mut self, cx: &mut Cx) {
         let mut client = BuildClientWrap {
             client: BuildClient::new_with_local_server(&self.path),
             processes: HashMap::new()
         };
+        
+        // lets update our runlist
+        self.update_run_list(cx);
         
         let texture = Texture::new(cx);
         
@@ -389,11 +521,11 @@ impl BuildManager {
         }
     }
     
-    pub fn clear_log(&mut self){
+    pub fn clear_log(&mut self) {
         self.log.clear();
     }
     
-    pub fn start_recompile_timer(&mut self, cx:&mut Cx){
+    pub fn start_recompile_timer(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
@@ -441,9 +573,9 @@ impl BuildManager {
             wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
                 //let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
-                match &wrap.item {
-                    LogItem::Location(_loc) => {
-                        log.push(wrap.item);
+                match wrap.item {
+                    LogItem::Location(loc) => {
+                        log.push(LogItem::Location(loc));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
                         /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                             let doc = &mut editor_state.documents[*doc_id];
@@ -471,6 +603,10 @@ impl BuildManager {
                                 });
                             }
                             Err(_) => { // we should output a log string
+                                log.push(LogItem::Bare(LogItemBare {
+                                    level: LogItemLevel::Log,
+                                    line:line.trim().to_string()
+                                }));
                                 /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                     level: BuildMsgLevel::Log,
                                     line

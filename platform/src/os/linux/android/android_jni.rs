@@ -1,7 +1,7 @@
 use {
     crate::makepad_math::*,
     std::ffi::CString,
-    std::{cell::RefCell, cell::Cell, sync::mpsc},
+    std::{cell::RefCell, cell::Cell, rc::Rc, sync::mpsc},
     self::super::{
         ndk_sys,
         jni_sys,
@@ -76,6 +76,21 @@ pub enum FromJavaMessage {
     MidiDeviceOpened{
         name: String,
         midi_device: jni_sys::jobject
+    },
+    VideoDecodingInitialized {
+        video_id: u64,
+        frame_rate: usize,
+        video_width: u32,
+        video_height: u32,
+        color_format: String,
+        duration: u128,
+    },
+    VideoStream {
+        video_id: u64,
+        frames_group: Vec<u8>,
+    },
+    VideoChunkDecoded {
+        video_id: u64,
     },
     Pause,
     Resume,
@@ -348,6 +363,54 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     });
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoDecodingInitialized(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    video_id: jni_sys::jlong,
+    frame_rate: jni_sys::jint,
+    video_width: jni_sys::jint,
+    video_height: jni_sys::jint,
+    color_format: jni_sys::jstring,
+    duration: jni_sys::jlong,
+) {
+    let color_format = unsafe { jstring_to_string(env, color_format) };
+
+    send_from_java_message(FromJavaMessage::VideoDecodingInitialized {
+        video_id: video_id as u64,
+        frame_rate: frame_rate as usize,
+        video_width: video_width as u32,
+        video_height: video_height as u32,
+        color_format,
+        duration: duration as u128,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoStream(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    video_id: jni_sys::jlong,
+    frames_group: jni_sys::jobject,
+) {
+    let frames_group = unsafe { java_byte_buffer_to_vec(env, frames_group) };
+
+    send_from_java_message(FromJavaMessage::VideoStream {
+        video_id: video_id as u64,
+        frames_group,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoChunkDecoded(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    video_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::VideoChunkDecoded {
+        video_id: video_id as u64,
+    });
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onMidiDeviceOpened(
@@ -389,6 +452,32 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
     let slice = std::slice::from_raw_parts(bytes as *const u8, length as usize);
     out_bytes.extend_from_slice(slice);
     (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, jni_sys::JNI_ABORT);
+    out_bytes
+}
+
+unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sys::jobject) -> Vec<u8> {
+    let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
+
+    // call 'remaining' method to find out how many elements are remaining between the current position and the limit
+    let method_name = CString::new("remaining").unwrap();
+    let method_sig = CString::new("()I").unwrap();
+    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
+    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id);
+
+    // call 'array()' to get the backing byte array (works only for non-direct byte buffers)
+    let method_name = CString::new("array").unwrap();
+    let method_sig = CString::new("()[B").unwrap();
+    let array_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
+    let byte_array = (**env).CallObjectMethod.unwrap()(env, byte_buffer, array_method_id);
+
+    // extract elements from byte array
+    let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
+    let mut out_bytes = Vec::new();
+    let slice = std::slice::from_raw_parts(bytes as *const u8, remaining as usize);
+    out_bytes.extend_from_slice(slice);
+
+    (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, jni_sys::JNI_ABORT);
+
     out_bytes
 }
 
@@ -488,3 +577,58 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
         ndk_utils::call_void_method!(env, ACTIVITY, "openAllMidiDevices", "(J)V", delay);
     }  
 }
+
+pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>, chunk_size: usize) {
+    let video_data = &*video;
+
+    let java_body = (**env).NewByteArray.unwrap()(env, video_data.len() as i32);
+    (**env).SetByteArrayRegion.unwrap()(
+        env,
+        java_body,
+        0,
+        video_data.len() as i32,
+        video_data.as_ptr() as *const jni_sys::jbyte,
+    );
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "initializeVideoDecoding",
+        "(J[BI)V",
+        video_id.get_value() as jni_sys::jlong,
+        java_body as jni_sys::jobject,
+        chunk_size
+    );
+}
+
+pub unsafe fn to_java_decode_next_video_chunk(env: *mut jni_sys::JNIEnv, video_id: LiveId, max_frames_to_decode: usize) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "decodeNextVideoChunk",
+        "(JI)V",
+        video_id.get_value() as jni_sys::jlong,
+        max_frames_to_decode as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_fetch_next_video_frames(env: *mut jni_sys::JNIEnv, video_id: LiveId, number_frames: usize) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "fetchNextVideoFrames",
+        "(JI)V",
+        video_id.get_value() as jni_sys::jlong,
+        number_frames as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_cleanup_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "cleanupVideoDecoding",
+        "(J)V",
+        video_id
+    );
+}    
