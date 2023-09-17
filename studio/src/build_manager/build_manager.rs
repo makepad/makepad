@@ -370,11 +370,13 @@ impl BuildManager {
                     HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
                     }
                     HttpServerRequest::Get{headers, response_sender}=>{
-                        let body = if addrs.contains(&headers.addr){
+                        let mut addr = headers.addr.clone();
+                        addr.set_port(0);
+                        let body = if addrs.contains(&addr){
                             "".to_string().as_bytes().to_vec()
                         }
                         else{
-                            addrs.push(headers.addr);
+                            addrs.push(addr);
                             if let Some(change) = &change_slot{
                                 format!("{}$$$makepad_live_change$$${}",change.file_name, change.content).as_bytes().to_vec()
                             }
