@@ -138,7 +138,7 @@ impl RunView {
         }
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, manager: &mut BuildManager) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: &StdinToHost, manager: &mut BuildManager) {
 
         match msg {
 
@@ -159,8 +159,8 @@ impl RunView {
                 for client in manager.clients.iter_mut() {
                     for process in client.processes.values_mut() {
 
-                        process.present_index = present_index;
-                        self.draw_app.set_texture(0, &process.swapchain[present_index]);
+                        process.present_index = *present_index;
+                        self.draw_app.set_texture(0, &process.swapchain[*present_index]);
                     }
                 }
 
@@ -203,19 +203,47 @@ impl RunView {
                     });
 
                     // make sure the actual shared texture resources exist, and get their handles
+                    #[allow(unused_assignments)]
                     let mut handles = [0u64,0u64];
                     
-                    let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
+#[cfg(target_os = "windows")]
+                    {
+                        let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
 
-                    let cxtexture = &mut cx.textures[process.swapchain[0].texture_id()];
-                    cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
-                    handles[0] = cxtexture.os.shared_handle.0 as u64;
+                        let cxtexture = &mut cx.textures[process.swapchain[0].texture_id()];
+                        cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
+                        handles[0] = cxtexture.os.shared_handle.0 as u64;
 
-                    let cxtexture = &mut cx.textures[process.swapchain[1].texture_id()];
-                    cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
-                    handles[1] = cxtexture.os.shared_handle.0 as u64;
+                        let cxtexture = &mut cx.textures[process.swapchain[1].texture_id()];
+                        cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
+                        handles[1] = cxtexture.os.shared_handle.0 as u64;
 
-                    cx.cx.os.d3d11_device.replace(Some(d3d11_device));
+                        cx.cx.os.d3d11_device.replace(Some(d3d11_device));
+                    }
+
+#[cfg(target_os = "macos")]
+                    {
+                        let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
+
+                        let cxtexture = &mut cx.textures[process.swapchain[0].texture_id()];
+                        cxtexture.os.update_shared_texture(metal_device,&TextureDesc {
+                            format: TextureFormat::SharedBGRA(0),  // index to XPS server textures
+                            width: Some(new_size.0.max(1)),
+                            height: Some(new_size.0.max(1)),
+                        });
+
+                        let cxtexture = &mut cx.textures[process.swapchain[1].texture_id()];
+                        cxtexture.os.update_shared_texture(metal_device,&TextureDesc {
+                            format: TextureFormat::SharedBGRA(1),  // index to XPS server textures
+                            width: Some(new_size.0.max(1)),
+                            height: Some(new_size.0.max(1)),
+                        });
+
+                        cx.cx.os.metal_device.replace(Some(metal_device));
+
+                        // on macos, the XPS server takes care of managing the actual texture handles
+                        handles = [0,0];
+                    }
 
                     // send size update to client
                     manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
@@ -262,9 +290,9 @@ impl RunViewRef{
     
     pub fn recompile_started(&self, cx:&mut Cx){
         if let Some(mut inner) = self.borrow_mut(){
+
             inner.animator_play(cx, id!(recompiling.on));
         }
     }
     
 }
-
