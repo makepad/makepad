@@ -49,6 +49,7 @@ live_design!{
     App = {{App}} {
         ui: <Window> {
             caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
+            window: {inner_size: vec2(1600, 900)},
             body = {dock = <Dock> {
                 height: Fill,
                 width: Fill
@@ -69,7 +70,7 @@ live_design!{
                 
                 split2 = Splitter {
                     axis: Horizontal,
-                    align: FromB(400.0),
+                    align: Weighted(0.5),
                     a: edit_tabs,
                     b: run_tabs
                 }
@@ -337,7 +338,7 @@ impl AppMain for App {
             match self.build_manager.handle_run_list(cx, item_id, item, &actions){
                 RunListAction::Create(run_view_id, name)=>{
                     let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
-                    dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::No);
+                    dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::Yes);
                     dock.redraw(cx);
                 }
                 RunListAction::Destroy(run_view_id)=>{
@@ -351,6 +352,10 @@ impl AppMain for App {
             
         if let Some(tab_id) = dock.clicked_tab_close(&actions) {
             dock.close_tab(cx, tab_id);
+            if self.build_manager.handle_tab_close(tab_id){
+                log_list.redraw(cx);
+                run_list.redraw(cx);
+            }
         }
         
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {

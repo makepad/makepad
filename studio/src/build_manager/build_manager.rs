@@ -163,6 +163,26 @@ impl BuildManager {
         }
     }
     
+    pub fn handle_tab_close(&mut self, tab_id:LiveId)->bool{
+        let len = self.active.builds.len();
+        self.active.builds.retain(|_,v|{
+            if v.run_view_id == tab_id{
+                if let Some(cmd_id) = v.cmd_id {
+                    self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
+                }
+                return false
+            }
+            true
+        });
+        if len != self.active.builds.len(){
+            self.log.clear();
+            true
+        }
+        else{
+            false
+        }
+    }
+    
     pub fn start_recompile(&mut self, _cx: &mut Cx) {
         // alright so. a file was changed. now what.
         for active_build in self.active.builds.values_mut() {

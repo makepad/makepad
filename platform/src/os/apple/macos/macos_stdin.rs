@@ -49,8 +49,10 @@ impl Cx {
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(_) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                CxPassParent::Window(window_id) => {
+                    if window_id == CxWindowPool::id_zero() {
+                        self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                    }
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -288,10 +290,7 @@ impl Cx {
     fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, main_texture: &Texture) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::CreateWindow(window_id) => {
-                    if window_id != CxWindowPool::id_zero() {
-                        panic!("ONLY ONE WINDOW SUPPORTED");
-                    }
+                CxOsOp::CreateWindow(_window_id) => {
                     let window = &mut self.windows[CxWindowPool::id_zero()];
                     window.is_created = true;
                     // lets set up our render pass target
