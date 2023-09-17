@@ -1,6 +1,5 @@
 use {
     std::{
-        sync::mpsc,
         rc::Rc,
         cell::{RefCell},
         io::prelude::*,
@@ -358,12 +357,10 @@ impl Cx {
                                 let mut parts = body.split("$$$makepad_live_change$$$");
                                 if let Some(file_name) = parts.next() {
                                     let content = parts.next().unwrap().to_string();
-                                    if let Some(send) = &self.os.live_file_change_sender{
-                                        let _ = send.send(vec![LiveFileChange{
-                                            file_name:file_name.to_string(),
-                                            content
-                                        }]);
-                                    }
+                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                        file_name:file_name.to_string(),
+                                        content
+                                    }]);
                                 }
                             }
                         }
@@ -406,12 +403,8 @@ impl CxOsApi for Cx {
         #[cfg(ios_sim)]
         self.start_disk_live_file_watcher(50);
         
-        #[cfg(not(ios_sim))]{
-            let (send, recv) = std::sync::mpsc::channel();
-            self.os.live_file_change_sender = Some(send);
-            self.live_file_change_receiver = Some(recv);
-            self.poll_studio_http();
-        }
+        #[cfg(not(ios_sim))]
+        self.poll_studio_http();
         
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
@@ -442,7 +435,6 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
-    pub (crate)  live_file_change_sender: Option<mpsc::Sender<Vec<LiveFileChange >> >,
     pub (crate) decoding: CxAppleDecoding,
 }
 

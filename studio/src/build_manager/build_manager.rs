@@ -116,7 +116,6 @@ impl ActiveBuilds {
 
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
-    #[rust] pub studio_uid: LiveId,
     #[live] path: String,
     #[rust] pub clients: Vec<BuildClient>,
     #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
@@ -257,6 +256,15 @@ impl BuildManager {
     }
     
     pub fn live_reload_needed(&mut self, live_file_change:LiveFileChange){
+        // lets send this filechange to all our stdin stuff
+        for active_build in self.active.builds.values_mut() {
+            if let Some(cmd_id) = active_build.cmd_id{
+                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile{
+                    file: live_file_change.file_name.clone(),
+                    contents: live_file_change.content.clone()
+                }.to_json()));
+            }
+        }
         let _ = self.send_file_change.send(live_file_change);
     }
     
@@ -342,7 +350,7 @@ impl BuildManager {
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
         
         self.studio_http = format!("{}",addr);
-        log!("start_http_server {}", self.studio_http);
+        log!("Build manager mobile file change http server at {}", self.studio_http);
         start_http_server(HttpServer{
             listen_address:addr,
             post_max_size: 1024*1024,
@@ -408,13 +416,16 @@ impl BuildManager {
         // figure out some kind of unique id. bad but whatever.
         let studio_uid = LiveId::from_str(&format!("{:?}{:?}", Instant::now(), std::time::SystemTime::now()));
         
-        let write_discovery = UdpSocket::bind("0.0.0.0:41534").unwrap();
+        let write_discovery = UdpSocket::bind("0.0.0.0:41534");
+        if write_discovery.is_err(){
+            return
+        }
+        let write_discovery = write_discovery.unwrap();
         write_discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
         write_discovery.set_broadcast(true).unwrap();
         // start a broadcast
-        let studio_uid = self.studio_uid.0;
         std::thread::spawn(move || {
-            let dummy = studio_uid.to_be_bytes();
+            let dummy = studio_uid.0.to_be_bytes();
             loop {
                 write_discovery.send_to(&dummy, "255.255.255.255:41533").unwrap();
                 thread::sleep(time::Duration::from_millis(100));
@@ -431,7 +442,7 @@ impl BuildManager {
             'outer: loop{
                 while let Ok((_, addr)) = discovery.recv_from(&mut other_uid) {
                     let recv_uid = u64::from_be_bytes(other_uid);
-                    if studio_uid == recv_uid {
+                    if studio_uid.0 == recv_uid {
                         let _ = ip_sender.send(addr);
                         break 'outer;
                     }
@@ -439,16 +450,5 @@ impl BuildManager {
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
-        // lets start a webserver
-        
-        
-        // this thread does udp broadcast every second to announce our existence
-        /*std::thread::spawn(move || {
-            let dummy = client_uid.to_be_bytes();
-            loop {
-                write_discovery.send_to(&dummy, "255.255.255.255:41531").unwrap();
-                thread::sleep(time::Duration::from_secs(1));
-            }
-        });*/
     }
 }

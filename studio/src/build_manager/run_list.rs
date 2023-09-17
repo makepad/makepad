@@ -128,7 +128,7 @@ live_design!{
         }
         Empty = <BuildItem> {
             cursor: Default
-            height: 20,
+            height: 24,
             width: Fill
         }
     }

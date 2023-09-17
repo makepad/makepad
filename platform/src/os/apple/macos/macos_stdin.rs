@@ -15,6 +15,7 @@ use {
         makepad_math::*,
         makepad_error_log::*,
         makepad_micro_serde::*,
+        makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
@@ -87,9 +88,12 @@ impl Cx {
                 
                 match parsed {
                     Ok(msg) => match msg {
-                        HostToStdin::ReloadFile {file: _, contents: _} => {
+                        HostToStdin::ReloadFile {file, contents} => {
                             // alright lets reload this file in our DSL system
-                            
+                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                file_name: file,
+                                content: contents
+                            }]);
                         }
                         HostToStdin::KeyDown(e) => {
                             self.call_event_handler(&Event::KeyDown(e));
