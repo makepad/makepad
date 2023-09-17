@@ -291,7 +291,8 @@ impl AppMain for App {
                 FileSystemAction::RecompileNeeded => {
                     self.build_manager.start_recompile_timer(cx, &self.ui);
                 }
-                FileSystemAction::LiveReloadNeeded => {
+                FileSystemAction::LiveReloadNeeded(live_file_change) => {
+                    self.build_manager.live_reload_needed(live_file_change);
                     self.build_manager.clear_log();
                     log_list.redraw(cx);
                 }
