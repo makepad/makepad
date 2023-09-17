@@ -392,22 +392,17 @@ impl Video {
                         // if at the last frame, loop or stop
                         if current_frame.is_eos {
                             self.next_frame_ts = 0;
-                            if let Some(start_time) = self.start_time {
-                                self.start_time = Some(
-                                    start_time + Duration::from_micros(self.total_duration as u64),
-                                );
-                            }
+                            self.start_time = None;
                             if !self.is_looping {
                                 self.draw_bg.set_uniform(cx, id!(is_last_frame), &[1.0]);
                                 self.playback_state = PlaybackState::Finished;
-                                self.start_time = None;
                             }
                         } else {
                             self.next_frame_ts =
                                 current_frame.timestamp_us + self.frame_ts_interval.ceil() as u128;
                         }
                     }
-                    // empty buffer, deocder is falling behind
+                    // empty buffer, decoder is falling behind
                     None => {}
                 }
             }
