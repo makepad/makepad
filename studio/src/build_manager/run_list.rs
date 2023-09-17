@@ -89,10 +89,11 @@ pub enum RunListAction{
 impl BuildManager {
     
     pub fn draw_run_list(&self, cx: &mut Cx2d, list: &mut FlatList){
-        let mut counter = 0;
+        let mut counter = 0u32;
         for (index, binary) in self.binaries.iter().enumerate() {
             let is_even = counter & 1 == 0;
-            let item_id = LiveId(index as u64 * (BuildTarget::len() + 1));
+            
+            let item_id = LiveId::from_str(&binary.name);
             let item = list.item(cx, item_id, live_id!(Binary)).unwrap().as_view();
             item.apply_over(cx, live!{
                 check = {text:(&binary.name)}
@@ -100,10 +101,11 @@ impl BuildManager {
             });
             item.draw_widget_all(cx);
             counter += 1;
+            
             if binary.open>0.001 {
                 for i in 0..BuildTarget::len() {
                     let is_even = counter & 1 == 0;
-                    let item_id = LiveId(index as u64 * (BuildTarget::len() + 1) + i as u64 + 1);
+                    let item_id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
                     let item = list.item(cx, item_id, live_id!(Target)).unwrap().as_view();
                     let height = 25.0 * binary.open;
                     item.apply_over(cx, live!{
@@ -118,7 +120,7 @@ impl BuildManager {
         }
         while list.space_left(cx)>0.0 {
             let is_even = counter & 1 == 0;
-            let item_id = LiveId(self.binaries.len() as u64 * (BuildTarget::len() + 1) + counter);
+            let item_id = LiveId::from_str("empty").bytes_append(&counter.to_be_bytes());
             let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
             let height = list.space_left(cx).min(20.0);
             item.apply_over(cx, live!{
@@ -132,23 +134,27 @@ impl BuildManager {
     
     pub fn handle_run_list(&mut self, cx: &mut Cx, item_id: LiveId, item: WidgetRef, actions: &WidgetActions)->RunListAction{
         // ok lets see if someone clicked our
-        let targets = BuildTarget::len() as u64 + 1;
-        let bin = item_id.0 / targets;
-        let tgt = item_id.0 % targets;
-        if tgt == 0 {
-            if let Some(v) = item.fold_button(id!(fold)).animating(actions) {
-                self.binaries[bin as usize].open = v;
-                item.redraw(cx);
+        for binary in &mut self.binaries {
+            let binary_name = binary.name.clone();
+            let id = LiveId::from_str(&binary.name);
+            if item_id == id{
+                if let Some(v) = item.fold_button(id!(fold)).animating(actions) {
+                    binary.open = v;
+                    item.redraw(cx);
+                }
+                if let Some(change) = item.check_box(id!(check)).changed(actions) {
+                    return self.toggle_active_build(cx, binary_name, 0, change)
+                };
             }
-            if let Some(change) = item.check_box(id!(check)).changed(actions) {
-                let binary = self.binaries[bin as usize].name.clone();
-                return self.toggle_active_build(cx, binary.clone(), 0, change)
-            }
-        }
-        else {
-            if let Some(change) = item.check_box(id!(check)).changed(actions) {
-                let binary = self.binaries[bin as usize].name.clone();
-                return self.toggle_active_build(cx, binary.clone(), tgt - 1, change)
+            else{
+                for i in 0..BuildTarget::len() {
+                    let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
+                    if item_id == id{
+                        if let Some(change) = item.check_box(id!(check)).changed(actions) {
+                            return self.toggle_active_build(cx, binary_name, i, change)
+                        }
+                    }
+                }
             }
         }
         RunListAction::None
