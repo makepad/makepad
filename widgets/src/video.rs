@@ -91,6 +91,8 @@ pub struct Video {
 
     // Frame
     #[rust]
+    is_current_texture_preview: bool,
+    #[rust]
     next_frame_ts: u128,
     #[rust]
     frame_ts_interval: f64,
@@ -120,6 +122,13 @@ impl VideoRef {
     pub fn begin_decoding(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.initialize_decoding(cx);
+        }
+    }
+
+    // it will initialize decoding if not already initialized
+    pub fn show_preview(&mut self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.show_preview(cx);
         }
     }
 
@@ -165,10 +174,11 @@ enum DecodingState {
     ChunkFinished,
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Debug)]
 enum PlaybackState {
     #[default]
     NotStarted,
+    Previewing,
     Playing,
     Paused,
     Finished,
@@ -248,19 +258,26 @@ impl Video {
         }
 
         if self.tick.is_event(event).is_some() {            
+            self.maybe_show_preview(cx);
             self.maybe_advance_playback(cx);
 
             if self.should_fetch() {
                 self.available_to_fetch = false;
                 cx.fetch_next_video_frames(self.id, MAX_FRAMES_TO_DECODE);
             } else if self.should_request_decoding() {
-                cx.decode_next_video_chunk(self.id, MAX_FRAMES_TO_DECODE);
+                let frames_to_decode = if self.playback_state == PlaybackState::Previewing {
+                    1
+                } else {
+                    MAX_FRAMES_TO_DECODE
+                };
+                cx.decode_next_video_chunk(self.id, frames_to_decode);
                 self.decoding_state = DecodingState::Decoding;
             }
         }
 
         self.handle_gestures(cx, event);
         self.handle_activity_events(event);
+        self.handle_errors(event);
     }
 
     fn initialize_decoding(&mut self, cx: &mut Cx) {
@@ -287,7 +304,8 @@ impl Video {
         self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
 
         makepad_error_log::log!(
-            "<<<<<<<<<<<<<<< Decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
+            "Video id {} decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
+            self.id.0,
             self.video_width,
             self.video_height,
             self.original_frame_rate,
@@ -330,7 +348,25 @@ impl Video {
             );
         });
     }
-    
+
+    fn maybe_show_preview(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Previewing {
+            if !self.is_current_texture_preview {
+                let current_frame = { self.frames_buffer.lock().unwrap().get() };
+                match current_frame {
+                    Some(current_frame) => {
+                        self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
+                        self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
+                        self.update_texture(cx, current_frame.pixel_data);
+                        self.is_current_texture_preview = true;
+                        self.redraw(cx);
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
     fn maybe_advance_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Playing {
             let now = Instant::now();
@@ -350,7 +386,7 @@ impl Video {
                             self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
                         }
 
-                        self.update_textures(cx, current_frame.pixel_data);
+                        self.update_texture(cx, current_frame.pixel_data);
                         self.redraw(cx);
 
                         // if at the last frame, loop or stop
@@ -378,7 +414,7 @@ impl Video {
         }
     }
 
-    fn update_textures(&mut self, cx: &mut Cx, pixel_data: Arc<Mutex<Vec<u32>>>) {
+    fn update_texture(&mut self, cx: &mut Cx, pixel_data: Arc<Mutex<Vec<u32>>>) {
         if self.texture.is_none() {
             let texture = Texture::new(cx);
             texture.set_desc(
@@ -404,14 +440,14 @@ impl Video {
             .unwrap()
             .release(pixel_data.lock().unwrap().to_vec());
     }
-    
+
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 if self.hold_to_pause {
                     self.pause_playback();
                 }
-            },
+            }
             Hit::FingerUp(_fe) => {
                 if self.hold_to_pause {
                     self.resume_playback();
@@ -429,11 +465,27 @@ impl Video {
         }
     }
 
-    fn begin_playback(&mut self, cx: &mut Cx) {
+    fn handle_errors(&mut self, event: &Event) {
+        if let Event::VideoDecodingError(event) = event {
+            if event.video_id == self.id {
+                // todo: cleanup resources or retry depending on state
+                makepad_error_log::log!("Error decoding video: {}", event.error);
+            }
+        }
+    }
+
+    fn show_preview(&mut self, cx: &mut Cx) {
         if self.decoding_state == DecodingState::NotStarted {
             self.initialize_decoding(cx);
         }
-        self.playback_state = PlaybackState::Playing;
+        self.playback_state = PlaybackState::Previewing;
+    }
+
+    fn begin_playback(&mut self, cx: &mut Cx) {
+        if self.decoding_state == DecodingState::NotStarted {
+            self.initialize_decoding(cx);
+            self.playback_state = PlaybackState::Playing;
+        }
     }
 
     fn pause_playback(&mut self) {
@@ -458,15 +510,12 @@ impl Video {
     }
 
     fn should_fetch(&self) -> bool {
-        self.available_to_fetch
-            && self.is_buffer_running_low()
+        self.available_to_fetch && self.is_buffer_running_low()
     }
 
     fn should_request_decoding(&self) -> bool {
         match self.decoding_state {
-            DecodingState::ChunkFinished => {
-                self.is_buffer_running_low()
-            }
+            DecodingState::ChunkFinished => self.is_buffer_running_low(),
             _ => false,
         }
     }
@@ -474,11 +523,14 @@ impl Video {
     fn is_buffer_running_low(&self) -> bool {
         self.frames_buffer.lock().unwrap().data.len() < FRAME_BUFFER_LOW_WATER_MARK
     }
-    
+
     fn cleanup_decoding(&mut self, cx: &mut Cx) {
-        cx.cleanup_video_decoding(self.id);
-        self.frames_buffer.lock().unwrap().clear();
-        self.decoding_state = DecodingState::NotStarted;
+        if self.decoding_state != DecodingState::NotStarted {
+            cx.cleanup_video_decoding(self.id);
+            self.frames_buffer.lock().unwrap().clear();
+            self.vec_pool.lock().unwrap().clear();
+            self.decoding_state = DecodingState::NotStarted;
+        }
     }
 }
 
@@ -550,6 +602,10 @@ impl VecPool {
 
     pub fn release(&mut self, vec: Vec<u32>) {
         self.pool.push(vec);
+    }
+
+    pub fn clear(&mut self) {
+        self.pool.clear();
     }
 }
 
