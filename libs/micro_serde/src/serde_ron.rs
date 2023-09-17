@@ -735,25 +735,17 @@ unsafe fn de_ron_array_impl_inner<T>(top: *mut T, count: usize, s: &mut DeRonSta
     Ok(())
 }
 
-macro_rules!de_ron_array_impl {
-    ( $ ( $ count: expr), *) => {
-        $ (
-            impl<T> DeRon for [T; $ count] where T: DeRon {
-                fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
-                DeRonErr> {
-                    unsafe {
-                        let mut to = std::mem::MaybeUninit::<[T; $ count]>::uninit();
-                        let top: *mut T = &mut to as *mut _ as *mut T;
-                        de_ron_array_impl_inner(top, $ count, s, i) ?;
-                        Ok(to.assume_init())
-                    }
-                }
-            }
-        ) *
+impl<T, const N: usize> DeRon for [T; N] where T: DeRon {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
+    DeRonErr> {
+        unsafe {
+            let mut to = std::mem::MaybeUninit::<[T; N]>::uninit();
+            let top: *mut T = &mut to as *mut _ as *mut T;
+            de_ron_array_impl_inner(top, N, s, i) ?;
+            Ok(to.assume_init())
+        }
     }
 }
-
-de_ron_array_impl!(2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32);
 
 fn de_ron_comma_paren<T>(s: &mut DeRonState, i: &mut Chars) -> Result<T, DeRonErr> where T: DeRon {
     let t = DeRon::de_ron(s, i);
