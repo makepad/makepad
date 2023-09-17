@@ -68,7 +68,6 @@ pub struct View { // draw info per UI element
     #[live] cursor: Option<MouseCursor>,
     #[live] scroll_bars: Option<LivePtr>,
     #[live(false)] design_mode: bool,
-    #[live(false)] stepping: bool,
     
     #[rust] find_cache: HashMap<u64, WidgetSet>,
     
@@ -573,7 +572,6 @@ impl Widget for View {
 
 #[derive(Clone)]
 enum DrawState {
-    Stepping(usize),
     Drawing(usize, bool),
     DeferWalk(usize)
 }
@@ -601,13 +599,6 @@ impl View {
             height: if walk.height.is_fill() {walk.height}else {Size::Fixed(view_size.y)},
             margin: walk.margin
         }
-    }
-    
-    pub fn is_in_draw_step(&self)->Option<usize>{
-        if let Some(DrawState::Stepping(step)) = self.draw_state.get(){
-            return Some(step)
-        }
-        None
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
@@ -680,9 +671,7 @@ impl View {
                 cx.begin_turtle(walk, self.layout.with_scroll(scroll));//.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
         }
-        if let Some(DrawState::Stepping(step)) = self.draw_state.get() {
-            self.draw_state.set(DrawState::Drawing(step, false));
-        }
+
         while let Some(DrawState::Drawing(step, resume)) = self.draw_state.get() {
             if step < self.draw_order.len() {
                 let id = self.draw_order[step];
@@ -701,13 +690,7 @@ impl View {
                         }
                     }
                 }
-                if self.stepping{
-                    self.draw_state.set(DrawState::Stepping(step + 1));
-                    
-                }
-                else{
-                    self.draw_state.set(DrawState::Drawing(step + 1, false));
-                }
+                self.draw_state.set(DrawState::Drawing(step + 1, false));
             }
             else {
                 self.draw_state.set(DrawState::DeferWalk(0));

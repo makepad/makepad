@@ -270,6 +270,36 @@ impl ScrollBars {
         }
     }
     
+    pub fn end2(&mut self, cx: &mut Cx2d) {
+        self.draw_scroll_bars(cx);
+        // this needs to be a rect_area
+        cx.end_turtle_with_area(&mut self.area);
+        self.end_nav_area(cx);
+    }
+    
+    pub fn draw_scroll_bars2(&mut self, cx: &mut Cx2d) {
+        // lets ask the turtle our actual bounds
+        let view_total = cx.turtle().used();
+        let mut rect_now = cx.turtle().rect();
+        
+        if rect_now.size.y.is_nan() {
+            rect_now.size.y = view_total.y;
+        }
+        if rect_now.size.x.is_nan() {
+            rect_now.size.x = view_total.x;
+        }
+        
+        if self.show_scroll_x {
+            let scroll_pos = self.scroll_bar_x.draw_scroll_bar(cx, Axis::Horizontal, rect_now, view_total);
+            self.set_scroll_x(cx, scroll_pos);
+        }
+        if self.show_scroll_y {
+            println!("SET SCROLLBAR {} {}", rect_now.size.y, view_total.y);
+            let scroll_pos = self.scroll_bar_y.draw_scroll_bar(cx, Axis::Vertical, rect_now, view_total);
+            self.set_scroll_y(cx, scroll_pos);
+        }
+    }
+    
     pub fn set_area(&mut self, area: Area) {
         self.area = area;
     }

@@ -4,10 +4,12 @@ use {
     std::cell::{RefCell},
     std::ffi::CString,
     std::os::raw::{c_void},
-    std::time::Instant,
+    std::time::{Instant, Duration},
     std::sync::mpsc,
+    std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
+        android_decoding::CxAndroidDecoding,
         jni_sys::jobject,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
@@ -39,6 +41,9 @@ use {
             KeyCode,
             Event,
             WindowGeom,
+            VideoDecodingInitializedEvent,
+            VideoColorFormat,
+            VideoStreamEvent,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -59,6 +64,7 @@ impl Cx {
         self.redraw_all();
         
         while !self.os.quit {
+            self.handle_timers();
             
             while let Ok(msg) = from_java_rx.try_recv() {
                 match msg {
@@ -247,6 +253,32 @@ impl Cx {
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
                     }
+                    FromJavaMessage::VideoDecodingInitialized {video_id, frame_rate, video_width, video_height, color_format, duration} => {
+                        let e = Event::VideoDecodingInitialized(
+                            VideoDecodingInitializedEvent { 
+                                video_id: LiveId(video_id),
+                                frame_rate,
+                                video_width,
+                                video_height,
+                                color_format: VideoColorFormat::from_str(&color_format),
+                                duration,
+                            }
+                        );
+                        self.call_event_handler(&e);
+                    },
+                    FromJavaMessage::VideoStream {video_id, frames_group} => {
+                        if let Some(callback_mutex) = self.os.decoding.video_decoding_input_cb.get(&LiveId(video_id)) {
+                            if let Ok(mut lock) = callback_mutex.lock() {
+                                if let Some(ref mut callback) = *lock {
+                                    (*callback)(frames_group);
+                                }
+                            }
+                        }
+                    },
+                    FromJavaMessage::VideoChunkDecoded {video_id} => {
+                        let e = Event::VideoChunkDecoded(LiveId(video_id));
+                        self.call_event_handler(&e);
+                    },
                     FromJavaMessage::Pause => {
                         self.call_event_handler(&Event::Pause);
                     }
@@ -262,6 +294,7 @@ impl Cx {
                         }
                         self.redraw_all();
                         self.reinitialise_media();
+                        self.call_event_handler(&Event::Resume);
                     }
                     FromJavaMessage::Destroy => {
                         self.os.quit = true;
@@ -276,7 +309,7 @@ impl Cx {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
             }
-            
+
             self.handle_platform_ops();
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
                 if self.new_next_frames.len() != 0 {
@@ -295,12 +328,12 @@ impl Cx {
                 self.handle_repaint();
             }
             else {
-                std::thread::sleep(std::time::Duration::from_millis(8));
+                std::thread::sleep(Duration::from_millis(8));
             }
         }
     }
     
-    pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
+    pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {        
         let (from_java_tx, from_java_rx) = mpsc::channel();
         
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
@@ -522,13 +555,11 @@ impl Cx {
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
-                CxOsOp::StartTimer {timer_id: _, interval: _, repeats: _} => {
-                    //android_app.start_timer(timer_id, interval, repeats);
-                    //to_java.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    self.os.timers.insert(timer_id, Timer::new(interval, repeats));
                 },
-                CxOsOp::StopTimer(_timer_id) => {
-                    //to_java.cancel_timeout(timer_id as i64);
-                    //android_app.stop_timer(timer_id);
+                CxOsOp::StopTimer(timer_id) => {
+                    self.os.timers.remove(&timer_id);
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
                     //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
@@ -544,10 +575,62 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
+                CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_initialize_video_decoding(env, video_id, video, chunk_size);
+                    }
+                },
+                CxOsOp::DecodeNextVideoChunk(video_id, max_frames_to_decode) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_decode_next_video_chunk(env, video_id, max_frames_to_decode);
+                    }
+                },
+                CxOsOp::FetchNextVideoFrames(video_id, number_frames) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_fetch_next_video_frames(env, video_id, number_frames);
+                    }
+                },
+                CxOsOp::CleanupVideoDecoding(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_cleanup_video_decoding(env, video_id);
+                    }
+                }
                 _ => ()
             }
         }
         EventFlow::Poll
+    }
+
+    fn handle_timers(&mut self) {
+        let mut to_be_dispatched = Vec::with_capacity(self.os.timers.len());
+        let mut to_be_removed = Vec::with_capacity(self.os.timers.len());
+        let now = Instant::now();
+
+        for (id, timer) in self.os.timers.iter_mut() {
+            let elapsed_time = now - timer.start_time;
+            let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
+
+            if elapsed_time > next_due_time {
+                to_be_dispatched.push(Event::Timer(TimerEvent { timer_id: *id }));
+                if timer.repeats {
+                    timer.step += 1;
+                } else {
+                    to_be_removed.push(*id);
+                }
+            }
+        }
+
+        for id in to_be_removed {
+            self.os.timers.remove(&id);
+        }
+        for event in to_be_dispatched {
+            self.call_event_handler(&event);
+        }
+        self.os.last_time = now;
     }
 }
 
@@ -576,9 +659,11 @@ impl Default for CxOs {
             //keyboard_trigger_position: DVec2::default(),
             //keyboard_panning_offset: 0,
             media: CxAndroidMedia::default(),
+            decoding: CxAndroidDecoding::default(),
             display: None,
             quit: false,
-            fullscreen: false
+            fullscreen: false,
+            timers: HashMap::new()
         }
     }
 }
@@ -610,8 +695,9 @@ pub struct CxOs {
     pub fullscreen: bool,
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
+    pub (crate) decoding: CxAndroidDecoding,
+    pub (crate) timers: HashMap<u64, Timer>,
 }
-
 
 impl CxAndroidDisplay {
     unsafe fn destroy_surface(&mut self) {
@@ -653,9 +739,29 @@ impl CxAndroidDisplay {
         assert!(res != 0);
     }
 }
+
 impl CxOs {
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+    }
+}
+
+pub struct Timer {
+    pub start_time: Instant,
+    pub interval: Duration,
+    pub repeats: bool,
+    pub step: u64, 
+}
+
+impl Timer {
+    pub fn new(interval_ms: f64, repeats: bool) -> Timer {
+        let interval_ns = (interval_ms * 1e6) as u64;
+        Timer {
+            start_time: Instant::now(),
+            interval: Duration::from_nanos(interval_ns),
+            repeats,
+            step: 0,
+        }
     }
 }
