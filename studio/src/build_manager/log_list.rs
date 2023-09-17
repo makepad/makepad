@@ -121,7 +121,7 @@ live_design!{
     LogItem = <RectView> {
         height: Fit,
         width: Fill
-        padding: {top: 4, bottom: 4}
+        padding: {top: 6, bottom: 6}
         
         draw_bg: {
             instance is_even: 0.0
@@ -197,7 +197,7 @@ live_design!{
         }
         Empty =  <LogItem> {
             cursor: Default
-            height: 20,
+            height: 24,
             width: Fill
         }
     }

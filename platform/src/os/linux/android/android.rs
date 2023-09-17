@@ -434,12 +434,10 @@ impl Cx {
                                 let mut parts = body.split("$$$makepad_live_change$$$");
                                 if let Some(file_name) = parts.next() {
                                     let content = parts.next().unwrap().to_string();
-                                    if let Some(send) = &self.os.live_file_change_sender{
-                                        let _ = send.send(vec![LiveFileChange{
-                                            file_name:file_name.to_string(),
-                                            content
-                                        }]);
-                                    }
+                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                        file_name:file_name.to_string(),
+                                        content
+                                    }]);
                                 }
                             }
                         }
@@ -735,11 +733,6 @@ impl CxOsApi for Cx {
         self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         self.live_expand();
         self.live_scan_dependencies();
-        
-        let (send, recv) = std::sync::mpsc::channel();
-        self.os.live_file_change_sender = Some(send);
-        self.live_file_change_receiver = Some(recv);
-        
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
@@ -750,7 +743,6 @@ impl CxOsApi for Cx {
 impl Default for CxOs {
     fn default() -> Self {
         Self {
-            live_file_change_sender: None,
             last_time: Instant::now(),
             first_after_resize: true,
             display_size: dvec2(100., 100.),
@@ -788,7 +780,6 @@ pub struct CxOs {
     pub dpi_factor: f64,
     pub time_start: Instant,
     pub keyboard_closed: f64,
-    pub live_file_change_sender: Option<mpsc::Sender<Vec<LiveFileChange >> >,
     //pub keyboard_visible: bool,
     //pub keyboard_trigger_position: DVec2,
     //pub keyboard_panning_offset: i32,
