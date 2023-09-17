@@ -251,25 +251,17 @@ unsafe fn de_bin_array_impl_inner<T>(top: *mut T, count: usize, o:&mut usize, d:
     Ok(())
 }
 
-macro_rules!de_bin_array_impl {
-    ( $($count:expr),*) => {
-        $(
-        impl<T> DeBin for [T; $count] where T: DeBin {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self,
-            DeBinErr> {
-                unsafe{
-                    let mut to = std::mem::MaybeUninit::<[T; $count]>::uninit();
-                    let top: *mut T = &mut to as *mut _ as *mut T;
-                    de_bin_array_impl_inner(top, $count, o, d)?;
-                    Ok(to.assume_init())
-                }
-            }
+impl<T, const N: usize> DeBin for [T; N] where T: DeBin {
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self,
+    DeBinErr> {
+        unsafe{
+            let mut to = std::mem::MaybeUninit::<[T; N]>::uninit();
+            let top: *mut T = &mut to as *mut _ as *mut T;
+            de_bin_array_impl_inner(top, N, o, d)?;
+            Ok(to.assume_init())
         }
-        )*
     }
 }
-
-de_bin_array_impl!(2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32);
 
 impl<A,B> SerBin for (A,B) where A: SerBin, B:SerBin {
     fn ser_bin(&self, s: &mut Vec<u8>) {

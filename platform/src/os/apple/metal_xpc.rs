@@ -5,13 +5,13 @@ use {
     std::sync::Mutex,
     std::ptr::NonNull,
     crate::{
-        makepad_error_log::*,
+        //makepad_error_log::*,
         makepad_objc_sys::objc_block,
         makepad_objc_sys::objc_block_invoke,
         os::{
             apple::apple_sys::*,
             apple_util::{
-                nsstring_to_string,
+                //nsstring_to_string,
                 str_to_nsstring,
             },
         },
@@ -72,12 +72,13 @@ pub fn xpc_service_proxy() -> RcObjcId {
         ];
         let () = msg_send![connection, setRemoteObjectInterface: iface];
         let () = msg_send![connection, resume];
-        
-        let error_handler = objc_block!(move | error: ObjcId | {
+        /*
+        let _error_handler = objc_block!(move | error: ObjcId | {
             let desc: ObjcId = msg_send![error, localizedDescription];
             log!("xpc_service_proxy got error: {}", nsstring_to_string(desc));
         });
-        let proxy: ObjcId = msg_send![connection, remoteObjectProxyWithErrorHandler: error_handler];
+        */
+        let proxy: ObjcId = msg_send![connection, remoteObjectProxyWithErrorHandler: nil];
         RcObjcId::from_unowned(NonNull::new(proxy).unwrap())
     }
 }
