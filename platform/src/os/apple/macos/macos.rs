@@ -320,6 +320,7 @@ impl Cx {
                 if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
                     metal_windows.remove(index);
                     if metal_windows.len() == 0 {
+                        self.call_event_handler(&Event::Destruct);
                         return EventFlow::Exit
                     }
                 }

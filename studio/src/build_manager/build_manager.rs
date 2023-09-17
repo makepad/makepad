@@ -11,7 +11,7 @@ use {
         },
         build_manager::{
             build_protocol::*,
-            build_server::{BuildTarget, BuildConnection, BuildServer},
+            build_server::{BuildConnection, BuildServer},
             build_client::BuildClient
         },
         makepad_file_protocol::{
@@ -24,7 +24,7 @@ use {
         makepad_widgets::portal_list::PortalList,
     },
     std::{
-        collections::HashMap,
+        collections::{HashMap, BTreeMap},
         env,
         cell::Cell,
         io::{Read, Write},
@@ -142,7 +142,7 @@ live_design!{
     LogItem = <RectView> {
         height: Fit,
         width: Fill
-        padding: {top: 7, bottom: 7}
+        padding: {top: 5, bottom: 5}
         
         draw_bg: {
             instance is_even: 0.0
@@ -161,6 +161,7 @@ live_design!{
             }
         }
         animator: {
+            ignore_missing: true,
             hover = {
                 default: off
                 off = {
@@ -224,21 +225,24 @@ live_design!{
     LogList = <PortalList> {
         grab_key_focus: true
         auto_tail: true
+        allow_empty: true
         drag_scrolling: false
         height: Fill,
         width: Fill
         flow: Down
         Location = <LogItem> {
             icon = <LogIcon> {},
+            binary = <Label> {width: Fit, margin: 0, padding: 0, draw_text: {wrap: Word}}
             location = <LinkLabel> {margin: 0, text: ""}
             body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
         }
         Bare = <LogItem> {
             icon = <LogIcon> {},
+            binary = <Label> {width: Fit, margin: 0, padding: 0, draw_text: {wrap: Word}}
             body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
         }
         Empty = <RectView> {
-            height: 20,
+            height: 22,
             width: Fill
             draw_bg: {
                 instance is_even: 0.0
@@ -275,7 +279,7 @@ live_design!{
             padding: {top: 0, bottom: 0}
             flow: Overlay
             fold = <FoldButton> {animator: {open = {default: no}}, height: 25, width: Fill margin: {left: 5}}
-            label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Word}}
+            label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
         }
         Empty = <RectView> {
             height: 20,
@@ -299,25 +303,73 @@ live_design!{
     }
 }
 
-pub struct BuildClientProcess {
-    pub cmd_id: BuildCmdId,
-    pub texture: Texture
+
+pub struct ActiveBuild {
+    pub process: BuildProcess,
+    pub run_view_id: LiveId,
+    pub texture: Texture,
+    pub cmd_id: Option<BuildCmdId>,
 }
 
-pub struct BuildClientWrap {
-    client: BuildClient,
-    pub processes: HashMap<String, BuildClientProcess>,
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct ActiveBuildId(pub LiveId);
+
+#[derive(Default)]
+pub struct ActiveBuilds{
+    pub builds: HashMap<ActiveBuildId, ActiveBuild>
+}
+
+impl ActiveBuilds{
+    
+    pub fn build_id_from_cmd_id(&self, cmd_id: BuildCmdId) -> Option<ActiveBuildId> {
+        for (k, v) in &self.builds {
+            if v.cmd_id == Some(cmd_id) {
+                return Some(*k);
+            }
+        }
+        None
+    }
+    
+    pub fn build_id_from_run_view_id(&self, run_view_id: LiveId) -> Option<ActiveBuildId> {
+        for (k, v) in &self.builds {
+            if v.run_view_id == run_view_id {
+                return Some(*k);
+            }
+        }
+        None
+    }
+    
+    
+    pub fn run_view_id_from_cmd_id(&self, cmd_id: BuildCmdId) -> Option<LiveId> {
+        for v in self.builds.values() {
+            if v.cmd_id == Some(cmd_id) {
+                return Some(v.run_view_id);
+            }
+        }
+        None
+    }
+    
+    pub fn cmd_id_from_run_view_id(&self, run_view_id: LiveId) -> Option<BuildCmdId> {
+        for v in self.builds.values() {
+            if v.run_view_id == run_view_id {
+                return v.cmd_id
+            }
+        }
+        None
+    }
+    
 }
 
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
     #[live] path: String,
+    #[rust] clients: Vec<BuildClient>,
+    #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
     #[live] recompile_timeout: f64,
-    #[rust] pub clients: Vec<BuildClientWrap>,
     #[rust] recompile_timer: Timer,
-    #[rust] pub log: Vec<LogItem>,
     #[rust] build_targets: Vec<BuildTarget>,
-    #[rust] binaries: Vec<BuildBinary>
+    #[rust] binaries: Vec<BuildBinary>,
+    #[rust] active: ActiveBuilds
 }
 
 struct BuildBinary {
@@ -328,7 +380,7 @@ struct BuildBinary {
 
 pub enum BuildManagerAction {
     RedrawDoc, // {doc_id: DocumentId},
-    StdinToHost {cmd_id: BuildCmdId, msg: StdinToHost},
+    StdinToHost {run_view_id: LiveId, msg: StdinToHost},
     RedrawLog,
     ClearLog,
     None
@@ -338,8 +390,14 @@ const WHAT_TO_BUILD: &'static str = "makepad-example-news-feed";
 
 impl BuildManager {
     
+    pub fn init(&mut self, cx: &mut Cx) {
+        self.clients = vec![BuildClient::new_with_local_server(&self.path)];
+        self.update_run_list(cx);
+        self.recompile_timer = cx.start_timeout(self.recompile_timeout);
+    }
+    
     pub fn draw_log(&self, cx: &mut Cx2d, list: &mut PortalList) {
-        //let dt = profile_start();
+        
         list.set_item_range(cx, 0, self.log.len() as u64);
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id & 1 == 0;
@@ -352,31 +410,39 @@ impl BuildManager {
                     LogItemLevel::Panic => live_id!(panic),
                 }
             }
-            if let Some(log_item) = self.log.get(item_id as usize) {
-                match log_item {
-                    LogItem::Bare(msg) => {
-                        let item = list.item(cx, item_id, live_id!(Bare)).unwrap().as_view();
-                        item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-                        item.page_flip(id!(icon)).set_active_page(map_level_to_icon(msg.level));
-                        item.widget(id!(body)).set_text(&msg.line);
-                        item.draw_widget_all(cx);
+            if let Some((build_id, log_item)) = self.log.get(item_id as usize) {
+                if let Some(build) = self.active.builds.get(&build_id) {
+                    match log_item {
+                        LogItem::Bare(msg) => {
+                            let item = list.item(cx, item_id, live_id!(Bare)).unwrap().as_view();
+                            item.apply_over(cx, live!{
+                                icon = {active_page: (map_level_to_icon(msg.level))},
+                                body = {text: (&msg.line)}
+                                draw_bg: {is_even: (if is_even {1.0} else {0.0})}
+                            });
+                            item.draw_widget_all(cx);
+                            
+                        }
+                        LogItem::Location(msg) => {
+                            let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
+                            item.apply_over(cx, live!{
+                                binary = {text: (&build.process.binary)}
+                                icon = {active_page: (map_level_to_icon(msg.level))},
+                                body = {text: (&msg.msg)}
+                                location = {text: (format!("{}: {}:{}", msg.file_name, msg.range.start().line_index, msg.range.start().byte_index))}
+                                draw_bg: {is_even: (if is_even {1.0} else {0.0})}
+                            });
+                            item.draw_widget_all(cx);
+                            
+                        }
+                        _ => {}
                     }
-                    LogItem::Location(msg) => {
-                        let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
-                        item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-                        item.page_flip(id!(icon)).set_active_page(map_level_to_icon(msg.level));
-                        item.widget(id!(location)).set_text(&format!("{}: {}:{}", msg.file_name, msg.range.start().line_index, msg.range.start().byte_index));
-                        item.widget(id!(body)).set_text(&msg.msg);
-                        item.draw_widget_all(cx);
-                    }
-                    _=>()
                 }
+                continue
             }
-            else { // draw empty items
-                let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
-                item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-                item.draw_widget_all(cx);
-            }
+            let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
+            item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
+            item.draw_widget_all(cx);
         }
         //profile_end!(dt);
     }
@@ -387,22 +453,23 @@ impl BuildManager {
             let is_even = counter & 1 == 0;
             let item_id = LiveId(index as u64 * (BuildTarget::len() + 1));
             let item = list.item(cx, item_id, live_id!(Binary)).unwrap().as_view();
-            item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-            item.widget(id!(label)).set_text(&binary.name);
+            item.apply_over(cx, live!{
+                label = {text:(&binary.name)}
+                draw_bg: {is_even: (if is_even {1.0} else {0.0})}
+            });
             item.draw_widget_all(cx);
             counter += 1;
             if binary.open>0.001 {
                 for i in 0..BuildTarget::len() {
                     let is_even = counter & 1 == 0;
                     let item_id = LiveId(index as u64 * (BuildTarget::len() + 1) + i as u64 + 1);
-                    let bt = BuildTarget::index(i);
                     let item = list.item(cx, item_id, live_id!(Target)).unwrap().as_view();
-                    let height = 25.0*binary.open;
+                    let height = 25.0 * binary.open;
                     item.apply_over(cx, live!{
                         height: (height)
                         draw_bg: {is_even: (if is_even {1.0} else {0.0})}
+                        check = {text: (BuildTarget::name(i))}
                     });
-                    item.widget(id!(check)).set_text(bt.name());
                     item.draw_widget_all(cx);
                     counter += 1;
                 }
@@ -433,14 +500,72 @@ impl BuildManager {
                 item.redraw(cx);
             }
         }
-        else{
+        else {
             if let Some(change) = item.check_box(id!(check)).changed(actions) {
-                let binary = &self.binaries[bin as usize];
-                log!("Run target {} {} {}", change, binary.name, BuildTarget::index(tgt - 1).name())
+                let binary = self.binaries[bin as usize].name.clone();
+                self.toggle_active_build(cx, binary.clone(), tgt - 1, change);
+                //log!("Run target {} {} {}", change, binary.name, BuildTarget::index(tgt - 1).name())
             }
         }
     }
     
+    pub fn toggle_active_build(&mut self, cx: &mut Cx, binary: String, tgt: u64, run: bool) {
+        let target = match tgt {
+            BuildTarget::RELEASE => BuildTarget::Release,
+            BuildTarget::DEBUG => BuildTarget::Debug,
+            BuildTarget::RELEASE_STUDIO => BuildTarget::ReleaseStudio,
+            BuildTarget::DEBUG_STUDIO => BuildTarget::DebugStudio,
+            BuildTarget::PROFILER => BuildTarget::Profiler,
+            BuildTarget::IOS_SIM => BuildTarget::IosSim {
+                org: "makepad".to_string(),
+                app: "example".to_string()
+            },
+            BuildTarget::IOS_DEVICE => BuildTarget::IosDevice {
+                org: "makepad".to_string(),
+                app: "example".to_string()
+            },
+            BuildTarget::ANDROID => BuildTarget::Android,
+            BuildTarget::WEBASSEMBLY => BuildTarget::WebAssembly,
+            _ => panic!()
+        };
+        // alright so what buildtarget do we use
+        let process = BuildProcess {
+            binary,
+            target
+        };
+        let build_id = process.as_id().into();
+        if run {
+            if self.active.builds.get(&build_id).is_none() {
+                self.active.builds.insert(build_id, ActiveBuild {
+                    process: process.clone(),
+                    run_view_id: LiveId::unique(),
+                    cmd_id: Some(self.clients[0].send_cmd(BuildCmd::Run(process))),
+                    texture: Texture::new(cx)
+                });
+            }
+            
+        }
+        else {
+            if let Some(build) = self.active.builds.remove(&build_id) {
+                if let Some(cmd_id) = build.cmd_id {
+                    self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Kill);
+                }
+            }
+        }
+        self.log.clear();
+    }
+    
+    
+    pub fn get_process_texture(&self, run_view_id: LiveId) -> Option<Texture> {
+        for v in self.active.builds.values() {
+            if v.run_view_id == run_view_id {
+                return Some(v.texture.clone())
+            }
+        }
+        None
+    }
+    
+    /*
     pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {
         for wrap in &mut self.clients {
             for process in wrap.processes.values_mut() {
@@ -450,18 +575,12 @@ impl BuildManager {
             }
         }
         return None
-    }
+    }*/
     
-    pub fn send_host_to_stdin(&self, cmd_id: Option<BuildCmdId>, msg: HostToStdin) {
-        for wrap in &self.clients {
-            for process in wrap.processes.values() {
-                if cmd_id.is_none() || Some(process.cmd_id) == cmd_id {
-                    wrap.client.send_cmd_with_id(process.cmd_id, BuildCmd::HostToStdin(msg.to_json()));
-                    return;
-                }
-            }
+    pub fn send_host_to_stdin(&self, run_view_id: LiveId, msg: HostToStdin) {
+        if let Some(cmd_id) = self.active.cmd_id_from_run_view_id(run_view_id) {
+            self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::HostToStdin(msg.to_json()));
         }
-        log!("Send host to stdin process not found");
     }
     
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
@@ -490,35 +609,25 @@ impl BuildManager {
         }
     }
     
-    pub fn init(&mut self, cx: &mut Cx) {
-        let mut client = BuildClientWrap {
-            client: BuildClient::new_with_local_server(&self.path),
-            processes: HashMap::new()
-        };
-        
-        // lets update our runlist
-        self.update_run_list(cx);
-        
-        let texture = Texture::new(cx);
-        
-        client.processes.insert(WHAT_TO_BUILD.into(), BuildClientProcess {
-            texture,
-            cmd_id: BuildCmdId(0)
-        });
-        
-        self.clients.push(client);
-        self.recompile_timer = cx.start_timeout(self.recompile_timeout);
+    pub fn start_recompile(&mut self, _cx: &mut Cx) {
+        // alright so. a file was changed. now what.
+        for active_build in self.active.builds.values_mut() {
+            if let Some(cmd_id) = active_build.cmd_id{
+                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Kill);
+            }
+            let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone()));
+            active_build.cmd_id = Some(cmd_id);
+        }
     }
     
-    pub fn file_change(&mut self, _cx: &mut Cx) {
-        for wrap in &mut self.clients {
-            if let Some(process) = wrap.processes.get_mut(WHAT_TO_BUILD) {
-                self.log.clear();
-                process.cmd_id = wrap.client.send_cmd(BuildCmd::CargoRun {
-                    what: WHAT_TO_BUILD.into(),
-                });
+    pub fn clear_active_builds(&mut self) {
+        // alright so. a file was changed. now what.
+        for active_build in self.active.builds.values_mut() {
+            if let Some(cmd_id) = active_build.cmd_id{
+                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Kill);
             }
         }
+        self.active.builds.clear();
     }
     
     pub fn clear_log(&mut self) {
@@ -556,7 +665,7 @@ impl BuildManager {
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if self.recompile_timer.is_event(event) {
-            self.file_change(cx);
+            self.start_recompile(cx);
             self.clear_log();
             /*state.editor_state.messages.clear();
             for doc in &mut state.editor_state.documents.values_mut() {
@@ -566,60 +675,61 @@ impl BuildManager {
             }*/
             dispatch_event(cx, BuildManagerAction::RedrawLog)
         }
-        let mut any_msg = false;
-        for wrap in &mut self.clients {
-            let log = &mut self.log;
-            //let editor_state = &mut state.editor_state;
-            wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
-                //let msg_id = editor_state.messages.len();
-                // ok we have a cmd_id in wrap.msg
-                match wrap.item {
-                    LogItem::Location(loc) => {
-                        log.push(LogItem::Location(loc));
+        let log = &mut self.log;
+        let active = &mut self.active;
+        //let editor_state = &mut state.editor_state;
+        self.clients[0].handle_event_with(cx, event, &mut | cx, wrap | {
+            //let msg_id = editor_state.messages.len();
+            // ok we have a cmd_id in wrap.msg
+            match wrap.item {
+                LogItem::Location(loc) => {
+                    if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
+                        log.push((id, LogItem::Location(loc)));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
-                        /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
-                            let doc = &mut editor_state.documents[*doc_id];
-                            if let Some(inner) = &mut doc.inner {
-                                inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
-                            }
-                            dispatch_event(cx, BuildManagerAction::RedrawDoc {
-                                doc_id: *doc_id
-                            })
-                        }*/
-                        //editor_state.messages.push(BuildMsg::Location(loc));
                     }
-                    LogItem::Bare(_) => {
-                        log.push(wrap.item);
+                    /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
+                        let doc = &mut editor_state.documents[*doc_id];
+                        if let Some(inner) = &mut doc.inner {
+                            inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
+                        }
+                        dispatch_event(cx, BuildManagerAction::RedrawDoc {
+                            doc_id: *doc_id
+                        })
+                    }*/
+                    //editor_state.messages.push(BuildMsg::Location(loc));
+                }
+                LogItem::Bare(bare) => {
+                    if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
+                        log.push((id, LogItem::Bare(bare)));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
-                        //editor_state.messages.push(wrap.msg);
                     }
-                    LogItem::StdinToHost(line) => {
-                        let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
-                        match msg {
-                            Ok(msg) => {
-                                dispatch_event(cx, BuildManagerAction::StdinToHost {
-                                    cmd_id: wrap.cmd_id,
-                                    msg
-                                });
-                            }
-                            Err(_) => { // we should output a log string
-                                log.push(LogItem::Bare(LogItemBare {
+                    //editor_state.messages.push(wrap.msg);
+                }
+                LogItem::StdinToHost(line) => {
+                    let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
+                    match msg {
+                        Ok(msg) => {
+                            dispatch_event(cx, BuildManagerAction::StdinToHost {
+                                run_view_id: active.run_view_id_from_cmd_id(wrap.cmd_id).unwrap_or(LiveId(0)),
+                                msg
+                            });
+                        }
+                        Err(_) => { // we should output a log string
+                            if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
+                                log.push((id, LogItem::Bare(LogItemBare {
                                     level: LogItemLevel::Log,
-                                    line:line.trim().to_string()
-                                }));
-                                /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
-                                    level: BuildMsgLevel::Log,
-                                    line
-                                }));*/
+                                    line: line.trim().to_string()
+                                })));
+                                dispatch_event(cx, BuildManagerAction::RedrawLog)
                             }
+                            /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
+                                level: BuildMsgLevel::Log,
+                                line
+                            }));*/
                         }
                     }
                 }
-                any_msg = true;
-            });
-        }
-        if any_msg {
-            dispatch_event(cx, BuildManagerAction::RedrawLog)
-        }
+            }
+        });
     }
 }

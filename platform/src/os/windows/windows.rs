@@ -121,6 +121,7 @@ impl Cx {
                 if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                     d3d11_windows.remove(index);
                     if d3d11_windows.len() == 0 {
+                        self.call_event_handler(&Event::Destruct);
                         return EventFlow::Exit
                     }
                 }
