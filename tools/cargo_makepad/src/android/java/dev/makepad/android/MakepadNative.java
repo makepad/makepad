@@ -2,6 +2,7 @@ package dev.makepad.android;
 
 import android.view.Surface;
 import android.view.MotionEvent;
+import java.nio.ByteBuffer;
 
 public class MakepadNative {
     // belongs to MakepadActivity class
@@ -28,4 +29,9 @@ public class MakepadNative {
 
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
+
+    // video decoding
+    public static native void onVideoDecodingInitialized(long videoId, int frameRate, int videoWidth, int videoHeight, String colorFormat, long duration);
+    public static native void onVideoStream(long videoId, ByteBuffer frameGroup);
+    public static native void onVideoChunkDecoded(long videoId);
 }

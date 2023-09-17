@@ -22,6 +22,7 @@ use {
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
+            apple_decoding::CxAppleDecoding,
             metal::{MetalCx, DrawPassMode},
         },
         pass::{CxPassParent},
@@ -322,7 +323,11 @@ impl Cx {
                 }
                 CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
                     todo!()
-                }
+                },
+                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
+                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
+                CxOsOp::CleanupVideoDecoding(_) => todo!(),
             }
         }
     }
@@ -366,5 +371,6 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
+    pub (crate) media: CxAppleDecoding,
 }
 
