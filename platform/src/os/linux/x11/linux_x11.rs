@@ -117,6 +117,7 @@ impl Cx {
                     opengl_windows.remove(index);
                     if opengl_windows.len() == 0 {
                         xlib_app.terminate_event_loop();
+                        self.call_event_handler(&Event::Destruct);
                         return EventFlow::Exit
                     }
                 }
@@ -327,7 +328,11 @@ impl Cx {
                 }
                 CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
                     todo!()
-                }
+                },
+                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
+                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
+                CxOsOp::CleanupVideoDecoding(_) => todo!(),
             }
         }
         ret

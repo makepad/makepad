@@ -16,10 +16,12 @@ live_design!{
     import crate::hook_widget::HookWidgetBase;
     import crate::image::ImageBase;
     import crate::rotated_image::RotatedImageBase;
+    import crate::video::VideoBase;
     import crate::popup_menu::PopupMenuBase;
     import crate::label::LabelBase;
     import crate::link_label::LinkLabelBase;
-    import crate::list_view::ListViewBase;
+    import crate::portal_list::PortalListBase;
+    import crate::flat_list::FlatListBase;
     import crate::scroll_bars::ScrollBarsBase;
     import crate::view::ViewBase;
     import crate::nav_control::NavControlBase;
@@ -199,6 +201,55 @@ live_design!{
             
             shape: Solid,
             fill: Image
+        }
+    }
+
+    Video = <VideoBase> {
+        draw_bg: {
+            shape: Solid,
+            fill: Image
+            texture yuv_texture: texture2d
+            instance image_scale: vec2(1.0, 1.0)
+            instance image_pan: vec2(0.0, 0.0)
+            uniform image_alpha: 1.0
+            uniform texture_available: 0.0
+            uniform is_last_frame: 0.0
+        
+            fn yuv_to_rgb(y: float, u: float, v: float) -> vec4 {
+                let c = y - 16.0;
+                let d = u - 128.0;
+                let e = v - 128.0;
+        
+                let r = clamp((298.0 * c + 409.0 * e + 128.0) / 65536.0, 0.0, 1.0);
+                let g = clamp((298.0 * c - 100.0 * d - 208.0 * e + 128.0) / 65536.0, 0.0, 1.0);
+                let b = clamp((298.0 * c + 516.0 * d + 128.0) / 65536.0, 0.0, 1.0);
+        
+                return vec4(r, g, b, 1.0);
+            }
+        
+            fn get_color(self) -> vec4 {
+                if self.texture_available == 0.0 {
+                    return vec4(0.0, 0.0, 0.0, 1.0);
+                }
+
+                let sample = sample2d(self.yuv_texture, self.pos * self.image_scale + self.image_pan);
+                let y = sample.z * 255.0;
+                let u = sample.y * 255.0;
+                let v = sample.x * 255.0;
+
+                return yuv_to_rgb(y, u, v);
+            }
+            
+            fn pixel(self) -> vec4 {
+                let color = self.get_color();
+                let premul_color = Pal::premul(vec4(color.xyz, color.w * self.image_alpha));
+
+                if (self.is_last_frame == 1.0) {
+                    return mix(premul_color, vec4(0.0, 0.0, 0.0, 1.0), 0.5);
+                } 
+
+                return premul_color;
+            }
         }
     }
     
@@ -538,9 +589,11 @@ live_design!{
     HookWidgetBase = <HookWidgetBase> {}
     ImageBase = <ImageBase> {}
     RotatedImageBase = <RotatedImageBase> {}
+    VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}
-    ListViewBase = <ListViewBase> {}
+    PortalListBase = <PortalListBase> {}
+    FlatListBase = <FlatListBase>{}
     NavControlBase = <NavControlBase> {}
     PopupMenuBase = <PopupMenuBase> {}
     PopupMenuItemBase = <PopupMenuItemBase> {}

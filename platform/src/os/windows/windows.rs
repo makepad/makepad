@@ -11,6 +11,7 @@ use {
         os::{
             windows::{
                 windows_media::CxWindowsMedia,
+                windows_decoding::CxWindowsDecoding,
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
@@ -125,6 +126,7 @@ impl Cx {
                 if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                     d3d11_windows.remove(index);
                     if d3d11_windows.len() == 0 {
+                        self.call_event_handler(&Event::Destruct);
                         return EventFlow::Exit
                     }
                 }
@@ -344,7 +346,11 @@ impl Cx {
                 }
                 CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     //todo!()
-                }
+                },
+                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
+                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
+                CxOsOp::CleanupVideoDecoding(_) => todo!(),
             }
         }
         ret
@@ -366,8 +372,8 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
-
     pub (crate) d3d11_device: Cell<Option<ID3D11Device>>,
     pub (crate) swapchain: [Texture; 2],
     pub (crate) present_index: usize,
+    pub (crate) decoding: CxWindowsDecoding,
 }

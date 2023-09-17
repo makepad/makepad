@@ -476,6 +476,37 @@ impl DrawVars {
         }
     }
     
+    pub fn get_instance(&self, cx: &mut Cx, id: LiveId, value: &mut [f32]){
+        if let Some(draw_shader) = self.draw_shader {
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            let self_slice = self.as_slice();
+            for input in &sh.mapping.instances.inputs {
+                let offset = input.offset;
+                let slots = input.slots;
+                if input.id == id {
+                    for i in 0..value.len().min(slots) {
+                        value[i] = self_slice[offset + i]
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn get_uniform(&self, cx: &mut Cx, id: LiveId, value: &mut [f32]){
+        if let Some(draw_shader) = self.draw_shader {
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            for input in &sh.mapping.user_uniforms.inputs {
+                let offset = input.offset;
+                let slots = input.slots;
+                if input.id == id {
+                    for i in 0..value.len().min(slots) {
+                        value[i] = self.user_uniforms[offset + i];
+                    }
+                }
+            }
+        }
+    }
+    
     pub fn init_slicer(
         &mut self,
         cx: &mut Cx,

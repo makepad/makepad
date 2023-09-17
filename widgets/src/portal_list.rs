@@ -7,7 +7,7 @@ use crate::{
 };
 
 live_design!{
-    ListViewBase = {{ListView}} {}
+    PortalListBase = {{PortalList}} {}
 }
 
 #[derive(Clone,Copy)]
@@ -34,7 +34,7 @@ enum ListDrawState {
 
 
 #[derive(Clone, WidgetAction)]
-pub enum ListViewAction {
+pub enum PortalListAction {
     Scroll,
     None
 }
@@ -47,7 +47,7 @@ impl ListDrawState {
     }
 }
 #[derive(Live)]
-pub struct ListView {
+pub struct PortalList {
     #[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -64,6 +64,7 @@ pub struct ListView {
     #[live(true)] align_top_when_empty: bool,
     #[live(false)] grab_key_focus: bool,
     #[live(true)] drag_scrolling: bool,
+    #[live(true)] allow_empty: bool,
     #[rust] first_id: u64,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
@@ -89,9 +90,9 @@ struct AlignItem {
     index: u64
 }
 
-impl LiveHook for ListView {
+impl LiveHook for PortalList {
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, ListView)
+        register_widget!(cx, PortalList)
     }
     
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
@@ -137,7 +138,7 @@ impl LiveHook for ListView {
     }
 }
 
-impl ListView {
+impl PortalList {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
@@ -323,7 +324,7 @@ impl ListView {
                 }
                 ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
                     let is_down_again = draw_state.is_down_again();
-                    let did_draw = cx.turtle_has_align_items();
+                    let did_draw = cx.turtle_has_align_items() || self.allow_empty;
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -378,7 +379,7 @@ impl ListView {
                     return Some(index + 1)
                 }
                 ListDrawState::Up {index, pos, hit_bottom, viewport} => {
-                    let did_draw = cx.turtle_has_align_items();
+                    let did_draw = cx.turtle_has_align_items() || self.allow_empty;
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -482,7 +483,7 @@ impl ListView {
 }
 
 
-impl Widget for ListView {
+impl Widget for PortalList {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
@@ -510,7 +511,7 @@ impl Widget for ListView {
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
             self.first_id = scroll_to;
             self.first_scroll = 0.0;
-            dispatch_action(cx, WidgetActionItem::new(ListViewAction::Scroll.into(), uid));
+            dispatch_action(cx, WidgetActionItem::new(PortalListAction::Scroll.into(), uid));
             self.area.redraw(cx);
         }
         
@@ -529,7 +530,7 @@ impl Widget for ListView {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, true);
-                        dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
+                        dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
                         self.area.redraw(cx);
                     } else {
                         self.scroll_state = ScrollState::Stopped;
@@ -546,7 +547,7 @@ impl Widget for ListView {
                         }
                         else {
                             *next_frame = cx.new_next_frame();
-                            dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
+                            dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
                         }
                         self.area.redraw(cx);
                     }
@@ -571,7 +572,7 @@ impl Widget for ListView {
                     self.detect_tail_in_draw = true;
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
-                    dispatch_action(cx, ListViewAction::Scroll.into_action(uid));
+                    dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 },
                 
@@ -727,9 +728,9 @@ impl Widget for ListView {
 }
 
 #[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct ListViewRef(WidgetRef);
+pub struct PortalListRef(WidgetRef);
 
-impl ListViewRef {
+impl PortalListRef {
     pub fn set_first_id_and_scroll(&self, id: u64, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
@@ -792,9 +793,9 @@ impl ListViewRef {
 }
 
 #[derive(Clone, Default, WidgetSet)]
-pub struct ListViewSet(WidgetSet);
+pub struct PortalListSet(WidgetSet);
 
-impl ListViewSet {
+impl PortalListSet {
     pub fn set_first_id(&self, id: u64) {
         for list in self.iter() {
             list.set_first_id(id)
