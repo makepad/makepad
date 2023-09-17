@@ -1,16 +1,12 @@
 use {
     std::ffi::{CStr, CString},
-    std::os::raw::{
-        c_void,
-        c_uint,
-        c_int,
-    },
+    std::os::raw::{c_char, c_int, c_uint, c_void},
     self::super::{
         drm_sys::*,
         gbm_sys::*,
-        egl_sys::*,
     },
     self::super::super::{
+        egl_sys::{self, LibEgl},
         gl_sys,
         libc_sys,
     },
@@ -267,76 +263,72 @@ impl Drm {
 #[allow(non_snake_case)]
 #[allow(dead_code)]
 pub struct Egl {
-    egl_display: EGLDisplay,
-    egl_surface: EGLSurface,
-    egl_context: EGLContext,
+    libegl: LibEgl,
+    egl_display: egl_sys::EGLDisplay,
+    egl_surface: egl_sys::EGLSurface,
+    egl_context: egl_sys::EGLContext,
 }
 
 impl Egl {
     pub unsafe fn new(drm: &Drm) -> Option<Self> {
+        let libegl = LibEgl::try_load().expect("Cant load LibEGL");
+
         let mut major = 0;
         let mut minor = 0;
-        
-        #[allow(non_snake_case)]
-        let eglGetPlatformDisplayEXT: PFNEGLGETPLATFORMDISPLAYEXTPROC = std::mem::transmute(eglGetProcAddress("eglGetPlatformDisplayEXT\0".as_ptr()));
-        #[allow(non_snake_case)]
-        let eglInitialize: PFNEGLINITIALIZEPROC = std::mem::transmute(eglGetProcAddress("eglInitialize\0".as_ptr()));
-        #[allow(non_snake_case)]
-        let eglGetConfigs: PFNEGLGETCONFIGSPROC = std::mem::transmute(eglGetProcAddress("eglGetConfigs\0".as_ptr()));
-        #[allow(non_snake_case)]
-        let eglChooseConfig: PFNEGLCHOOSECONFIGPROC = std::mem::transmute(eglGetProcAddress("eglChooseConfig\0".as_ptr()));
-        #[allow(non_snake_case)]
-        let eglGetConfigAttrib: PFNEGLGETCONFIGATTRIBPROC = std::mem::transmute(eglGetProcAddress("eglGetConfigAttrib\0".as_ptr()));
-        
-        let egl_display = (eglGetPlatformDisplayEXT.unwrap())(EGL_PLATFORM_GBM_KHR, drm.gbm_dev as *mut _, std::ptr::null());
+
+        let egl_display = (libegl.eglGetPlatformDisplayEXT.unwrap())(
+            egl_sys::EGL_PLATFORM_GBM_KHR,
+            drm.gbm_dev as *mut _,
+            std::ptr::null(),
+        );
         if egl_display == std::ptr::null_mut() {
             println!("Could not get platform display");
             return None
         }
         
-        if (eglInitialize.unwrap())(egl_display, &mut major, &mut minor) == 0 {
+        if (libegl.eglInitialize.unwrap())(egl_display, &mut major, &mut minor) == 0 {
             println!("Could not initialize egl");
             return None;
         }
         
         println!("Initialized EGL version {}.{}", major, minor);
         
-        if eglBindAPI(EGL_OPENGL_ES_API) == 0 {
+        if (libegl.eglBindAPI.unwrap())(egl_sys::EGL_OPENGL_ES_API) == 0 {
             println!("Could not bind EGL_OPENGL_ES_API");
             return None;
         }
         
         let mut cfg_count = 0;
-        if (eglGetConfigs.unwrap())(egl_display, std::ptr::null_mut(), 0, &mut cfg_count) == 0 || cfg_count == 0 {
+        if (libegl.eglGetConfigs.unwrap())(egl_display, std::ptr::null_mut(), 0, &mut cfg_count) == 0 || cfg_count == 0 {
             println!("eglGetConfigs failed");
             return None;
         };
         
         let cfg_attribs = [
-            EGL_SURFACE_TYPE,
-            EGL_WINDOW_BIT,
-            EGL_RED_SIZE,
+            egl_sys::EGL_SURFACE_TYPE,
+            egl_sys::EGL_WINDOW_BIT,
+            egl_sys::EGL_RED_SIZE,
             1,
-            EGL_GREEN_SIZE,
+            egl_sys::EGL_GREEN_SIZE,
             1,
-            EGL_BLUE_SIZE,
+            egl_sys::EGL_BLUE_SIZE,
             1,
-            EGL_ALPHA_SIZE,
+            egl_sys::EGL_ALPHA_SIZE,
             0,
-            //EGL_DEPTH_SIZE,
+            //egl_sys::EGL_DEPTH_SIZE,
             //24,
-            EGL_RENDERABLE_TYPE,
-            EGL_OPENGL_ES2_BIT,
-            EGL_NONE
+            egl_sys::EGL_RENDERABLE_TYPE,
+            egl_sys::EGL_OPENGL_ES2_BIT,
+            egl_sys::EGL_NONE
         ];
         
-        let mut configs: Vec<EGLConfig> = Vec::new();
-        configs.resize(cfg_count as usize, 0 as EGLConfig);
+        let mut configs: Vec<egl_sys::EGLConfig> = Vec::new();
+        configs.resize(cfg_count as usize, 0 as egl_sys::EGLConfig);
         
         let mut matched = 0;
-        if (eglChooseConfig.unwrap())(
+        if (libegl.eglChooseConfig.unwrap())(
             egl_display,
-            cfg_attribs.as_ptr(),
+            cfg_attribs.as_ptr() as _,
             configs.as_mut_ptr(),
             cfg_count,
             &mut matched
@@ -350,10 +342,10 @@ impl Egl {
         let mut egl_config = None;
         for i in 0..cfg_count as usize {
             let mut native_id = 0;
-            if (eglGetConfigAttrib.unwrap())(egl_display, configs[i], EGL_NATIVE_VISUAL_ID, &mut native_id) == 0 {
+            if (libegl.eglGetConfigAttrib.unwrap())(egl_display, configs[i], egl_sys::EGL_NATIVE_VISUAL_ID as _, &mut native_id) == 0 {
                 continue;
             }
-            if native_id == drm.fourcc_format {
+            if native_id == drm.fourcc_format as _ {
                 egl_config = Some(configs[i]);
                 break;
             }
@@ -366,34 +358,35 @@ impl Egl {
         let egl_config = egl_config.unwrap();
         
         let ctx_attribs = [
-            EGL_CONTEXT_CLIENT_VERSION,
+            egl_sys::EGL_CONTEXT_CLIENT_VERSION,
             2,
-            EGL_NONE
+            egl_sys::EGL_NONE
         ];
         
-        let egl_context = eglCreateContext(egl_display, egl_config, EGL_NO_CONTEXT, ctx_attribs.as_ptr());
+        let egl_context = (libegl.eglCreateContext.unwrap())(egl_display, egl_config, egl_sys::EGL_NO_CONTEXT, ctx_attribs.as_ptr() as _);
         if egl_context == std::ptr::null_mut() {
             println!("eglCreateContext failed");
             return None;
         }
         
-        let egl_surface = eglCreateWindowSurface(egl_display, egl_config, drm.gbm_surface as _, std::ptr::null());
+        let egl_surface = (libegl.eglCreateWindowSurface.unwrap())(egl_display, egl_config, drm.gbm_surface as _, std::ptr::null());
         if egl_surface == std::ptr::null_mut() {
             println!("eglCreateWindowSurface failed");
             return None;
         }
         
-        if eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context) == 0 {
+        if (libegl.eglMakeCurrent.unwrap())(egl_display, egl_surface, egl_surface, egl_context) == 0 {
             println!("eglMakeCurrent failed");
             return None;
         }
         
-        gl_sys::load_with( | s | {
+        gl_sys::load_with(|s| {
             let s = CString::new(s).unwrap();
-            unsafe {eglGetProcAddress(s.as_ptr() as *const u8)}
+            unsafe {(libegl.eglGetProcAddress.unwrap())(s.as_ptr())}
         });
         
         Some(Self {
+            libegl,
             egl_display,
             egl_surface,
             egl_context
@@ -401,13 +394,13 @@ impl Egl {
     }
     
     pub fn make_current(&self) {
-        if unsafe {eglMakeCurrent(self.egl_display, self.egl_surface, self.egl_surface, self.egl_context)} == 0 {
+        if unsafe {(self.libegl.eglMakeCurrent.unwrap())(self.egl_display, self.egl_surface, self.egl_surface, self.egl_context)} == 0 {
             println!("eglMakeCurrent failed");
         }
     }
     
     pub fn swap_buffers(&self) {
-        if unsafe {eglSwapBuffers(self.egl_display, self.egl_surface)} == 0 {
+        if unsafe {(self.libegl.eglSwapBuffers.unwrap())(self.egl_display, self.egl_surface)} == 0 {
             println!("eglSwapBuffers failed")
         }
     }
