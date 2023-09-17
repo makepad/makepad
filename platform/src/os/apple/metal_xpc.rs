@@ -77,7 +77,7 @@ pub fn xpc_service_proxy() -> RcObjcId {
             let desc: ObjcId = msg_send![error, localizedDescription];
             log!("xpc_service_proxy got error: {}", nsstring_to_string(desc));
         });
-        let proxy: ObjcId = msg_send![connection, remoteObjectProxyWithErrorHandler: error_handler];
+        let proxy: ObjcId = msg_send![connection, remoteObjectProxyWithErrorHandler: nil];
         RcObjcId::from_unowned(NonNull::new(proxy).unwrap())
     }
 }
