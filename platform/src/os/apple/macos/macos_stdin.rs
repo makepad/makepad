@@ -132,10 +132,10 @@ impl Cx {
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
                         }
-                        HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
+                        HostToStdin::Tick {frame: _, time, buffer_id} => if let Some(ws) = window_size {
                             // poll the service for updates
                             let uid = if let Some((_, uid)) = fb_shared.lock().unwrap().borrow().as_ref() {*uid}else {0};
-                            fetch_xpc_service_texture(service_proxy.as_id(), 0, uid, Box::new({
+                            fetch_xpc_service_texture(service_proxy.as_id(), buffer_id, uid, Box::new({
                                 let fb_shared = fb_shared.clone();
                                 move | shared_handle,
                                 shared_uid | {
@@ -297,8 +297,8 @@ impl Cx {
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                        //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                        clear_color: PassClearColor::ClearWith(pass.clear_color),
                         texture_id: main_texture.texture_id()
                     }];
                 },

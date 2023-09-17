@@ -16,31 +16,31 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
-pub enum ViewOptimize{
+pub enum ViewOptimize {
     #[pick] None,
     DrawList,
-    Texture    
+    Texture
 }
 
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
-pub enum EventOrder{
+pub enum EventOrder {
     Down,
     #[pick] Up,
     #[live(Default::default())] List(Vec<LiveId>),
 }
 
 
-impl ViewOptimize{
-    fn is_texture(&self)->bool{
-        if let Self::Texture = self{true} else{false}
+impl ViewOptimize {
+    fn is_texture(&self) -> bool {
+        if let Self::Texture = self {true} else {false}
     }
-    fn is_draw_list(&self)->bool{
-        if let Self::DrawList = self{true} else{false}
+    fn is_draw_list(&self) -> bool {
+        if let Self::DrawList = self {true} else {false}
     }
-    fn needs_draw_list(&self)->bool{
-        return self.is_texture() ||self.is_draw_list()
+    fn needs_draw_list(&self) -> bool {
+        return self.is_texture() || self.is_draw_list()
     }
 }
 
@@ -63,7 +63,6 @@ pub struct View { // draw info per UI element
     #[live(true)] visible: bool,
     
     #[live(true)] grab_key_focus: bool,
-    
     #[live(false)] block_signal_event: bool,
     #[live] cursor: Option<MouseCursor>,
     #[live] scroll_bars: Option<LivePtr>,
@@ -97,8 +96,8 @@ impl LiveHook for View {
         register_widget!(cx, View)
     }
     
-    fn before_apply(&mut self,  _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from{
+    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = from {
             //self.children.clear();
             self.draw_order.clear();
             self.find_cache.clear();
@@ -114,7 +113,7 @@ impl LiveHook for View {
                 self.scroll_bars_obj = Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
-/*
+        /*
         if let Some(image_texture) = &mut self.image_texture {
             if self.image_scale != 0.0 {
                 let texture_desc = image_texture.get_desc(cx);
@@ -182,7 +181,7 @@ pub enum ViewAction {
 }
 
 impl ViewRef {
-    pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
+    pub fn finger_down(&self, actions: &WidgetActions) -> Option<FingerDownEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let ViewAction::FingerDown(fd) = item.action() {
                 return Some(fd)
@@ -190,8 +189,8 @@ impl ViewRef {
         }
         None
     }
-
-    pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
+    
+    pub fn finger_up(&self, actions: &WidgetActions) -> Option<FingerUpEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let ViewAction::FingerUp(fd) = item.action() {
                 return Some(fd)
@@ -199,8 +198,8 @@ impl ViewRef {
         }
         None
     }
-
-    pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
+    
+    pub fn finger_move(&self, actions: &WidgetActions) -> Option<FingerMoveEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let ViewAction::FingerMove(fd) = item.action() {
                 return Some(fd)
@@ -208,8 +207,8 @@ impl ViewRef {
         }
         None
     }
-
-    pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+    
+    pub fn key_down(&self, actions: &WidgetActions) -> Option<KeyEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let ViewAction::KeyDown(fd) = item.action() {
                 return Some(fd)
@@ -217,8 +216,8 @@ impl ViewRef {
         }
         None
     }
-
-    pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+    
+    pub fn key_up(&self, actions: &WidgetActions) -> Option<KeyEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let ViewAction::KeyUp(fd) = item.action() {
                 return Some(fd)
@@ -226,7 +225,7 @@ impl ViewRef {
         }
         None
     }
-
+    
     pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.animator_cut(cx, state);
@@ -252,18 +251,18 @@ impl ViewRef {
     }
     
     
-    pub fn set_visible_and_redraw(&self, cx:&mut Cx, visible: bool) {
+    pub fn set_visible_and_redraw(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible;
             inner.redraw(cx);
         }
     }
     
-    pub fn visible(&self)->bool {
+    pub fn visible(&self) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.visible 
+            inner.visible
         }
-        else{
+        else {
             false
         }
     }
@@ -324,7 +323,7 @@ impl ViewSet {
             item.toggle_state(cx, is_state_1, animate, state1, state2);
         }
     }
-
+    
     pub fn set_visible(&self, visible: bool) {
         for item in self.iter() {
             item.set_visible(visible)
@@ -349,46 +348,46 @@ impl ViewSet {
         }
     }
     
-    pub fn finger_down(&self, actions:&WidgetActions) -> Option<FingerDownEvent> {
+    pub fn finger_down(&self, actions: &WidgetActions) -> Option<FingerDownEvent> {
         for item in self.iter() {
-            if let Some(e) = item.finger_down(actions){
+            if let Some(e) = item.finger_down(actions) {
                 return Some(e)
             }
         }
         None
     }
-
-    pub fn finger_up(&self, actions:&WidgetActions) -> Option<FingerUpEvent> {
+    
+    pub fn finger_up(&self, actions: &WidgetActions) -> Option<FingerUpEvent> {
         for item in self.iter() {
-            if let Some(e) = item.finger_up(actions){
+            if let Some(e) = item.finger_up(actions) {
                 return Some(e)
             }
         }
         None
     }
-
-
-    pub fn finger_move(&self, actions:&WidgetActions) -> Option<FingerMoveEvent> {
+    
+    
+    pub fn finger_move(&self, actions: &WidgetActions) -> Option<FingerMoveEvent> {
         for item in self.iter() {
-            if let Some(e) = item.finger_move(actions){
+            if let Some(e) = item.finger_move(actions) {
                 return Some(e)
             }
         }
         None
     }
-
-    pub fn key_down(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+    
+    pub fn key_down(&self, actions: &WidgetActions) -> Option<KeyEvent> {
         for item in self.iter() {
-            if let Some(e) = item.key_down(actions){
+            if let Some(e) = item.key_down(actions) {
                 return Some(e)
             }
         }
         None
     }
-
-    pub fn key_up(&self, actions:&WidgetActions) -> Option<KeyEvent> {
+    
+    pub fn key_up(&self, actions: &WidgetActions) -> Option<KeyEvent> {
         for item in self.iter() {
-            if let Some(e) = item.key_up(actions){
+            if let Some(e) = item.key_up(actions) {
                 return Some(e)
             }
         }
@@ -404,7 +403,7 @@ impl Widget for View {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        if self.animator_handle_event(cx, event).must_redraw(){
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);
         }
         
@@ -424,8 +423,8 @@ impl Widget for View {
             }
         }
         
-        match &self.event_order{
-            EventOrder::Up=>{
+        match &self.event_order {
+            EventOrder::Up => {
                 for id in self.draw_order.iter().rev() {
                     if let Some(child) = self.children.get_mut(id) {
                         if child.is_visible() || !event.requires_visibility() {
@@ -434,7 +433,7 @@ impl Widget for View {
                     }
                 }
             }
-            EventOrder::Down=>{
+            EventOrder::Down => {
                 for id in self.draw_order.iter() {
                     if let Some(child) = self.children.get_mut(id) {
                         if child.is_visible() || !event.requires_visibility() {
@@ -443,26 +442,26 @@ impl Widget for View {
                     }
                 }
             }
-            EventOrder::List(list)=>{
-                for id in list{
+            EventOrder::List(list) => {
+                for id in list {
                     if let Some(child) = self.children.get_mut(id) {
                         if child.is_visible() || !event.requires_visibility() {
                             child.handle_widget_event_with(cx, event, dispatch_action);
                         }
-                    }                    
+                    }
                 }
             }
         }
         
         
-        if self.visible && (self.cursor.is_some() || self.animator.live_ptr.is_some()){
+        if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(e) => {
-                    if self.grab_key_focus{
+                    if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
                     dispatch_action(cx, ViewAction::FingerDown(e).into_action(uid));
-                    if self.animator.live_ptr.is_some(){
+                    if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(down.on));
                     }
                 }
@@ -471,27 +470,27 @@ impl Widget for View {
                 }
                 Hit::FingerUp(e) => {
                     dispatch_action(cx, ViewAction::FingerUp(e).into_action(uid));
-                    if self.animator.live_ptr.is_some(){
+                    if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(down.off));
                     }
                 }
                 Hit::FingerHoverIn(_) => {
-                    if let Some(cursor) = &self.cursor{
+                    if let Some(cursor) = &self.cursor {
                         cx.set_cursor(*cursor);
                     }
-                    if self.animator.live_ptr.is_some(){
+                    if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(hover.on));
                     }
                 }
-                Hit::FingerHoverOut(_)=>{
-                    if self.animator.live_ptr.is_some(){
+                Hit::FingerHoverOut(_) => {
+                    if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(hover.off));
                     }
                 }
-                Hit::KeyDown(e)=>{
+                Hit::KeyDown(e) => {
                     dispatch_action(cx, ViewAction::KeyDown(e).into_action(uid))
                 }
-                Hit::KeyUp(e)=>{
+                Hit::KeyUp(e) => {
                     dispatch_action(cx, ViewAction::KeyUp(e).into_action(uid))
                 }
                 _ => ()
@@ -507,7 +506,7 @@ impl Widget for View {
         self.visible
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
     
@@ -611,8 +610,8 @@ impl View {
             
             self.defer_walks.clear();
             
-            match self.optimize{
-                ViewOptimize::Texture=>{
+            match self.optimize {
+                ViewOptimize::Texture => {
                     let walk = self.walk_from_previous_size(walk);
                     if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
@@ -641,14 +640,14 @@ impl View {
                     cx.begin_pass(&texture_cache.pass, self.dpi_factor);
                     self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
-                ViewOptimize::DrawList=>{
+                ViewOptimize::DrawList => {
                     let walk = self.walk_from_previous_size(walk);
                     if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
                         cx.walk_turtle_with_area(&mut self.area, walk);
                         return WidgetDraw::done()
                     }
                 }
-                _=>()
+                _ => ()
             }
             
             
@@ -665,13 +664,13 @@ impl View {
                 /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }*/
-                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));//.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll));//.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
         }
-
+        
         while let Some(DrawState::Drawing(step, resume)) = self.draw_state.get() {
             if step < self.draw_order.len() {
                 let id = self.draw_order[step];
