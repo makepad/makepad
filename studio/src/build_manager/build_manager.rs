@@ -16,6 +16,7 @@ use {
         makepad_shell::*,
     },
     std::{
+        cell::Cell,
         collections::HashMap,
         env,
     },
@@ -35,11 +36,9 @@ pub struct ActiveBuild {
     pub item_id: LiveId,
     pub process: BuildProcess,
     pub run_view_id: LiveId,
-    pub texture: Texture,
     pub cmd_id: Option<BuildCmdId>,
-
-    pub swapchain: [Texture; 2],  // fixed to two textures
-    pub present_index: usize,
+    pub swapchain: [Texture; 2],
+    pub present_index: Cell<usize>,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -142,14 +141,14 @@ impl BuildManager {
     }
     
     
-    pub fn get_process_texture(&self, run_view_id: LiveId) -> Option<Texture> {
+    /*pub fn get_process_texture(&self, run_view_id: LiveId) -> Option<Texture> {
         for v in self.active.builds.values() {
             if v.run_view_id == run_view_id {
                 return Some(v.texture.clone())
             }
         }
         None
-    }
+    }*/
     
     pub fn send_host_to_stdin(&self, run_view_id: LiveId, msg: HostToStdin) {
         if let Some(cmd_id) = self.active.cmd_id_from_run_view_id(run_view_id) {

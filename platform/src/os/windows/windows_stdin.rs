@@ -46,12 +46,7 @@ impl Cx {
                     let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(self.os.present_index).to_json().as_bytes());
 
                     // flip to next one
-                    if self.os.present_index < self.os.swapchain.len() - 1 {
-                        self.os.present_index += 1;
-                    }
-                    else {
-                        self.os.present_index = 0;
-                    }
+                    self.os.present_index = 1 - self.os.present_index;
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
