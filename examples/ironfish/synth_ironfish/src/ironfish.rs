@@ -26,8 +26,6 @@ use {
     crate::{
         makepad_platform::*,
         makepad_platform::live_atomic::*,
-        makepad_platform::audio::*,
-        makepad_platform::midi::*,
         makepad_audio_graph::*,
     },
 };

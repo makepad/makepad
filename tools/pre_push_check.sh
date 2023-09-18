@@ -23,7 +23,7 @@
 echo "Checking all examples"
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-fractal-zoom --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --message-format=json
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-numbers --release --message-format=json
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-web-cam --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-simple --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-chatgpt --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-news-feed --release --message-format=json

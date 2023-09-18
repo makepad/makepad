@@ -1,11 +1,10 @@
 workspace.members = [
 #    "code_editor",
-    "examples/numbers", 
     "examples/fractal_zoom", 
     "examples/news_feed", 
+    "examples/web_cam", 
     "examples/ironfish",
     "examples/simple",
-    "examples/widgets",
     "examples/chatgpt",
     "examples/sdxl",
 #    "libs/futures",

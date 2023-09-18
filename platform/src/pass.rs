@@ -231,7 +231,7 @@ pub struct PassUniforms {
     camera_inv: Mat4,
     dpi_factor: f32,
     dpi_dilate: f32,
-    pad1: f32,
+    time: f32,
     pad2: f32
 }
 
@@ -307,6 +307,9 @@ pub enum CxPassParent {
 }
 
 impl CxPass {
+    pub fn set_time(&mut self, time: f32) {
+        self.pass_uniforms.time = time;
+    }
     
     pub fn set_dpi_factor(&mut self, dpi_factor: f64) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);

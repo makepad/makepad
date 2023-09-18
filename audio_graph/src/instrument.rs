@@ -1,9 +1,6 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_platform::thread::*,
-        makepad_platform::audio::*,
-        makepad_platform::midi::*,
         register_audio_component,
         audio_traits::*
     },

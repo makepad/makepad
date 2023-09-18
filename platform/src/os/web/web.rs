@@ -9,6 +9,7 @@ use {
         to_wasm::*,
     },
     crate::{
+        makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         thread::Signal,
@@ -48,7 +49,7 @@ impl Cx {
         let mut network_responses = Vec::new();
         self.os.from_wasm = Some(FromWasmMsg::new());
         let mut to_wasm = to_wasm_msg.as_ref();
-        let mut is_animation_frame = false;
+        let mut is_animation_frame = None;
         while !to_wasm.was_last_block() {
             let block_id = LiveId(to_wasm.read_u64());
             let skip = to_wasm.read_block_skip();
@@ -108,7 +109,7 @@ impl Cx {
                 
                 live_id!(ToWasmAnimationFrame) => {
                     let tw = ToWasmAnimationFrame::read_to_wasm(&mut to_wasm);
-                    is_animation_frame = true;
+                    is_animation_frame = Some(tw.time);
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(tw.time);
                     }
@@ -292,7 +293,20 @@ impl Cx {
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
                 }
-
+                live_id!(ToWasmLiveFileChange)=>{
+                    let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
+                    // live file change. lets do it.
+                    if tw.body.len()>0 {
+                        let mut parts = tw.body.split("$$$makepad_live_change$$$");
+                        if let Some(file_name) = parts.next() {
+                            let content = parts.next().unwrap().to_string();
+                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                file_name:file_name.to_string(),
+                                content
+                            }]);
+                        }
+                    }
+                }
                 live_id!(ToWasmAudioDeviceList)=>{
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
                     self.os.web_audio().lock().unwrap().to_wasm_audio_device_list(tw);
@@ -319,18 +333,23 @@ impl Cx {
             to_wasm.block_skip(skip);
         };
         
-        if is_animation_frame {
+        if self.handle_live_edit(){
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+        }
+
+        if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
                 self.call_draw_event();
                 self.webgl_compile_shaders();
             }
-            self.handle_repaint();
+            self.handle_repaint(time);
         }
 
         if network_responses.len() != 0 {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
-        
+
         self.handle_platform_ops();
         self.handle_media_signals();
         
@@ -343,12 +362,13 @@ impl Cx {
     }
     
          
-    pub fn handle_repaint(&mut self){
+    pub fn handle_repaint(&mut self, time: f64){
         let mut passes_todo = Vec::new();
          
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //et dpi_factor = self.os.window_geom.dpi_factor;
@@ -522,7 +542,8 @@ impl CxOsApi for Cx {
             ToWasmSignal::to_js_code(),
             ToWasmMidiInputData::to_js_code(),
             ToWasmMidiPortList::to_js_code(),
-            ToWasmAudioDeviceList::to_js_code()
+            ToWasmAudioDeviceList::to_js_code(),
+            ToWasmLiveFileChange::to_js_code()
         ]);
         
         self.os.append_from_wasm_js(&[
