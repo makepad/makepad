@@ -704,14 +704,14 @@ impl Cx {
         let mut to_be_dispatched = Vec::with_capacity(self.os.timers.len());
         let mut to_be_removed = Vec::with_capacity(self.os.timers.len());
         let now = Instant::now();
-        
+        let time = self.os.time_now();
         for (id, timer) in self.os.timers.iter_mut() {
             let elapsed_time = now - timer.start_time;
             let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
             
             if elapsed_time > next_due_time {
-                let time = self.os.time_now();
-                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time}));
+                
+                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time:Some(time)}));
                 if timer.repeats {
                     timer.step += 1;
                 } else {

@@ -96,7 +96,7 @@ impl Cx {
                     &mut direct_app,
                     DirectEvent::Timer(TimerEvent {
                         timer_id: *timer_id,
-                        time
+                        time:Some(time)
                     })
                 );
             }

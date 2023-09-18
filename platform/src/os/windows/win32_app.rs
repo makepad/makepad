@@ -320,7 +320,7 @@ impl Win32App {
             match hit_timer {
                 Win32Timer::Timer {timer_id, ..} => {
                     Win32App::do_callback(Win32Event::Timer(TimerEvent {
-                        time,
+                        time: Some(time),
                         timer_id: timer_id
                     }));
                 },

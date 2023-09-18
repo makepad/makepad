@@ -563,7 +563,7 @@ impl XlibApp {
                             self.do_callback(
                                 XlibEvent::Timer(TimerEvent {
                                     timer_id:*timer_id,
-                                    time
+                                    time: Some(time)
                                 })
                             );
                         }
@@ -577,7 +577,7 @@ impl XlibApp {
                             self.do_callback(
                                 XlibEvent::Timer(TimerEvent {
                                     timer_id:*timer_id,
-                                    time
+                                    time: Some(time)
                                 })
                             );
                         }
