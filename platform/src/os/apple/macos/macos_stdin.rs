@@ -46,6 +46,7 @@ impl Cx {
 
         // get the current present index
         let mut index = present_index.lock().unwrap();
+        log!("frame {} ready, sending message to host",index);
 
         // send message
         let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(*index).to_json().as_bytes());
@@ -62,17 +63,22 @@ impl Cx {
             self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    let window = &mut self.windows[CxWindowPool::id_zero()];
-                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
+
+                    // make sure rendering is done onto the right texture
                     if let Some(swapchain) = self.os.swapchain.as_ref() {
                         let present_index = *self.os.present_index.lock().unwrap();
+                        let texture_id = swapchain[present_index].texture_id();
+                        let window = &mut self.windows[CxWindowPool::id_zero()];
+                        let pass = &mut self.passes[window.main_pass_id.unwrap()];
                         pass.color_textures = vec![CxPassColorTexture {
-                            //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
                             clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: swapchain[present_index].texture_id()
+                            texture_id,
                         }];
                     }
-                    
+                    else {
+                        log!("wanting to paint, but there is no swapchain yet");
+                    }
+                                
                     // render to swapchain
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
 
@@ -145,20 +151,16 @@ impl Cx {
                         }
                         HostToStdin::WindowSize(ws) => {
 
-                            log!("fetching XPC textures with indices {} and {}",ws.swapchain_handles[0],ws.swapchain_handles[1]);
-
                             // start fetching new texture objects from XPC
                             fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handles[0],0,Box::new({
                                 let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[0]);
                                 move |objcid,_| {
-                                    log!("fetched XPC texture {:?}",objcid.as_id());
                                     *maybe_new_handle.lock().unwrap() = Some(objcid);
                                 }
                             }));
                             fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handles[1],0,Box::new({
                                 let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[1]);
                                 move |objcid,_| {
-                                    log!("fetched XPC texture {:?}",objcid.as_id());
                                     *maybe_new_handle.lock().unwrap() = Some(objcid);
                                 }
                             }));
@@ -169,7 +171,7 @@ impl Cx {
                             if window_size != Some(ws) {
                                 window_size = Some(ws);
                                 self.redraw_all();
-                                
+
                                 let window = &mut self.windows[CxWindowPool::id_zero()];
                                 window.window_geom = WindowGeom {
                                     dpi_factor: ws.dpi_factor,
@@ -185,8 +187,6 @@ impl Cx {
                             let maybe_handle0 = self.os.maybe_new_handles[0].lock().unwrap().clone();
                             let maybe_handle1 = self.os.maybe_new_handles[1].lock().unwrap().clone();
                             if maybe_handle0.is_some() && maybe_handle1.is_some() {
-
-                                log!("both texture handles arrived from XPC, create new textures accordingly");
 
                                 // make sure the corresponding Metal textures exist
                                 let new_textures = [Texture::new(self),Texture::new(self),];
