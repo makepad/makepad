@@ -1,7 +1,7 @@
 use {
     makepad_objc_sys::{
         msg_send,
-        runtime::{YES},
+        runtime::YES,
         sel,
         class,
         sel_impl,
@@ -203,7 +203,7 @@ impl Cx {
                     if cxtexture.desc.format.is_shared() {
                         #[cfg(target_os = "macos")]
                         cxtexture.os.update_shared_texture(
-                            metal_cx,
+                            metal_cx.device,
                             &cxtexture.desc,
                         );
                     }
@@ -471,12 +471,13 @@ impl Cx {
     
     fn commit_command_buffer(&mut self, stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
+        let present_index = Arc::clone(&self.os.present_index);
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
                 if stdin_frame.is_some(){
                     #[cfg(target_os = "macos")]
-                    Self::stdin_send_draw_complete();
+                    Self::stdin_send_draw_complete(&present_index);
                 }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
@@ -872,9 +873,9 @@ impl CxOsTexture {
     }
     
     #[cfg(target_os = "macos")]
-    fn update_shared_texture(
+    pub fn update_shared_texture(
         &mut self,
-        metal_cx: &MetalCx,
+        metal_device: ObjcId,
         desc: &TextureDesc,
     ) {
         // we need a width/height for this one.
@@ -907,8 +908,7 @@ impl CxOsTexture {
                 let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
                 match desc.format {
                     TextureFormat::SharedBGRA(shared_id) => {
-                        let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
-                        // lets send this to the other side.
+                        let texture: ObjcId = msg_send![metal_device, newSharedTextureWithDescriptor: descriptor];
                         let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
                         // lets send it over
                         //log!("STORING SHARED TEXTURE {}", shared_id);

@@ -396,8 +396,6 @@ pub const WM_SIZE: u32 = 5u32;
 
 pub const WM_DPICHANGED: u32 = 736u32;
 
-pub const WM_DROPFILES: u32 = 563u32;
-
 pub const WM_DESTROY: u32 = 2u32;
 
 pub const HTTOPLEFT: u32 = 13u32;
@@ -2589,6 +2587,38 @@ pub const D3D11_USAGE_DYNAMIC: D3D11_USAGE = D3D11_USAGE(2i32);
 pub const D3D11_CPU_ACCESS_WRITE: D3D11_CPU_ACCESS_FLAG = D3D11_CPU_ACCESS_FLAG(65536i32);
 
 pub const D3D11_MAP_WRITE_DISCARD: D3D11_MAP = D3D11_MAP(4i32);
+
+#[repr(C)]pub struct D3D11_QUERY_DESC {
+    pub Query: D3D11_QUERY,
+    pub MiscFlags: u32,
+}
+impl ::core::marker::Copy for D3D11_QUERY_DESC {}
+impl ::core::cmp::Eq for D3D11_QUERY_DESC {}
+impl ::core::cmp::PartialEq for D3D11_QUERY_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        self.Query == other.Query && self.MiscFlags == other.MiscFlags
+    }
+}
+impl ::core::clone::Clone for D3D11_QUERY_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_QUERY_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+impl ::core::fmt::Debug for D3D11_QUERY_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_QUERY_DESC").field("Query", &self.Query).field("MiscFlags", &self.MiscFlags).finish()
+    }
+}
+impl ::windows_core::TypeKind for D3D11_QUERY_DESC {
+    type TypeKind = ::windows_core::CopyType;
+}
+
+pub const D3D11_QUERY_EVENT: D3D11_QUERY = D3D11_QUERY(0i32);
 
 #[repr(transparent)]pub struct ID3D11Device(::windows_core::IUnknown);
 impl ID3D11Device {
@@ -5659,6 +5689,87 @@ impl ID3D11Resource_Vtbl {
     }
 }
 
+#[repr(transparent)]pub struct ID3D11Query(::windows_core::IUnknown);
+impl ID3D11Query {
+    pub unsafe fn GetDevice(&self) -> ::windows_core::Result<ID3D11Device> {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).base__.base__.GetDevice)(::windows_core::Interface::as_raw(self), &mut result__);
+        ::windows_core::from_abi(result__)
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows_core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).base__.base__.GetPrivateData)(::windows_core::Interface::as_raw(self), guid, pdatasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows_core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows_core::Result<()> {
+        (::windows_core::Interface::vtable(self).base__.base__.SetPrivateData)(::windows_core::Interface::as_raw(self), guid, datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<P0>(&self, guid: *const ::windows_core::GUID, pdata: P0) -> ::windows_core::Result<()>
+    where
+        P0: ::windows_core::IntoParam<::windows_core::IUnknown>,
+    {
+        (::windows_core::Interface::vtable(self).base__.base__.SetPrivateDataInterface)(::windows_core::Interface::as_raw(self), guid, pdata.into_param().abi()).ok()
+    }
+    pub unsafe fn GetDataSize(&self) -> u32 {
+        (::windows_core::Interface::vtable(self).base__.GetDataSize)(::windows_core::Interface::as_raw(self))
+    }
+    pub unsafe fn GetDesc(&self) -> D3D11_QUERY_DESC {
+        let mut result__ = ::std::mem::zeroed();
+        (::windows_core::Interface::vtable(self).GetDesc)(::windows_core::Interface::as_raw(self), &mut result__);
+        ::std::mem::transmute(result__)
+    }
+}
+impl ::core::cmp::Eq for ID3D11Query {}
+impl ::core::cmp::PartialEq for ID3D11Query {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Query {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Query {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Query").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Query {}
+unsafe impl ::core::marker::Sync for ID3D11Query {}
+unsafe impl ::windows_core::Interface for ID3D11Query {
+    type Vtable = ID3D11Query_Vtbl;
+}
+unsafe impl ::windows_core::ComInterface for ID3D11Query {
+    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0xd6c00747_87b7_425e_b84d_44d108560afd);
+}
+
+::windows_core::imp::interface_hierarchy!(ID3D11Query, ::windows_core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous);
+
+#[repr(C)]
+pub struct ID3D11Query_Vtbl {
+    pub base__: ID3D11Asynchronous_Vtbl,
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC),
+}
+
+pub trait ID3D11Query_Impl: Sized + ID3D11Asynchronous_Impl {
+    fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC) -> ();
+}
+
+impl ::windows_core::RuntimeName for ID3D11Query {}
+
+impl ID3D11Query_Vtbl {
+    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>() -> ID3D11Query_Vtbl {
+        unsafe extern "system" fn GetDesc<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        Self { base__: ID3D11Asynchronous_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &::windows_core::GUID) -> bool {
+        iid == &<ID3D11Query as ::windows_core::ComInterface>::IID || iid == &<ID3D11DeviceChild as ::windows_core::ComInterface>::IID || iid == &<ID3D11Asynchronous as ::windows_core::ComInterface>::IID
+    }
+}
+
 #[repr(transparent)]pub struct ID3D11Asynchronous(::windows_core::IUnknown);
 impl ID3D11Asynchronous {
     pub unsafe fn GetDevice(&self) -> ::windows_core::Result<ID3D11Device> {
@@ -6745,87 +6856,6 @@ impl ID3D11View_Vtbl {
     }
     pub fn matches(iid: &::windows_core::GUID) -> bool {
         iid == &<ID3D11View as ::windows_core::ComInterface>::IID || iid == &<ID3D11DeviceChild as ::windows_core::ComInterface>::IID
-    }
-}
-
-#[repr(transparent)]pub struct ID3D11Query(::windows_core::IUnknown);
-impl ID3D11Query {
-    pub unsafe fn GetDevice(&self) -> ::windows_core::Result<ID3D11Device> {
-        let mut result__ = ::std::mem::zeroed();
-        (::windows_core::Interface::vtable(self).base__.base__.GetDevice)(::windows_core::Interface::as_raw(self), &mut result__);
-        ::windows_core::from_abi(result__)
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows_core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows_core::Result<()> {
-        (::windows_core::Interface::vtable(self).base__.base__.GetPrivateData)(::windows_core::Interface::as_raw(self), guid, pdatasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows_core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows_core::Result<()> {
-        (::windows_core::Interface::vtable(self).base__.base__.SetPrivateData)(::windows_core::Interface::as_raw(self), guid, datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<P0>(&self, guid: *const ::windows_core::GUID, pdata: P0) -> ::windows_core::Result<()>
-    where
-        P0: ::windows_core::IntoParam<::windows_core::IUnknown>,
-    {
-        (::windows_core::Interface::vtable(self).base__.base__.SetPrivateDataInterface)(::windows_core::Interface::as_raw(self), guid, pdata.into_param().abi()).ok()
-    }
-    pub unsafe fn GetDataSize(&self) -> u32 {
-        (::windows_core::Interface::vtable(self).base__.GetDataSize)(::windows_core::Interface::as_raw(self))
-    }
-    pub unsafe fn GetDesc(&self) -> D3D11_QUERY_DESC {
-        let mut result__ = ::std::mem::zeroed();
-        (::windows_core::Interface::vtable(self).GetDesc)(::windows_core::Interface::as_raw(self), &mut result__);
-        ::std::mem::transmute(result__)
-    }
-}
-impl ::core::cmp::Eq for ID3D11Query {}
-impl ::core::cmp::PartialEq for ID3D11Query {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Query {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Query {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Query").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Query {}
-unsafe impl ::core::marker::Sync for ID3D11Query {}
-unsafe impl ::windows_core::Interface for ID3D11Query {
-    type Vtable = ID3D11Query_Vtbl;
-}
-unsafe impl ::windows_core::ComInterface for ID3D11Query {
-    const IID: ::windows_core::GUID = ::windows_core::GUID::from_u128(0xd6c00747_87b7_425e_b84d_44d108560afd);
-}
-
-::windows_core::imp::interface_hierarchy!(ID3D11Query, ::windows_core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous);
-
-#[repr(C)]
-pub struct ID3D11Query_Vtbl {
-    pub base__: ID3D11Asynchronous_Vtbl,
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC),
-}
-
-pub trait ID3D11Query_Impl: Sized + ID3D11Asynchronous_Impl {
-    fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC) -> ();
-}
-
-impl ::windows_core::RuntimeName for ID3D11Query {}
-
-impl ID3D11Query_Vtbl {
-    pub const fn new<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>() -> ID3D11Query_Vtbl {
-        unsafe extern "system" fn GetDesc<Identity: ::windows_core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        Self { base__: ID3D11Asynchronous_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &::windows_core::GUID) -> bool {
-        iid == &<ID3D11Query as ::windows_core::ComInterface>::IID || iid == &<ID3D11DeviceChild as ::windows_core::ComInterface>::IID || iid == &<ID3D11Asynchronous as ::windows_core::ComInterface>::IID
     }
 }
 
@@ -8715,36 +8745,6 @@ impl ::core::default::Default for D3D11_RENDER_TARGET_VIEW_DESC {
     }
 }
 impl ::windows_core::TypeKind for D3D11_RENDER_TARGET_VIEW_DESC {
-    type TypeKind = ::windows_core::CopyType;
-}
-
-#[repr(C)]pub struct D3D11_QUERY_DESC {
-    pub Query: D3D11_QUERY,
-    pub MiscFlags: u32,
-}
-impl ::core::marker::Copy for D3D11_QUERY_DESC {}
-impl ::core::cmp::Eq for D3D11_QUERY_DESC {}
-impl ::core::cmp::PartialEq for D3D11_QUERY_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        self.Query == other.Query && self.MiscFlags == other.MiscFlags
-    }
-}
-impl ::core::clone::Clone for D3D11_QUERY_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_QUERY_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-impl ::core::fmt::Debug for D3D11_QUERY_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_QUERY_DESC").field("Query", &self.Query).field("MiscFlags", &self.MiscFlags).finish()
-    }
-}
-impl ::windows_core::TypeKind for D3D11_QUERY_DESC {
     type TypeKind = ::windows_core::CopyType;
 }
 
@@ -12646,6 +12646,8 @@ impl ::windows_core::TypeKind for HINSTANCE {
     type TypeKind = ::windows_core::CopyType;
 }
 
+pub const S_FALSE: ::windows_core::HRESULT = ::windows_core::HRESULT(1i32);
+
 pub const WAIT_OBJECT_0: WAIT_EVENT = WAIT_EVENT(0u32);
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WAIT_EVENT(pub u32);
@@ -13016,8 +13018,6 @@ pub const DV_E_LINDEX: ::windows_core::HRESULT = ::windows_core::HRESULT(-214722
 
 pub const DV_E_TYMED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147221399i32);
 
-pub const S_FALSE: ::windows_core::HRESULT = ::windows_core::HRESULT(1i32);
-
 pub const E_UNEXPECTED: ::windows_core::HRESULT = ::windows_core::HRESULT(-2147418113i32);
 
 }
@@ -13026,6 +13026,11 @@ pub mod Threading{
 pub unsafe fn ExitProcess(uexitcode: u32) -> ! {
     ::windows_targets::link!("kernel32.dll" "system" fn ExitProcess(uexitcode : u32) -> !);
     ExitProcess(uexitcode)
+}
+
+pub unsafe fn Sleep(dwmilliseconds: u32) {
+    ::windows_targets::link!("kernel32.dll" "system" fn Sleep(dwmilliseconds : u32) -> ());
+    Sleep(dwmilliseconds)
 }
 
 pub unsafe fn SetEvent<P0>(hevent: P0) -> ::windows_core::Result<()>
@@ -13243,8 +13248,6 @@ pub const DROPEFFECT_MOVE: DROPEFFECT = DROPEFFECT(2u32);
 pub const CF_UNICODETEXT: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(13u16);
 
 pub const DROPEFFECT_LINK: DROPEFFECT = DROPEFFECT(4u32);
-
-pub const DROPEFFECT_SCROLL: DROPEFFECT = DROPEFFECT(2147483648u32);
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CLIPBOARD_FORMAT(pub u16);
 impl ::core::marker::Copy for CLIPBOARD_FORMAT {}
@@ -13694,25 +13697,15 @@ impl ::windows_core::TypeKind for PARAMDESC {
     type TypeKind = ::windows_core::CopyType;
 }
 
+pub const CF_HDROP: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(15u16);
+
 pub unsafe fn ReleaseStgMedium(param0: *mut super::Com::STGMEDIUM) {
     ::windows_targets::link!("ole32.dll" "system" fn ReleaseStgMedium(param0 : *mut super::Com:: STGMEDIUM) -> ());
     ReleaseStgMedium(param0)
 }
 
-pub const CF_HDROP: CLIPBOARD_FORMAT = CLIPBOARD_FORMAT(15u16);
-
 }
 pub mod Memory{
-pub unsafe fn GlobalAlloc(uflags: GLOBAL_ALLOC_FLAGS, dwbytes: usize) -> ::windows_core::Result<super::super::Foundation::HGLOBAL> {
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalAlloc(uflags : GLOBAL_ALLOC_FLAGS, dwbytes : usize) -> super::super::Foundation:: HGLOBAL);
-    let result__ = GlobalAlloc(uflags, dwbytes);
-    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows_core::Error::from_win32)
-}
-
-pub const GMEM_ZEROINIT: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(64u32);
-
-pub const GMEM_FIXED: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(0u32);
-
 pub unsafe fn GlobalLock<P0>(hmem: P0) -> *mut ::core::ffi::c_void
 where
     P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
@@ -13721,12 +13714,10 @@ where
     GlobalLock(hmem.into_param().abi())
 }
 
-pub unsafe fn GlobalUnlock<P0>(hmem: P0) -> ::windows_core::Result<()>
-where
-    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
-{
-    ::windows_targets::link!("kernel32.dll" "system" fn GlobalUnlock(hmem : super::super::Foundation:: HGLOBAL) -> super::super::Foundation:: BOOL);
-    GlobalUnlock(hmem.into_param().abi()).ok()
+pub unsafe fn GlobalAlloc(uflags: GLOBAL_ALLOC_FLAGS, dwbytes: usize) -> ::windows_core::Result<super::super::Foundation::HGLOBAL> {
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalAlloc(uflags : GLOBAL_ALLOC_FLAGS, dwbytes : usize) -> super::super::Foundation:: HGLOBAL);
+    let result__ = GlobalAlloc(uflags, dwbytes);
+    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows_core::Error::from_win32)
 }
 
 pub unsafe fn GlobalSize<P0>(hmem: P0) -> usize
@@ -13735,6 +13726,14 @@ where
 {
     ::windows_targets::link!("kernel32.dll" "system" fn GlobalSize(hmem : super::super::Foundation:: HGLOBAL) -> usize);
     GlobalSize(hmem.into_param().abi())
+}
+
+pub unsafe fn GlobalUnlock<P0>(hmem: P0) -> ::windows_core::Result<()>
+where
+    P0: ::windows_core::IntoParam<super::super::Foundation::HGLOBAL>,
+{
+    ::windows_targets::link!("kernel32.dll" "system" fn GlobalUnlock(hmem : super::super::Foundation:: HGLOBAL) -> super::super::Foundation:: BOOL);
+    GlobalUnlock(hmem.into_param().abi()).ok()
 }
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct GLOBAL_ALLOC_FLAGS(pub u32);
@@ -13790,6 +13789,10 @@ impl ::core::ops::Not for GLOBAL_ALLOC_FLAGS {
 impl ::windows_core::TypeKind for GLOBAL_ALLOC_FLAGS {
     type TypeKind = ::windows_core::CopyType;
 }
+
+pub const GMEM_ZEROINIT: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(64u32);
+
+pub const GMEM_FIXED: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(0u32);
 
 }
 pub mod SystemServices{
@@ -13852,10 +13855,6 @@ pub const MK_CONTROL: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(8u32);
 pub const MK_SHIFT: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(4u32);
 
 pub const MK_LBUTTON: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(1u32);
-
-pub const MK_MBUTTON: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(16u32);
-
-pub const MK_RBUTTON: MODIFIERKEYS_FLAGS = MODIFIERKEYS_FLAGS(2u32);
 
 }
 pub mod WindowsProgramming{
