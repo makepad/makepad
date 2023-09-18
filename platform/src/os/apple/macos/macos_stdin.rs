@@ -46,6 +46,7 @@ impl Cx {
 
         // get the current present index
         let mut index = present_index.lock().unwrap();
+        log!("frame {} ready, sending message to host",index);
 
         // send message
         let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(*index).to_json().as_bytes());
@@ -65,13 +66,17 @@ impl Cx {
 
                     // make sure rendering is done onto the right texture
                     if let Some(swapchain) = self.os.swapchain.as_ref() {
-                        let texture_id = swapchain[*self.os.present_index.lock().unwrap()].texture_id();
+                        let present_index = *self.os.present_index.lock().unwrap();
+                        let texture_id = swapchain[present_index].texture_id();
                         let window = &mut self.windows[CxWindowPool::id_zero()];
                         let pass = &mut self.passes[window.main_pass_id.unwrap()];
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(pass.clear_color),
                             texture_id,
                         }];
+                    }
+                    else {
+                        log!("wanting to paint, but there is no swapchain yet");
                     }
                                 
                     // render to swapchain
