@@ -603,6 +603,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(self.os.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
