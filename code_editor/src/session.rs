@@ -3,7 +3,6 @@ use {
         char::CharExt,
         document::Document,
         history::EditKind,
-        iter::IteratorExt,
         layout::{BlockElement, Layout, WrappedElement},
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
@@ -652,24 +651,15 @@ impl Session {
 
     pub fn copy(&self) -> String {
         let mut string = String::new();
-        for range in self
+        for selection in &self
             .selection_state
             .borrow()
             .selections
-            .iter()
-            .copied()
-            .merge(
-                |selection_0, selection_1| match selection_0.merge_with(selection_1) {
-                    Some(selection) => Ok(selection),
-                    None => Err((selection_0, selection_1)),
-                },
-            )
-            .map(|selection| selection.range())
         {
             write!(
                 &mut string,
                 "{}",
-                self.document.as_text().slice(range.start(), range.extent())
+                self.document.as_text().slice(selection.start(), selection.length())
             )
             .unwrap();
         }
