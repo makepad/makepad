@@ -54,11 +54,12 @@ impl Cx {
         *index = 1 - *index;
     }
     
-    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx) {
+    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx, time:f32) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     // render to swapchain
@@ -67,7 +68,6 @@ impl Cx {
                     // and then wait for GPU, which calls stdin_send_draw_complete when its done
                 }
                 CxPassParent::Pass(_) => {
-                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
@@ -226,8 +226,8 @@ impl Cx {
                                 self.call_draw_event();
                                 self.mtl_compile_shaders(metal_cx);
                             }
-                            
-                            self.stdin_handle_repaint(metal_cx);
+
+                            self.stdin_handle_repaint(metal_cx, time as f32);
                         }
                     }
                     Err(err) => { // we should output a log string

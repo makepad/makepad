@@ -1,9 +1,6 @@
 use {
     crate::{
-        makepad_platform::thread::*,
         makepad_platform::*,
-        makepad_platform::audio::*,
-        makepad_platform::midi::*,
         audio_traits::*,
     },
     std::any::TypeId,
