@@ -1,5 +1,6 @@
 use {
     crate::{
+        decoration::Decoration,
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
         session::Session,
@@ -40,6 +41,16 @@ live_design! {
             sdf.move_to(1., -1.);
             sdf.line_to(1., self.rect_size.y + 1.);
             return sdf.stroke(self.color, thickness);
+        }
+    }
+
+    DrawDecoration = {{DrawDecoration}} {
+        fn pixel(self) -> vec4 {
+            let transformed_pos = vec2(self.pos.x, self.pos.y + 0.03 * sin(self.pos.x * self.rect_size.x));
+            let cx = Sdf2d::viewport(transformed_pos * self.rect_size);
+            cx.move_to(0.0, self.rect_size.y - 1.0);
+            cx.line_to(self.rect_size.x, self.rect_size.y - 1.0);
+            return cx.stroke(vec4(1.0, 0.0, 0.0, 1.0), 0.8);
         }
     }
 
@@ -111,8 +122,11 @@ live_design! {
             text_style: <THEME_FONT_CODE> {}
         }
         draw_indent_guide: {
-            draw_depth: 2.0,
+            draw_depth: 1.0,
             color: #C0C0C0,
+        }
+        draw_decoration: {
+            draw_depth: 2.0,
         }
         draw_selection: {
             draw_depth: 3.0,
@@ -140,6 +154,8 @@ pub struct CodeEditor {
     token_colors: TokenColors,
     #[live]
     draw_indent_guide: DrawIndentGuide,
+    #[live]
+    draw_decoration: DrawDecoration,
     #[live]
     draw_selection: DrawSelection,
     #[live]
@@ -250,6 +266,7 @@ impl CodeEditor {
         self.draw_gutter(cx, session);
         self.draw_text_layer(cx, session);
         self.draw_indent_guide_layer(cx, session);
+        self.draw_decoration_layer(cx, session);
         self.draw_selection_layer(cx, session);
 
         // Get the last added selection.
@@ -641,6 +658,31 @@ impl CodeEditor {
         }
     }
 
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+        let mut active_decoration = None;
+        let decorations = session.decorations();
+        let mut decorations = decorations.iter();
+        while decorations.as_slice().first().map_or(false, |decoration| {
+            decoration.end().line_index < self.line_start
+        }) {
+            decorations.next().unwrap();
+        }
+        if decorations.as_slice().first().map_or(false, |decoration| {
+            decoration.start.line_index < self.line_start
+        }) {
+            active_decoration = Some(ActiveDecoration {
+                decoration: *decorations.next().unwrap(),
+                start_x: 0.0,
+            });
+        }
+        DrawDecorationLayer {
+            code_editor: self,
+            active_decoration,
+            decorations,
+        }
+        .draw_decoration_layer(cx, session)
+    }
+
     fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_selection = None;
         let selections = session.selections();
@@ -810,6 +852,194 @@ impl CodeEditor {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CodeEditorAction {
     TextDidChange,
+}
+
+struct DrawDecorationLayer<'a> {
+    code_editor: &'a mut CodeEditor,
+    active_decoration: Option<ActiveDecoration>,
+    decorations: Iter<'a, Decoration>,
+}
+
+impl<'a> DrawDecorationLayer<'a> {
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+        let mut line_index = self.code_editor.line_start;
+        let mut origin_y = session.layout().line(line_index).y();
+        for block in session
+            .layout()
+            .block_elements(self.code_editor.line_start, self.code_editor.line_end)
+        {
+            match block {
+                BlockElement::Line {
+                    is_inlay: false,
+                    line,
+                } => {
+                    let mut byte_index = 0;
+                    let mut row_index = 0;
+                    let mut column_index = 0;
+                    self.handle_event(
+                        cx,
+                        line_index,
+                        line,
+                        byte_index,
+                        Affinity::Before,
+                        origin_y,
+                        row_index,
+                        column_index,
+                    );
+                    for element in line.wrapped_elements() {
+                        match element {
+                            WrappedElement::Text {
+                                is_inlay: false,
+                                text,
+                            } => {
+                                for grapheme in text.graphemes() {
+                                    self.handle_event(
+                                        cx,
+                                        line_index,
+                                        line,
+                                        byte_index,
+                                        Affinity::After,
+                                        origin_y,
+                                        row_index,
+                                        column_index,
+                                    );
+                                    byte_index += grapheme.len();
+                                    column_index += grapheme.column_count();
+                                    self.handle_event(
+                                        cx,
+                                        line_index,
+                                        line,
+                                        byte_index,
+                                        Affinity::Before,
+                                        origin_y,
+                                        row_index,
+                                        column_index,
+                                    );
+                                }
+                            }
+                            WrappedElement::Text {
+                                is_inlay: true,
+                                text,
+                            } => {
+                                column_index += text.column_count();
+                            }
+                            WrappedElement::Widget(widget) => {
+                                column_index += widget.column_count;
+                            }
+                            WrappedElement::Wrap => {
+                                if self.active_decoration.is_some() {
+                                    self.draw_decoration(
+                                        cx,
+                                        line,
+                                        origin_y,
+                                        row_index,
+                                        column_index,
+                                    );
+                                }
+                                column_index = line.wrap_indent_column_count();
+                                row_index += 1;
+                            }
+                        }
+                    }
+                    self.handle_event(
+                        cx,
+                        line_index,
+                        line,
+                        byte_index,
+                        Affinity::After,
+                        origin_y,
+                        row_index,
+                        column_index,
+                    );
+                    if self.active_decoration.is_some() {
+                        self.draw_decoration(cx, line, origin_y, row_index, column_index);
+                    }
+                    line_index += 1;
+                    origin_y += line.height();
+                }
+                BlockElement::Line {
+                    is_inlay: true,
+                    line,
+                } => {
+                    origin_y += line.height();
+                }
+                BlockElement::Widget(widget) => {
+                    origin_y += widget.height;
+                }
+            }
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        cx: &mut Cx2d,
+        line_index: usize,
+        line: Line<'_>,
+        byte_index: usize,
+        affinity: Affinity,
+        origin_y: f64,
+        row_index: usize,
+        column_index: usize,
+    ) {
+        let position = Position {
+            line_index,
+            byte_index,
+        };
+        if self.active_decoration.as_ref().map_or(false, |decoration| {
+            decoration.decoration.end() == position && affinity == Affinity::Before
+        }) {
+            self.draw_decoration(cx, line, origin_y, row_index, column_index);
+            self.active_decoration = None;
+        }
+        if self
+            .decorations
+            .as_slice()
+            .first()
+            .map_or(false, |decoration| {
+                decoration.start == position && affinity == Affinity::After
+            })
+        {
+            let decoration = *self.decorations.next().unwrap();
+            if !decoration.is_empty() {
+                let (start_x, _) = line.grid_to_normalized_position(row_index, column_index);
+                self.active_decoration = Some(ActiveDecoration {
+                    decoration,
+                    start_x,
+                });
+            }
+        }
+    }
+
+    fn draw_decoration(
+        &mut self,
+        cx: &mut Cx2d,
+        line: Line<'_>,
+        origin_y: f64,
+        row_index: usize,
+        column_index: usize,
+    ) {
+        let start_x = mem::take(&mut self.active_decoration.as_mut().unwrap().start_x);
+        let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+        self.code_editor.draw_decoration.draw_abs(
+            cx,
+            Rect {
+                pos: DVec2 {
+                    x: start_x,
+                    y: origin_y + y,
+                } * self.code_editor.cell_size
+                    + self.code_editor.viewport_rect.pos,
+                size: DVec2 {
+                    x: x - start_x,
+                    y: line.scale(),
+                } * self.code_editor.cell_size,
+            },
+        );
+    }
+}
+
+struct ActiveDecoration {
+    decoration: Decoration,
+    start_x: f64,
 }
 
 struct DrawSelectionLayer<'a> {
@@ -1068,6 +1298,12 @@ pub struct DrawIndentGuide {
     draw_super: DrawQuad,
     #[live]
     color: Vec4,
+}
+
+#[derive(Live, LiveHook)]
+struct DrawDecoration {
+    #[deref]
+    draw_super: DrawQuad,
 }
 
 #[derive(Live, LiveHook)]
