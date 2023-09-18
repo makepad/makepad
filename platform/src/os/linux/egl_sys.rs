@@ -1,25 +1,19 @@
 #![allow(non_camel_case_types, non_snake_case, dead_code)]
 
-#[cfg(target_os = "linux")]
-pub type EGLNativeDisplayType = *mut crate::native::linux_x11::libx11::Display;
-#[cfg(target_os = "linux")]
-pub type EGLNativePixmapType = crate::native::linux_x11::libx11::Pixmap;
-#[cfg(target_os = "linux")]
-pub type EGLNativeWindowType = crate::native::linux_x11::libx11::Window;
-
-#[cfg(target_os = "android")]
 pub type EGLNativeDisplayType = *mut ();
-#[cfg(target_os = "android")]
 pub type EGLNativePixmapType = ::std::os::raw::c_ulong;
-#[cfg(target_os = "android")]
 pub type EGLNativeWindowType = ::std::os::raw::c_ulong;
 
 pub use core::ptr::null_mut;
 
-pub const EGL_SUCCESS: u32 = 12288;
+pub const EGL_NO_CONTEXT: EGLContext = 0 as EGLContext;
+pub const EGL_NO_SURFACE: EGLSurface = 0 as EGLSurface;
 
 pub const EGL_WINDOW_BIT: u32 = 4;
 
+pub const EGL_OPENGL_ES2_BIT: u32 = 4;
+
+pub const EGL_SUCCESS: u32 = 12288;
 pub const EGL_ALPHA_SIZE: u32 = 12321;
 pub const EGL_BLUE_SIZE: u32 = 12322;
 pub const EGL_GREEN_SIZE: u32 = 12323;
@@ -27,22 +21,42 @@ pub const EGL_RED_SIZE: u32 = 12324;
 pub const EGL_DEPTH_SIZE: u32 = 12325;
 pub const EGL_STENCIL_SIZE: u32 = 12326;
 pub const EGL_NATIVE_VISUAL_ID: u32 = 12334;
-pub const EGL_WIDTH: u32 = 12375;
-pub const EGL_HEIGHT: u32 = 12374;
 pub const EGL_SURFACE_TYPE: u32 = 12339;
 pub const EGL_NONE: u32 = 12344;
+pub const EGL_RENDERABLE_TYPE: u32 = 12352;
+pub const EGL_HEIGHT: u32 = 12374;
+pub const EGL_WIDTH: u32 = 12375;
 pub const EGL_CONTEXT_CLIENT_VERSION: u32 = 12440;
+pub const EGL_OPENGL_ES_API: u32 = 12448;
+
+pub const EGL_GL_TEXTURE_2D_KHR: u32 = 12465;
+
+pub const EGL_PLATFORM_X11_EXT: u32 = 12757;
+pub const EGL_PLATFORM_GBM_KHR: u32 = 12759;
+
+pub const EGL_LINUX_DMA_BUF_EXT: u32 = 12912;
+pub const EGL_LINUX_DRM_FOURCC_EXT: u32 = 12913;
+pub const EGL_DMA_BUF_PLANE0_FD_EXT: u32 = 12914;
+pub const EGL_DMA_BUF_PLANE0_OFFSET_EXT: u32 = 12915;
+pub const EGL_DMA_BUF_PLANE0_PITCH_EXT: u32 = 12916;
+pub const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: u32 = 13379;
+pub const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: u32 = 13380;
 
 pub type NativeDisplayType = EGLNativeDisplayType;
 pub type NativePixmapType = EGLNativePixmapType;
 pub type NativeWindowType = EGLNativeWindowType;
 pub type EGLint = i32;
+pub type EGLuint64KHR = u64;
+pub type EGLenum = ::std::os::raw::c_uint;
 pub type EGLBoolean = ::std::os::raw::c_uint;
 pub type EGLDisplay = *mut ::std::os::raw::c_void;
 pub type EGLConfig = *mut ::std::os::raw::c_void;
 pub type EGLSurface = *mut ::std::os::raw::c_void;
 pub type EGLContext = *mut ::std::os::raw::c_void;
+pub type EGLClientBuffer = *mut ::std::os::raw::c_void;
+pub type EGLImageKHR = *mut ::std::os::raw::c_void;
 pub type __eglMustCastToProperFunctionPointerType = ::std::option::Option<unsafe extern "C" fn()>;
+pub type PFNEGLBINDAPIPROC = ::std::option::Option<unsafe extern "C" fn(api: EGLenum) -> EGLBoolean>;
 pub type PFNEGLCHOOSECONFIGPROC = ::std::option::Option<
 unsafe extern "C" fn(
     dpy: EGLDisplay,
@@ -66,6 +80,15 @@ unsafe extern "C" fn(
     share_context: EGLContext,
     attrib_list: *const EGLint,
 ) -> EGLContext,
+>;
+pub type PFNEGLCREATEIMAGEKHRPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    ctx: EGLContext,
+    target: EGLenum,
+    buffer: EGLClientBuffer,
+    attrib_list: *const EGLint,
+) -> EGLImageKHR,
 >;
 pub type PFNEGLCREATEPBUFFERSURFACEPROC = ::std::option::Option<
 unsafe extern "C" fn(
@@ -175,7 +198,45 @@ unsafe extern "C" fn(
 pub type PFNEGLSWAPINTERVALPROC =
 ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, interval: EGLint) -> EGLBoolean>;
 
+pub type PFNEGLGETPLATFORMDISPLAYEXTPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    platform: EGLenum,
+    native_display: *mut ::std::os::raw::c_void,
+    attrib_list: *const EGLint,
+) -> EGLDisplay,
+>;
+
+pub type PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    image: EGLImageKHR,
+    fourcc: *mut i32,
+    num_planes: *mut i32,
+    modifiers: *mut EGLuint64KHR,
+) -> EGLBoolean,
+>;
+pub type PFNEGLEXPORTDMABUFIMAGEMESAPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    image: EGLImageKHR,
+    fds: *mut i32,
+    strides: *mut EGLint,
+    offsets: *mut EGLint,
+) -> EGLBoolean,
+>;
+
+// HACK(eddyb) this is actually an OpenGL extension function.
+type PFNGLEGLIMAGETARGETTEXTURE2DOESPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    super::gl_sys::GLenum,
+    EGLImageKHR,
+),
+>;
+
+struct Module(::std::ptr::NonNull<::std::os::raw::c_void>);
+
 pub struct LibEgl {
+    pub eglBindAPI: PFNEGLBINDAPIPROC,
     pub eglChooseConfig: PFNEGLCHOOSECONFIGPROC,
     pub eglCopyBuffers: PFNEGLCOPYBUFFERSPROC,
     pub eglCreateContext: PFNEGLCREATECONTEXTPROC,
@@ -204,17 +265,25 @@ pub struct LibEgl {
     pub eglReleaseTexImage: PFNEGLRELEASETEXIMAGEPROC,
     pub eglSurfaceAttrib: PFNEGLSURFACEATTRIBPROC,
     pub eglSwapInterval: PFNEGLSWAPINTERVALPROC,
+
+    pub eglCreateImageKHR: PFNEGLCREATEIMAGEKHRPROC,
+    pub eglExportDMABUFImageQueryMESA: PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC,
+    pub eglExportDMABUFImageMESA: PFNEGLEXPORTDMABUFIMAGEMESAPROC,
+    pub eglGetPlatformDisplayEXT: PFNEGLGETPLATFORMDISPLAYEXTPROC,
+
+    // HACK(eddyb) this is actually an OpenGL extension function.
+    pub glEGLImageTargetTexture2DOES: PFNGLEGLIMAGETARGETTEXTURE2DOESPROC,
+
+    _keep_module_alive: Module,
 }
 
 impl LibEgl {
     pub fn try_load() -> Option<LibEgl> {
         use self::super::libc_sys::{dlclose, dlopen, dlsym, RTLD_LAZY, RTLD_LOCAL};
         use std::{
-            ffi::{c_void, CString},
+            ffi::{CString, CStr},
             ptr::NonNull,
         };
-        
-        pub struct Module(NonNull<c_void>);
         
         impl Module {
             pub fn load(path: &str) -> Result<Self,()> {
@@ -246,10 +315,20 @@ impl LibEgl {
                 unsafe {dlclose(self.0.as_ptr())};
             }
         }
-        
-        Module::load("libEGL.so")
-            .or_else( | _ | Module::load("libEGL.so.1"))
-            .map( | module | LibEgl {
+
+        let module = Module::load("libEGL.so").or_else(|_| Module::load("libEGL.so.1")).ok()?;
+
+        let eglGetProcAddress: PFNEGLGETPROCADDRESSPROC = module.get_symbol("eglGetProcAddress").ok();
+        macro_rules! get_ext_fn {
+            ($name:literal) => {
+                eglGetProcAddress.and_then(|gpa| unsafe {
+                    std::mem::transmute(gpa(CStr::from_bytes_with_nul(concat!($name, "\0").as_bytes()).unwrap().as_ptr()))
+                })
+            }
+        }
+
+        Some(LibEgl {
+            eglBindAPI: module.get_symbol("eglBindAPI").ok(),
             eglChooseConfig: module.get_symbol("eglChooseConfig").ok(),
             eglCopyBuffers: module.get_symbol("eglCopyBuffers").ok(),
             eglCreateContext: module.get_symbol("eglCreateContext").ok(),
@@ -264,7 +343,7 @@ impl LibEgl {
             eglGetCurrentSurface: module.get_symbol("eglGetCurrentSurface").ok(),
             eglGetDisplay: module.get_symbol("eglGetDisplay").ok(),
             eglGetError: module.get_symbol("eglGetError").ok(),
-            eglGetProcAddress: module.get_symbol("eglGetProcAddress").ok(),
+            eglGetProcAddress,
             eglInitialize: module.get_symbol("eglInitialize").ok(),
             eglMakeCurrent: module.get_symbol("eglMakeCurrent").ok(),
             eglQueryContext: module.get_symbol("eglQueryContext").ok(),
@@ -278,8 +357,16 @@ impl LibEgl {
             eglReleaseTexImage: module.get_symbol("eglReleaseTexImage").ok(),
             eglSurfaceAttrib: module.get_symbol("eglSurfaceAttrib").ok(),
             eglSwapInterval: module.get_symbol("eglSwapInterval").ok(),
+
+            eglCreateImageKHR: get_ext_fn!("eglCreateImageKHR"),
+            eglExportDMABUFImageQueryMESA: get_ext_fn!("eglExportDMABUFImageQueryMESA"),
+            eglExportDMABUFImageMESA: get_ext_fn!("eglExportDMABUFImageMESA"),
+            eglGetPlatformDisplayEXT: get_ext_fn!("eglGetPlatformDisplayEXT"),
+
+            glEGLImageTargetTexture2DOES: get_ext_fn!("glEGLImageTargetTexture2DOES"),
+
+            _keep_module_alive: module,
         })
-            .ok()
     }
 }
 
@@ -292,6 +379,7 @@ pub enum EglError {
 
 pub struct Egl {}
 
+#[cfg(target_os="android")]
 pub unsafe fn create_egl_context(
     egl: &mut LibEgl,
     display: *mut std::ffi::c_void,

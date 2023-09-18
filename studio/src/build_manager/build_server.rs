@@ -5,7 +5,7 @@ use {
         build_manager::{
             build_protocol::*,
             child_process::{
-                ChildStdIn, 
+                ChildStdIn,
                 ChildProcess,
                 ChildStdIO
             },
@@ -20,7 +20,7 @@ use {
     },
 };
 
-struct BuildServerProcess{
+struct BuildServerProcess {
     cmd_id: BuildCmdId,
     stdin_sender: Mutex<Sender<ChildStdIn> >,
     line_sender: Mutex<Sender<ChildStdIO> >,
@@ -29,7 +29,7 @@ struct BuildServerProcess{
 struct BuildServerShared {
     path: PathBuf,
     // here we should store our connections send slots
-    processes: HashMap<String, BuildServerProcess>
+    processes: HashMap<BuildProcess, BuildServerProcess>
 }
 
 pub struct BuildServer {
@@ -55,134 +55,155 @@ impl BuildServer {
 }
 
 pub struct BuildConnection {
-//    connection_id: ConnectionId,
+    //    connection_id: ConnectionId,
     shared: Arc<RwLock<BuildServerShared >>,
     msg_sender: Box<dyn MsgSender>,
 }
 
 #[derive(Debug, PartialEq)]
-enum StdErrState{
+enum StdErrState {
     First,
     Sync,
     Desync,
     Running,
 }
 
-#[derive(Debug)]
-pub enum BuildTarget {
-    Release,
-    Debug,
-    ReleaseStudio,
-    DebugStudio,
-    Profiler,
-    IosSim,
-    IosReal,
-    Android,
-    Wasm
-}
-
-
-
-impl BuildTarget {
-    pub fn len() -> u64 {9}
-    pub fn index(idx: u64) -> BuildTarget {
-        match idx {
-            0 => Self::Release,
-            1 => Self::Debug,
-            2 => Self::ReleaseStudio,
-            3 => Self::DebugStudio,
-            4 => Self::Profiler,
-            5 => Self::IosSim,
-            6 => Self::IosReal,
-            7 => Self::Android,
-            _ => Self::Wasm,
-        }
-    }
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Release => "Release",
-            Self::Debug => "Debug",
-            Self::ReleaseStudio => "Release Studio",
-            Self::DebugStudio => "Debug Studio",
-            Self::Profiler => "Profiler",
-            Self::IosSim => "iOS simulator",
-            Self::IosReal => "iOS device",
-            Self::Android => "Android adb",
-            Self::Wasm => "WASM",
-        }
-    }
-}
-
 
 impl BuildConnection {
     
-    pub fn cargo_run(&self, what: &str, target:&BuildTarget, cmd_id: BuildCmdId) {
-
+    pub fn stop(&self, cmd_id: BuildCmdId) {
+        let shared = self.shared.clone();
+        
+        let shared = shared.write().unwrap();
+        if let Some(proc) = shared.processes.values().find(|v| v.cmd_id == cmd_id) {
+            let line_sender = proc.line_sender.lock().unwrap();
+            let _ = line_sender.send(ChildStdIO::Kill);
+        }
+    }
+    
+    pub fn run(&self, what: BuildProcess, cmd_id: BuildCmdId, http:String) {
+        
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
         let path = shared.read().unwrap().path.clone();
         
-        if let Ok(shared) = shared.write() {
-            if let Some(proc) = shared.processes.get(what) {
-                let line_sender = proc.line_sender.lock().unwrap();
-                let _ = line_sender.send(ChildStdIO::Kill);
-            }
-        }
-        /*
-        let _args:&[&str] = match target{
-            BuildTarget::Release=>&[
-                "run",
-                "nightly",
-                "cargo",
-                "run",
-                "-p",
-                what,
-                "--message-format=json",
-                "--release",
-                "--",
-                "--message-format=json",
+        let args: Vec<String> = match &what.target {
+            BuildTarget::ReleaseStudio => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "run".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--message-format=json".into(),
+                "--release".into(),
+                "--".into(),
+                "--message-format=json".into(),
+                "--stdin-loop".into(),
             ],
-            BuildTarget::ReleaseStudio=>&[
-                "run",
-                "nightly",
-                "cargo",
-                "run",
-                "-p",
-                what,
-                "--message-format=json",
-                "--",
-                "--message-format=json",
-                "--stdin-loop",
+            BuildTarget::DebugStudio => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "run".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--message-format=json".into(),
+                "--".into(),
+                "--message-format=json".into(),
+                "--stdin-loop".into(),
             ],
-            BuildTarget::Debug=>&[],
-            BuildTarget::DebugStudio=>&[],
-            BuildTarget::Profiler=>&[],
-            BuildTarget::IosSim=>&[],
-            BuildTarget::IosReal=>&[],
-            BuildTarget::Android=>&[],
-            BuildTarget::Wasm=>&[],
-        };*/
+            BuildTarget::Release => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "run".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--message-format=json".into(),
+                "--release".into(),
+                "--".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::Debug => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "run".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--message-format=json".into(),
+                "--".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::Profiler => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "instruments".into(),
+                "-t".into(),
+                "time".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+                "--".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::IosSim {org, app} => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "ios".into(),
+                format!("--org={org}"),
+                format!("--app={app}"),
+                "run-sim".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::IosDevice {org, app} => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "ios".into(),
+                format!("--org={org}"),
+                format!("--app={app}"),
+                "run-device".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::Android => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "android".into(),
+                "run".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::WebAssembly => vec![
+            ],
+        };
         
-        let args = [
-            "run",
-            "nightly",
-            "cargo",
-            "run",
-            "-p",
-            what,
-            "--message-format=json",
-            "--release",
-            "--",
-            "--message-format=json",
-            &format!("--stdin-loop"),
+        let env = [
+            ("MAKEPAD_STUDIO_HTTP", http.as_str()),
+            ("MAKEPAD", "lines")
         ];
-        let env = [("MAKEPAD", "lines")];
         let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
-
+        
         shared.write().unwrap().processes.insert(
-            what.to_string(),
-            BuildServerProcess{
+            what,
+            BuildServerProcess {
                 cmd_id,
                 stdin_sender: Mutex::new(process.stdin_sender.clone()),
                 line_sender: Mutex::new(process.line_sender.clone())
@@ -201,16 +222,16 @@ impl BuildConnection {
                             Ok(msg) => {
                                 // alright we have a couple of 'reasons'
                                 match msg.reason.as_str() {
-                                    "makepad-signal"=>{
+                                    "makepad-signal" => {
                                         let _ = stdin_sender.send(ChildStdIn::Send(format!("{{\"Signal\":[{}]}}\n", msg.signal.unwrap())));
                                     }
                                     "makepad-error-log" | "compiler-message" => {
                                         msg_sender.process_compiler_message(cmd_id, msg);
                                     }
-                                    "build-finished"=>{
-                                        if Some(true) == msg.success{
+                                    "build-finished" => {
+                                        if Some(true) == msg.success {
                                         }
-                                        else{
+                                        else {
                                         }
                                     }
                                     "compiler-artifact" => {
@@ -226,31 +247,31 @@ impl BuildConnection {
                     }
                     ChildStdIO::StdErr(line) => {
                         // attempt to clean up stderr of cargo
-                        match stderr_state{
-                            StdErrState::First=>{
-                                if line.trim().starts_with("Compiling "){
+                        match stderr_state {
+                            StdErrState::First => {
+                                if line.trim().starts_with("Compiling ") {
                                     msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
                                 }
-                                else if line.trim().starts_with("Finished "){
+                                else if line.trim().starts_with("Finished ") {
                                     stderr_state = StdErrState::Running;
                                 }
-                                else if line.trim().starts_with("error: could not compile "){
+                                else if line.trim().starts_with("error: could not compile ") {
                                     msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
                                 }
-                                else{
+                                else {
                                     stderr_state = StdErrState::Desync;
-                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);                                    
+                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
                                 }
-                            }                            
+                            }
                             StdErrState::Sync | StdErrState::Desync => {
                                 msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
                             }
-                            StdErrState::Running=>{
-                                if line.trim().starts_with("Running "){
-                                     msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, format!("{}",line.trim()));
+                            StdErrState::Running => {
+                                if line.trim().starts_with("Running ") {
+                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, format!("{}", line.trim()));
                                     stderr_state = StdErrState::Sync
                                 }
-                                else{
+                                else {
                                     stderr_state = StdErrState::Desync;
                                     msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
                                 }
@@ -271,19 +292,23 @@ impl BuildConnection {
     
     pub fn handle_cmd(&self, cmd_wrap: BuildCmdWrap) {
         match cmd_wrap.cmd {
-            BuildCmd::CargoRun {what} => {
+            BuildCmd::Run(process, http) => {
                 // lets kill all other 'whats'
-                //self.cargo_run(&what, cmd_wrap.cmd_id);
+                self.run(process, cmd_wrap.cmd_id, http);
             }
-            BuildCmd::HostToStdin(msg)=>{
+            BuildCmd::Stop => {
+                // lets kill all other 'whats'
+                self.stop(cmd_wrap.cmd_id);
+            }
+            BuildCmd::HostToStdin(msg) => {
                 // ok lets fetch the running process from the cmd_id
                 // and plug this msg on the standard input as serialiser json
-                if let Ok(shared) = self.shared.read(){
-                    for v in shared.processes.values(){
-                        if v.cmd_id == cmd_wrap.cmd_id{
+                if let Ok(shared) = self.shared.read() {
+                    for v in shared.processes.values() {
+                        if v.cmd_id == cmd_wrap.cmd_id {
                             // lets send it on sender
-                            if let Ok(stdin_sender) = v.stdin_sender.lock(){
-                                let _= stdin_sender.send(ChildStdIn::Send(msg));
+                            if let Ok(stdin_sender) = v.stdin_sender.lock() {
+                                let _ = stdin_sender.send(ChildStdIn::Send(msg));
                             }
                             break;
                         }
@@ -303,7 +328,7 @@ pub trait MsgSender: Send {
         let line = line.trim();
         self.send_message(
             cmd_id.wrap_msg(LogItem::Bare(LogItemBare {
-                line:line.to_string(),
+                line: line.to_string(),
                 level
             }))
         );
@@ -335,7 +360,7 @@ pub trait MsgSender: Send {
                 "warning" => LogItemLevel::Warning,
                 "log" => LogItemLevel::Log,
                 "failure-note" => LogItemLevel::Error,
-                "panic"=>LogItemLevel::Panic,
+                "panic" => LogItemLevel::Panic,
                 other => {
                     self.send_bare_msg(cmd_id, LogItemLevel::Error, format!("process_compiler_message: unexpected level {}", other));
                     return
@@ -355,13 +380,13 @@ pub trait MsgSender: Send {
                     self.send_location_msg(cmd_id, level, span.file_name.clone(), range, msg.message.clone());
                 }*/
             }
-            else { 
+            else {
                 if msg.message.trim().starts_with("aborting due to ") ||
-                    msg.message.trim().starts_with("For more information about this error") ||
-                        msg.message.trim().ends_with("warning emitted") ||
-                        msg.message.trim().ends_with("warnings emitted"){
+                msg.message.trim().starts_with("For more information about this error") ||
+                msg.message.trim().ends_with("warning emitted") ||
+                msg.message.trim().ends_with("warnings emitted") {
                 }
-                else{
+                else {
                     self.send_bare_msg(cmd_id, LogItemLevel::Warning, msg.message);
                 }
             }

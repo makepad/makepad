@@ -18,7 +18,7 @@ live_design!{
         }
     }
     
-    THEME_FONT_META = {
+    THEME_FONT_META = { 
         font_size: 9.4,
         top_drop: 1.2,
         font: {
@@ -378,13 +378,13 @@ live_design!{
     
     
     
-    CheckBox = <CheckBoxBase> {
+     CheckBox = <CheckBoxBase> {
         
         width: Fit,
         height: Fit
         
         label_walk: {
-            margin: {left: 20.0, top: 1, bottom: 1, right: 1}
+            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
             width: Fit,
             height: Fit,
         }
@@ -534,7 +534,6 @@ live_design!{
                     }
                 }
                 on = {
-                    cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_check: {selected: 1.0}
@@ -684,7 +683,7 @@ live_design!{
             flow: Right
             
             draw_bg: {color: (THEME_COLOR_BG_APP)}
-            height: 29
+            height: 27
             caption_label = <View> {
                 width: Fill,
                 height: Fill
@@ -1041,7 +1040,7 @@ live_design!{
         border_size: (BORDER_SIZE)
         
         flow: Down
-        padding: {left: (BORDER_SIZE), top: (BORDER_SIZE), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
+        padding: {left: (BORDER_SIZE), top: (0), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
         padding_fill: {color: (THEME_COLOR_BG_APP)}
         drag_quad: {
             draw_depth: 10.0

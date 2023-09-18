@@ -4,7 +4,7 @@ use {
     std::cell::RefCell,
     self::super::{
         web_media::CxWebMedia,
-        web_media::CxWebDecoding,
+        web_decoding::CxWebDecoding,
         from_wasm::*,
         to_wasm::*,
     },
@@ -374,6 +374,9 @@ impl Cx {
     fn handle_platform_ops(&mut self) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
+                CxOsOp::FetchNextVideoFrames(_, _)=>{
+                    
+                }
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     self.os.from_wasm(FromWasmSetDocumentTitle {
@@ -619,7 +622,7 @@ pub struct CxOs {
     pub (crate) from_wasm_js: Vec<String>,
     
     pub (crate) media: CxWebMedia,
-    pub (crate) media: CxWebDecoding
+    pub (crate) decoding: CxWebDecoding
 }
 
 impl CxOs {
