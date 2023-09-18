@@ -150,6 +150,8 @@ impl RunView {
             }
             StdinToHost::DrawCompleteAndFlip(present_index) => {
 
+                log!("received DrawCompleteAndFlip({}) from client",present_index);
+
                 // client is ready with new image on swapchain[present_index]
                 for v in manager.active.builds.values() {
                     if v.run_view_id == run_view_id {
@@ -188,6 +190,9 @@ impl RunView {
                     // update descriptors for swapchain textures
                     let id0 = run_view_id.0 & 0x0000FFFFFFFFFFFF;  // take the lowest bits from run_view_id, and encode texture ID in high bits
                     let id1 = run_view_id.0 | 0x0001000000000000;
+
+                    log!("create new textures for client: {},{}",id0,id1);
+
                     let desc0 = TextureDesc {
                         format: TextureFormat::SharedBGRA(id0),
                         width: Some(new_size.0.max(1)),
