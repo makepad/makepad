@@ -5,7 +5,6 @@ use {
     std::sync::Mutex,
     std::ptr::NonNull,
     crate::{
-        log,
         //makepad_error_log::*,
         makepad_objc_sys::objc_block,
         makepad_objc_sys::objc_block_invoke,
@@ -86,9 +85,7 @@ pub fn xpc_service_proxy() -> RcObjcId {
 
 pub fn fetch_xpc_service_texture(proxy: ObjcId, id: u64, uid:u64, f: Box<dyn Fn(RcObjcId, u64)>) {
     unsafe {
-        log!("fetch called for {}, uid = {:?}",id,uid);
         let texture_out = objc_block!(move | texture: ObjcId, uid: u64 | {
-            log!("fetch returned {:?},{:?}",texture,uid);
             //log!("FETCH RETUREND");
             f(RcObjcId::from_unowned(NonNull::new(texture).unwrap()), uid)
         });
@@ -100,10 +97,8 @@ pub fn fetch_xpc_service_texture(proxy: ObjcId, id: u64, uid:u64, f: Box<dyn Fn(
 pub fn store_xpc_service_texture(id: u64, obj: ObjcId) {
     //log!("STORING {}", obj as *const _ as u64);
     unsafe {
-        log!("store called for {}, obj = {:?}",id,obj);
         let proxy = xpc_service_proxy();
         let texture_out = objc_block!(move | _texture: ObjcId | {
-            log!("store completed for {:?}",_texture);
             //log!("store texture complete!");
         });
         let completion_block = get_store_completion_block(&texture_out as *const _ as u64);
