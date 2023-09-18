@@ -5,10 +5,6 @@ use {
             Cell,
             RefCell,
         },
-        sync::{
-            Arc,
-            Mutex,
-        },
     },
     makepad_objc_sys::{
         msg_send,
@@ -52,7 +48,6 @@ use {
         window::CxWindowPool,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
-        texture::Texture,
     }
 };
 
@@ -581,7 +576,4 @@ pub struct CxOs {
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) decoding: CxAppleDecoding,
     pub metal_device: Cell<Option<ObjcId>>,
-    pub (crate) swapchain: Option<[Texture; 2]>,  // Option to satisfy Default
-    pub (crate) maybe_new_handles: [Arc<Mutex<Option<RcObjcId>>>; 2],
-    pub (crate) present_index: Arc<Mutex<usize>>,
 }
