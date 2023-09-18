@@ -2,9 +2,7 @@ use crate::{
     makepad_draw::*,
     makepad_widgets::*,
     makepad_platform::os::cx_stdin::*,
-    build_manager::{
-        build_manager::BuildManager,
-    }
+    build_manager::build_manager::BuildManager,
 };
 
 live_design!{
@@ -75,17 +73,6 @@ impl RunView {
             self.time += self.frame_delta;
             self.frame += 1;
             
-            // ugly hack but whatever for now.
-            #[cfg(target_os = "windows")]
-            for client in &manager.clients {
-                for process in client.processes.values() {
-                    let handle = cx.get_shared_handle(&process.texture);
-                    
-                    let marshalled_handle = handle.0 as u64; // hack: unsure if HANDLE is supported in microserde yet, so convert to u64
-                    manager.send_host_to_stdin(None, HostToStdin::Dx11SharedHandle(marshalled_handle));
-                }
-            }
-            
             // what shall we do, a timer? or do we do a next-frame
             manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
                 buffer_id: run_view_id.0,
@@ -149,8 +136,9 @@ impl RunView {
         }
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost, run_view_id: LiveId, manager: &BuildManager) {
         match msg {
+
             StdinToHost::SetCursor(cursor) => {
                 cx.set_cursor(*cursor)
             }
@@ -160,7 +148,20 @@ impl RunView {
                 self.last_size = Default::default();
                 self.redraw(cx);
             }
-            StdinToHost::DrawComplete => {
+            StdinToHost::DrawCompleteAndFlip(present_index) => {
+
+                log!("received DrawCompleteAndFlip({}) from client",present_index);
+
+                // client is ready with new image on swapchain[present_index]
+                for v in manager.active.builds.values() {
+                    if v.run_view_id == run_view_id {
+                        log!("setting draw texture");
+                        v.present_index.set(*present_index);
+                        self.draw_app.set_texture(0, &v.swapchain[*present_index]);
+                    }
+                }
+
+                // and draw
                 self.redraw(cx);
             }
         }
@@ -178,42 +179,108 @@ impl RunView {
         let walk = if let Some(walk) = self.draw_state.get() {walk}else {panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
-        let texture = manager.get_process_texture(run_view_id);
-        if let Some(texture) = texture {
-            let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
-            if new_size != self.last_size {
-                self.last_size = new_size;
-                
-                let desc = TextureDesc {
-                    format: TextureFormat::SharedBGRA(run_view_id.0),
-                    width: Some(new_size.0.max(1)),
-                    height: Some(new_size.1.max(1)),
-                };
-                texture.set_desc(cx, desc);
-                
-                manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
-                    width: rect.size.x,
-                    height: rect.size.y,
-                    dpi_factor: dpi_factor,
 
-                    #[cfg(target_os = "linux")]
-                    swapchain_handles: [{
+        for v in manager.active.builds.values() {
+            if v.run_view_id == run_view_id {
+                
+                // update texture size and indicate new size to client if needed
+                let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
+                if new_size != self.last_size {
+                    self.last_size = new_size;
+
+                    // update descriptors for swapchain textures
+                    let id0 = run_view_id.0 & 0x0000FFFFFFFFFFFF;  // take the lowest bits from run_view_id, and encode texture ID in high bits
+                    let id1 = run_view_id.0 | 0x0001000000000000;
+
+                    log!("create new textures for client: {},{}",id0,id1);
+
+                    let desc0 = TextureDesc {
+                        format: TextureFormat::SharedBGRA(id0),
+                        width: Some(new_size.0.max(1)),
+                        height: Some(new_size.1.max(1)),    
+                    };
+                    let desc1 = TextureDesc {
+                        format: TextureFormat::SharedBGRA(id1),
+                        width: Some(new_size.0.max(1)),
+                        height: Some(new_size.1.max(1)),    
+                    };
+                    v.swapchain[0].set_desc(cx,desc0);
+                    v.swapchain[1].set_desc(cx,desc1);
+
+                    // make sure the actual shared texture resources exist, and get their handles                    
+#[cfg(target_os = "windows")]
+                    let handles = {
+
+                        let mut handles = [0u64,0u64];
+
+                        let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
+
+                        let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
+                        cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
+                        handles[0] = cxtexture.os.shared_handle.0 as u64;
+
+                        let cxtexture = &mut cx.textures[v.swapchain[1].texture_id()];
+                        cxtexture.os.update_shared_texture(&d3d11_device,new_size.0 as u32,new_size.1 as u32);
+                        handles[1] = cxtexture.os.shared_handle.0 as u64;
+
+                        cx.cx.os.d3d11_device.replace(Some(d3d11_device));
+
+                        handles
+                    };
+
+#[cfg(target_os = "macos")]
+                    let handles = {
+                        let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
+
+                        let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
+                        cxtexture.os.update_shared_texture(metal_device,&desc0);
+
+                        let cxtexture = &mut cx.textures[v.swapchain[1].texture_id()];
+                        cxtexture.os.update_shared_texture(metal_device,&desc1);
+
+                        cx.cx.os.metal_device.replace(Some(metal_device));
+
+                        // for macos, pass the hashmap indices to the client, so they can find the right texture in XPC
+                        [id0,id1]
+                    };
+
+#[cfg(target_os = "linux")]
+                    let handles = {
+
                         // HACK(eddyb) normally this would be triggered later,
                         // but we need it *before* `get_shared_texture_dma_buf_image`.
                         {
-                            let cxtexture = &mut cx.cx.textures[texture.texture_id()];
-
                             // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
+                            let cxtexture = &mut cx.cx.textures[v.swapchain[0].texture_id()];
                             #[cfg(not(any(linux_direct, target_os="android")))]
-                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc);
+                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc0);
+
+                            let cxtexture = &mut cx.cx.textures[v.swapchain[1].texture_id()];
+                            #[cfg(not(any(linux_direct, target_os="android")))]
+                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc1);
                         }
 
-                        cx.get_shared_texture_dma_buf_image(&texture)
-                    }]
-                }));
+                        [
+                            cx.get_shared_texture_dma_buf_image(&v.swapchain[0]),
+                            cx.get_shared_texture_dma_buf_image(&v.swapchain[1]),
+                        ]
+                    };
+
+                    // send size update to client
+                    manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
+                        width: rect.size.x,
+                        height: rect.size.y,
+                        dpi_factor: dpi_factor,
+                        swapchain_handles: handles,
+                    }));
+                }
+
+                // make sure it's going to present the right texture
+                let texture = &v.swapchain[v.present_index.get()];
+                self.draw_app.set_texture(0, texture);
+                
+                break
             }
-            
-            self.draw_app.set_texture(0, &texture);
         }
         
         self.draw_app.draw_abs(cx, rect);
@@ -250,4 +317,3 @@ impl RunViewRef {
     }
     
 }
-
