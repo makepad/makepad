@@ -83,7 +83,7 @@ impl<T> ToUIReceiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.receiver.try_recv()
     }
-    
+
     pub fn try_recv_flush(&self) -> Result<T, TryRecvError> {
         let mut store_last = None;
         loop {
@@ -168,6 +168,14 @@ impl<T> FromUIReceiver<T> {
     
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.receiver.try_recv()
+    }
+    
+}
+
+impl<T> std::ops::Deref for FromUIReceiver<T> {
+    type Target = Receiver<T>;
+    fn deref(&self) -> &Receiver<T>{
+        &self.receiver
     }
 }
 

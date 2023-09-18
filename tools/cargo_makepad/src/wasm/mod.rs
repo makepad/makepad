@@ -4,10 +4,10 @@ mod sdk;
 pub fn handle_wasm(args: &[String]) -> Result<(), String> {
     
     match args[0].as_ref() {
-        "rustup-toolchain-install"=>{
+        "rustup-install-toolchain"=>{
             sdk::rustup_toolchain_install()
         }
-        "toolchain-install"=>{
+        "install-toolchain"=>{
             sdk::rustup_toolchain_install()
         }
         "build" =>{

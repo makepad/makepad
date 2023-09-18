@@ -9,6 +9,7 @@ use {
         to_wasm::*,
     },
     crate::{
+        makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         thread::Signal,
@@ -292,7 +293,20 @@ impl Cx {
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
                 }
-
+                live_id!(ToWasmLiveFileChange)=>{
+                    let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
+                    // live file change. lets do it.
+                    if tw.body.len()>0 {
+                        let mut parts = tw.body.split("$$$makepad_live_change$$$");
+                        if let Some(file_name) = parts.next() {
+                            let content = parts.next().unwrap().to_string();
+                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                file_name:file_name.to_string(),
+                                content
+                            }]);
+                        }
+                    }
+                }
                 live_id!(ToWasmAudioDeviceList)=>{
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
                     self.os.web_audio().lock().unwrap().to_wasm_audio_device_list(tw);
@@ -319,6 +333,11 @@ impl Cx {
             to_wasm.block_skip(skip);
         };
         
+        if self.handle_live_edit(){
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+        }
+
         if is_animation_frame {
             if self.need_redrawing() {
                 self.call_draw_event();
@@ -330,7 +349,7 @@ impl Cx {
         if network_responses.len() != 0 {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
-        
+
         self.handle_platform_ops();
         self.handle_media_signals();
         
@@ -522,7 +541,8 @@ impl CxOsApi for Cx {
             ToWasmSignal::to_js_code(),
             ToWasmMidiInputData::to_js_code(),
             ToWasmMidiPortList::to_js_code(),
-            ToWasmAudioDeviceList::to_js_code()
+            ToWasmAudioDeviceList::to_js_code(),
+            ToWasmLiveFileChange::to_js_code()
         ]);
         
         self.os.append_from_wasm_js(&[
