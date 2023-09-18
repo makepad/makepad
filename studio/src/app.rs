@@ -326,7 +326,7 @@ impl AppMain for App {
                 }
                 BuildManagerAction::StdinToHost {run_view_id, msg} =>{
                     if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut(){
-                        run_view.handle_stdin_to_host(cx, &msg);
+                        run_view.handle_stdin_to_host(cx, &msg, run_view_id, &self.build_manager);
                     }
                 }
                 _ => ()

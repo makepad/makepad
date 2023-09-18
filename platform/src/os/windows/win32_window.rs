@@ -479,8 +479,7 @@ impl Win32Window {
                 return LRESULT(1)
             },
             WM_MOUSEMOVE => {
-                if get_win32_app_global().current_internal_drag_item.is_some() || 
-                    get_win32_app_global().start_dragging_items.is_some(){
+                if get_win32_app_global().start_dragging_items.is_some(){
                     return LRESULT(0)
                 }
                 if !window.track_mouse_event {
@@ -499,8 +498,7 @@ impl Win32Window {
                 )
             },
             WM_MOUSELEAVE => {
-                if get_win32_app_global().current_internal_drag_item.is_some() || 
-                    get_win32_app_global().start_dragging_items.is_some(){
+                if get_win32_app_global().start_dragging_items.is_some() {
                     return LRESULT(0)
                 }
                 window.track_mouse_event = false;
@@ -658,50 +656,11 @@ impl Win32Window {
 
                 match *message {
 
-                    //DropTargetMessage::Enter(_flags,mut _point,_effect,_drag_item) => {
-                         /*// crate::log!("DRAG ENTER");
-                        // decode message
-                        unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
-                        let response = if (effect & DROPEFFECT_LINK) != DROPEFFECT(0) { DragResponse::Link }
-                        else if (effect & DROPEFFECT_MOVE) != DROPEFFECT(0) { DragResponse::Move }
-                        else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
-                        else { DragResponse::None };
-
-                        // if there is a current internal drag item, use that one instead of what came with the message
-                        let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
-                        let drag_item = if let Some(internal_drag_item) = current_internal_drag_item {
-                            get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
-                            internal_drag_item
-                        } else {
-                            drag_item
-                        };
-
-                        // send to makepad
-                        window.do_callback(
-                            Win32Event::Drag(
-                                DragEvent {
-                                    modifiers: KeyModifiers {
-                                        shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
-                                        control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
-                                        alt: false,  // TODO
-                                        logo: false,  // Windows doesn't have a logo button
-                                    },
-                                    handled: Cell::new(false),
-                                    abs: DVec2 { x: point.x as f64,y: point.y as f64, },
-                                    items: Rc::new(vec![drag_item]),
-                                    response: Rc::new(Cell::new(response)),
-                                }
-                            )
-                        );*/
-                   // },
-
                     DropTargetMessage::Leave => {
-                        // If anything we should send a drag with an out of window coordinate.
-                        
-                        // make sure there is no more internal drag item
-                       // get_win32_app_global().current_internal_drag_item.replace(None);
-                        // send to makepad
-                        //window.do_callback(Win32Event::DragEnd);
+                        if get_win32_app_global().is_dragging_internal.get() {
+                            // TODO: cancel DoDragDrop somehow
+                            window.do_callback(Win32Event::DragEnd);
+                        }
                     },
                     DropTargetMessage::Enter(flags,mut point,effect,drag_item) |
                     DropTargetMessage::Over(flags,mut point,effect,drag_item) => {
@@ -713,15 +672,8 @@ impl Win32Window {
                         else if (effect & DROPEFFECT_COPY) != DROPEFFECT(0) { DragResponse::Copy }
                         else { DragResponse::None };
 
-                        // if there is a current internal drag item, use that one instead of what came with the message
-                        //let current_internal_drag_item = get_win32_app_global().current_internal_drag_item.replace(None);
-                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.clone() {
-                            //get_win32_app_global().current_internal_drag_item.replace(Some(internal_drag_item.clone()));
-                            internal_drag_item
-                        } else {
-                            drag_item
-                        };
                         let dpi_factor = window.get_dpi_factor();
+
                         // send to makepad
                         window.do_callback(
                             Win32Event::Drag(
@@ -746,14 +698,6 @@ impl Win32Window {
                         // decode message
                         unsafe { ScreenToClient(window.hwnd,&mut point as *mut POINTL as *mut POINT) };
 
-                        // if there is a current internal drag item, use that one instead of what came with the message
-                        let drag_item = if let Some(internal_drag_item) = get_win32_app_global().current_internal_drag_item.clone() {
-                            // leave the current internal drag item empty
-                            internal_drag_item
-                        } else {
-                            drag_item
-                        };
-                        
                         //log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,flags.0,response,drag_item);
                         let dpi_factor = window.get_dpi_factor();
 
@@ -773,12 +717,10 @@ impl Win32Window {
                                 }
                             )
                         );
-                        if get_win32_app_global().current_internal_drag_item.is_some(){
-                            get_win32_app_global().current_internal_drag_item = None;
-                            window.do_callback(
-                                Win32Event::DragEnd
-                            );        
-                        }
+
+                        window.do_callback(
+                            Win32Event::DragEnd
+                        );        
                     },
                 }
             },
