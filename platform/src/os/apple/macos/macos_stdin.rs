@@ -44,11 +44,12 @@ impl Cx {
         let _ = io::stdout().write_all(StdinToHost::DrawComplete.to_json().as_bytes());
     }
     
-    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx) {
+    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx, time:f32) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if window_id == CxWindowPool::id_zero() {
@@ -56,7 +57,6 @@ impl Cx {
                     }
                 }
                 CxPassParent::Pass(_) => {
-                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
@@ -189,7 +189,7 @@ impl Cx {
                                 }
                             }
                             // we need to make this shared texture handle into a true metal one
-                            self.stdin_handle_repaint(metal_cx);
+                            self.stdin_handle_repaint(metal_cx, time as f32);
                         }
                         _=>()
                     }
