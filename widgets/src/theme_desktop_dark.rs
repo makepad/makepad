@@ -2209,9 +2209,9 @@ live_design!{
     
     Slide = <RoundedView> {
         draw_bg: {color: #x1A, radius: 5.0}
-        width: (SLIDE_WIDTH),
+        width: Fill,
         height: Fill
-        align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
+        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
         title = <Label> {
             draw_text: {
                 color: #f
@@ -2225,9 +2225,9 @@ live_design!{
     
     SlideChapter = <Slide> {
         draw_bg: {color: #xFF5C39, radius: 5.0}
-        width: (SLIDE_WIDTH),
+        width: Fill,
         height: Fill
-        align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
+        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
         title = <Label> {
             draw_text: {
                 color: #x181818
