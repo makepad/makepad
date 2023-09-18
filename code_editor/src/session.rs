@@ -57,7 +57,7 @@ impl Session {
             selection_state: RefCell::new(SelectionState {
                 selections: SelectionSet::new(),
                 last_added_selection_index: Some(0),
-                injected_delimiter_stack: Vec::new(),
+                injected_char_stack: Vec::new(),
                 highlighted_delimiter_positions: HashSet::new(),
             }),
             decorations: RefCell::new(vec![Decoration {
@@ -210,7 +210,7 @@ impl Session {
                 preferred_column_index: None,
             }));
         selection_state.last_added_selection_index = Some(0);
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
@@ -227,7 +227,7 @@ impl Session {
                     preferred_column_index: None,
                 })),
         );
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
@@ -247,7 +247,7 @@ impl Session {
                     })
                 }),
         );
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
@@ -279,14 +279,14 @@ impl Session {
 
     pub fn insert(&mut self, text: Text) {
         let mut edit_kind = EditKind::Insert;
-        let mut inject_delimiter = None;
-        let mut uninject_delimiter = None;
+        let mut inject_char = None;
+        let mut uninject_char = None;
         let mut selection_state = self.selection_state.borrow_mut();
         match text.to_single_char() {
             Some(' ') => {
                 edit_kind = EditKind::InsertSpace;
             }
-            Some(char) if char.is_opening_delimiter() => {
+            Some(char) if char == '"' || char.is_opening_delimiter() => {
                 if selection_state.selections.iter().all(|selection| {
                     !selection.is_empty()
                         || self.document.as_text().as_lines()[selection.cursor.position.line_index]
@@ -294,18 +294,22 @@ impl Session {
                             .chars()
                             .all(|char| char.is_whitespace())
                 }) {
-                    let char = char.opposite_delimiter().unwrap();
-                    inject_delimiter = Some(char);
-                    selection_state.injected_delimiter_stack.push(char);
+                    let char = if char == '"' {
+                        '"'
+                    } else {
+                        char.opposite_delimiter().unwrap()
+                    };
+                    inject_char = Some(char);
+                    selection_state.injected_char_stack.push(char);
                 }
             }
             Some(char)
                 if selection_state
-                    .injected_delimiter_stack
+                    .injected_char_stack
                     .last()
                     .map_or(false, |&last_char| last_char == char) =>
             {
-                uninject_delimiter = Some(selection_state.injected_delimiter_stack.pop().unwrap());
+                uninject_char = Some(selection_state.injected_char_stack.pop().unwrap());
             }
             _ => {}
         }
@@ -318,14 +322,14 @@ impl Session {
             |mut editor, position, length| {
                 let mut position = position;
                 let mut length = length;
-                if inject_delimiter.is_none() {
+                if inject_char.is_none() {
                     editor.apply_edit(Edit {
                         change: Change::Delete(position, length),
                         drift: Drift::Before,
                     });
                     length = Length::zero();
                 }
-                if let Some(uninject_delimiter) = uninject_delimiter {
+                if let Some(uninject_delimiter) = uninject_char {
                     editor.apply_edit(Edit {
                         change: Change::Delete(
                             position,
@@ -342,7 +346,7 @@ impl Session {
                     drift: Drift::Before,
                 });
                 position += text.length();
-                if let Some(inject_delimiter) = inject_delimiter {
+                if let Some(inject_delimiter) = inject_char {
                     editor.apply_edit(Edit {
                         change: Change::Insert(position + length, Text::from(inject_delimiter)),
                         drift: Drift::After,
@@ -720,7 +724,7 @@ impl Session {
                 }
                 selection
             });
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         drop(layout);
         self.update_highlighted_delimiter_positions();
@@ -912,7 +916,7 @@ pub struct SessionLayout {
 struct SelectionState {
     selections: SelectionSet,
     last_added_selection_index: Option<usize>,
-    injected_delimiter_stack: Vec<char>,
+    injected_char_stack: Vec<char>,
     highlighted_delimiter_positions: HashSet<Position>,
 }
 
