@@ -710,7 +710,8 @@ impl Cx {
             let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
             
             if elapsed_time > next_due_time {
-                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id}));
+                let time = self.os.time_now();
+                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time}));
                 if timer.repeats {
                     timer.step += 1;
                 } else {
