@@ -20,6 +20,7 @@
 #rustup target add aarch64-apple-darwin --toolchain nightly &>/dev/null
 #rustup target add aarch64-linux-android --toolchain nightly &>/dev/null
 
+
 echo "Checking all examples"
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-fractal-zoom --release --message-format=json
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --message-format=json
