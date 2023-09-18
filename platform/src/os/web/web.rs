@@ -49,7 +49,7 @@ impl Cx {
         let mut network_responses = Vec::new();
         self.os.from_wasm = Some(FromWasmMsg::new());
         let mut to_wasm = to_wasm_msg.as_ref();
-        let mut is_animation_frame = false;
+        let mut is_animation_frame = None;
         while !to_wasm.was_last_block() {
             let block_id = LiveId(to_wasm.read_u64());
             let skip = to_wasm.read_block_skip();
@@ -109,7 +109,7 @@ impl Cx {
                 
                 live_id!(ToWasmAnimationFrame) => {
                     let tw = ToWasmAnimationFrame::read_to_wasm(&mut to_wasm);
-                    is_animation_frame = true;
+                    is_animation_frame = Some(tw.time);
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(tw.time);
                     }
@@ -338,12 +338,12 @@ impl Cx {
             self.redraw_all();
         }
 
-        if is_animation_frame {
+        if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
                 self.call_draw_event();
                 self.webgl_compile_shaders();
             }
-            self.handle_repaint();
+            self.handle_repaint(time);
         }
 
         if network_responses.len() != 0 {
@@ -362,12 +362,13 @@ impl Cx {
     }
     
          
-    pub fn handle_repaint(&mut self){
+    pub fn handle_repaint(&mut self, time: f64){
         let mut passes_todo = Vec::new();
          
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //et dpi_factor = self.os.window_geom.dpi_factor;
