@@ -1,6 +1,7 @@
 use {
     crate::{
         char::CharExt,
+        decoration::Decoration,
         document::Document,
         history::EditKind,
         layout::{BlockElement, Layout, WrappedElement},
@@ -28,6 +29,7 @@ pub struct Session {
     document: Document,
     layout: RefCell<SessionLayout>,
     selection_state: RefCell<SelectionState>,
+    decorations: RefCell<Vec<Decoration>>,
     wrap_column: Option<usize>,
     folding_lines: HashSet<usize>,
     folded_lines: HashSet<usize>,
@@ -58,6 +60,17 @@ impl Session {
                 injected_delimiter_stack: Vec::new(),
                 highlighted_delimiter_positions: HashSet::new(),
             }),
+            decorations: RefCell::new(vec![Decoration {
+                id: 0,
+                start: Position {
+                    line_index: 0,
+                    byte_index: 4,
+                },
+                length: Length {
+                    line_count: 3,
+                    byte_count: 8,
+                },
+            }]),
             wrap_column: None,
             folding_lines: HashSet::new(),
             folded_lines: HashSet::new(),
@@ -100,6 +113,12 @@ impl Session {
     pub fn selections(&self) -> Ref<'_, [Selection]> {
         Ref::map(self.selection_state.borrow(), |selection_state| {
             selection_state.selections.as_selections()
+        })
+    }
+
+    pub fn decorations(&self) -> Ref<'_, [Decoration]> {
+        Ref::map(self.decorations.borrow(), |decorations| {
+            decorations.as_slice()
         })
     }
 
@@ -651,15 +670,13 @@ impl Session {
 
     pub fn copy(&self) -> String {
         let mut string = String::new();
-        for selection in &self
-            .selection_state
-            .borrow()
-            .selections
-        {
+        for selection in &self.selection_state.borrow().selections {
             write!(
                 &mut string,
                 "{}",
-                self.document.as_text().slice(selection.start(), selection.length())
+                self.document
+                    .as_text()
+                    .slice(selection.start(), selection.length())
             )
             .unwrap();
         }
