@@ -30,6 +30,8 @@ pub struct Button {
     
     #[layout] layout: Layout,
 
+    #[live(true)] grab_key_focus: bool,
+
     #[live] pub text: RcStringMut,
 }
 
@@ -80,6 +82,9 @@ impl Button {
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
+                if self.grab_key_focus{
+                    cx.set_key_focus(self.draw_bg.area());
+                }
                 dispatch_action(cx, ButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             },
