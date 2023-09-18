@@ -119,7 +119,7 @@ use {
 pub const FALSE: BOOL = BOOL(0);
 pub const TRUE: BOOL = BOOL(1);
 
-static mut WIN32_APP: Option<RefCell<Win32App>> = None;
+static mut WIN32_APP: Option<RefCell<Win32App >> = None;
 
 pub fn get_win32_app_global() -> std::cell::RefMut<'static, Win32App> {
     unsafe {
@@ -315,10 +315,14 @@ impl Win32App {
             }
         };
         // call the dependencies
+        let time =get_win32_app_global().time_now();
         if let Some(hit_timer) = hit_timer {
             match hit_timer {
                 Win32Timer::Timer {timer_id, ..} => {
-                    Win32App::do_callback(Win32Event::Timer(TimerEvent {timer_id: timer_id}));
+                    Win32App::do_callback(Win32Event::Timer(TimerEvent {
+                        time,
+                        timer_id: timer_id
+                    }));
                 },
                 Win32Timer::Resize {..} => {
                     Win32App::do_callback(Win32Event::Paint);
@@ -407,13 +411,13 @@ impl Win32App {
                     
                     // only drag if something is there
                     if (path.len() > 0) || internal_id.is_some() {
-                                                
+                        
                         // create COM IDataObject that hosts the drag item
-                        let data_object: IDataObject = DragItem::FilePath { path: path.clone(),internal_id: internal_id.clone(), }.into();
+                        let data_object: IDataObject = DragItem::FilePath {path: path.clone(), internal_id: internal_id.clone(),}.into();
                         
                         // create COM IDropSource to indicate when to stop dragging
                         let drop_source: IDropSource = DropSource {}.into();
-
+                        
                         get_win32_app_global().is_dragging_internal.replace(true);
                         let mut effect = DROPEFFECT(0);
                         match unsafe {DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect)} {
@@ -432,8 +436,8 @@ impl Win32App {
                 let mut win32_app = get_win32_app_global();
                 for slot in 0..win32_app.timers.len() {
                     if let Win32Timer::DragDrop {win32_id} = win32_app.timers[slot] {
-                       win32_app.timers[slot] = Win32Timer::Free;
-                       unsafe {KillTimer(None, win32_id).unwrap();}
+                        win32_app.timers[slot] = Win32Timer::Free;
+                        unsafe {KillTimer(None, win32_id).unwrap();}
                     }
                 }
             }

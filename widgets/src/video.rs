@@ -247,7 +247,7 @@ impl Video {
             }
         }
 
-        if self.tick.is_event(event) {            
+        if self.tick.is_event(event).is_some() {            
             self.maybe_advance_playback(cx);
 
             if self.should_fetch() {
