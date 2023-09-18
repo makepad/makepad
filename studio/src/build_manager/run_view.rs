@@ -48,6 +48,8 @@ pub struct RunView {
     #[live] frame_delta: f64,
     #[rust] last_size: (usize, usize),
     #[rust] tick: NextFrame,
+    #[rust] timer: Timer,
+    #[rust(100usize)] redraw_countdown: usize,
     #[rust] time: f64,
     #[rust] frame: u64
 }
@@ -61,27 +63,37 @@ impl LiveHook for RunView {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.tick = cx.new_next_frame();//start_interval(self.frame_delta);
         self.time = 0.0;
+        self.draw_app.set_texture(0, &cx.null_texture());
     }
 }
 
 impl RunView {
     
+    pub fn run_tick(&mut self, cx: &mut Cx, time: f64, run_view_id: LiveId, manager: &mut BuildManager){
+        self.frame += 1;
+        manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
+            buffer_id: run_view_id.0,
+            frame: 0,
+            time: time
+        });
+        if self.redraw_countdown>0{
+            self.redraw_countdown -= 1;
+            self.redraw(cx);
+            self.tick = cx.new_next_frame();
+        }
+        else{
+            self.timer = cx.start_timeout(0.008);
+        }
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
         
         self.animator_handle_event(cx, event);
+        if let Some(te) = self.timer.is_event(event){
+            self.run_tick(cx, te.time, run_view_id, manager)
+        }
         if let Some(te) = self.tick.is_event(event) {
-            //self.time += self.frame_delta;
-            self.frame += 1;
-            
-            // what shall we do, a timer? or do we do a next-frame
-            manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
-                buffer_id: run_view_id.0,
-                frame: 0,
-                //frame: self.frame,
-                time: te.time
-            });
-            self.redraw(cx);
-            self.tick = cx.new_next_frame();
+            self.run_tick(cx, te.time, run_view_id, manager)
         }
         // lets send mouse events
         match event.hits(cx, self.draw_app.area()) {
@@ -152,9 +164,9 @@ impl RunView {
                 self.redraw(cx);
             }
             StdinToHost::DrawCompleteAndFlip(present_index) => {
-
                 for v in manager.active.builds.values_mut() {
                     if v.run_view_id == run_view_id {
+                        self.redraw_countdown = 10;
                         v.present_index.set(*present_index);
                         self.draw_app.set_texture(0, &v.swapchain[*present_index]);
                         v.mac_resize_id = 1 - present_index;
