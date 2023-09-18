@@ -135,7 +135,10 @@ pub use {
             InstanceArea
         },
         menu::MenuCommand,
-        thread::Signal,
+        midi::*,
+        audio::*,
+        thread::*,
+        video::*,
         event::{
             VirtualKeyboardEvent,
             HttpRequest,
