@@ -503,6 +503,7 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_lut!(camera_inv), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(dpi_factor), id_lut!(pass), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(dpi_dilate), id_lut!(pass), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(time), id_lut!(pass), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(view_transform), id_lut!(view), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(draw_zbias), id_lut!(draw), Ty::Float, TokenSpan::default());
         
