@@ -910,6 +910,7 @@ impl CxOsTexture {
                     TextureFormat::SharedBGRA(shared_id) => {
                         let texture: ObjcId = msg_send![metal_device, newSharedTextureWithDescriptor: descriptor];
                         let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
+                        log!("sending texture {:?},{:?} to XPC",shared_id,shared);
                         // lets send it over
                         //log!("STORING SHARED TEXTURE {}", shared_id);
                         store_xpc_service_texture(shared_id, shared);
@@ -936,6 +937,7 @@ impl CxOsTexture {
         width: u64,
         height: u64,
     ) {
+        log!("client: metal newSharedTextureWithHandle {:?}",shared_handle);
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
         }).unwrap());
