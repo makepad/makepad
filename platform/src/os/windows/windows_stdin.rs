@@ -64,11 +64,7 @@ impl Cx {
     }
     
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
-
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-        //let mut swapchain = [Texture::new(self),Texture::new(self),];
-        //let mut swapchain_handles = [HANDLE(0),HANDLE(0),];
-        //let mut present_index = 0usize;
 
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;

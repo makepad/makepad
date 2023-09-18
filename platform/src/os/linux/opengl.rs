@@ -12,7 +12,7 @@ use {
         makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
         cx::Cx,
-        texture::{Texture, TextureDesc, TextureFormat},
+        texture::{TextureId, TextureDesc, TextureFormat},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
@@ -264,8 +264,8 @@ impl Cx {
         Some(pass_rect.size)
     }
 
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, fb_texture: &Texture) {
-        self.draw_pass_to_texture_inner(pass_id, Some(fb_texture))
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, texture_id: TextureId) {
+        self.draw_pass_to_texture_inner(pass_id, Some(texture_id))
     }
 
     pub fn draw_pass_to_magic_texture(&mut self, pass_id: PassId) {
@@ -275,7 +275,7 @@ impl Cx {
     fn draw_pass_to_texture_inner(
         &mut self,
         pass_id: PassId,
-        maybe_fb_texture: Option<&Texture>,
+        maybe_texture_id: Option<TextureId>,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -308,10 +308,10 @@ impl Cx {
             gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, self.passes[pass_id].os.gl_framebuffer.unwrap());
         }
 
-        let color_textures_from_fb_texture = maybe_fb_texture.map(|fb_texture| {
+        let color_textures_from_fb_texture = maybe_texture_id.map(|texture_id| {
             [crate::pass::CxPassColorTexture {
                 clear_color: PassClearColor::ClearWith(self.passes[pass_id].clear_color),
-                texture_id: fb_texture.texture_id(),
+                texture_id,
             }]
         });
         let color_textures = color_textures_from_fb_texture
