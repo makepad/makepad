@@ -64,6 +64,7 @@ import android.graphics.Rect;
 import java.util.concurrent.CompletableFuture;
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.Iterator;
 
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
@@ -482,20 +483,18 @@ MidiManager.OnDeviceOpenedListener{
         BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
         if (videoFrameQueue != null) {
             int totalBytes = 0;
-            ArrayList<ByteBuffer> individualFrames = new ArrayList<>();
-
-            for (int i = 0; i < numberFrames; i++) {
-                ByteBuffer frame = videoFrameQueue.poll();
-                if (frame != null) {
-                    individualFrames.add(frame);
-                    totalBytes += frame.remaining();
-                }
+            Iterator<ByteBuffer> iterator = videoFrameQueue.iterator();
+            int frameCount = 0;
+            while (iterator.hasNext() && frameCount < numberFrames) {
+                totalBytes += iterator.next().remaining();
+                frameCount++;
             }
 
             VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
             ByteBuffer frameGroup = acquireBuffer(totalBytes);
-        
-            for (ByteBuffer frame : individualFrames) {
+
+            for (int i = 0; i < frameCount; i++) {
+                ByteBuffer frame = videoFrameQueue.poll();
                 if (frame != null) {
                     frameGroup.put(frame);
                     if (runnable != null) {
@@ -505,7 +504,7 @@ MidiManager.OnDeviceOpenedListener{
             }
 
             frameGroup.flip();
-            runOnUiThread(() -> MakepadNative.onVideoStream(videoId, frameGroup));       
+            runOnUiThread(() -> MakepadNative.onVideoStream(videoId, frameGroup));
             releaseBuffer(frameGroup);
         }
     }
