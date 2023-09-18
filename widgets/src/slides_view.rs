@@ -6,7 +6,9 @@ use crate::{
 };
 
 live_design!{
-    SlidesViewBase = {{SlidesView}} {}
+    SlidesViewBase = {{SlidesView}} {
+        
+    }
 }
 
 
