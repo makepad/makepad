@@ -287,8 +287,8 @@ impl Video {
                     cx.initialize_video_decoding(self.id, data, 100);
                     self.decoding_state = DecodingState::Initializing;
                 }
-                Err(_e) => {
-                    todo!()
+                Err(e) => {
+                    error!("initialize_decoding: resource not found {} {}", self.source.as_str(), e);
                 }
             }
         }
@@ -304,7 +304,8 @@ impl Video {
         self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
 
         makepad_error_log::log!(
-            "Video id {} decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
+            "Video id {} - {:?} decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
+            self.source.as_str(),
             self.id.0,
             self.video_width,
             self.video_height,
@@ -463,8 +464,7 @@ impl Video {
     fn handle_errors(&mut self, event: &Event) {
         if let Event::VideoDecodingError(event) = event {
             if event.video_id == self.id {
-                // todo: cleanup resources or retry depending on state
-                makepad_error_log::log!("Error decoding video: {}", event.error);
+                error!("Error decoding video: {}", event.error);
             }
         }
     }
