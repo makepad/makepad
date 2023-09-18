@@ -2,7 +2,7 @@ use {
     crate::{
         layout::Layout,
         str::StrExt,
-        text::{Edit, Length, Position, Range},
+        text::{Edit, Length, Position},
     },
     std::{ops, ops::Deref, slice::Iter},
 };
@@ -52,10 +52,6 @@ impl Selection {
 
     pub fn length(self) -> Length {
         self.end() - self.start()
-    }
-
-    pub fn range(self) -> Range {
-        Range::new(self.start(), self.end()).unwrap()
     }
 
     pub fn line_range(self) -> ops::Range<usize> {

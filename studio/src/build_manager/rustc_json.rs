@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::{
     makepad_micro_serde::*,
-    makepad_code_editor::text::{Range, Position},
+    makepad_code_editor::text::{Length, Position},
 };
 
 // rust compiler output json structs
@@ -43,14 +43,22 @@ pub struct RustcSpan {
 }
 
 impl RustcSpan {
-    pub fn to_range(&self) -> Range {
-        Range::new(Position {
+    pub fn start(&self) -> Position {
+        Position {
             line_index: self.line_start - 1,
             byte_index: self.column_start - 1
-        }, Position {
+        }
+    }
+
+    pub fn end(&self) -> Position {
+        Position {
             line_index: self.line_end - 1,
             byte_index: self.column_end - 1
-        }).unwrap()
+        }
+    }
+
+    pub fn length(&self) -> Length {
+        self.end() - self.start()
     }
 }
 
