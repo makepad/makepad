@@ -223,7 +223,7 @@ impl BuildManager {
             if let Some((build_id, log_item)) = self.log.get(item_id as usize) {
                 let binary = if self.active.builds.len()>1{
                     if let Some(build) = self.active.builds.get(&build_id) {
-                        &build.process.binary
+                        &build.log_index
                     }
                     else{""}
                 }else{""};
