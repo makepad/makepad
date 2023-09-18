@@ -246,7 +246,7 @@ impl AppMain for App {
                 }
                 else if let Some(mut run_view) = next.as_run_view().borrow_mut() {
                     let current_id = dock.drawing_item_id().unwrap();
-                    run_view.draw(cx, current_id, &self.build_manager);
+                    run_view.draw(cx, current_id, &mut self.build_manager);
                 }
                 else if let Some(mut log_list) = log_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_log(cx, &mut *log_list);
@@ -326,7 +326,7 @@ impl AppMain for App {
                 }
                 BuildManagerAction::StdinToHost {run_view_id, msg} =>{
                     if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut(){
-                        run_view.handle_stdin_to_host(cx, &msg, run_view_id, &self.build_manager);
+                        run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.build_manager);
                     }
                 }
                 _ => ()

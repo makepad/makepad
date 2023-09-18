@@ -23,8 +23,14 @@ pub struct StdinWindowSize {
     pub width: f64,
     pub height: f64,
     pub dpi_factor: f64,
-
-    #[cfg(any(target_os = "windows",target_os = "macos"))]
+    
+    #[cfg(target_os = "macos")]
+    pub swapchain_front: u32,  // DX11 handles or XPC hashmap indices
+    
+    #[cfg(target_os = "macos")]
+    pub swapchain_handle: u64,  // DX11 handles or XPC hashmap indices
+    
+    #[cfg(target_os = "windows")]
     pub swapchain_handles: [u64; 2],  // DX11 handles or XPC hashmap indices
 
     // FIXME(eddyb) double-buffering support is intentionally left out, as it's

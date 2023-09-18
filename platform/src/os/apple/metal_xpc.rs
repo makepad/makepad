@@ -62,7 +62,7 @@ pub fn xpc_service_proxy() -> RcObjcId {
     unsafe {
         if METAL_XPC_CLASSES == 0 as *const _ {
             METAL_XPC_CLASSES = Box::into_raw(Box::new(MetalXPCClasses::new()));
-        }
+        } 
         let connection: ObjcId = msg_send![class!(NSXPCConnection), new];
         let nsstring = str_to_nsstring("dev.makepad.metalxpc");
         let () = msg_send![connection, initWithMachServiceName: nsstring options: 0];
@@ -168,11 +168,11 @@ pub fn define_xpc_service_class() -> *const Class {
     
     extern fn fetch_texture(_this: &Object, _: Sel, index: u64, _old_uid: u64, with: ObjcId) {
         let storage = get_metal_xpc_storage();
-        if let Some((obj, uid)) = storage.textures.lock().unwrap().borrow_mut().get(&index) {
+        if let Some((obj, _uid)) = storage.textures.lock().unwrap().borrow_mut().get(&index) {
             //if *uid != old_uid{
                 unsafe {objc_block_invoke!(with, invoke(
                     (obj.as_id()): ObjcId,
-                    (*uid): u64
+                    (0): u64
                 ))}; 
             //}
         } 
