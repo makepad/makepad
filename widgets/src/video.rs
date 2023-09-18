@@ -1,7 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    makepad_platform::{event::video_decoding::*, thread::*},
+    makepad_platform::{event::video_decoding::*},
     widget::*,
     VideoColorFormat,
 };
