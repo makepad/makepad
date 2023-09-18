@@ -256,10 +256,10 @@ impl Cx {
                     self.draw_pass_to_fullscreen(*pass_id, direct_app);
                 }
                 CxPassParent::Pass(_) => {
-                    self.draw_pass_to_texture(*pass_id);
+                    self.draw_pass_to_magic_texture(*pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id); 
+                    self.draw_pass_to_magic_texture(*pass_id); 
                 }
             }
         }

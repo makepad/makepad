@@ -1,9 +1,9 @@
-use std::net::{TcpStream, Shutdown};
+use std::net::{TcpStream, Shutdown, SocketAddr};
 use std::io::Write;
 use std::io::BufReader;
 use std::io::prelude::*;
 
-pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8])->bool {
+pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
     let bytes_total = bytes.len();
     let mut bytes_left = bytes_total;
     while bytes_left > 0 {
@@ -42,7 +42,7 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     
     // find the end_of_name skipping everything else
     let end_of_name = url.find(' ');
-    end_of_name?;
+    end_of_name ?;
     let end_of_name = end_of_name.unwrap();
     let mut search = None;
     let end_of_name = if let Some(q) = url.find('?') {
@@ -59,21 +59,23 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     Some((url, search))
 }
 
-pub struct HttpHeaders {
+pub struct HttpServerHeaders {
+    pub addr: SocketAddr,
     pub lines: Vec<String>,
     pub verb: String,
     pub path: String,
-    pub path_no_slash:String,
+    pub path_no_slash: String,
     pub search: Option<String>,
     pub content_length: Option<u64>,
     pub accept_encoding: Option<String>,
     pub sec_websocket_key: Option<String>
 }
 
-impl HttpHeaders {
-    pub fn from_tcp_stream(tcp_stream: &mut TcpStream) -> Option<HttpHeaders> {
-      let mut reader = BufReader::new(tcp_stream);
-                      
+impl HttpServerHeaders {
+    pub fn from_tcp_stream(tcp_stream: &mut TcpStream) -> Option<HttpServerHeaders> {
+        let addr = tcp_stream.peer_addr().unwrap();
+        let mut reader = BufReader::new(tcp_stream);
+        
         let mut lines = Vec::new();
         let mut content_length = None;
         let mut accept_encoding = None;
@@ -101,7 +103,7 @@ impl HttpHeaders {
             lines.push(line.clone());
             line.clear();
         }
-        if lines.len() <2{
+        if lines.len() <2 {
             return None;
         }
         let verb;
@@ -122,13 +124,14 @@ impl HttpHeaders {
             verb = "DELETE";
             path = parse_url_path(v)
         }
-        else{
+        else {
             return None
         }
-        path.as_ref()?;
+        path.as_ref() ?;
         let path = path.unwrap();
-
-        Some(HttpHeaders {
+        
+        Some(HttpServerHeaders {
+            addr,
             verb: verb.to_string(),
             path_no_slash: path.0[1..].to_string(),
             path: path.0,

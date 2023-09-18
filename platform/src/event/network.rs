@@ -155,11 +155,11 @@ impl HttpResponse {
 
     pub fn get_string_body(&self) -> Option<String> {
         if let Some(body) = self.body.as_ref() {
-            let deserialized = String::from_utf8(body.to_vec()).unwrap();
-            Some(deserialized)
-        } else {
-            None
+            if let Ok(utf8) = String::from_utf8(body.to_vec()){
+                return Some(utf8)
+            }
         }
+        None
     }
 
     // Todo: a more generic function that supports serialization into rust structs from other MIME types

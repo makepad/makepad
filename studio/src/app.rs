@@ -4,13 +4,17 @@ use crate::{
     makepad_draw::*,
     makepad_widgets::*,
     makepad_widgets::file_tree::*,
-    makepad_widgets::dock::*,
     file_system::file_system::*,
-    run_view::*,
-    build_manager::build_manager::{
-        BuildManager,
-        BuildManagerAction
-    },
+    build_manager::{
+        run_view::*,
+        run_list::{
+            RunListAction
+        },
+        build_manager::{
+            BuildManager,
+            BuildManagerAction
+        },
+    }
 };
 
 live_design!{
@@ -19,9 +23,9 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
     
-    import makepad_studio::run_view::RunView;
-    import makepad_studio::build_manager::build_manager::LogList;
-    import makepad_studio::build_manager::build_manager::RunList;
+    import makepad_studio::build_manager::run_view::RunView;
+    import makepad_studio::build_manager::log_list::LogList;
+    import makepad_studio::build_manager::run_list::RunList;
     
     Logo = <Button> {
         draw_icon: {
@@ -45,6 +49,7 @@ live_design!{
     App = {{App}} {
         ui: <Window> {
             caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
+            window: {inner_size: vec2(1600, 900)},
             body = {dock = <Dock> {
                 height: Fill,
                 width: Fill
@@ -65,7 +70,7 @@ live_design!{
                 
                 split2 = Splitter {
                     axis: Horizontal,
-                    align: FromB(400.0),
+                    align: Weighted(0.5),
                     a: edit_tabs,
                     b: run_tabs
                 }
@@ -74,27 +79,23 @@ live_design!{
                 
                 file_tree_tabs = Tabs {
                     tabs: [file_tree, search, run_list],
-                    closable: false,
                     selected: 2
                 }
                 
                 edit_tabs = Tabs {
                     tabs: [edit_first, file1],
-                    closable: false,
                     selected: 1
                 }
                 
                 log_tabs = Tabs {
-                    tabs: [log_first, log1],
-                    closable: false,
-                    selected: 1
+                    tabs: [log_list],
+                    selected: 0
                 }
                 
                 run_tabs = Tabs {
-                    tabs: [run_first, run1],
-                    selected: 1
+                    tabs: [run_first],
+                    selected: 0
                 }
-                
                 
                 file_tree = Tab {
                     name: "Explore",
@@ -118,12 +119,6 @@ live_design!{
                     closable: false,
                     kind: EditFirst
                 }
-                log_first = Tab {
-                    name: "Log"
-                    closable: false,
-                    kind: LogFirst
-                }
-                
                 
                 run_list = Tab {
                     name: "Run"
@@ -137,18 +132,11 @@ live_design!{
                     kind: CodeEditor
                 }
                 
-                log1 = Tab {
-                    name: "example_app",
+                log_list = Tab {
+                    name: "Log",
                     closable: false,
                     kind: LogList
                 }
-                
-                run1 = Tab {
-                    name: "example_app",
-                    closable: true,
-                    kind: RunView
-                }
-                
                 
                 CodeEditor = <CodeEditor> {}
                 EditFirst = <RectView> {
@@ -193,20 +181,6 @@ live_design!{
                     }
                     
                 }
-                LogFirst = <RectView> {
-                    draw_bg: {color: #052329}
-                    <View> {
-                        width: Fill,
-                        height: Fill
-                        align: {
-                            x: 0.5,
-                            y: 0.5
-                        }
-                        flow: Down
-                            <Logo> {}
-                    }
-                    
-                }
                 RunList = <RunList> {
                 }
                 Search = <RectView> {
@@ -232,7 +206,9 @@ impl LiveHook for App {
         crate::makepad_widgets::live_design(cx);
         crate::makepad_code_editor::live_design(cx);
         crate::build_manager::build_manager::live_design(cx);
-        crate::run_view::live_design(cx);
+        crate::build_manager::run_list::live_design(cx);
+        crate::build_manager::log_list::live_design(cx);
+        crate::build_manager::run_view::live_design(cx);
         // for macos
         cx.start_stdin_service();
     }
@@ -253,7 +229,7 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
-        let log_list = self.ui.portal_list(id!(log1));
+        let log_list = self.ui.portal_list(id!(log_list));
         let run_list = self.ui.flat_list(id!(run_list));
         if let Event::Draw(event) = event {
             //let dt = profile_start();
@@ -269,7 +245,8 @@ impl AppMain for App {
                     );
                 }
                 else if let Some(mut run_view) = next.as_run_view().borrow_mut() {
-                    run_view.draw(cx, &self.build_manager);
+                    let current_id = dock.drawing_item_id().unwrap();
+                    run_view.draw(cx, current_id, &self.build_manager);
                 }
                 else if let Some(mut log_list) = log_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_log(cx, &mut *log_list);
@@ -279,7 +256,7 @@ impl AppMain for App {
                 }
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
-                    let current_id = dock.get_drawing_item_id().unwrap();
+                    let current_id = dock.drawing_item_id().unwrap();
                     if let Some(session) = self.file_system.get_session_mut(current_id) {
                         code_editor.draw(cx, session);
                     }
@@ -289,6 +266,9 @@ impl AppMain for App {
             return
         }
         
+        if let Event::Destruct = event{
+            self.build_manager.clear_active_builds();
+        }
         
         if let Event::KeyDown(KeyEvent {
             key_code,
@@ -297,7 +277,7 @@ impl AppMain for App {
         }) = event {
             if *control || *logo {
                 if let KeyCode::Backtick = key_code {
-                    self.build_manager.file_change(cx);
+                    self.build_manager.start_recompile(cx);
                 }
                 else if let KeyCode::KeyK = key_code {
                     self.build_manager.clear_log();
@@ -309,11 +289,10 @@ impl AppMain for App {
         for action in self.file_system.handle_event(cx, event, &self.ui) {
             match action {
                 FileSystemAction::RecompileNeeded => {
-                    self.build_manager.start_recompile_timer(cx);
-                    let view = self.ui.run_view(id!(run1));
-                    view.recompile_started(cx);
+                    self.build_manager.start_recompile_timer(cx, &self.ui);
                 }
-                FileSystemAction::LiveReloadNeeded => {
+                FileSystemAction::LiveReloadNeeded(live_file_change) => {
+                    self.build_manager.live_reload_needed(live_file_change);
                     self.build_manager.clear_log();
                     log_list.redraw(cx);
                 }
@@ -323,7 +302,7 @@ impl AppMain for App {
         // lets iterate over the editors and handle events
         for (item_id, item) in dock.borrow_mut().unwrap().visible_items() {
             if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                run_view.handle_event(cx, event, &mut self.build_manager);
+                run_view.handle_event(cx, event, item_id, &mut self.build_manager);
             }
             else if let Some(mut code_editor) = item.as_code_editor().borrow_mut() {
                 if let Some(session) = self.file_system.get_session_mut(item_id) {
@@ -345,11 +324,9 @@ impl AppMain for App {
                     // if the log_list is tailing, set the new len
                     log_list.redraw(cx);
                 }
-                BuildManagerAction::StdinToHost {cmd_id, msg} =>{
-                    for (_item_id, (_templ,item)) in dock.borrow_mut().unwrap().items().iter() {
-                        if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                            run_view.handle_stdin_to_host(cx, cmd_id, &msg, &mut self.build_manager);
-                        }
+                BuildManagerAction::StdinToHost {run_view_id, msg} =>{
+                    if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut(){
+                        run_view.handle_stdin_to_host(cx, &msg);
                     }
                 }
                 _ => ()
@@ -358,13 +335,30 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        // dock drag drop and tabs
         for (item_id, item) in run_list.items_with_actions(&actions) {
-            self.build_manager.handle_run_list(cx, item_id, item, &actions);
+            for action in self.build_manager.handle_run_list(cx, &run_list, item_id, item, &actions){
+                match action {
+                    RunListAction::Create(run_view_id, name)=>{
+                        let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
+                        dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::Yes);
+                        dock.redraw(cx);
+                    }
+                    RunListAction::Destroy(run_view_id)=>{
+                        dock.close_tab(cx, run_view_id);
+                        dock.redraw(cx);
+                    }
+                    _=>()
+                }
+                log_list.redraw(cx);
+            }
         }
             
         if let Some(tab_id) = dock.clicked_tab_close(&actions) {
             dock.close_tab(cx, tab_id);
+            if self.build_manager.handle_tab_close(tab_id){
+                log_list.redraw(cx);
+                run_list.redraw(cx);
+            }
         }
         
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
@@ -400,7 +394,7 @@ impl AppMain for App {
                 else { // external file, we have to create a new tab
                     let tab_id = LiveId::unique();
                     self.file_system.request_open_file(tab_id, path.to_string());
-                    dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), path.clone());
+                    dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), path.clone(), TabClosable::Yes);
                 }
             }
         }
@@ -422,7 +416,7 @@ impl AppMain for App {
             self.file_system.request_open_file(tab_id, file_path);
             
             // lets add a file tab 'somewhere'
-            dock.create_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), tab_name);
+            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), tab_name, TabClosable::Yes);
         }
     }
 }

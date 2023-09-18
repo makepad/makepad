@@ -26,7 +26,7 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
     let mut signing_identity  = None;
     let mut provisioning_profile = None;
     let mut device_uuid = None;
-    let mut product = None;
+    let mut app = None;
     let mut org = None;
     let mut ios_version = None;
     for i in 0..args.len() {
@@ -40,8 +40,8 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
         else if let Some(opt) = v.strip_prefix("--device-uuid=") {
             device_uuid = Some(opt.to_string());
         } 
-        else if let Some(opt) = v.strip_prefix("--product=") {
-            product = Some(opt.to_string());
+        else if let Some(opt) = v.strip_prefix("--app=") {
+            app = Some(opt.to_string());
         } 
         else if let Some(opt) = v.strip_prefix("--org=") {
             org = Some(opt.to_string());
@@ -63,12 +63,12 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
             let toolchains = vec![IosTarget::aarch64_sim, IosTarget::aarch64];
             sdk::rustup_toolchain_install(&toolchains)
         }
-        "run-real" =>{
-            compile::run_real(SigningArgs{
+        "run-device" =>{
+            compile::run_on_device(SigningArgs{
                 signing_identity, 
                 provisioning_profile, 
                 device_uuid, 
-                product,
+                app,
                 org,
                 ios_version
             },&args[1..], IosTarget::aarch64)?;
@@ -79,12 +79,12 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
             let toolchain = IosTarget::x86_64_sim;
             #[cfg(target_arch = "aarch64")]
             let toolchain = IosTarget::aarch64_sim; 
-            compile::run_sim(SigningArgs{
+            compile::run_on_sim(SigningArgs{
                 ios_version,
                 signing_identity, 
                 provisioning_profile, 
                 device_uuid, 
-                product,
+                app,
                 org
             },
             &args[1..], toolchain)?;

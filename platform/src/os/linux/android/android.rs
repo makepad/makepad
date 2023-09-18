@@ -23,8 +23,9 @@ use {
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
+        makepad_live_id::*,
+        makepad_live_compiler::LiveFileChange,
         thread::Signal,
-        live_id::LiveId,
         event::{
             VirtualKeyboardEvent,
             NetworkResponseEvent,
@@ -44,6 +45,8 @@ use {
             VideoDecodingInitializedEvent,
             VideoColorFormat,
             VideoStreamEvent,
+            HttpRequest,
+            HttpMethod,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -62,6 +65,8 @@ impl Cx {
         
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
+        
+        self.start_network_live_file_watcher();
         
         while !self.os.quit {
             self.handle_timers();
@@ -196,9 +201,9 @@ impl Cx {
                     FromJavaMessage::KeyUp {keycode, meta_state} => {
                         let makepad_keycode = android_to_makepad_key_code(keycode);
                         let control = meta_state & ANDROID_META_CTRL_MASK != 0;
-                        let alt = meta_state & ANDROID_META_ALT_MASK != 0; 
+                        let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                         let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
-
+                        
                         let e = Event::KeyUp(
                             KeyEvent {
                                 key_code: makepad_keycode,
@@ -211,7 +216,7 @@ impl Cx {
                     }
                     FromJavaMessage::ResizeTextIME {keyboard_height, is_open} => {
                         let keyboard_height = (keyboard_height as f64) / self.os.dpi_factor;
-                        if !is_open{
+                        if !is_open {
                             self.os.keyboard_closed = keyboard_height;
                         }
                         if is_open {
@@ -219,7 +224,7 @@ impl Cx {
                                 height: keyboard_height - self.os.keyboard_closed,
                                 time: self.os.time_now()
                             }))
-                        } 
+                        }
                         else {
                             self.text_ime_was_dismissed();
                             self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidHide {
@@ -228,7 +233,7 @@ impl Cx {
                         }
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
-                        let e = Event::NetworkResponses(vec![
+                        let mut e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpResponse(HttpResponse::new(
@@ -239,23 +244,27 @@ impl Cx {
                                 ))
                             }
                         ]);
-                        self.call_event_handler(&e);
+                        if self.studio_http_connection(&mut e) {
+                            self.call_event_handler(&e);
+                        }
                     }
                     FromJavaMessage::HttpRequestError {request_id, error, ..} => {
-                        let e = Event::NetworkResponses(vec![
+                        let mut e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpRequestError(error)
                             }
                         ]);
-                        self.call_event_handler(&e);
+                        if self.studio_http_connection(&mut e) {
+                            self.call_event_handler(&e);
+                        }
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
                     }
                     FromJavaMessage::VideoDecodingInitialized {video_id, frame_rate, video_width, video_height, color_format, duration} => {
                         let e = Event::VideoDecodingInitialized(
-                            VideoDecodingInitializedEvent { 
+                            VideoDecodingInitializedEvent {
                                 video_id: LiveId(video_id),
                                 frame_rate,
                                 video_width,
@@ -283,7 +292,6 @@ impl Cx {
                         self.call_event_handler(&Event::Pause);
                     }
                     FromJavaMessage::Stop => {
-                        
                     }
                     FromJavaMessage::Resume => {
                         if self.os.fullscreen {
@@ -297,6 +305,7 @@ impl Cx {
                         self.call_event_handler(&Event::Resume);
                     }
                     FromJavaMessage::Destroy => {
+                        self.call_event_handler(&Event::Destruct);
                         self.os.quit = true;
                     }
                     FromJavaMessage::Init(_) => {
@@ -309,8 +318,13 @@ impl Cx {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
             }
-
+            
+            if self.handle_live_edit() {
+                self.call_event_handler(&Event::LiveEdit);
+                self.redraw_all();
+            }
             self.handle_platform_ops();
+            
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(self.os.time_now());
@@ -333,14 +347,14 @@ impl Cx {
         }
     }
     
-    pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {        
+    pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
         let (from_java_tx, from_java_rx) = mpsc::channel();
         
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
         
         // lets start a thread
         std::thread::spawn(move || {
-            unsafe{attach_jni_env()};
+            unsafe {attach_jni_env()};
             let mut cx = startup();
             cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
@@ -408,6 +422,85 @@ impl Cx {
         });
     }
     
+    pub fn studio_http_connection(&mut self, event: &mut Event) -> bool {
+        if let Event::NetworkResponses(res) = event {
+            res.retain( | res | {
+                if res.request_id == live_id!(live_reload) {
+                    // alright lets see if we need to live reload from the body
+                    if let NetworkResponse::HttpResponse(res) = &res.response {
+                        // lets check our response
+                        if let Some(body) = res.get_string_body() {
+                            if body.len()>0 {
+                                let mut parts = body.split("$$$makepad_live_change$$$");
+                                if let Some(file_name) = parts.next() {
+                                    let content = parts.next().unwrap().to_string();
+                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                        file_name:file_name.to_string(),
+                                        content
+                                    }]);
+                                }
+                            }
+                        }
+                        Self::poll_studio_http();
+                    }
+                    false
+                }
+                else {
+                    true
+                }
+            });
+            if res.len()>0 {
+                return true
+            }
+        }
+        false
+    }
+    
+    fn poll_studio_http() {
+        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
+        if studio_http.is_none() {
+            return
+        }
+        let url = format!("http://{}/live_file", studio_http.unwrap());
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        unsafe {android_jni::to_java_http_request(live_id!(live_reload), request);}
+    }
+    
+    pub fn start_network_live_file_watcher(&mut self) {
+        Self::poll_studio_http();
+        /*
+        log!("WATCHING NETWORK FOR FILE WATCHER");
+        let studio_uid: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_UID");
+        if studio_uid.is_none(){
+            return
+        }
+        let studio_uid:u64 = studio_uid.unwrap().parse().unwrap_or(0);
+        std::thread::spawn(move || {
+            let discovery = UdpSocket::bind("0.0.0.0:41533").unwrap();
+            discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
+            discovery.set_broadcast(true).unwrap();
+            
+            let mut other_uid = [0u8; 8];
+            let mut host_addr = None;
+            // nonblockingly (timeout=1ns) check our discovery socket for peers
+            'outer: loop{
+                while let Ok((_, mut addr)) = discovery.recv_from(&mut other_uid) {
+                    let recv_uid = u64::from_be_bytes(other_uid);
+                    log!("GOT ADDR {} {}",studio_uid, recv_uid);
+                    if studio_uid == recv_uid {
+                        // we found our host. lets connect to it
+                        host_addr = Some(addr);
+                        break 'outer;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let host_addr = host_addr.unwrap();
+            // ok we can connect
+            log!("WE CAN CONNECT {:?}", host_addr);
+        });*/
+    }
+    
     /*    
     pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
         if let Some(text) = content {
@@ -433,6 +526,7 @@ impl Cx {
         self.after_every_event(&to_java);
     }
    */
+    
     
     pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
@@ -522,17 +616,17 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id);
+                    self.draw_pass_to_magic_texture(*pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id);
+                    self.draw_pass_to_magic_texture(*pass_id);
                 }
             }
         }
         
         
     }
-
+    
     fn handle_platform_ops(&mut self) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -604,18 +698,18 @@ impl Cx {
         }
         EventFlow::Poll
     }
-
+    
     fn handle_timers(&mut self) {
         let mut to_be_dispatched = Vec::with_capacity(self.os.timers.len());
         let mut to_be_removed = Vec::with_capacity(self.os.timers.len());
         let now = Instant::now();
-
+        
         for (id, timer) in self.os.timers.iter_mut() {
             let elapsed_time = now - timer.start_time;
             let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
-
+            
             if elapsed_time > next_due_time {
-                to_be_dispatched.push(Event::Timer(TimerEvent { timer_id: *id }));
+                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id}));
                 if timer.repeats {
                     timer.step += 1;
                 } else {
@@ -623,7 +717,7 @@ impl Cx {
                 }
             }
         }
-
+        
         for id in to_be_removed {
             self.os.timers.remove(&id);
         }
@@ -654,7 +748,7 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             time_start: Instant::now(),
-            keyboard_closed: 0.0, 
+            keyboard_closed: 0.0,
             //keyboard_visible: false,
             //keyboard_trigger_position: DVec2::default(),
             //keyboard_panning_offset: 0,
@@ -686,7 +780,6 @@ pub struct CxOs {
     pub dpi_factor: f64,
     pub time_start: Instant,
     pub keyboard_closed: f64,
-    
     //pub keyboard_visible: bool,
     //pub keyboard_trigger_position: DVec2,
     //pub keyboard_panning_offset: i32,
@@ -751,7 +844,7 @@ pub struct Timer {
     pub start_time: Instant,
     pub interval: Duration,
     pub repeats: bool,
-    pub step: u64, 
+    pub step: u64,
 }
 
 impl Timer {
