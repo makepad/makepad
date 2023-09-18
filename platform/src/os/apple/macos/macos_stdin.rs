@@ -62,6 +62,17 @@ impl Cx {
             self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
+                    let window = &mut self.windows[CxWindowPool::id_zero()];
+                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                    if let Some(swapchain) = self.os.swapchain.as_ref() {
+                        let present_index = *self.os.present_index.lock().unwrap();
+                        pass.color_textures = vec![CxPassColorTexture {
+                            //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                            clear_color: PassClearColor::ClearWith(pass.clear_color),
+                            texture_id: swapchain[present_index].texture_id()
+                        }];
+                    }
+                    
                     // render to swapchain
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
 
@@ -335,15 +346,7 @@ impl Cx {
                     let window = &mut self.windows[CxWindowPool::id_zero()];
                     window.is_created = true;
                     // lets set up our render pass target
-                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    if let Some(swapchain) = self.os.swapchain.as_ref() {
-                        let present_index = *self.os.present_index.lock().unwrap();
-                        pass.color_textures = vec![CxPassColorTexture {
-                            //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                            clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: swapchain[present_index].texture_id()
-                        }];
-                    }
+                    
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
