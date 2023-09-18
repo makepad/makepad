@@ -661,7 +661,7 @@ impl MacosApp {
                     get_macos_app_global().timers.remove(i);
                 }
                 
-                MacosApp::do_callback(MacosEvent::Timer(TimerEvent {time, timer_id: timer_id}));
+                MacosApp::do_callback(MacosEvent::Timer(TimerEvent {time:Some(time), timer_id: timer_id}));
                 // break the eventloop if its in blocked mode
                 unsafe {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];

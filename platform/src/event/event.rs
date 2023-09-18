@@ -198,7 +198,7 @@ pub struct NextFrameEvent {
 
 #[derive(Clone, Debug)]
 pub struct TimerEvent {
-    pub time: f64,
+    pub time: Option<f64>,
     pub timer_id: u64
 }
 
