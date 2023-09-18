@@ -64,7 +64,7 @@ pub struct PortalList {
     #[live(true)] align_top_when_empty: bool,
     #[live(false)] grab_key_focus: bool,
     #[live(true)] drag_scrolling: bool,
-    #[live(true)] allow_empty: bool,
+    #[live(false)] allow_empty: bool,
     #[rust] first_id: u64,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
