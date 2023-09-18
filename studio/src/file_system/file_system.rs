@@ -3,10 +3,10 @@ use {
     crate::{
         makepad_code_editor::{Document, Session},
         makepad_platform::*,
+        makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_draw::*,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
-        makepad_widgets::dock::*,
         file_system::FileClient,
         makepad_file_protocol::{
             FileRequest,
@@ -50,7 +50,7 @@ pub struct FileEdge {
 
 pub enum FileSystemAction{
     RecompileNeeded,
-    LiveReloadNeeded
+    LiveReloadNeeded(LiveFileChange)
 }
 
 impl FileSystem {
@@ -106,7 +106,7 @@ impl FileSystem {
                         }
                     }
                     FileResponse::SaveFile(result)=>match result{
-                        Ok((_path, old, new))=>{
+                        Ok((path, old, new))=>{
                             // alright file has been saved
                             // now we need to check if a live_design!{} changed or something outside it
                             if old != new{
@@ -127,7 +127,10 @@ impl FileSystem {
                                             }
                                             if old_tokens != new_tokens{
                                                 // design code changed, hotreload it
-                                                dispatch_action(cx, FileSystemAction::LiveReloadNeeded)
+                                                dispatch_action(cx, FileSystemAction::LiveReloadNeeded(LiveFileChange{
+                                                    file_name: path,
+                                                    content: new
+                                                }))
                                             }
                                         }
                                     }
