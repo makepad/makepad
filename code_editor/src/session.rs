@@ -930,32 +930,67 @@ fn find_highlighted_delimiter_pair(
     lines: &[String],
     position: Position,
 ) -> Option<(Position, Position)> {
-    match find_opening_delimiter(lines, position) {
-        Some((opening_delimiter_position, opening_delimiter)) => {
-            match find_closing_delimiter(lines, position, opening_delimiter) {
-                Some(closing_delimiter_position) => {
-                    Some((opening_delimiter_position, closing_delimiter_position))
-                }
-                None => None,
-            }
-        }
-        None => None,
-    }
-}
-
-fn find_opening_delimiter(lines: &[String], position: Position) -> Option<(Position, char)> {
     match lines[position.line_index][..position.byte_index]
         .chars()
         .next_back()
     {
-        Some(char) if char.is_opening_delimiter() => Some((
-            Position {
+        Some(ch) if ch.is_opening_delimiter() => {
+            let opening_delimiter_position = Position {
                 line_index: position.line_index,
-                byte_index: position.byte_index - char.len_utf8(),
-            },
-            char,
-        )),
-        _ => None,
+                byte_index: position.byte_index - ch.len_utf8(),
+            };
+            if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, ch) {
+                return Some((opening_delimiter_position, closing_delimiter_position));
+            }
+        }
+        _ => {}
+    }
+    match lines[position.line_index][position.byte_index..]
+        .chars()
+        .next()
+    {
+        Some(ch) if ch.is_closing_delimiter() => {
+            let closing_delimiter_position = position;
+            if let Some(opening_delimiter_position) = find_opening_delimiter(lines, position, ch) {
+                return Some((opening_delimiter_position, closing_delimiter_position));
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn find_opening_delimiter(
+    lines: &[String],
+    position: Position,
+    closing_delimiter: char,
+) -> Option<Position> {
+    let mut delimiter_stack = vec![closing_delimiter];
+    let mut position = position;
+    loop {
+        for char in lines[position.line_index][..position.byte_index]
+            .chars()
+            .rev()
+        {
+            position.byte_index -= char.len_utf8();
+            if char.is_closing_delimiter() {
+                delimiter_stack.push(char);
+            }
+            if char.is_opening_delimiter() {
+                if delimiter_stack.last() != Some(&char.opposite_delimiter().unwrap()) {
+                    return None;
+                }
+                delimiter_stack.pop().unwrap();
+                if delimiter_stack.is_empty() {
+                    return Some(position);
+                }
+            }
+        }
+        if position.line_index == 0 {
+            return None;
+        }
+        position.line_index -= 1;
+        position.byte_index = lines[position.line_index].len();
     }
 }
 
