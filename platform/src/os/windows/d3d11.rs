@@ -940,7 +940,7 @@ impl CxOsTexture {
             Height: height as u32,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0
@@ -1001,7 +1001,7 @@ impl CxOsTexture {
 
             // get shared handle of this resource
             let handle = unsafe { dxgi_resource.GetSharedHandle().unwrap() };
-            log!("created new shared texture with handle {:?}",handle);
+            //log!("created new shared texture with handle {:?}",handle);
 
             self.width = width;
             self.height = height;
@@ -1018,7 +1018,6 @@ impl CxOsTexture {
         let mut texture: Option<ID3D11Texture2D> = None;
         if let Ok(()) = unsafe { d3d11_cx.device.OpenSharedResource(handle,&mut texture) } {
 
-            log!("found shared texture with handle {:?}",handle);
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
