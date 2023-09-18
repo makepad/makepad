@@ -47,7 +47,7 @@ pub struct RunView {
     #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
     #[rust] last_size: (usize, usize),
-    #[rust] tick: Timer,
+    #[rust] tick: NextFrame,
     #[rust] time: f64,
     #[rust] frame: u64
 }
@@ -59,7 +59,7 @@ impl LiveHook for RunView {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.tick = cx.start_interval(self.frame_delta);
+        self.tick = cx.new_next_frame();//start_interval(self.frame_delta);
         self.time = 0.0;
     }
 }
@@ -69,16 +69,19 @@ impl RunView {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
         
         self.animator_handle_event(cx, event);
-        if self.tick.is_event(event) {
-            self.time += self.frame_delta;
+        if let Some(te) = self.tick.is_event(event) {
+            //self.time += self.frame_delta;
             self.frame += 1;
             
             // what shall we do, a timer? or do we do a next-frame
             manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
                 buffer_id: run_view_id.0,
-                frame: self.frame,
-                time: self.time
-            })
+                frame: 0,
+                //frame: self.frame,
+                time: te.time
+            });
+            self.redraw(cx);
+            self.tick = cx.new_next_frame();
         }
         // lets send mouse events
         match event.hits(cx, self.draw_app.area()) {
@@ -136,7 +139,7 @@ impl RunView {
         }
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost, run_view_id: LiveId, manager: &BuildManager) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost, run_view_id: LiveId, manager: &mut BuildManager) {
         match msg {
 
             StdinToHost::SetCursor(cursor) => {
@@ -150,16 +153,13 @@ impl RunView {
             }
             StdinToHost::DrawCompleteAndFlip(present_index) => {
 
-                // client is ready with new image on swapchain[present_index]
-                for v in manager.active.builds.values() {
+                for v in manager.active.builds.values_mut() {
                     if v.run_view_id == run_view_id {
                         v.present_index.set(*present_index);
                         self.draw_app.set_texture(0, &v.swapchain[*present_index]);
+                        v.mac_resize_id = 1 - present_index;
                     }
                 }
-
-                // and draw
-                self.redraw(cx);
             }
         }
     }
@@ -168,7 +168,7 @@ impl RunView {
         self.draw_app.redraw(cx);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &BuildManager) {
+    pub fn draw(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager) {
         
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
@@ -177,7 +177,7 @@ impl RunView {
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
 
-        for v in manager.active.builds.values() {
+        for v in manager.active.builds.values_mut() {
             if v.run_view_id == run_view_id {
                 
                 // update texture size and indicate new size to client if needed
@@ -186,25 +186,21 @@ impl RunView {
                     self.last_size = new_size;
 
                     // update descriptors for swapchain textures
-                    let id0 = run_view_id.0 & 0x0000FFFFFFFFFFFF;  // take the lowest bits from run_view_id, and encode texture ID in high bits
-                    let id1 = run_view_id.0 | 0x0001000000000000;
-
-                    let desc0 = TextureDesc {
-                        format: TextureFormat::SharedBGRA(id0),
+                    let ids = [run_view_id.0 & 0x0000FFFFFFFFFFFF,run_view_id.0 | 0x0001000000000000];
+                    let descs = [TextureDesc {
+                        format: TextureFormat::SharedBGRA(ids[0]),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),    
-                    };
-                    let desc1 = TextureDesc {
-                        format: TextureFormat::SharedBGRA(id1),
+                    }, TextureDesc {
+                        format: TextureFormat::SharedBGRA(ids[1]),
                         width: Some(new_size.0.max(1)),
                         height: Some(new_size.1.max(1)),    
-                    };
-                    v.swapchain[0].set_desc(cx,desc0);
-                    v.swapchain[1].set_desc(cx,desc1);
+                    }];
 
                     // make sure the actual shared texture resources exist, and get their handles                    
-#[cfg(target_os = "windows")]
-                    let handles = {
+#[cfg(target_os = "windows")]{
+                        v.swapchain[0].set_desc(cx,descs[0]);
+                        v.swapchain[1].set_desc(cx,descs[1]);
 
                         let mut handles = [0u64,0u64];
 
@@ -219,29 +215,40 @@ impl RunView {
                         handles[1] = cxtexture.os.shared_handle.0 as u64;
 
                         cx.cx.os.d3d11_device.replace(Some(d3d11_device));
-
-                        handles
+                        manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
+                            width: rect.size.x,
+                            height: rect.size.y,
+                            dpi_factor: dpi_factor,
+                            swapchain_handles: handles,
+                        }));
                     };
 
-#[cfg(target_os = "macos")]
-                    let handles = {
-
+#[cfg(target_os = "macos")]{
+                        // macos alternates resizes with doublebuffering NOT frames
+                        let id = v.mac_resize_id;
+                        v.swapchain[id].set_desc(cx, descs[id]);
                         let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
-
-                        let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
-                        cxtexture.os.update_shared_texture(metal_device,&desc0);
-
-                        let cxtexture = &mut cx.textures[v.swapchain[1].texture_id()];
-                        cxtexture.os.update_shared_texture(metal_device,&desc1);
-
+                        // ok so we have to alternate which buffer we resize
+                        let cxtexture = &mut cx.textures[v.swapchain[id].texture_id()];
+                        cxtexture.os.update_shared_texture(metal_device,&descs[id]);
+                        
                         cx.cx.os.metal_device.replace(Some(metal_device));
-
                         // for macos, pass the hashmap indices to the client, so they can find the right texture in XPC
-                        [id0,id1]
+                        // send size update to client
+                        let swapchain_front = v.mac_resize_id as u32;
+                        manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
+                            width: rect.size.x,
+                            height: rect.size.y,
+                            dpi_factor: dpi_factor,
+                            swapchain_handle: ids[id],
+                            swapchain_front 
+                        }));
                     };
 
 #[cfg(target_os = "linux")]
                     let handles = {
+                        v.swapchain[0].set_desc(cx,desc0);
+                        v.swapchain[1].set_desc(cx,desc1);
 
                         // HACK(eddyb) normally this would be triggered later,
                         // but we need it *before* `get_shared_texture_dma_buf_image`.
@@ -261,19 +268,11 @@ impl RunView {
                             cx.get_shared_texture_dma_buf_image(&v.swapchain[1]),
                         ]
                     };
-
-                    // send size update to client
-                    manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
-                        width: rect.size.x,
-                        height: rect.size.y,
-                        dpi_factor: dpi_factor,
-                        swapchain_handles: handles,
-                    }));
+                    
                 }
 
                 // make sure it's going to present the right texture
-                let texture = &v.swapchain[v.present_index.get()];
-                self.draw_app.set_texture(0, texture);
+                
                 
                 break
             }

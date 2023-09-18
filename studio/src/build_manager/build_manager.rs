@@ -48,6 +48,7 @@ pub struct ActiveBuild {
     pub run_view_id: LiveId,
     pub cmd_id: Option<BuildCmdId>,
     pub swapchain: [Texture; 2],
+    pub mac_resize_id: usize,
     pub present_index: Cell<usize>,
 }
 
