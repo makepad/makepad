@@ -194,8 +194,7 @@ impl Cx {
             self.stdin_handle_platform_ops(d3d11_cx);
         }
     }
-    
-    
+        
     fn stdin_handle_platform_ops(&mut self, _metal_cx: &D3d11Cx) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
