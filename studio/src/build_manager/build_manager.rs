@@ -5,7 +5,6 @@ use {
         makepad_platform::*,
         makepad_widgets::*,
         makepad_platform::makepad_live_compiler::LiveFileChange,
-        makepad_platform::thread::*,
         makepad_platform::os::cx_stdin::{
             HostToStdin,
             StdinToHost,

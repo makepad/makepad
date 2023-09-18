@@ -1,7 +1,6 @@
 use {
     crate::{
         makepad_widgets::*,
-        makepad_platform::thread::*,
         mandelbrot_simd::*
     }
 };
