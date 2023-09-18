@@ -461,7 +461,7 @@ impl Cx {
         if studio_http.is_none() {
             return
         }
-        let url = format!("http://{}/live_file", studio_http.unwrap());
+        let url = format!("http://{}/$live_file_change", studio_http.unwrap());
         let request = HttpRequest::new(url, HttpMethod::GET);
         unsafe {android_jni::to_java_http_request(live_id!(live_reload), request);}
     }
@@ -603,6 +603,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(self.os.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
