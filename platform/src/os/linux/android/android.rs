@@ -461,7 +461,7 @@ impl Cx {
         if studio_http.is_none() {
             return
         }
-        let url = format!("http://{}/live_file", studio_http.unwrap());
+        let url = format!("http://{}/$live_file_change", studio_http.unwrap());
         let request = HttpRequest::new(url, HttpMethod::GET);
         unsafe {android_jni::to_java_http_request(live_id!(live_reload), request);}
     }

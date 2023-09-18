@@ -255,8 +255,10 @@ impl BuildManager {
         if run {
             let run_view_id = LiveId::unique();
             if active.builds.get(&build_id).is_none() {
+                let index = active.builds.len();
                 active.builds.insert(build_id, ActiveBuild {
                     item_id,
+                    log_index: format!("[{}]", index),
                     process: process.clone(),
                     run_view_id,
                     cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
@@ -278,6 +280,7 @@ impl BuildManager {
                 }
             }
         }
+        
     }
     
 }

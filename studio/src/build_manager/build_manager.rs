@@ -21,6 +21,8 @@ use {
     std::{
         collections::{HashMap},
         env,
+        io::prelude::*,
+        fs::File,
     },
     std::sync::mpsc,
     std::thread,
@@ -41,6 +43,7 @@ live_design!{
 
 
 pub struct ActiveBuild {
+    pub log_index: String,
     pub item_id: LiveId,
     pub process: BuildProcess,
     pub run_view_id: LiveId,
@@ -117,6 +120,7 @@ impl ActiveBuilds {
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
     #[live] path: String,
+    #[live(8001usize)] http_port: usize,
     #[rust] pub clients: Vec<BuildClient>,
     #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
     #[live] recompile_timeout: f64,
@@ -146,11 +150,12 @@ impl BuildManager {
     
     pub fn init(&mut self, cx: &mut Cx) {
         // not great but it will do.
-        
         self.clients = vec![BuildClient::new_with_local_server(&self.path)];
         self.update_run_list(cx);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
         self.discover_external_ip(cx);
+        // alright lets start our http server
+        self.start_http_server();
     }
     
     
@@ -270,9 +275,9 @@ impl BuildManager {
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if let Event::Signal = event{
-            if let Ok(addr) = self.recv_external_ip.try_recv(){
-                // alright lets start our http server
-                self.start_http_server(addr);
+            if let Ok(mut addr) = self.recv_external_ip.try_recv(){
+                addr.set_port(self.http_port as u16);
+                self.studio_http = format!("{}",addr);
             }
         }
         
@@ -345,31 +350,73 @@ impl BuildManager {
         });
     }
     
-    pub fn start_http_server(&mut self, mut addr: SocketAddr){
-        addr.set_port(41535);
+    pub fn start_http_server(&mut self){
+        let addr = SocketAddr::new("0.0.0.0".parse().unwrap(),self.http_port as u16);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
         
-        self.studio_http = format!("{}",addr);
         log!("Build manager mobile file change http server at {}", self.studio_http);
         start_http_server(HttpServer{
             listen_address:addr,
             post_max_size: 1024*1024,
             request: tx_request
         });
-        let receiver = self.send_file_change.receiver();
+        
+        let rx_file_change = self.send_file_change.receiver();
+        let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
+        
+        // livecoding observer
         std::thread::spawn(move || {
-            // lets receive incoming http requests
-            // if will answer it with a filechange if we have one
-            // otherwise we just return nothing
-            let mut change_slot = None;
-            let mut addrs = Vec::new();
-            while let Ok(message) = rx_request.recv() {
-                // only store last change, fix later
-                while let Ok(change) = receiver.try_recv(){
-                    change_slot = Some(change);
+            loop{
+                let mut last_change = None;
+                let mut addrs = Vec::new();
+                if let Ok(change) = rx_file_change.recv_timeout(Duration::from_millis(1000)){
+                    last_change = Some(change);
                     addrs.clear();
                 }
-                
+                while let Ok(change) = rx_file_change.try_recv(){
+                    last_change = Some(change);
+                    addrs.clear();
+                }
+                while let Ok(HttpServerRequest::Get{headers, response_sender}) = rx_live_file.try_recv(){
+                    let body = if addrs.contains(&headers.addr){
+                        vec![]
+                    }
+                    else if let Some(last_change) = &last_change{
+                        addrs.push(headers.addr);
+                        format!("{}$$$makepad_live_change$$${}",last_change.file_name, last_change.content).as_bytes().to_vec()
+                    }
+                    else{
+                        vec![]
+                    };
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                        Content-Type: application/json\r\n\
+                        Content-encoding: none\r\n\
+                        Cache-Control: max-age:0\r\n\
+                        Content-Length: {}\r\n\
+                        Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = response_sender.send(HttpServerResponse{header, body});
+                }
+            }
+        });
+        
+        std::thread::spawn(move || {
+
+            // TODO fix this proper:
+            let makepad_path = "./".to_string();
+            let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
+            let remaps = [
+                (format!("/makepad/{}/",abs_makepad_path),makepad_path.clone()),
+                (format!("/makepad/{}/",std::env::current_dir().unwrap().display()),"".to_string()),
+                ("/makepad//".to_string(),makepad_path.clone()),
+                ("/makepad/".to_string(),makepad_path.clone()),
+                ("/".to_string(),"".to_string())
+            ];
+            
+            while let Ok(message) = rx_request.recv() {
+                // only store last change, fix later
                 match message{
                     HttpServerRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
                     },
@@ -378,32 +425,68 @@ impl BuildManager {
                     HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
                     }
                     HttpServerRequest::Get{headers, response_sender}=>{
-                        let mut addr = headers.addr.clone();
-                        addr.set_port(0);
-                        let body = if addrs.contains(&addr){
-                            "".to_string().as_bytes().to_vec()
+                        let path = &headers.path;
+                        
+                        if path == "/$live_file_change"{
+                            let _ =tx_live_file.send(HttpServerRequest::Get{headers, response_sender});
+                            continue
                         }
-                        else{
-                            addrs.push(addr);
-                            if let Some(change) = &change_slot{
-                                format!("{}$$$makepad_live_change$$${}",change.file_name, change.content).as_bytes().to_vec()
+                        // alright wasm http server
+                        if path == "/$watch"{
+                            let header = "HTTP/1.1 200 OK\r\n\
+                                    Cache-Control: max-age:0\r\n\
+                                    Connection: close\r\n\r\n".to_string();
+                            let _ = response_sender.send(HttpServerResponse{header, body:vec![]});
+                            continue
+                        }
+                         if path == "/favicon.ico"{
+                            let header = "HTTP/1.1 200 OK\r\n\r\n".to_string();
+                            let _ = response_sender.send(HttpServerResponse{header, body:vec![]});
+                            continue
+                        }
+                        
+                        let mime_type = if path.ends_with(".html") {"text/html"}
+                        else if path.ends_with(".wasm") {"application/wasm"}
+                        else if path.ends_with(".css") {"text/css"}
+                        else if path.ends_with(".js") {"text/javascript"}
+                        else if path.ends_with(".ttf") {"application/ttf"}
+                        else if path.ends_with(".png") {"image/png"}
+                        else if path.ends_with(".jpg") {"image/jpg"}
+                        else if path.ends_with(".svg") {"image/svg+xml"}
+                        else {continue};
+        
+                        if path.contains("..") || path.contains('\\'){
+                            continue
+                        }
+                        
+                        let mut strip = None;
+                        for remap in &remaps{
+                            if let Some(s) = path.strip_prefix(&remap.0){
+                                strip = Some(format!("{}{}",remap.1, s));
+                                break;
                             }
-                            else{
-                                "".to_string().as_bytes().to_vec()
+                        }
+                        if let Some(base) = strip{
+                            if let Ok(mut file_handle) = File::open(base) {
+                                let mut body = Vec::<u8>::new();
+                                if file_handle.read_to_end(&mut body).is_ok() {
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\n\
+                                        Content-Type: {}\r\n\
+                                        Cross-Origin-Embedder-Policy: require-corp\r\n\
+                                        Cross-Origin-Opener-Policy: same-origin\r\n\
+                                        Content-encoding: none\r\n\
+                                        Cache-Control: max-age:0\r\n\
+                                        Content-Length: {}\r\n\
+                                        Connection: close\r\n\r\n",
+                                        mime_type,
+                                        body.len()
+                                    );
+                                    let _ = response_sender.send(HttpServerResponse{header, body});
+                                }
                             }
-                        };
-                        let header = format!(
-                            "HTTP/1.1 200 OK\r\n\
-                            Content-Type: application/json\r\n\
-                            Content-encoding: none\r\n\
-                            Cache-Control: max-age:0\r\n\
-                            Content-Length: {}\r\n\
-                            Connection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = response_sender.send(HttpServerResponse{header, body});
-                        // protect a little bit against flooding
-                        thread::sleep(time::Duration::from_millis(50));
+                        }
+                        
                     }
                     HttpServerRequest::Post{..}=>{//headers, body, response}=>{
                     }
