@@ -21,7 +21,7 @@ use {
         /*makepad_math::*,*/
         cx::Cx,
         cx::CxDependency,
-    }
+    },
 };
 
 pub struct LiveBody {
@@ -33,6 +33,7 @@ pub struct LiveBody {
     pub code: String,
     pub live_type_infos: Vec<LiveTypeInfo>
 }
+
 
 #[cfg(not(lines))]
 fn line_nr_error_once(){
@@ -176,10 +177,9 @@ impl Cx {
         }
     }
     
-    pub fn start_live_file_watcher(&mut self){
+    pub fn start_disk_live_file_watcher(&mut self, milis:u64){
         let live_registry = self.live_registry.borrow();
-        let (send, recv) = std::sync::mpsc::channel();
-        self.live_file_changes = Some(recv);
+
         let mut file_list:Vec<(String,String, Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
             if let Some(start) = file.file_name.find("src/"){
@@ -187,6 +187,7 @@ impl Cx {
                 file_list.push((path, file.file_name.clone(), None));
             }
         }
+        let send = self.live_file_change_sender.clone();
         std::thread::spawn(move || loop{
             let mut changed_files = Vec::new();
             for (full_path, file_name, content) in &mut file_list{
@@ -210,20 +211,18 @@ impl Cx {
             if changed_files.len()>0{
                 send.send(changed_files).unwrap();
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(milis));
         });
     }
     
-    pub fn was_live_edit(&mut self)->bool{
+    pub fn handle_live_edit(&mut self)->bool{
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
         // then find the token-slice we need
         let mut all_changes = Vec::new();
-        if let Some(live_file_changes) = &self.live_file_changes{
-            while let Ok(changes) = live_file_changes.try_recv(){
-                all_changes.extend(changes);
-            }
+        while let Ok(changes) = self.live_file_change_receiver.try_recv(){
+            all_changes.extend(changes);
         }
         if all_changes.len()>0{
             let mut live_registry = self.live_registry.borrow_mut();

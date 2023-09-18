@@ -15,6 +15,7 @@ use {
         makepad_math::*,
         makepad_error_log::*,
         makepad_micro_serde::*,
+        makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
@@ -49,8 +50,10 @@ impl Cx {
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(_) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                CxPassParent::Window(window_id) => {
+                    if window_id == CxWindowPool::id_zero() {
+                        self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                    }
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -85,9 +88,12 @@ impl Cx {
                 
                 match parsed {
                     Ok(msg) => match msg {
-                        HostToStdin::ReloadFile {file: _, contents: _} => {
+                        HostToStdin::ReloadFile {file, contents} => {
                             // alright lets reload this file in our DSL system
-                            
+                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                                file_name: file,
+                                content: contents
+                            }]);
                         }
                         HostToStdin::KeyDown(e) => {
                             self.call_event_handler(&Event::KeyDown(e));
@@ -132,10 +138,10 @@ impl Cx {
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
                         }
-                        HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
+                        HostToStdin::Tick {frame: _, time, buffer_id} => if let Some(ws) = window_size {
                             // poll the service for updates
                             let uid = if let Some((_, uid)) = fb_shared.lock().unwrap().borrow().as_ref() {*uid}else {0};
-                            fetch_xpc_service_texture(service_proxy.as_id(), 0, uid, Box::new({
+                            fetch_xpc_service_texture(service_proxy.as_id(), buffer_id, uid, Box::new({
                                 let fb_shared = fb_shared.clone();
                                 move | shared_handle,
                                 shared_uid | {
@@ -148,7 +154,7 @@ impl Cx {
                                 self.handle_media_signals();
                                 self.call_event_handler(&Event::Signal);
                             }
-                            if self.was_live_edit() {
+                            if self.handle_live_edit() {
                                 self.call_event_handler(&Event::LiveEdit);
                                 self.redraw_all();
                             }
@@ -288,17 +294,14 @@ impl Cx {
     fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, main_texture: &Texture) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::CreateWindow(window_id) => {
-                    if window_id != CxWindowPool::id_zero() {
-                        panic!("ONLY ONE WINDOW SUPPORTED");
-                    }
+                CxOsOp::CreateWindow(_window_id) => {
                     let window = &mut self.windows[CxWindowPool::id_zero()];
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                        //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                        clear_color: PassClearColor::ClearWith(pass.clear_color),
                         texture_id: main_texture.texture_id()
                     }];
                 },

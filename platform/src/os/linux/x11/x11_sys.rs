@@ -39,6 +39,8 @@ pub const None: u32 = 0;
 pub const True: u32 = 1;
 pub const False: u32 = 0;
 
+pub const VisualIDMask: u32 = 1;
+
 pub const CurrentTime: u32 = 0;
 pub const SelectionNotify: u32 = 31;
 pub const AnyPropertyType: u32 = 0;
@@ -302,7 +304,14 @@ extern "C" {
     pub fn XDefaultScreen(arg1: *mut Display) -> c_int;
     
     pub fn XRootWindow(arg1: *mut Display, arg2: c_int) -> Window;
-    
+
+    pub fn XGetVisualInfo(
+        arg1: *mut Display,
+        arg2: c_long,
+        arg3: *mut XVisualInfo,
+        arg4: *mut c_int,
+    ) -> *mut XVisualInfo;
+
     pub fn XCreateColormap(
         arg1: *mut Display,
         arg2: Window,

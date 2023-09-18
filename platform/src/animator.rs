@@ -520,6 +520,7 @@ impl Ease {
 
 #[derive(Default)]
 pub struct Animator {
+    pub ignore_missing: bool,
     pub live_ptr: LiveRef,
     pub state: Option<Vec<LiveNode >>,
     pub next_frame: NextFrame,
@@ -561,7 +562,10 @@ impl LiveApply for Animator {
                 index += 1;
                 break;
             }
-            if !nodes[index].origin.has_prop_type(LivePropType::Instance) {
+            if nodes[index].id == live_id!(ignore_missing){
+                self.ignore_missing = nodes[index].value.as_bool().unwrap_or(false);
+            }
+            else if !nodes[index].origin.has_prop_type(LivePropType::Instance) {
                 cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
             }
             index = nodes.skip_node(index);
@@ -1023,7 +1027,7 @@ impl Animator {
                 if let Some(index) = nodes.child_by_path(index, &[state_pair[0].as_instance(), state_pair[1].as_instance()]) {
                     self.animate_to(cx, state_pair, index, nodes)
                 }
-                else {
+                else if !self.ignore_missing{
                     error!("animate_to_live {}.{} not found", state_pair[0], state_pair[1])
                 }
             }

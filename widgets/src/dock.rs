@@ -57,15 +57,15 @@ pub struct Dock {
     
     #[rust] dock_items: ComponentMap<LiveId, DockItem>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<LiveId, (LiveId,WidgetRef)>,
+    #[rust] items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
     #[rust] drop_state: Option<DropPosition>,
-    #[rust] dock_item_iter_stack: Vec<(LiveId,usize)>,
+    #[rust] dock_item_iter_stack: Vec<(LiveId, usize)>,
 }
 
 pub struct DockVisibleItemIterator<'a> {
-    stack: &'a mut Vec<(LiveId,usize)>, 
+    stack: &'a mut Vec<(LiveId, usize)>,
     dock_items: &'a ComponentMap<LiveId, DockItem>,
-    items: &'a ComponentMap<LiveId, (LiveId,WidgetRef)>,
+    items: &'a ComponentMap<LiveId, (LiveId, WidgetRef)>,
 }
 
 impl<'a> Iterator for DockVisibleItemIterator<'a> {
@@ -73,26 +73,26 @@ impl<'a> Iterator for DockVisibleItemIterator<'a> {
     type Item = (LiveId, WidgetRef);
     fn next(&mut self) -> Option<Self::Item> {
         // alright so lets fetch the item on the top of the stack
-        while let Some((item_id, index)) = self.stack.pop(){
-            if let Some(dock_item) = self.dock_items.get(&item_id){
-                match dock_item{
-                    DockItem::Splitter{a,b,..}=>{
-                        if index == 0{
-                            self.stack.push((item_id,1));
-                            self.stack.push((*a,0));
+        while let Some((item_id, index)) = self.stack.pop() {
+            if let Some(dock_item) = self.dock_items.get(&item_id) {
+                match dock_item {
+                    DockItem::Splitter {a, b, ..} => {
+                        if index == 0 {
+                            self.stack.push((item_id, 1));
+                            self.stack.push((*a, 0));
                         }
-                        else{
-                            self.stack.push((*b,0));
+                        else {
+                            self.stack.push((*b, 0));
                         }
                     }
-                    DockItem::Tabs{tabs, selected, ..}=>{
-                        if let Some(tab_id) = tabs.get(*selected){
+                    DockItem::Tabs {tabs, selected, ..} => {
+                        if let Some(tab_id) = tabs.get(*selected) {
                             self.stack.push((*tab_id, 0));
                         }
                     }
-                    DockItem::Tab{..}=>{
-                        if let Some((_,widget)) = self.items.get(&item_id){
-                            return Some((item_id,widget.clone()))
+                    DockItem::Tab {..} => {
+                        if let Some((_, widget)) = self.items.get(&item_id) {
+                            return Some((item_id, widget.clone()))
                         }
                     }
                 }
@@ -184,7 +184,7 @@ pub enum DockItem {
         a: LiveId,
         b: LiveId
     },
-    #[live {tabs: vec![], selected: 0, closable:false}]
+    #[live {tabs: vec![], selected: 0, closable: false}]
     Tabs {
         tabs: Vec<LiveId>,
         selected: usize,
@@ -243,7 +243,7 @@ impl LiveHook for Dock {
                 splitter.apply(cx, from, index, nodes);
             }
         }
-    }    
+    }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         // make sure our items exist
@@ -254,7 +254,7 @@ impl LiveHook for Dock {
             }
         }
         for (item_id, kind) in items {
-            self.item(cx, item_id, kind);
+            self.item_or_create(cx, item_id, kind);
         }
     }
     
@@ -378,15 +378,21 @@ impl Dock {
         None
     }
     
+    pub fn item(&mut self, entry_id: LiveId) -> Option<WidgetRef> {
+        if let Some(entry) = self.items.get(&entry_id) {
+            return Some(entry.1.clone())
+        }
+        None
+    }
     
-    pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+    pub fn item_or_create(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, entry_id, | cx | {
                 (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
             });
             return Some(entry.1.clone())
         }
-        else{
+        else {
             log!("PortalList template not found {}", template);
         }
         None
@@ -396,12 +402,12 @@ impl Dock {
         &self.items
     }
     
-    pub fn visible_items(&mut self) ->DockVisibleItemIterator{
+    pub fn visible_items(&mut self) -> DockVisibleItemIterator {
         self.dock_item_iter_stack.clear();
-        self.dock_item_iter_stack.push((live_id!(root),0));
-        DockVisibleItemIterator{
+        self.dock_item_iter_stack.push((live_id!(root), 0));
+        DockVisibleItemIterator {
             stack: &mut self.dock_item_iter_stack,
-            dock_items: & self.dock_items,
+            dock_items: &self.dock_items,
             items: &self.items
         }
     }
@@ -428,7 +434,7 @@ impl Dock {
         if let Some(tab_bar) = self.tab_bars.get_mut(&what_item_id) {
             tab_bar.contents_draw_list.redraw(cx);
         }
-        for (item_id, (_kind,item)) in self.items.iter_mut() {
+        for (item_id, (_kind, item)) in self.items.iter_mut() {
             if *item_id == what_item_id {
                 item.redraw(cx);
             }
@@ -463,7 +469,7 @@ impl Dock {
     fn select_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
-                DockItem::Tabs {tabs, selected,..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                DockItem::Tabs {tabs, selected, ..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
                     *selected = pos;
                     // ok now lets redraw the area of the tab
                     if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
@@ -488,7 +494,7 @@ impl Dock {
         }
     }
     
-    fn find_tab_bar_from_tab(&mut self, tab_id: LiveId) -> Option<LiveId> {
+    fn find_tab_bar_of_tab(&mut self, tab_id: LiveId) -> Option<LiveId> {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
                 DockItem::Tabs {tabs, ..} => if let Some(_) = tabs.iter().position( | v | *v == tab_id) {
@@ -510,7 +516,7 @@ impl Dock {
                     let tabs_id = *tabs_id;
                     tabs.remove(pos);
                     if tabs.len() == 0 { // unsplit
-                        if *closable{
+                        if *closable {
                             self.unsplit_tabs(cx, tabs_id);
                         }
                         self.area.redraw(cx);
@@ -604,7 +610,7 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get_mut(&pos.id) {
+                    if let Some(DockItem::Tabs {tabs, selected, ..}) = self.dock_items.get_mut(&pos.id) {
                         tabs.push(item);
                         *selected = tabs.len() - 1;
                         if let Some(tab_bar) = self.tab_bars.get(&pos.id) {
@@ -620,7 +626,7 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get_mut(&pos.id) {
+                    if let Some(DockItem::Tabs {tabs, selected, ..}) = self.dock_items.get_mut(&pos.id) {
                         tabs.push(item);
                         *selected = tabs.len() - 1;
                         if let Some(tab_bar) = self.tab_bars.get(&pos.id) {
@@ -637,8 +643,8 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    let tab_bar_id = self.find_tab_bar_from_tab(pos.id).unwrap();
-                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get_mut(&tab_bar_id) {
+                    let tab_bar_id = self.find_tab_bar_of_tab(pos.id).unwrap();
+                    if let Some(DockItem::Tabs {tabs, selected, ..}) = self.dock_items.get_mut(&tab_bar_id) {
                         if let Some(pos) = tabs.iter().position( | v | *v == pos.id) {
                             let old = tabs[pos];
                             tabs[pos] = item;
@@ -656,16 +662,16 @@ impl Dock {
         false
     }
     
-    fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String) {
+    fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
         // lets add a tab
-
+        
         if self.handle_drop(cx, abs, item, false) {
             self.dock_items.insert(item, DockItem::Tab {
                 name,
-                closable: true,
+                closable: closable.as_bool(),
                 kind
             });
-            self.item(cx, item, kind);
+            self.item_or_create(cx, item, kind);
             self.select_tab(cx, item);
             self.area.redraw(cx);
         }
@@ -682,27 +688,30 @@ impl Dock {
                     closable: true,
                     kind
                 });
-                self.item(cx, new_item, kind);
+                self.item_or_create(cx, new_item, kind);
                 self.select_tab(cx, new_item);
             }
         }
     }
     
+    fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+        self.create_tab(cx, parent, item, kind, name, closable);
+        self.select_tab(cx, item);
+    }
     
-    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String) {
+    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
         if let Some(DockItem::Tabs {tabs, ..}) = self.dock_items.get_mut(&parent) {
             tabs.push(item);
             self.dock_items.insert(item, DockItem::Tab {
                 name,
-                closable: true,
+                closable: closable.as_bool(),
                 kind
             });
-            self.select_tab(cx, item);
-            self.item(cx, item, kind);
+            self.item_or_create(cx, item, kind);
         }
     }
     
-    pub fn get_drawing_item_id(&self) -> Option<LiveId> {
+    pub fn drawing_item_id(&self) -> Option<LiveId> {
         if let Some(stack) = self.draw_state.as_ref() {
             match stack.last() {
                 Some(DrawStackItem::Tab {id}) => {
@@ -799,7 +808,7 @@ impl Widget for Dock {
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some((_,widget)) = self.items.get_mut(&path[0]) {
+        if let Some((_, widget)) = self.items.get_mut(&path[0]) {
             if path.len()>1 {
                 widget.find_widgets(&path[1..], cached, results);
             }
@@ -808,13 +817,13 @@ impl Widget for Dock {
             }
         }
         else {
-            for (_,widget) in self.items.values_mut() {
+            for (_, widget) in self.items.values_mut() {
                 widget.find_widgets(path, cached, results);
             }
         }
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
@@ -876,11 +885,11 @@ impl Widget for Dock {
                     else {panic!()}
                 }
                 Some(DrawStackItem::TabLabel {id, index}) => {
-                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get(&id) {
+                    if let Some(DockItem::Tabs {tabs, selected, ..}) = self.dock_items.get(&id) {
                         let tab_bar = self.tab_bars.get_mut(&id).unwrap();
                         if index < tabs.len() {
                             if let Some(DockItem::Tab {name, closable, ..}) = self.dock_items.get(&tabs[index]) {
-                                tab_bar.tab_bar.draw_tab(cx, tabs[index].into(), name, if *closable{TabClosable::Yes}else{TabClosable::No});
+                                tab_bar.tab_bar.draw_tab(cx, tabs[index].into(), name, if *closable {TabClosable::Yes}else {TabClosable::No});
                             }
                             stack.push(DrawStackItem::TabLabel {id, index: index + 1});
                         }
@@ -889,7 +898,9 @@ impl Widget for Dock {
                             tab_bar.contents_rect = cx.turtle().rect();
                             if tabs.len()>0 && tab_bar.contents_draw_list.begin(cx, Walk::default()).is_redrawing() {
                                 stack.push(DrawStackItem::TabContent {id});
-                                stack.push(DrawStackItem::Tab {id: tabs[*selected]});
+                                if *selected < tabs.len() {
+                                    stack.push(DrawStackItem::Tab {id: tabs[*selected]});
+                                }
                             }
                         }
                     }
@@ -899,7 +910,7 @@ impl Widget for Dock {
                     stack.push(DrawStackItem::Tab {id});
                     if let Some(DockItem::Tab {kind, ..}) = self.dock_items.get(&id) {
                         if let Some(ptr) = self.templates.get(&kind) {
-                            let (_,entry) = self.items.get_or_insert(cx, id, | cx | {
+                            let (_, entry) = self.items.get_or_insert(cx, id, | cx | {
                                 (*kind, WidgetRef::new_from_ptr(cx, Some(*ptr)))
                             });
                             entry.draw_widget(cx) ?;
@@ -934,6 +945,25 @@ impl Widget for Dock {
 pub struct DockRef(WidgetRef);
 
 impl DockRef {
+    
+    
+    pub fn item(&self, entry_id: LiveId) -> WidgetRef {
+        if let Some(mut dock) = self.borrow_mut() {
+            if let Some(item) = dock.item(entry_id) {
+                return item
+            }
+        }
+        WidgetRef::empty()
+    }
+    
+    pub fn item_or_create(&self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+        if let Some(mut dock) = self.borrow_mut() {
+            return dock.item_or_create(cx, entry_id, template);
+        }
+        None
+    }
+    
+    
     pub fn close_tab(&self, cx: &mut Cx, tab_id: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.close_tab(cx, tab_id, false);
@@ -989,9 +1019,9 @@ impl DockRef {
         }
     }
     
-    pub fn get_drawing_item_id(&self) -> Option<LiveId> {
+    pub fn drawing_item_id(&self) -> Option<LiveId> {
         if let Some(dock) = self.borrow() {
-            return dock.get_drawing_item_id();
+            return dock.drawing_item_id();
         }
         None
     }
@@ -1008,16 +1038,35 @@ impl DockRef {
         }
     }
     
-    pub fn drop_create(&self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String) {
+    pub fn drop_create(&self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.drop_create(cx, abs, item, kind, name);
+            dock.drop_create(cx, abs, item, kind, name, closable);
         }
     }
     
-    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String) {
-
+    pub fn create_and_select_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.create_tab(cx, parent, item, kind, name);
+            dock.create_and_select_tab(cx, parent, item, kind, name, closable);
+        }
+    }
+    
+    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.create_tab(cx, parent, item, kind, name, closable);
+        }
+    }
+    
+    pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<LiveId> {
+        if let Some(mut dock) = self.borrow_mut() {
+            return dock.find_tab_bar_of_tab(tab_id);
+        }
+        None
+    }
+    
+    
+    pub fn select_tab(&self, cx: &mut Cx, item: LiveId) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.select_tab(cx, item);
         }
     }
     

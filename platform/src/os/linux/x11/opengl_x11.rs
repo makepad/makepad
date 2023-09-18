@@ -1,24 +1,28 @@
 use {
     std::{
         mem,
-        os::raw::{c_ulong, c_void},
-        ptr,
-        ffi::{CStr, CString},
+        os::raw::{c_long, c_void},
+        ffi::{CString},
+        os::{self, fd::{AsRawFd as _, FromRawFd as _}},
     },
     self::super::{
-        glx_sys,
         x11_sys,
         xlib_window::XlibWindow,
     },
-    self::super::super::{ 
+    self::super::super::{
+        egl_sys::{self, LibEgl},
         gl_sys,
+        opengl::CxOsTexture,
     },
     crate::{
         cx::Cx,
+        cx_stdin::linux_dma_buf,
         window::WindowId,
+        makepad_error_log::*,
         makepad_math::{DVec2},
         pass::{PassClearColor, PassClearDepth, PassId},
         event::*,
+        texture::{Texture, TextureDesc},
     },
 };
 
@@ -28,20 +32,20 @@ impl Cx {
         &mut self,
         pass_id: PassId,
         opengl_window: &mut OpenglWindow,
-        opengl_cx: &OpenglCx,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         self.setup_render_pass(pass_id);
         
-        let window = opengl_window.xlib_window.window.unwrap();
+        let egl_surface = opengl_window.egl_surface;
         
         self.passes[pass_id].paint_dirty = false;
-         
+
         let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
         let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
         unsafe {
-            glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
+            let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
+            (opengl_cx.libegl.eglMakeCurrent.unwrap())(opengl_cx.egl_display, egl_surface, egl_surface, opengl_cx.egl_context);
             gl_sys::Viewport(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
         
@@ -78,181 +82,319 @@ impl Cx {
             &mut zbias,
             zbias_step,
         );
-        
+
         unsafe {
-            glx_sys::glXSwapBuffers(opengl_cx.display, window);
+            let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
+            (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface);
+        }
+    }
+
+    pub fn get_shared_texture_dma_buf_image(&self, texture: &Texture) -> linux_dma_buf::Image<linux_dma_buf::RemoteFd> {
+        self.textures[texture.texture_id()].os.dma_buf_exported_image
+            .as_ref().expect("OpenGL texture has not been exported via EGL+DMA-BUF")
+            .as_remote()
+    }
+}
+
+
+impl CxOsTexture {
+    pub fn update_shared_texture(
+        &mut self,
+        opengl_cx: &OpenglCx,
+        desc: &TextureDesc,
+    ) {
+        // we need a width/height for this one.
+        if desc.width.is_none() || desc.height.is_none() {
+            log!("Shared texture width/height is undefined, cannot allocate it");
+            return
+        }
+
+        let width = desc.width.unwrap() as u64;
+        let height = desc.height.unwrap() as u64;
+
+        if self.gl_texture.is_some() && self.width == width && self.height == height && self.alloc_desc == *desc {
+            return;
+        }
+
+        self.alloc_desc = desc.clone();
+        self.width = width;
+        self.height = height;
+
+        unsafe {
+            self.alloc_desc = desc.clone();
+            self.width = width;
+            self.height = height;
+
+            if self.gl_texture.is_none() {
+                let mut gl_texture = std::mem::MaybeUninit::uninit();
+                gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                self.gl_texture = Some(gl_texture.assume_init());
+            }
+
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
+
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+            gl_sys::TexImage2D(
+                gl_sys::TEXTURE_2D,
+                0,
+                gl_sys::RGBA as i32,
+                width as i32,
+                height as i32,
+                0,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                std::ptr::null()
+            );
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+
+            let egl_image = (opengl_cx.libegl.eglCreateImageKHR.unwrap())(
+                opengl_cx.egl_display,
+                opengl_cx.egl_context,
+                egl_sys::EGL_GL_TEXTURE_2D_KHR,
+                self.gl_texture.unwrap() as egl_sys::EGLClientBuffer,
+                std::ptr::null(),
+            );
+            assert!(!egl_image.is_null(), "eglCreateImageKHR failed");
+
+            let (mut fourcc, mut num_planes) = (0, 0);
+            assert!(
+                (
+                    opengl_cx.libegl.eglExportDMABUFImageQueryMESA
+                        .expect("eglExportDMABUFImageQueryMESA unsupported")
+                )(
+                    opengl_cx.egl_display,
+                    egl_image,
+                    &mut fourcc as *mut u32 as *mut i32,
+                    &mut num_planes,
+                    std::ptr::null_mut(),
+                ) != 0,
+                "eglExportDMABUFImageQueryMESA failed",
+            );
+            assert!(
+                num_planes == 1,
+                "planar DRM format {:?} ({fourcc:#x}) unsupported (num_planes={num_planes})",
+                std::str::from_utf8(&u32::to_le_bytes(fourcc))
+            );
+
+            // HACK(eddyb) `modifiers` are reported per-plane, so to avoid UB,
+            // a second query call is used *after* the `num_planes == 1` check.
+            let mut modifiers = 0;
+            assert!(
+                (opengl_cx.libegl.eglExportDMABUFImageQueryMESA.unwrap())(
+                    opengl_cx.egl_display,
+                    egl_image,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut modifiers,
+                ) != 0,
+                "eglExportDMABUFImageQueryMESA failed",
+            );
+
+            let (mut dma_buf_fd, mut offset, mut stride) = (0, 0, 0);
+            assert!(
+                (opengl_cx.libegl.eglExportDMABUFImageMESA.unwrap())(
+                    opengl_cx.egl_display,
+                    egl_image,
+                    &mut dma_buf_fd,
+                    &mut stride as *mut u32 as *mut i32,
+                    &mut offset as *mut u32 as *mut i32,
+                ) != 0,
+                "eglExportDMABUFImageMESA failed",
+            );
+
+            self.dma_buf_exported_image = Some(Box::new(linux_dma_buf::Image {
+                width: width.try_into().unwrap(),
+                height: height.try_into().unwrap(),
+                drm_format: linux_dma_buf::DrmFormat {
+                    fourcc,
+                    modifiers,
+                },
+                planes: [linux_dma_buf::ImagePlane {
+                    dma_buf_fd: os::fd::OwnedFd::from_raw_fd(dma_buf_fd),
+                    offset,
+                    stride,
+                }],
+            }));
+        }
+    }
+
+    pub fn update_from_shared_dma_buf_image(
+        &mut self,
+        opengl_cx: &OpenglCx,
+        dma_buf_image: &linux_dma_buf::Image<os::fd::OwnedFd>,
+    ) {
+        // HACK(eddyb) drain error queue, so that we can check erors below.
+        while unsafe { gl_sys::GetError() } != 0 {}
+        opengl_cx.make_current();
+        while unsafe { gl_sys::GetError() } != 0 {}
+
+        let linux_dma_buf::Image { width, height, drm_format, planes: [ref plane0] } = *dma_buf_image;
+
+        let image_attribs = [
+            egl_sys::EGL_LINUX_DRM_FOURCC_EXT,
+            drm_format.fourcc,
+            egl_sys::EGL_WIDTH,
+            width,
+            egl_sys::EGL_HEIGHT,
+            height,
+            egl_sys::EGL_DMA_BUF_PLANE0_FD_EXT,
+            plane0.dma_buf_fd.as_raw_fd() as u32,
+            egl_sys::EGL_DMA_BUF_PLANE0_OFFSET_EXT,
+            plane0.offset,
+            egl_sys::EGL_DMA_BUF_PLANE0_PITCH_EXT,
+            plane0.stride,
+            egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+            drm_format.modifiers as u32,
+            egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
+            (drm_format.modifiers >> 32) as u32,
+            egl_sys::EGL_NONE,
+        ];
+        let egl_image = unsafe { (opengl_cx.libegl.eglCreateImageKHR.unwrap())(
+            opengl_cx.egl_display,
+            std::ptr::null_mut(),
+            egl_sys::EGL_LINUX_DMA_BUF_EXT,
+            std::ptr::null_mut(),
+            image_attribs.as_ptr() as _,
+        ) };
+        assert!(!egl_image.is_null(), "eglCreateImageKHR failed");
+
+        self.width = width as u64;
+        self.height = height as u64;
+
+        unsafe {
+            let gl_texture = *self.gl_texture.get_or_insert_with(|| {
+                let mut gl_texture = std::mem::MaybeUninit::uninit();
+                gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                assert_eq!(gl_sys::GetError(), 0, "glGenTextures failed");
+                gl_texture.assume_init()
+            });
+
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, gl_texture);
+            assert_eq!(gl_sys::GetError(), 0, "glBindTexture({gl_texture}) failed");
+
+            (opengl_cx.libegl.glEGLImageTargetTexture2DOES.unwrap())(gl_sys::TEXTURE_2D, egl_image);
+            assert_eq!(gl_sys::GetError(), 0, "glEGLImageTargetTexture2DOES failed");
+
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
 }
 
+// FIXME(eddyb) move this out of `linux::x11`, since it's mostly generic EGL.
 pub struct OpenglCx {
-    pub display: *mut x11_sys::Display,
-    pub context: glx_sys::GLXContext,
-    pub visual_info: x11_sys::XVisualInfo,
-    pub hidden_window: x11_sys::Window,
+    libegl: LibEgl,
+    egl_display: egl_sys::EGLDisplay,
+    egl_config: egl_sys::EGLConfig,
+    egl_context: egl_sys::EGLContext,
+
+    egl_platform: egl_sys::EGLenum,
+    egl_platform_display: *mut c_void,
 }
 
 impl OpenglCx {
-    pub fn new(display: *mut x11_sys::Display) -> OpenglCx {
-        unsafe {
-            // Query GLX version.
-            let mut major = 0;
-            let mut minor = 0;
-            assert!(
-                glx_sys::glXQueryVersion(display, &mut major, &mut minor) >= 0,
-                "can't query GLX version"
-            );
-            
-            // Check that GLX version number is 1.4 or higher.
-            assert!(
-                major > 1 || major == 1 && minor >= 4,
-                "GLX version must be 1.4 or higher, got {}.{}",
-                major,
-                minor,
-            );
-            
-            let screen = x11_sys::XDefaultScreen(display);
-            
-            // Query extensions string
-            let supported_extensions = glx_sys::glXQueryExtensionsString(display, screen);
-            assert!(
-                !supported_extensions.is_null(),
-                "can't query GLX extensions string"
-            );
-            let supported_extensions = CStr::from_ptr(supported_extensions).to_str().unwrap();
-            
-            // Check that required extensions are supported.
-            let required_extensions = &["GLX_ARB_get_proc_address", "GLX_ARB_create_context"];
-            for required_extension in required_extensions {
-                assert!(
-                    supported_extensions.contains(required_extension),
-                    "extension {} is required, but not supported",
-                    required_extension,
-                );
-            }
-            
-            // Load GLX function pointers.
-            #[allow(non_snake_case)]
-            let glXCreateContextAttribsARB = mem::transmute::<
-                _,
-                glx_sys::PFNGLXCREATECONTEXTATTRIBSARBPROC,
-            >(glx_sys::glXGetProcAddressARB(
-                CString::new("glXCreateContextAttribsARB")
-                    .unwrap()
-                    .to_bytes_with_nul()
-                    .as_ptr(),
-            ))
-                .expect("can't load glXCreateContextAttribsARB function pointer");
-            
-            // Load GL function pointers.
-            gl_sys::load_with( | symbol | {
-                glx_sys::glXGetProcAddressARB(
-                    CString::new(symbol).unwrap().to_bytes_with_nul().as_ptr(),
-                )
-                    .map_or(ptr::null(), | ptr | ptr as *const c_void)
-            });
-            
-            // Choose framebuffer configuration.
-            let config_attribs = &[
-                glx_sys::GLX_DOUBLEBUFFER as i32,
-                glx_sys::True as i32,
-                glx_sys::GLX_RED_SIZE as i32,
-                8,
-                glx_sys::GLX_GREEN_SIZE as i32,
-                8,
-                glx_sys::GLX_BLUE_SIZE as i32,
-                8,
-                //glx_sys::GLX_ALPHA_SIZE as i32,
-                //8,
-                glx_sys::GLX_DEPTH_SIZE as i32,
-                24,
-                glx_sys::None as i32,
-            ];
-            let mut config_count = 0;
-            let configs = glx_sys::glXChooseFBConfig(
-                display,
-                x11_sys::XDefaultScreen(display),
-                config_attribs.as_ptr(),
-                &mut config_count,
-            );
-            if configs.is_null() {
-                panic!("can't choose framebuffer configuration");
-            }
-            let config = *configs;
-            x11_sys::XFree(configs as *mut c_void);
-            
-            // Create GLX context.
-            let context_attribs = &[
-                glx_sys::GLX_CONTEXT_MAJOR_VERSION_ARB as i32,
-                3,
-                glx_sys::GLX_CONTEXT_MINOR_VERSION_ARB as i32,
-                0,
-                glx_sys::GLX_CONTEXT_PROFILE_MASK_ARB as i32,
-                glx_sys::GLX_CONTEXT_ES_PROFILE_BIT_EXT as i32,
-                glx_sys::None as i32
-            ];
-            let context = glXCreateContextAttribsARB(
-                display,
-                config,
-                ptr::null_mut(),
-                glx_sys::True as i32,
-                context_attribs.as_ptr(),
-            );
-            
-            // Get visual from framebuffer configuration.
-            let visual_info_ptr = glx_sys::glXGetVisualFromFBConfig(display, config);
-            assert!(
-                !visual_info_ptr.is_null(),
-                "can't get visual from framebuffer configuration"
-            );
-            let visual_info = *visual_info_ptr;
-            x11_sys::XFree(visual_info_ptr as *mut c_void);
-            
-            let root_window = x11_sys::XRootWindow(display, screen);
-            
-            // Create hidden window compatible with visual
-            //
-            // We need a hidden window because we sometimes want to create OpenGL resources, such as
-            // shaders, when Makepad does not have any windows open. In cases such as these, we need
-            // *some* window to make the OpenGL context current on.
-            let mut attributes = mem::zeroed::<x11_sys::XSetWindowAttributes>();
-            
-            // We need a color map that is compatible with our visual. Otherwise, the call to
-            // XCreateWindow below will fail.
-            attributes.colormap = x11_sys::XCreateColormap(
-                display,
-                root_window,
-                visual_info.visual,
-                x11_sys::AllocNone as i32
-            );
-            let hidden_window = x11_sys::XCreateWindow(
-                display,
-                root_window,
-                0,
-                0,
-                16,
-                16,
-                0,
-                visual_info.depth,
-                x11_sys::InputOutput as u32,
-                visual_info.visual,
-                x11_sys::CWColormap as c_ulong,
-                &mut attributes,
-            );
-            
-            // To make sure the window stays hidden, we simply never call XMapWindow on it.
-            
-            OpenglCx {
-                display,
-                context,
-                visual_info,
-                hidden_window,
-            }
+    pub unsafe fn from_egl_platform_display<T>(
+        egl_platform: egl_sys::EGLenum,
+        egl_platform_display: *mut T,
+    ) -> OpenglCx {
+        let egl_platform_display = egl_platform_display as *mut c_void;
+
+        // Load EGL function pointers.
+        let libegl = LibEgl::try_load().expect("can't load LibEGL");
+
+        let mut major = 0;
+        let mut minor = 0;
+
+        let egl_display = (libegl.eglGetPlatformDisplayEXT.unwrap())(
+            egl_platform,
+            egl_platform_display,
+            std::ptr::null(),
+        );
+        assert!(!egl_display.is_null(), "can't get EGL platform display");
+
+        assert!(
+            (libegl.eglInitialize.unwrap())(egl_display, &mut major, &mut minor) != 0,
+            "can't initialize EGL",
+        );
+
+        assert!(
+            (libegl.eglBindAPI.unwrap())(egl_sys::EGL_OPENGL_ES_API) != 0,
+            "can't bind EGL_OPENGL_ES_API",
+        );
+
+        // Choose framebuffer configuration.
+        let cfg_attribs = [
+            egl_sys::EGL_RED_SIZE,
+            8,
+            egl_sys::EGL_GREEN_SIZE,
+            8,
+            egl_sys::EGL_BLUE_SIZE,
+            8,
+            egl_sys::EGL_ALPHA_SIZE,
+            8,
+            // egl_sys::EGL_DEPTH_SIZE,
+            // 24,
+            // egl_sys::EGL_STENCIL_SIZE,
+            // 8,
+            egl_sys::EGL_RENDERABLE_TYPE,
+            egl_sys::EGL_OPENGL_ES2_BIT,
+            egl_sys::EGL_NONE
+        ];
+
+        let mut egl_config = 0 as egl_sys::EGLConfig;
+        let mut matched_egl_configs = 0;
+        assert!(
+            (libegl.eglChooseConfig.unwrap())(
+                egl_display,
+                cfg_attribs.as_ptr() as _,
+                &mut egl_config,
+                1,
+                &mut matched_egl_configs
+            ) != 0 && matched_egl_configs == 1,
+            "eglChooseConfig failed",
+        );
+
+        // Create EGL context.
+        let ctx_attribs = [
+            egl_sys::EGL_CONTEXT_CLIENT_VERSION,
+            2,
+            egl_sys::EGL_NONE
+        ];
+
+        let egl_context = (libegl.eglCreateContext.unwrap())(
+            egl_display,
+            egl_config,
+            egl_sys::EGL_NO_CONTEXT,
+            ctx_attribs.as_ptr() as _,
+        );
+        assert!(!egl_context.is_null(), "eglCreateContext failed");
+
+        // Load GL function pointers.
+        gl_sys::load_with(|symbol| {
+            let s = CString::new(symbol).unwrap();
+            (libegl.eglGetProcAddress.unwrap())(s.as_ptr())
+        });
+
+        OpenglCx {
+            libegl,
+            egl_display,
+            egl_config,
+            egl_context,
+
+            egl_platform,
+            egl_platform_display,
         }
     }
 
-    pub fn make_current(&self){
-        unsafe {glx_sys::glXMakeCurrent(self.display, self.hidden_window, self.context);}
+    pub fn make_current(&self) {
+        unsafe {
+            (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                egl_sys::EGL_NO_SURFACE,
+                egl_sys::EGL_NO_SURFACE,
+                self.egl_context,
+            );
+        }
     }
 }
 
@@ -264,6 +406,7 @@ pub struct OpenglWindow {
     pub opening_repaint_count: u32,
     pub cal_size: DVec2,
     pub xlib_window: Box<XlibWindow>,
+    pub egl_surface: egl_sys::EGLSurface,
 }
 
 impl OpenglWindow {
@@ -274,24 +417,70 @@ impl OpenglWindow {
         position: Option<DVec2>,
         title: &str
     ) -> OpenglWindow {
-        
+        // Checked "downcast" of the EGL platform display to a X11 display.
+        assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_X11_EXT);
+        let display = opengl_cx. egl_platform_display as *mut x11_sys::Display;
+
         let mut xlib_window = Box::new(XlibWindow::new(window_id));
-        
-        let visual_info = unsafe {mem::transmute(opengl_cx.visual_info)};
+
+        // Get X11 visual from EGL configuration.
+        let visual_info = unsafe {
+            let mut native_visual_id = 0;
+            assert!(
+                (opengl_cx.libegl.eglGetConfigAttrib.unwrap())(
+                    opengl_cx.egl_display,
+                    opengl_cx.egl_config,
+                    egl_sys::EGL_NATIVE_VISUAL_ID as _,
+                    &mut native_visual_id,
+                ) != 0,
+                "eglGetConfigAttrib(EGL_NATIVE_VISUAL_ID) failed",
+            );
+
+            let mut visual_template = mem::zeroed::<x11_sys::XVisualInfo>();
+            visual_template.visualid = native_visual_id as _;
+
+            let mut count = 0;
+            let visual_info_ptr = x11_sys::XGetVisualInfo(
+                display,
+                x11_sys::VisualIDMask as c_long,
+                &mut visual_template,
+                &mut count,
+            );
+            assert!(
+                !visual_info_ptr.is_null() && count == 1,
+                "can't get visual from EGL configuration with XGetVisualInfo",
+            );
+
+            let visual_info = *visual_info_ptr;
+            x11_sys::XFree(visual_info_ptr as *mut c_void);
+            visual_info
+        };
+
         let custom_window_chrome = false;
         xlib_window.init(title, inner_size, position, visual_info, custom_window_chrome);
-        
+
+        let egl_surface = unsafe {
+            (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
+                opengl_cx.egl_display,
+                opengl_cx.egl_config,
+                xlib_window.window.unwrap(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!egl_surface.is_null(), "eglCreateWindowSurface failed");
+
         OpenglWindow {
             first_draw: true,
             window_id,
             opening_repaint_count: 0,
             cal_size: DVec2::default(),
             window_geom: xlib_window.get_window_geom(),
-            xlib_window
+            xlib_window,
+            egl_surface,
         }
     }
     
-    pub fn resize_buffers(&mut self, _opengl_cx: &OpenglCx) -> bool {
+    pub fn resize_buffers(&mut self) -> bool {
         let cal_size = DVec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor

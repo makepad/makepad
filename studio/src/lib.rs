@@ -4,13 +4,6 @@ pub mod app;
 pub mod file_system;
 pub mod build_manager;
 
-//pub mod code_editor;
-//pub mod editors;
-//pub mod editor_state;
-//pub mod log_view;
-//pub mod rust_editor;
-pub mod run_view;
-
 //pub use makepad_code_editor;
 pub use makepad_file_protocol;
 pub use makepad_file_server;

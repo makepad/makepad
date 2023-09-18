@@ -58,7 +58,7 @@ impl FoldButton {
                     self.animator_play(cx, id!(open.yes));
                     dispatch_action(cx, FoldButtonAction::Opening)
                 }
-                self.animator_play(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.on));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
