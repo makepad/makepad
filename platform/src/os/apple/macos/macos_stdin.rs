@@ -134,20 +134,20 @@ impl Cx {
                         }
                         HostToStdin::WindowSize(ws) => {
 
-                            log!("got WindowSize {},{}, fetching XPC textures",ws.width,ws.height);
+                            log!("fetching XPC textures with indices {} and {}",ws.swapchain_handles[0],ws.swapchain_handles[1]);
 
                             // start fetching new texture objects from XPC
-                            fetch_xpc_service_texture(service_proxy.as_id(),0,0,Box::new({
+                            fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handles[0],0,Box::new({
                                 let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[0]);
                                 move |objcid,_| {
-                                    log!("fetched XPC texture 0: {:?}",objcid.as_id());
+                                    log!("fetched XPC texture: {:?}",objcid.as_id());
                                     *maybe_new_handle.lock().unwrap() = Some(objcid);
                                 }
                             }));
-                            fetch_xpc_service_texture(service_proxy.as_id(),1,0,Box::new({
+                            fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handles[1],0,Box::new({
                                 let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[1]);
                                 move |objcid,_| {
-                                    log!("fetched XPC texture 1: {:?}",objcid.as_id());
+                                    log!("fetched XPC texture: {:?}",objcid.as_id());
                                     *maybe_new_handle.lock().unwrap() = Some(objcid);
                                 }
                             }));
