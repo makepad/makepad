@@ -15,7 +15,7 @@ pub struct Image {
     #[live] draw_bg: DrawQuad,
     #[live] min_width: i64,
     #[live] min_height: i64,
-    
+    #[live(1.0)] width_scale: f64,
     #[live] fit: ImageFit,
     #[live] source: LiveDependency,
     #[live] texture: Option<Texture>,
@@ -69,12 +69,15 @@ impl Image {
         let (width, height) = if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
             let desc = image_texture.get_desc(cx);
-            (desc.width.unwrap_or(self.min_width as usize) as f64 / dpi, desc.height.unwrap_or(self.min_height as usize) as f64 / dpi)
+            let width = desc.width.unwrap_or(self.min_width as usize) as f64 / dpi;
+            let height = desc.height.unwrap_or(self.min_height as usize) as f64 / dpi;
+            (width*self.width_scale,height)
         }
         else {
             self.draw_bg.draw_vars.empty_texture(0);
             (self.min_width as f64 / dpi, self.min_height as f64 / dpi)
         };
+        
         let aspect = width / height;
         match self.fit {
             ImageFit::Stretch => {},
