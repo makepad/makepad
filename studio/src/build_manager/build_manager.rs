@@ -255,9 +255,9 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildManagerAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dock:&DockRef) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
-        self.handle_event_with(cx, event, &mut | _, action | actions.push(action));
+        self.handle_event_with(cx, event, dock, &mut | _, action | actions.push(action));
         actions
     }
     
@@ -274,7 +274,7 @@ impl BuildManager {
         let _ = self.send_file_change.send(live_file_change);
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dock:&DockRef, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if let Event::Signal = event{
             if let Ok(mut addr) = self.recv_external_ip.try_recv(){
                 addr.set_port(self.http_port as u16);
@@ -293,6 +293,16 @@ impl BuildManager {
             }*/
             dispatch_event(cx, BuildManagerAction::RedrawLog)
         }
+        
+        // process events on all run_views
+        if let Some(mut dock) = dock.borrow_mut(){
+            for (id, (_, item)) in dock.items().iter(){
+                if let Some(mut run_view) = item.as_run_view().borrow_mut(){
+                    run_view.pump_event_loop(cx, event, *id, self);
+                }
+            }
+        }
+        
         let log = &mut self.log;
         let active = &mut self.active;
         //let editor_state = &mut state.editor_state;
