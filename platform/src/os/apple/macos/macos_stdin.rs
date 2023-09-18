@@ -1,9 +1,5 @@
 use {
     std::{
-        sync::{
-            Arc,
-            Mutex,
-        },
         io,
         io::prelude::*,
         io::BufReader,
@@ -42,20 +38,20 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_send_draw_complete(present_index: &Arc<Mutex<usize>>){
+    pub (crate) fn stdin_send_draw_complete(buf:u32){
 
         // get the current present index
-        let mut index = present_index.lock().unwrap();
-        log!("frame {} ready, sending message to host",index);
+        //let mut index = present_index.lock().unwrap();
+        //log!("frame {} ready, sending message to host",index);
 
         // send message
-        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(*index).to_json().as_bytes());
+        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(buf as usize).to_json().as_bytes());
 
         // flip swapchain
-        *index = 1 - *index;
+        //*index = 1 - *index;
     }
     
-    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx, time:f32) {
+    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx, texture:Texture, time:f32, swapchain_front:u32) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -65,22 +61,22 @@ impl Cx {
                 CxPassParent::Window(_) => {
 
                     // make sure rendering is done onto the right texture
-                    if let Some(swapchain) = self.os.swapchain.as_ref() {
-                        let present_index = *self.os.present_index.lock().unwrap();
-                        let texture_id = swapchain[present_index].texture_id();
-                        let window = &mut self.windows[CxWindowPool::id_zero()];
-                        let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                        pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id,
-                        }];
-                    }
-                    else {
-                        log!("wanting to paint, but there is no swapchain yet");
-                    }
+                    //if let Some(swapchain) = self.os.swapchain.as_ref() {
+                        //let present_index = *self.os.present_index.lock().unwrap();
+                    let texture_id = texture.texture_id();//swapchain[present_index].texture_id();
+                    let window = &mut self.windows[CxWindowPool::id_zero()];
+                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                    pass.color_textures = vec![CxPassColorTexture {
+                        clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        texture_id,
+                    }];
+                    //}
+                    //else {
+                   //     log!("wanting to paint, but there is no swapchain yet");
+                    //}
                                 
                     // render to swapchain
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
+                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain(swapchain_front));
 
                     // and then wait for GPU, which calls stdin_send_draw_complete when its done
                 }
@@ -151,21 +147,11 @@ impl Cx {
                         }
                         HostToStdin::WindowSize(ws) => {
 
-                            // start fetching new texture objects from XPC
-                            fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handles[0],0,Box::new({
-                                let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[0]);
-                                move |objcid,_| {
-                                    *maybe_new_handle.lock().unwrap() = Some(objcid);
-                                }
-                            }));
-                            fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handles[1],0,Box::new({
-                                let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[1]);
-                                move |objcid,_| {
-                                    *maybe_new_handle.lock().unwrap() = Some(objcid);
-                                }
-                            }));
+                            // update the swapchain resources
+                            
 
-                            // The textures will be placed in cx.os.maybe_new_handles[] by the XPC service and HostToStdin::Tick checks if they have arrived to process them further
+                            // and reset present index
+                            //*self.os.present_index.lock().unwrap() = 0;
 
                             // and window size might have changed
                             if window_size != Some(ws) {
@@ -183,37 +169,29 @@ impl Cx {
                         }
                         HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(ws) = window_size {
                             
-                            // check if new handles have already arrived from XPC
-                            let maybe_handle0 = self.os.maybe_new_handles[0].lock().unwrap().clone();
-                            let maybe_handle1 = self.os.maybe_new_handles[1].lock().unwrap().clone();
-                            if maybe_handle0.is_some() && maybe_handle1.is_some() {
-
-                                // make sure the corresponding Metal textures exist
-                                let new_textures = [Texture::new(self),Texture::new(self),];
-                                let cxtexture = &mut self.textures[new_textures[0].texture_id()];
-                                cxtexture.os.update_from_shared_handle(
+                            let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
+                            
+                            // lets fetch the framebuffers
+                            fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handle,0,Box::new({
+                                let tx_fb = tx_fb.clone();
+                                move |objcid,_uid| {
+                                    let _ = tx_fb.send(objcid);
+                                }
+                            })); 
+                            let mut tex = None;
+                            while let Ok(fb) = rx_fb.recv(){
+                                let texture = Texture::new(self);
+                                let cxtexture = &mut self.textures[texture.texture_id()];
+                                if !cxtexture.os.update_from_shared_handle(
                                     metal_cx,
-                                    maybe_handle0.as_ref().unwrap().as_id(),
-                                    ws.width as u64,
-                                    ws.height as u64,
-                                );
-                                let cxtexture = &mut self.textures[new_textures[1].texture_id()];
-                                cxtexture.os.update_from_shared_handle(
-                                    metal_cx,
-                                    maybe_handle1.as_ref().unwrap().as_id(),
-                                    ws.width as u64,
-                                    ws.height as u64,
-                                );
-
-                                // update the swapchain resources
-                                self.os.swapchain = Some(new_textures);
-
-                                // and reset present index
-                                *self.os.present_index.lock().unwrap() = 0;
-
-                                // clear the handles, until the next resize comes in
-                                *self.os.maybe_new_handles[0].lock().unwrap() = None;
-                                *self.os.maybe_new_handles[1].lock().unwrap() = None;
+                                    fb.as_id(),
+                                    (ws.width * ws.dpi_factor) as u64 ,
+                                    (ws.height * ws.dpi_factor) as u64,
+                                ){
+                                    break;
+                                }
+                                tex = Some(texture);
+                                break
                             }
 
                             // check signals
@@ -238,7 +216,9 @@ impl Cx {
                                 self.mtl_compile_shaders(metal_cx);
                             }
 
-                            self.stdin_handle_repaint(metal_cx, time as f32);
+                            if tex.is_some(){
+                                self.stdin_handle_repaint(metal_cx, tex.unwrap(), time as f32, ws.swapchain_front);
+                            }
                         }
                     }
                     Err(err) => { // we should output a log string
