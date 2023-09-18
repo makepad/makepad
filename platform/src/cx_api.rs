@@ -23,6 +23,7 @@ use {
             Area, 
             //DrawListArea
         },
+        texture::Texture,
         menu::Menu,
         pass::{
             PassId,
@@ -101,7 +102,7 @@ impl Cx {
         }
         Err(format!("Dependency not loaded {}", path))
     }
-    
+    pub fn null_texture(&self)->Texture{self.null_texture.clone()}
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn os_type(&self) -> &OsType {&self.os_type}

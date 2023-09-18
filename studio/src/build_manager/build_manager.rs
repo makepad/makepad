@@ -282,7 +282,7 @@ impl BuildManager {
             }
         }
         
-        if self.recompile_timer.is_event(event) {
+        if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
             self.clear_log();
             /*state.editor_state.messages.clear();

@@ -654,13 +654,14 @@ impl MacosApp {
         
         let len = get_macos_app_global().timers.len() ;
         for i in 0..len {
+            let time = get_macos_app_global().time_now();
             if get_macos_app_global().timers[i].nstimer == nstimer {
                 let timer_id = get_macos_app_global().timers[i].timer_id;
                 if !get_macos_app_global().timers[i].repeats {
                     get_macos_app_global().timers.remove(i);
                 }
                 
-                MacosApp::do_callback(MacosEvent::Timer(TimerEvent {timer_id: timer_id}));
+                MacosApp::do_callback(MacosEvent::Timer(TimerEvent {time, timer_id: timer_id}));
                 // break the eventloop if its in blocked mode
                 unsafe {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];

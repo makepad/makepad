@@ -198,6 +198,7 @@ pub struct NextFrameEvent {
 
 #[derive(Clone, Debug)]
 pub struct TimerEvent {
+    pub time: f64,
     pub timer_id: u64
 }
 
@@ -240,13 +241,13 @@ impl NextFrame{
 pub struct Timer(pub u64);
 
 impl Timer {
-    pub fn is_event(&self, event:&Event)->bool{
+    pub fn is_event(&self, event:&Event)->Option<TimerEvent>{
         if let Event::Timer(te) = event{
             if te.timer_id == self.0{
-                return true
+                return Some(te.clone())
             }
         }
-        false
+        None
     }
     
     pub fn empty() -> Timer {
