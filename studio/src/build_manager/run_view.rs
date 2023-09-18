@@ -258,7 +258,10 @@ impl RunView {
                             cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc1);
                         }
 
-                        cx.get_shared_texture_dma_buf_image(&texture)
+                        [
+                            cx.get_shared_texture_dma_buf_image(&v.swapchain[0]),
+                            cx.get_shared_texture_dma_buf_image(&v.swapchain[1]),
+                        ]
                     };
 
                     // send size update to client
