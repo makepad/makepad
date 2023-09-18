@@ -16,6 +16,7 @@ use crate::{
     texture::{ 
         TextureFormat,
         TextureDesc,
+        TextureId,
     },  
     windows::{
         core::{
@@ -435,11 +436,11 @@ impl Cx {
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
     
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId,  d3d11_cx: &D3d11Cx,fb_texture: &Texture) {
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId,  d3d11_cx: &D3d11Cx,texture_id: TextureId) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        let render_target_view = self.textures[fb_texture.texture_id()].os.render_target_view.clone();
+        let render_target_view = self.textures[texture_id].os.render_target_view.clone();
         self.setup_pass_render_targets(pass_id, &render_target_view, d3d11_cx);
         
         let mut zbias = 0.0;
