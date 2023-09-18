@@ -21,11 +21,6 @@ use {
                         DATADIR_GET,
                     },
                     SystemServices::MODIFIERKEYS_FLAGS,
-                    Memory::{
-                        GlobalLock,
-                        GlobalUnlock,
-                        GlobalSize,
-                    },
                 },
                 Foundation::{
                     WPARAM,
@@ -39,7 +34,10 @@ use {
                 },
             },
         },
-        os::windows::dataobject::*,
+        os::windows::{
+            dataobject::*,
+            dropfiles::*,
+        },
     },
 };
 
@@ -172,9 +170,7 @@ implement_com!{
 }
 
 
-// convert foreign IDataObject from drag operations to makepad DragItem
-
-fn idataobject_to_dragitem(data_object: &IDataObject) -> Option<DragItem> {
+fn create_dragitem_from_idataobject(data_object: &IDataObject) -> Option<DragItem> {
 
     // obtain enumerator for all DATADIR_GET formats of this object
     let enum_formats = unsafe { data_object.EnumFormatEtc(DATADIR_GET.0 as u32).unwrap() };
@@ -200,93 +196,14 @@ fn idataobject_to_dragitem(data_object: &IDataObject) -> Option<DragItem> {
     // if found...
     if let Some(format) = format {
         
-        // get data medium of the object in CF_HDROP format
+        // get data medium of the object
         let medium = unsafe { data_object.GetData(format).unwrap() };
 
-        // examine the HDROP structure
-        let hglobal_size = unsafe { GlobalSize(medium.u.hGlobal) };
-        let hglobal_raw_ptr = unsafe { GlobalLock(medium.u.hGlobal) };
-
-        // debug dump
-        /*
-        let u8_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u8,hglobal_size) };
-        for i in 0..(hglobal_size >> 4) {
-            let mut line = String::new();
-            for k in 0..16 {
-                line.push_str(&format!(" {:02X}",u8_slice[(i << 4) + k]));
-            }
-            log!("{:04X}: {}",i << 4,line);
-        }
-        if (hglobal_size & 15) != 0 {
-            let mut line = String::new();
-            for k in 0..(hglobal_size & 15) {
-                line.push_str(&format!(" {:02X}",u8_slice[((hglobal_size >> 4) << 4) + k]));
-            }
-            log!("{:04X}: {}",(hglobal_size >> 4) << 4,line);
-        }
-        */
-
-        let i32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut i32,5) };
-        let names_offset = i32_slice[0];
-        let has_wide_strings = i32_slice[4];
-
-        // guard against non-wide strings or unknown objects
-        if has_wide_strings == 0 {
-            log!("CF_HDROP drag object should have wide strings");
-            let _ = unsafe { GlobalUnlock(medium.u.hGlobal) };
-            //unsafe { ReleaseStgMedium(&medium as *const STGMEDIUM as *mut STGMEDIUM) };
-            return None;
-        }
-
-        if names_offset != 20 {
-            log!("unknown CF_HDROP object");
-            let _ = unsafe { GlobalUnlock(medium.u.hGlobal) };
-            //unsafe { ReleaseStgMedium(&medium as *const STGMEDIUM as *mut STGMEDIUM) };
-            return None;
-        }
-
-        // get u16 slice with names
-        let u16_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u16,(hglobal_size - 20) / 2) };
-
-        // extract/decode filenames
-        let mut filenames = Vec::<String>::new();
-        let mut filename = String::new();
-        for w in u16_slice {
-            if *w != 0 {
-                let c = match char::from_u32(*w as u32) {
-                    Some(c) => c,
-                    None => char::REPLACEMENT_CHARACTER,
-                };
-                filename.push(c);
-            }
-            else {
-                if (filename.len() == 0) && (filenames.len() > 0) { 
-                    break;
-                }
-                filenames.push(filename);
-                filename = String::new();
-            }
-        }
-/*
-        for filename in filenames.iter() {
-            log!("    \"{}\"",filename);
-        }*/
-
-        // we don't need the Microsoft objects here anymore
-        let _ = unsafe { GlobalUnlock(medium.u.hGlobal) };
-        //unsafe { ReleaseStgMedium(&medium as *const STGMEDIUM as *mut STGMEDIUM) };
-
-        if filenames.len() != 1 {
-            log!("dropping multiple files is not supported");
-            None
-        }
-        else {
-            let opt_drag_item = Some(DragItem::FilePath { path: filenames[0].clone(),internal_id: None, });
-            opt_drag_item
-        }
+        // convert to DragItem
+        convert_medium_to_dragitem(medium)
     }
     else {
-        log!("unknown drag object format");
+        log!("CF_HDROP format not found on data object");
         None
     }
 }
@@ -304,19 +221,19 @@ impl IDropTarget_Impl for DropTarget {
         }
 
         // convert _p_data_obj to DragItem
-        let drag_item = idataobject_to_dragitem(_p_data_obj.unwrap());
+        let drag_item_opt = create_dragitem_from_idataobject(_p_data_obj.unwrap());
 
         // ignore if conversion fails
-        if let None = drag_item {
+        if let None = drag_item_opt {
             return Ok(());
         }
 
         // store locally for Over messages
-        self.drag_item.replace(drag_item.clone());
+        self.drag_item.replace(drag_item_opt.clone());
 
         // allocate message
         let effect = unsafe { *_pdweffect };
-        let param = Box::new(DropTargetMessage::Enter(_grf_key_state,*_pt,effect,drag_item.unwrap()));
+        let param = Box::new(DropTargetMessage::Enter(_grf_key_state,*_pt,effect,drag_item_opt.unwrap()));
 
         // send to window for further processing
         unsafe { SendMessageW(
@@ -380,10 +297,10 @@ impl IDropTarget_Impl for DropTarget {
         }
 
         // convert _p_data_obj to DragItem
-        let drag_item = idataobject_to_dragitem(_p_data_obj.unwrap());
+        let drag_item_opt = create_dragitem_from_idataobject(_p_data_obj.unwrap());
 
         // ignore if conversion fails
-        if let None = drag_item {
+        if let None = drag_item_opt {
             return Ok(());
         }
 
@@ -392,14 +309,14 @@ impl IDropTarget_Impl for DropTarget {
 
         // allocate message
         let effect = unsafe { *_pdweffect };
-        let param = Box::new(DropTargetMessage::Drop(_grf_key_state,*_pt,effect,drag_item.unwrap().clone()));
+        let param = Box::new(DropTargetMessage::Drop(_grf_key_state,*_pt,effect,drag_item_opt.unwrap().clone()));
 
         // send to window for further processing
         unsafe { SendMessageW(
             self.hwnd,
             WM_DROPTARGET,
             WPARAM(0),
-            LPARAM(Box::into_raw(param) as isize),                
+            LPARAM(Box::into_raw(param) as isize),
         ) };
 
         Ok(())
