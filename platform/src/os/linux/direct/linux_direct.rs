@@ -19,7 +19,7 @@ use {
         event::{
             TimerEvent,
             Event,
-            WindowGeom,  
+            WindowGeom,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -68,7 +68,7 @@ impl DirectApp {
 }
 
 impl Cx {
-    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+    pub fn event_loop(cx: Rc<RefCell<Cx >>) {
         
         let mut cx = cx.borrow_mut();
         
@@ -84,16 +84,20 @@ impl Cx {
         // lets run the kms eventloop
         let mut event_flow = EventFlow::Poll;
         let mut timer_ids = Vec::new();
-
+        
         while event_flow != EventFlow::Exit {
             if event_flow == EventFlow::Wait {
                 //    kms_app.timers.select(signal_fds[0]);
             }
             direct_app.timers.update_timers(&mut timer_ids);
+            let time = direct_app.timers.time_now();
             for timer_id in &timer_ids {
                 cx.direct_event_callback(
                     &mut direct_app,
-                    DirectEvent::Timer(TimerEvent {timer_id: *timer_id})
+                    DirectEvent::Timer(TimerEvent {
+                        timer_id: *timer_id,
+                        time
+                    })
                 );
             }
             let input_events = direct_app.raw_input.poll_raw_input(
@@ -260,7 +264,7 @@ impl Cx {
                     self.draw_pass_to_magic_texture(*pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id); 
+                    self.draw_pass_to_magic_texture(*pass_id);
                 }
             }
         }
@@ -310,7 +314,7 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
- }
+}
 
 #[derive(Default)]
 pub struct CxOs {
