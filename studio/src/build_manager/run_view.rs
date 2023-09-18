@@ -246,9 +246,9 @@ impl RunView {
                     };
 
 #[cfg(target_os = "linux")]
-                    let handles = {
-                        v.swapchain[0].set_desc(cx,desc0);
-                        v.swapchain[1].set_desc(cx,desc1);
+                    {
+                        v.swapchain[0].set_desc(cx,descs[0]);
+                        v.swapchain[1].set_desc(cx,descs[1]);
 
                         // HACK(eddyb) normally this would be triggered later,
                         // but we need it *before* `get_shared_texture_dma_buf_image`.
@@ -256,17 +256,24 @@ impl RunView {
                             // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
                             let cxtexture = &mut cx.cx.textures[v.swapchain[0].texture_id()];
                             #[cfg(not(any(linux_direct, target_os="android")))]
-                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc0);
+                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &descs[0]);
 
                             let cxtexture = &mut cx.cx.textures[v.swapchain[1].texture_id()];
                             #[cfg(not(any(linux_direct, target_os="android")))]
-                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &desc1);
+                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &descs[1]);
                         }
 
-                        [
+                        let handles = [
                             cx.get_shared_texture_dma_buf_image(&v.swapchain[0]),
                             cx.get_shared_texture_dma_buf_image(&v.swapchain[1]),
-                        ]
+                        ];
+
+                        manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
+                            width: rect.size.x,
+                            height: rect.size.y,
+                            dpi_factor: dpi_factor,
+                            swapchain_handles: handles,
+                        }));
                     };
                     
                 }
