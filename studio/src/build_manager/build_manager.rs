@@ -369,7 +369,7 @@ impl BuildManager {
             loop{
                 let mut last_change = None;
                 let mut addrs = Vec::new();
-                if let Ok(change) = rx_file_change.recv_timeout(Duration::from_millis(1000)){
+                if let Ok(change) = rx_file_change.recv_timeout(Duration::from_millis(5000)){
                     last_change = Some(change);
                     addrs.clear();
                 }
