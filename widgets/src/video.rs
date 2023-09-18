@@ -303,16 +303,16 @@ impl Video {
         self.color_format = event.color_format;
         self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
 
-        makepad_error_log::log!(
-            "Video id {} - {:?} decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
-            self.source.as_str(),
-            self.id.0,
-            self.video_width,
-            self.video_height,
-            self.original_frame_rate,
-            self.color_format,
-            self.frame_ts_interval
-        );
+        // Debug
+        // makepad_error_log::log!(
+        //     "Video id {} - decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
+        //     self.id.0,
+        //     self.video_width,
+        //     self.video_height,
+        //     self.original_frame_rate,
+        //     self.color_format,
+        //     self.frame_ts_interval
+        // );
 
         cx.decode_next_video_chunk(self.id, MAX_FRAMES_TO_DECODE + MAX_FRAMES_TO_DECODE / 2);
         self.decoding_state = DecodingState::Decoding;
