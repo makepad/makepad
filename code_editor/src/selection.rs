@@ -325,7 +325,7 @@ impl Cursor {
                     .map(|(index, _)| index)
                     .unwrap(),
             },
-            affinity: Affinity::Before,
+            affinity: Affinity::After,
             preferred_column_index: None,
         }
     }
@@ -341,7 +341,7 @@ impl Cursor {
                     .map(|(index, _)| self.position.byte_index + index)
                     .unwrap_or(line.len()),
             },
-            affinity: Affinity::After,
+            affinity: Affinity::Before,
             preferred_column_index: None,
         }
     }
@@ -353,7 +353,7 @@ impl Cursor {
                 line_index: prev_line_index,
                 byte_index: lines[prev_line_index].len(),
             },
-            affinity: Affinity::Before,
+            affinity: Affinity::After,
             preferred_column_index: None,
         }
     }
@@ -364,7 +364,7 @@ impl Cursor {
                 line_index: self.position.line_index + 1,
                 byte_index: 0,
             },
-            affinity: Affinity::After,
+            affinity: Affinity::Before,
             preferred_column_index: None,
         }
     }
