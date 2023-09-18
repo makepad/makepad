@@ -97,14 +97,13 @@ impl AppMain for App {
                 }
             }
             Event::Draw(event) => {
-                self.ui.redraw(cx);
                 return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
             }
             Event::Construct => {
                 self.start_inputs(cx);
             }
             Event::VideoInputs(devices) => {
-                let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1920, 1080, 90.0);
+                let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 3840, 2160, 60.0);
                 cx.use_video_input(&input);
             }
             _ => ()
