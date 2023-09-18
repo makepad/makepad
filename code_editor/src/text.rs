@@ -340,44 +340,6 @@ impl SubAssign for Length {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct Range {
-    start: Position,
-    end: Position,
-}
-
-impl Range {
-    pub fn new(start: Position, end: Position) -> Option<Self> {
-        if start > end {
-            return None;
-        }
-        Some(Self { start, end })
-    }
-
-    pub fn from_start_and_extent(start: Position, extent: Length) -> Self {
-        Self {
-            start,
-            end: start + extent,
-        }
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.start == self.end
-    }
-
-    pub fn start(self) -> Position {
-        self.start
-    }
-
-    pub fn end(self) -> Position {
-        self.end
-    }
-
-    pub fn extent(self) -> Length {
-        self.end - self.start
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Drift {
     Before,
     After,
