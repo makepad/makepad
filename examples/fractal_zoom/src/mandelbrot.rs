@@ -1,7 +1,6 @@
 use {
     crate::{
         makepad_widgets::*,
-        makepad_platform::thread::*,
         mandelbrot_simd::*
     }
 };
@@ -23,13 +22,13 @@ live_design!{
             let magsq = (fractal.w * 256 + fractal.x - 127);
             
             // create a nice palette index
-            let index = abs((1.0 * iter / self.max_iter * 8.0) - .2 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter * 8.0) - .02 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq1(index + self.color_cycle), 1.0);
+            return vec4(Pal::iq2(sin(2.*index) - self.color_cycle), 1.0);
         }
     }
     

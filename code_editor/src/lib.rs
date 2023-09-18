@@ -3,6 +3,7 @@ use makepad_widgets::*;
 
 pub mod char;
 pub mod code_editor;
+pub mod decoration;
 pub mod document;
 pub mod history;
 pub mod inlays;
