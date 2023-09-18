@@ -79,7 +79,6 @@ impl Cx {
     
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-        let fb_texture = Texture::new(self);
         let service_proxy = xpc_service_proxy();
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
@@ -135,15 +134,25 @@ impl Cx {
                         }
                         HostToStdin::WindowSize(ws) => {
 
+                            log!("got WindowSize {},{}, fetching XPC textures",ws.width,ws.height);
+
                             // start fetching new texture objects from XPC
                             fetch_xpc_service_texture(service_proxy.as_id(),0,0,Box::new({
                                 let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[0]);
-                                move |objcid,_| { *maybe_new_handle.lock().unwrap() = Some(objcid) }
+                                move |objcid,_| {
+                                    log!("fetched XPC texture 0: {:?}",objcid.as_id());
+                                    *maybe_new_handle.lock().unwrap() = Some(objcid);
+                                }
                             }));
                             fetch_xpc_service_texture(service_proxy.as_id(),1,0,Box::new({
                                 let maybe_new_handle = Arc::clone(&self.os.maybe_new_handles[1]);
-                                move |objcid,_| { *maybe_new_handle.lock().unwrap() = Some(objcid) }
+                                move |objcid,_| {
+                                    log!("fetched XPC texture 1: {:?}",objcid.as_id());
+                                    *maybe_new_handle.lock().unwrap() = Some(objcid);
+                                }
                             }));
+
+                            // The textures will be placed in cx.os.maybe_new_handles[] by the XPC service and HostToStdin::Tick checks if they have arrived to process them further
 
                             // and window size might have changed
                             if window_size != Some(ws) {
@@ -156,15 +165,17 @@ impl Cx {
                                     inner_size: dvec2(ws.width, ws.height),
                                     ..Default::default()
                                 };
-                                self.stdin_handle_platform_ops(metal_cx, &fb_texture);
+                                self.stdin_handle_platform_ops(metal_cx);
                             }
                         }
                         HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(ws) = window_size {
                             
-                            // check if new objects arrived from XPC
+                            // check if new handles have already arrived from XPC
                             let maybe_handle0 = self.os.maybe_new_handles[0].lock().unwrap().clone();
                             let maybe_handle1 = self.os.maybe_new_handles[1].lock().unwrap().clone();
                             if maybe_handle0.is_some() && maybe_handle1.is_some() {
+
+                                log!("both texture handles arrived from XPC, create new textures accordingly");
 
                                 // make sure the corresponding Metal textures exist
                                 let new_textures = [Texture::new(self),Texture::new(self),];
@@ -225,7 +236,7 @@ impl Cx {
                 }
             }
             // we should poll our runloop
-            self.stdin_handle_platform_ops(metal_cx, &fb_texture);
+            self.stdin_handle_platform_ops(metal_cx);
             xpc_service_proxy_poll_run_loop();
         }
     }
@@ -317,7 +328,7 @@ impl Cx {
     }
     
     
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, main_texture: &Texture) {
+    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(_window_id) => {
@@ -325,11 +336,14 @@ impl Cx {
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    pass.color_textures = vec![CxPassColorTexture {
-                        //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                        clear_color: PassClearColor::ClearWith(pass.clear_color),
-                        texture_id: main_texture.texture_id()
-                    }];
+                    if let Some(swapchain) = self.os.swapchain.as_ref() {
+                        let present_index = *self.os.present_index.lock().unwrap();
+                        pass.color_textures = vec![CxPassColorTexture {
+                            //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                            clear_color: PassClearColor::ClearWith(pass.clear_color),
+                            texture_id: swapchain[present_index].texture_id()
+                        }];
+                    }
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
