@@ -464,28 +464,32 @@ impl Video {
     fn handle_errors(&mut self, event: &Event) {
         if let Event::VideoDecodingError(event) = event {
             if event.video_id == self.id {
-                error!("Error decoding video: {}", event.error);
+                error!("Error decoding video with id {} : {}", self.id.0, event.error);
             }
         }
     }
 
     fn show_preview(&mut self, cx: &mut Cx) {
-        if self.decoding_state == DecodingState::NotStarted {
-            self.initialize_decoding(cx);
+        if self.playback_state != PlaybackState::Previewing {
+            if self.decoding_state == DecodingState::NotStarted {
+                self.initialize_decoding(cx);
+            }
+            self.playback_state = PlaybackState::Previewing;
         }
-        self.playback_state = PlaybackState::Previewing;
     }
 
     fn begin_playback(&mut self, cx: &mut Cx) {
         if self.decoding_state == DecodingState::NotStarted {
             self.initialize_decoding(cx);
-            self.playback_state = PlaybackState::Playing;
         }
+        self.playback_state = PlaybackState::Playing;
     }
 
     fn pause_playback(&mut self) {
-        self.pause_time = Some(Instant::now());
-        self.playback_state = PlaybackState::Paused;
+        if self.playback_state != PlaybackState::Paused {
+            self.pause_time = Some(Instant::now());
+            self.playback_state = PlaybackState::Paused;
+       }
     }
 
     fn resume_playback(&mut self) {
@@ -501,6 +505,8 @@ impl Video {
 
     fn end_playback(&mut self, cx: &mut Cx) {
         self.playback_state = PlaybackState::Finished;
+        self.start_time = None;
+        self.next_frame_ts = 0;
         self.cleanup_decoding(cx);
     }
 
