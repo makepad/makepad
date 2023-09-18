@@ -22,6 +22,8 @@ use {
         cx_api::{CxOsApi, CxOsOp},
         window::CxWindowPool,
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        Texture,
+        windows::Win32::Foundation::HANDLE,
     }
 };
 
@@ -372,8 +374,9 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
-    pub (crate) d3d11_device: Cell<Option<ID3D11Device>>,
-    pub (crate) swapchain: [Texture; 2],
+    pub d3d11_device: Cell<Option<ID3D11Device>>,
+    pub (crate) swapchain: Option<[Texture; 2]>,
+    pub (crate) swapchain_handles: [HANDLE; 2],
     pub (crate) present_index: usize,
     pub (crate) decoding: CxWindowsDecoding,
 }

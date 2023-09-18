@@ -210,7 +210,7 @@ impl RunView {
 #[cfg(target_os = "windows")]
                     let handles = {
 
-                        let handles = [0u64,0u64];
+                        let mut handles = [0u64,0u64];
 
                         let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
 

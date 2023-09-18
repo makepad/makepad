@@ -29,7 +29,7 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_handle_repaint(&mut self, d3d11_cx: &mut D3d11Cx,swapchain: &[Texture]) {
+    pub (crate) fn stdin_handle_repaint(&mut self, d3d11_cx: &mut D3d11Cx) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -38,7 +38,10 @@ impl Cx {
                 CxPassParent::Window(_) => {
 
                     // render to swapchain
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx, &swapchain[self.os.present_index]);
+                    if self.os.swapchain.is_some() {
+                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
+                        self.draw_pass_to_texture(*pass_id, d3d11_cx, texture_id);
+                    }
 
                     // wait for GPU to finish rendering
                     d3d11_cx.wait_for_gpu();
@@ -63,9 +66,9 @@ impl Cx {
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
 
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-        let mut swapchain = [Texture::new(self),Texture::new(self),];
-        let mut swapchain_handles = [HANDLE(0),HANDLE(0),];
-        let mut present_index = 0usize;
+        //let mut swapchain = [Texture::new(self),Texture::new(self),];
+        //let mut swapchain_handles = [HANDLE(0),HANDLE(0),];
+        //let mut present_index = 0usize;
 
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
@@ -122,25 +125,25 @@ impl Cx {
                         HostToStdin::WindowSize(ws) => {
 
                             // first update the swapchain
-                            if swapchain_handles[0].0 as u64 != ws.swapchain_handles[0] {
+                            if self.os.swapchain_handles[0].0 as u64 != ws.swapchain_handles[0] {
 
                                 // we got a new texture handles
+                                let textures = [Texture::new(self),Texture::new(self),];
+
                                 let handle = HANDLE(ws.swapchain_handles[0] as isize);
-                                let texture = Texture::new(self);
-                                let cxtexture = &mut self.textures[texture.texture_id()];
+                                let cxtexture = &mut self.textures[textures[0].texture_id()];
                                 cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
-                                swapchain[0] = texture;
-                                swapchain_handles[0] = handle;
+                                self.os.swapchain_handles[0] = handle;
 
                                 let handle = HANDLE(ws.swapchain_handles[1] as isize);
-                                let texture = Texture::new(self);
-                                let cxtexture = &mut self.textures[texture.texture_id()];
+                                let cxtexture = &mut self.textures[textures[1].texture_id()];
                                 cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
-                                swapchain[1] = texture;
-                                swapchain_handles[1] = handle;
+                                self.os.swapchain_handles[1] = handle;
+
+                                self.os.swapchain = Some(textures);
 
                                 // and reset present_index
-                                present_index = 0;
+                                self.os.present_index = 0;
                             }
 
                             // redraw the window if needed
@@ -155,7 +158,7 @@ impl Cx {
                                     ..Default::default()
                                 };
 
-                                self.stdin_handle_platform_ops(d3d11_cx, &swapchain[present_index]);
+                                self.stdin_handle_platform_ops(d3d11_cx);
                             }
                         }
                         HostToStdin::Tick {frame: _, time,..} => if let Some(_ws) = window_size {
@@ -182,8 +185,8 @@ impl Cx {
                                 self.hlsl_compile_shaders(d3d11_cx);
                             }
                             
-                            // repaint and flip
-                            self.stdin_handle_repaint(d3d11_cx,&swapchain,&mut present_index);
+                            // repaint
+                            self.stdin_handle_repaint(d3d11_cx);
                         }
                     }
                     Err(err) => { // we should output a log string
@@ -192,12 +195,12 @@ impl Cx {
                 }
             }
             // we should poll our runloop
-            self.stdin_handle_platform_ops(d3d11_cx, &swapchain[present_index]);
+            self.stdin_handle_platform_ops(d3d11_cx);
         }
     }
     
     
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &D3d11Cx, main_texture: &Texture) {
+    fn stdin_handle_platform_ops(&mut self, _metal_cx: &D3d11Cx) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -208,11 +211,14 @@ impl Cx {
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
-                        //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                        texture_id: main_texture.texture_id()
-                    }];
+                    if self.os.swapchain.is_some() {
+                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
+                        pass.color_textures = vec![CxPassColorTexture {
+                            clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                            texture_id,
+                        }];
+                    }
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
