@@ -318,7 +318,7 @@ impl AppMain for App {
             }
         }
         
-        for action in self.build_manager.handle_event(cx, event) {
+        for action in self.build_manager.handle_event(cx, event, &dock) {
             match action {
                 BuildManagerAction::RedrawLog => {
                     // if the log_list is tailing, set the new len
