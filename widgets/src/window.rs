@@ -10,7 +10,7 @@ use crate::{
 };
 
 live_design!{
-    WindowBase = {{Window}} {}
+    WindowBase = {{Window}} {demo:false}
 }
 
 #[derive(Live)]
@@ -18,7 +18,8 @@ pub struct Window {
     #[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
     #[live] mouse_cursor_size: DVec2,
-    
+    #[live] demo: bool,
+    #[rust] demo_next_frame: NextFrame,
     #[live] cursor_draw_list: DrawList2d,
     #[live] draw_cursor: DrawQuad,
     #[live] debug_view: DebugView,
@@ -87,6 +88,12 @@ impl LiveHook for Window {
             _ => ()
         }
     }
+    
+    fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if self.demo{
+            self.demo_next_frame = cx.new_next_frame();
+        }
+    }
 }
 
 #[derive(Clone, WidgetAction)]
@@ -104,7 +111,12 @@ impl Window {
         self.debug_view.handle_event(cx, event);
         self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
-        
+        if self.demo_next_frame.is_event(event).is_some(){
+            if self.demo{
+                self.demo_next_frame = cx.new_next_frame();
+            }
+            cx.repaint_pass_and_child_passes(self.pass.pass_id());
+        }
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
