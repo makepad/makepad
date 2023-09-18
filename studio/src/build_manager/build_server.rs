@@ -192,7 +192,17 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::WebAssembly => vec![
-            ],
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "wasm".into(),
+                "build".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ]
         };
         
         let env = [
