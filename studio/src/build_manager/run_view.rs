@@ -150,12 +150,9 @@ impl RunView {
             }
             StdinToHost::DrawCompleteAndFlip(present_index) => {
 
-                log!("received DrawCompleteAndFlip({}) from client",present_index);
-
                 // client is ready with new image on swapchain[present_index]
                 for v in manager.active.builds.values() {
                     if v.run_view_id == run_view_id {
-                        log!("setting draw texture");
                         v.present_index.set(*present_index);
                         self.draw_app.set_texture(0, &v.swapchain[*present_index]);
                     }
@@ -228,6 +225,7 @@ impl RunView {
 
 #[cfg(target_os = "macos")]
                     let handles = {
+
                         let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
 
                         let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
