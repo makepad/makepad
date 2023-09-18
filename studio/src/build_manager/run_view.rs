@@ -155,6 +155,7 @@ impl RunView {
                 // client is ready with new image on swapchain[present_index]
                 for v in manager.active.builds.values() {
                     if v.run_view_id == run_view_id {
+                        log!("setting draw texture");
                         v.present_index.set(*present_index);
                         self.draw_app.set_texture(0, &v.swapchain[*present_index]);
                     }
@@ -228,7 +229,7 @@ impl RunView {
                     };
 
 #[cfg(target_os = "macos")]
-                    {
+                    let handles = {
                         let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
 
                         let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
@@ -239,8 +240,9 @@ impl RunView {
 
                         cx.cx.os.metal_device.replace(Some(metal_device));
 
-                        // on macos, the XPS server takes care of managing the actual texture handles
-                    }
+                        // for macos, pass the hashmap indices to the client, so they can find the right texture in XPC
+                        [id0,id1]
+                    };
 
 #[cfg(target_os = "linux")]
                     let handles = {
@@ -269,7 +271,6 @@ impl RunView {
                         width: rect.size.x,
                         height: rect.size.y,
                         dpi_factor: dpi_factor,
-                        #[cfg(any(target_os = "windows",target_os = "linux"))]
                         swapchain_handles: handles,
                     }));
                 }
