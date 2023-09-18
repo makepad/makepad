@@ -281,39 +281,56 @@ impl Session {
         let mut edit_kind = EditKind::Insert;
         let mut inject_char = None;
         let mut uninject_char = None;
-        let mut selection_state = self.selection_state.borrow_mut();
-        match text.to_single_char() {
-            Some(' ') => {
+        {}
+        if let Some(char) = text.to_single_char() {
+            let mut selection_state = self.selection_state.borrow_mut();
+            if char == ' ' {
                 edit_kind = EditKind::InsertSpace;
-            }
-            Some(char) if char == '"' || char.is_opening_delimiter() => {
-                if selection_state.selections.iter().all(|selection| {
-                    !selection.is_empty()
-                        || self.document.as_text().as_lines()[selection.cursor.position.line_index]
-                            [selection.cursor.position.byte_index..]
-                            .chars()
-                            .all(|char| char.is_whitespace())
-                }) {
-                    let char = if char == '"' {
+            } else if char == '"' || char.is_opening_delimiter() {
+                if selection_state
+                    .selections
+                    .iter()
+                    .all(|selection| !selection.is_empty())
+                    || selection_state.selections.iter().all(|selection| {
+                        selection.is_empty()
+                            && match self.document.as_text().as_lines()
+                                [selection.cursor.position.line_index]
+                                [selection.cursor.position.byte_index..]
+                                .chars()
+                                .next()
+                            {
+                                Some(char) => {
+                                    char == '"'
+                                        || char.is_closing_delimiter()
+                                        || char.is_whitespace()
+                                }
+                                None => true,
+                            }
+                    })
+                {
+                    // We are inserting either a string or opening delimiter, and either all
+                    // selections are non-empty, or all selections are empty and followed by either
+                    // a string or closing delimiter or whitespace. In this case, we automatically
+                    // inject the corresponding string or closing delimiter.
+                    let opposite_char = if char == '"' {
                         '"'
                     } else {
                         char.opposite_delimiter().unwrap()
                     };
-                    inject_char = Some(char);
-                    selection_state.injected_char_stack.push(char);
+                    inject_char = Some(opposite_char);
+                    selection_state.injected_char_stack.push(opposite_char);
                 }
-            }
-            Some(char)
-                if selection_state
-                    .injected_char_stack
-                    .last()
-                    .map_or(false, |&last_char| last_char == char) =>
+            } else if selection_state
+                .injected_char_stack
+                .last()
+                .map_or(false, |&last_char| last_char == char)
             {
+                // We are inserting a single character that we automatically injected earlier, so we need
+                // to uninject it before inserting it again.
                 uninject_char = Some(selection_state.injected_char_stack.pop().unwrap());
             }
-            _ => {}
+            drop(selection_state);
         }
-        drop(selection_state);
         self.document.edit_selections(
             self.id,
             edit_kind,
@@ -323,6 +340,8 @@ impl Session {
                 let mut position = position;
                 let mut length = length;
                 if inject_char.is_none() {
+                    // Only delete the selection if we are NOT injecting a character. This is for the
+                    // use case where we have selected `abc` and want to enclose it like: `{abc}`.
                     editor.apply_edit(Edit {
                         change: Change::Delete(position, length),
                         drift: Drift::Before,
@@ -330,6 +349,7 @@ impl Session {
                     length = Length::zero();
                 }
                 if let Some(uninject_delimiter) = uninject_char {
+                    // To uninject a character, we simply delete it.
                     editor.apply_edit(Edit {
                         change: Change::Delete(
                             position,
@@ -347,6 +367,11 @@ impl Session {
                 });
                 position += text.length();
                 if let Some(inject_delimiter) = inject_char {
+                    // To inject a character, we do an extra insert with Drift::After so that the
+                    // cursor stays in place. Note that we have to add the selected length to our
+                    // position, because the selection is only deleted if we are NOT injecting a
+                    // character. This is for the use case where we have selected `abc` and want
+                    // to enclose it like: `{abc}`.
                     editor.apply_edit(Edit {
                         change: Change::Insert(position + length, Text::from(inject_delimiter)),
                         drift: Drift::After,
@@ -357,6 +382,10 @@ impl Session {
     }
 
     pub fn enter(&mut self) {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document.edit_selections(
             self.id,
             EditKind::Other,
@@ -431,6 +460,10 @@ impl Session {
     }
 
     pub fn delete(&mut self) {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document.edit_selections(
             self.id,
             EditKind::Delete,
@@ -508,6 +541,10 @@ impl Session {
     }
 
     pub fn backspace(&mut self) {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document.edit_selections(
             self.id,
             EditKind::Delete,
@@ -688,11 +725,13 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.selection_state.borrow_mut().injected_char_stack.clear();
         self.document
             .undo(self.id, &self.selection_state.borrow().selections)
     }
 
     pub fn redo(&mut self) -> bool {
+        self.selection_state.borrow_mut().injected_char_stack.clear();
         self.document
             .redo(self.id, &self.selection_state.borrow().selections)
     }
