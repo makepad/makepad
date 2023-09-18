@@ -512,6 +512,7 @@ fn main() {
     generate_outputs_from_file("./platform/src/os/windows/dropsource.rs", &mut output, &mut cache);
     generate_outputs_from_file("./platform/src/os/windows/dataobject.rs", &mut output, &mut cache);
     generate_outputs_from_file("./platform/src/os/windows/enumformatetc.rs", &mut output, &mut cache);
+    generate_outputs_from_file("./platform/src/os/windows/dropfiles.rs", &mut output, &mut cache);
     
     fn generate_string_from_outputs(node: &Node, output: &mut String) {
         match node {

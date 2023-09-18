@@ -2,7 +2,7 @@ use {
     std::{
         mem,
         os::raw::{c_long, c_void},
-        ffi::{CString},
+        ffi::CString,
         os::{self, fd::{AsRawFd as _, FromRawFd as _}},
     },
     self::super::{
@@ -19,7 +19,7 @@ use {
         cx_stdin::linux_dma_buf,
         window::WindowId,
         makepad_error_log::*,
-        makepad_math::{DVec2},
+        makepad_math::DVec2,
         pass::{PassClearColor, PassClearDepth, PassId},
         event::*,
         texture::{Texture, TextureDesc},
@@ -210,11 +210,11 @@ impl CxOsTexture {
                     fourcc,
                     modifiers,
                 },
-                planes: [linux_dma_buf::ImagePlane {
+                planes: linux_dma_buf::ImagePlane {
                     dma_buf_fd: os::fd::OwnedFd::from_raw_fd(dma_buf_fd),
                     offset,
                     stride,
-                }],
+                },
             }));
         }
     }
@@ -229,7 +229,7 @@ impl CxOsTexture {
         opengl_cx.make_current();
         while unsafe { gl_sys::GetError() } != 0 {}
 
-        let linux_dma_buf::Image { width, height, drm_format, planes: [ref plane0] } = *dma_buf_image;
+        let linux_dma_buf::Image { width, height, drm_format, planes: ref plane0 } = *dma_buf_image;
 
         let image_attribs = [
             egl_sys::EGL_LINUX_DRM_FOURCC_EXT,
