@@ -2195,7 +2195,6 @@ live_design!{
         }
     }
     
-    const SLIDE_WIDTH = 1920
     
     SlideBody = <Label> {
         draw_text: {
@@ -2240,16 +2239,8 @@ live_design!{
     }
     
     SlidesView = <SlidesViewBase> {
-        slide_width: (SLIDE_WIDTH)
-        goal_pos: 0.0
         anim_speed: 0.9
-            <ScrollXView> {
-            width: Fill,
-            height: Fill
-        }
     }
-    
-    
     
     DrawScrollShadow = <DrawScrollShadowBase> {
         
