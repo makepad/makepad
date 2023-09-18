@@ -72,7 +72,8 @@ public class VideoDecoder {
                     if (codecName.toLowerCase().contains("omx")) {
                         MediaCodecInfo.CodecCapabilities capabilities = codecInfo.getCapabilitiesForType(videoMimeType);
                         for (int color : capabilities.colorFormats) {
-                            Log.e("Makepad", "Supported Color Format: " + color);
+                            // Debug
+                            // Log.e("Makepad", "Supported Color Format: " + color);
                             if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible) {
                                 selectedCodecName = codecName;
                                 isHWCodec = true;
@@ -103,7 +104,8 @@ public class VideoDecoder {
 
             String colorFormatString = getColorFormatString(colorFormat);
             
-            Log.e("Makepad", "Using Codec: " + mCodec.getName());
+            // Debug
+            // Log.e("Makepad", "Using Codec: " + mCodec.getName());
 
             mInfo = new MediaCodec.BufferInfo();
             mInputEos = false;
