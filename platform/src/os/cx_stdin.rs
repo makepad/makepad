@@ -30,7 +30,7 @@ pub struct StdinWindowSize {
     // FIXME(eddyb) double-buffering support is intentionally left out, as it's
     // being added to other OSes, this just uses the same name as that other work.
     #[cfg(target_os = "linux")]
-    pub swapchain_handles: [linux_dma_buf::Image<linux_dma_buf::RemoteFd>; 1],
+    pub swapchain_handles: [linux_dma_buf::Image<linux_dma_buf::RemoteFd>; 2],
 }
 
 // FIXME(eddyb) move this into `os::linux` somewhere.
@@ -52,17 +52,17 @@ pub mod linux_dma_buf {
         pub drm_format: DrmFormat,
         // FIXME(eddyb) support 2-4 planes (not needed for RGBA, so most likely only
         // relevant to YUV video decode streams - or certain forms of compression).
-        pub planes: [ImagePlane<FD>; 1],
+        pub planes: ImagePlane<FD>,
     }
 
     impl<FD> Image<FD> {
         pub fn planes_map<FD2>(self, f: impl Fn(ImagePlane<FD>) -> ImagePlane<FD2>) -> Image<FD2> {
-            let Image { width, height, drm_format, planes: [plane0] } = self;
-            Image { width, height, drm_format, planes: [f(plane0)] }
+            let Image { width, height, drm_format, planes: plane0 } = self;
+            Image { width, height, drm_format, planes: f(plane0) }
         }
         pub fn planes_ref_map<FD2>(&self, f: impl Fn(&ImagePlane<FD>) -> ImagePlane<FD2>) -> Image<FD2> {
-            let Image { width, height, drm_format, planes: [ref plane0] } = *self;
-            Image { width, height, drm_format, planes: [f(plane0)] }
+            let Image { width, height, drm_format, planes: ref plane0 } = *self;
+            Image { width, height, drm_format, planes: f(plane0) }
         }
     }
 
