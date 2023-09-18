@@ -1,7 +1,6 @@
 use crate::{makepad_live_id::*};
 use makepad_micro_serde::*;
 use makepad_widgets::*;
-use makepad_platform::thread::*;
 use makepad_widgets::image_cache::{ImageBuffer};
 use std::fs;
 use std::time::Instant;

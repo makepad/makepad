@@ -251,6 +251,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(direct_app.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
                     self.draw_pass_to_fullscreen(*pass_id, direct_app);
