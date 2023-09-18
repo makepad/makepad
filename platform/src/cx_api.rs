@@ -305,6 +305,18 @@ impl Cx {
         cxpass.paint_dirty = true;
     }
     
+    pub fn repaint_pass_and_child_passes(&mut self, pass_id: PassId) {
+        let cxpass = &mut self.passes[pass_id];
+        cxpass.paint_dirty = true;
+        for sub_pass_id in self.passes.id_iter() {
+            if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
+                if dep_pass_id == pass_id {
+                    self.repaint_pass_and_child_passes(sub_pass_id);
+                }
+            }
+        }
+    }
+    
     pub fn redraw_pass_and_child_passes(&mut self, pass_id: PassId) {
         let cxpass = &self.passes[pass_id];
         if let Some(main_list_id) = cxpass.main_draw_list_id {
