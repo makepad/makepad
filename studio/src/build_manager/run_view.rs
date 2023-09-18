@@ -90,7 +90,7 @@ impl RunView {
         
         self.animator_handle_event(cx, event);
         if let Some(te) = self.timer.is_event(event){
-            self.run_tick(cx, te.time, run_view_id, manager)
+            self.run_tick(cx, te.time.unwrap_or(0.0), run_view_id, manager)
         }
         if let Some(te) = self.tick.is_event(event) {
             self.run_tick(cx, te.time, run_view_id, manager)

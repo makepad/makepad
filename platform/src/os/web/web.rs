@@ -187,7 +187,8 @@ impl Cx {
                 live_id!(ToWasmTimerFired) => {
                     let tw = ToWasmTimerFired::read_to_wasm(&mut to_wasm);
                     self.call_event_handler(&Event::Timer(TimerEvent {
-                        timer_id: tw.timer_id as u64
+                        timer_id: tw.timer_id as u64,
+                        time: None
                     }));
                 }
                 
