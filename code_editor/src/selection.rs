@@ -2,7 +2,7 @@ use {
     crate::{
         layout::Layout,
         str::StrExt,
-        text::{Edit, Length, Position, Range},
+        text::{Edit, Length, Position},
     },
     std::{ops, ops::Deref, slice::Iter},
 };
@@ -52,10 +52,6 @@ impl Selection {
 
     pub fn length(self) -> Length {
         self.end() - self.start()
-    }
-
-    pub fn range(self) -> Range {
-        Range::new(self.start(), self.end()).unwrap()
     }
 
     pub fn line_range(self) -> ops::Range<usize> {
@@ -329,7 +325,7 @@ impl Cursor {
                     .map(|(index, _)| index)
                     .unwrap(),
             },
-            affinity: Affinity::Before,
+            affinity: Affinity::After,
             preferred_column_index: None,
         }
     }
@@ -345,7 +341,7 @@ impl Cursor {
                     .map(|(index, _)| self.position.byte_index + index)
                     .unwrap_or(line.len()),
             },
-            affinity: Affinity::After,
+            affinity: Affinity::Before,
             preferred_column_index: None,
         }
     }
@@ -357,7 +353,7 @@ impl Cursor {
                 line_index: prev_line_index,
                 byte_index: lines[prev_line_index].len(),
             },
-            affinity: Affinity::Before,
+            affinity: Affinity::After,
             preferred_column_index: None,
         }
     }
@@ -368,7 +364,7 @@ impl Cursor {
                 line_index: self.position.line_index + 1,
                 byte_index: 0,
             },
-            affinity: Affinity::After,
+            affinity: Affinity::Before,
             preferred_column_index: None,
         }
     }
