@@ -238,7 +238,7 @@ impl RunView {
                     });
                     cx.get_shared_presentable_image_os_handle(&texture)
                 });
-                for i in (0..v.swapchain_history.len()-1){
+                for i in 0..v.swapchain_history.len()-1{
                     v.swapchain_history[i] = v.swapchain_history[i+1].take();
                 }
                 v.swapchain_history[v.swapchain_history.len()-1] = Some(swapchain);
