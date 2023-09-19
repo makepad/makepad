@@ -176,6 +176,7 @@ pub fn define_xpc_service_class() -> *const Class {
                 ));
             }
         } 
+        //storage.textures_by_presentable_image_id_u64.lock().unwrap().clear();
         //insane_debug_out("GOT CALL! POST FETCH TEXTURE!");
     }
      
