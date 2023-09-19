@@ -13,6 +13,7 @@ use {
         Token,
     },
     makepad_widgets::*,
+    std::{fmt,fmt::Write},
     std::{mem, slice::Iter},
 };
 
@@ -200,6 +201,9 @@ pub struct CodeEditor {
     viewport_rect: Rect,
     #[rust]
     line_start: usize,
+    #[live(true)]
+    word_wrap: bool,
+
     #[rust]
     line_end: usize,
 }
@@ -345,9 +349,9 @@ impl CodeEditor {
         self.viewport_rect.size -= pad_left_top;
         
         session.handle_changes();
-        session.set_wrap_column(Some(
+        session.set_wrap_column(if self.word_wrap {Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
-        ));
+        )} else {None});
         
         let scroll_pos = self.scroll_bars.get_scroll_pos();
         
@@ -487,6 +491,16 @@ impl CodeEditor {
             }) => {
                 if control || logo {
                     self.increase_font_size();
+                    self.redraw(cx);
+                }
+            }
+             Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyW,
+                modifiers: KeyModifiers {control, logo, ..},
+                ..
+            }) => {
+                if control || logo {
+                    self.word_wrap = !self.word_wrap;
                     self.redraw(cx);
                 }
             }
@@ -672,6 +686,7 @@ impl CodeEditor {
     fn draw_gutter(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
+        let mut buf = String::new();
         for element in session
             .layout()
             .block_elements(self.line_start, self.line_end)
@@ -679,14 +694,18 @@ impl CodeEditor {
             match element {
                 BlockElement::Line {line, ..} => {
                     self.draw_gutter.font_scale = line.scale();
+                    buf.clear();
+                    log!("{}", line.scale());
+                    let _ = write!(buf,"{: >4}", line_index);
                     self.draw_gutter.draw_abs(
                         cx,
                         DVec2 {
                             x: 0.0,
                             y: origin_y,
                         } *self.cell_size
-                            + self.gutter_rect.pos,
-                        &format!("{: >4}", line_index),
+                            + self.gutter_rect.pos 
+                            + dvec2((1.0-line.scale()) * -self.cell_size.x + self.gutter_rect.size.x - line.scale() * self.gutter_rect.size.x,0.0),
+                            &buf
                     );
                     line_index += 1;
                     origin_y += line.height();
