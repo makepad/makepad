@@ -212,6 +212,12 @@ impl FileSystem {
         }
     }
     
+    pub fn redraw_all_views(&mut self, cx:&mut Cx, dock:&DockRef){
+        for (tab_id,_) in &self.tab_id_to_path{
+            dock.item(*tab_id).redraw(cx)
+        }
+    }
+    
     pub fn add_decoration(&mut self, path: &str, dec: Decoration) {
         // ok lets see if we have a document
         // ifnot, we create a new one
