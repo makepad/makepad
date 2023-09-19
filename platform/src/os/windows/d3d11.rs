@@ -275,8 +275,7 @@ impl Cx {
                         TextureFormat::SharedBGRA(_) => {
                             cxtexture.os.update_shared_texture(
                                 &d3d11_cx.device,
-                                cxtexture.desc.width.unwrap() as u32,
-                                cxtexture.desc.height.unwrap() as u32,
+                                &cxtexture.desc
                             );
                         },
                         _ => ()
@@ -500,6 +499,15 @@ impl Cx {
             }
         }
         self.draw_shaders.compile_set.clear();
+    }
+
+    pub fn get_shared_presentable_image_os_handle(
+        &mut self,
+        texture: &Texture,
+    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        cxtexture.os.update_shared_texture(self.os.d3d11_device.as_ref().unwrap(), &cxtexture.desc);
+        cxtexture.os.shared_handle.0 as u64
     }
 }
 
@@ -956,12 +964,20 @@ impl CxOsTexture {
         self.shader_resource_view = shader_resource_view;
     }
 
-    pub fn update_shared_texture(
+    fn update_shared_texture(
         &mut self,
         d3d11_device: &ID3D11Device,
-        width: u32,
-        height: u32,
+        desc: &TextureDesc,
     ) {
+        // we need a width/height for this one.
+        if desc.width.is_none() || desc.height.is_none() {
+            log!("Shared texture width/height is undefined, cannot allocate it");
+            return
+        }
+
+        let width = desc.width.unwrap() as u32;
+        let height = desc.height.unwrap() as u32;
+
         if (width != self.width) || (height != self.height) {
 
             let texture_desc = D3D11_TEXTURE2D_DESC {
