@@ -122,9 +122,7 @@ impl Widget for SlidesView {
         // we always maximally show 2 slides
        /* if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
             self.draw_bg.begin(cx, walk);
-            
         }
-        
         self.frame.draw_walk_widget(cx, walk)*/
         WidgetDraw::done()
     }
