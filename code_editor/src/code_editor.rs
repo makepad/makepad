@@ -298,8 +298,8 @@ impl CodeEditor {
                 last_added_selection.cursor.affinity,
             );
             // make a cursor bounding box
-            let pad_above = dvec2(self.cell_size.x, self.cell_size.y);
-            let pad_below = dvec2(self.cell_size.x * 2.0, self.cell_size.y * 2.0);
+            let pad_above = dvec2(self.cell_size.x * 8.0, self.cell_size.y);
+            let pad_below = dvec2(self.cell_size.x * 8.0, self.cell_size.y * 2.0);
             let rect = Rect {pos: dvec2(x * self.cell_size.x, y * self.cell_size.y) - pad_above, size: pad_above + pad_below};
             // only scroll into
             self.scroll_bars.scroll_into_view(cx, rect);
