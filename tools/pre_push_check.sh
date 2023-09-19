@@ -47,6 +47,8 @@ echo "Checking Wasm stable"
 cargo +stable check -q -p makepad-example-ironfish --release --target=wasm32-unknown-unknown --message-format=json
 echo "Checking android stable"
 cargo +stable check --lib -q -p makepad-example-ironfish --release --target=aarch64-linux-android --message-format=json
+echo "Checking ios stable"
+cargo +stable check -q -p makepad-example-ironfish --release --target=aarch64-apple-ios --message-format=json
 
 echo "Checking Windows GNU nightly"
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu --message-format=json
