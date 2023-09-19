@@ -262,6 +262,9 @@ pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+        // This needs to be called first to ensure the session is up to date.
+        session.handle_changes();
+
         let last_added_selection =
         session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
@@ -330,7 +333,6 @@ impl CodeEditor {
         self.viewport_rect.pos += pad_left_top;
         self.viewport_rect.size -= pad_left_top;
         
-        session.handle_changes();
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
