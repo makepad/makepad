@@ -197,6 +197,31 @@ impl RunView {
                             v.last_presented_id.set(Some(pi.id));
                             self.draw_app.set_texture(0, &pi.image);
                         }
+                        else if let Some(swapchain) = &v.old_swapchain {
+                            if let Some(pi) = swapchain.presentable_images.iter().find(|pi| pi.id == drawn_presentable_id) {
+                                if !self.started{
+                                    self.started = true;
+                                    self.animator_play(cx, id!(started.on));
+                                }
+                                self.redraw_countdown = 20;
+                                v.last_presented_id.set(Some(pi.id));
+                                self.draw_app.set_texture(0, &pi.image);
+                            }
+                            else if let Some(swapchain) = &v.old2_swapchain {
+                                if let Some(pi) = swapchain.presentable_images.iter().find(|pi| pi.id == drawn_presentable_id) {
+                                    if !self.started{
+                                        self.started = true;
+                                        self.animator_play(cx, id!(started.on));
+                                    }
+                                    self.redraw_countdown = 20;
+                                    v.last_presented_id.set(Some(pi.id));
+                                    self.draw_app.set_texture(0, &pi.image);
+                                }
+                            }
+                            else{
+                                log!("DONT HAVE FB ANYMORE");
+                            }
+                        }
                     }
                 }
             }
@@ -228,7 +253,7 @@ impl RunView {
                 // `Texture`s can be reused, but all `PresentableImageId`s must
                 // be regenerated, to tell apart swapchains when e.g. resizing
                 // constantly, so textures keep getting created and replaced.
-                if let Some(swapchain) = &mut v.swapchain {
+                /*if let Some(swapchain) = &mut v.swapchain {
                     for pi in &mut swapchain.presentable_images {
                         // Keep intact the most recently presented swapchain entry,
                         // so that its pre-resize texture isn't lost during resizing,
@@ -239,11 +264,9 @@ impl RunView {
 
                         pi.id = cx_stdin::PresentableImageId::alloc();
                     }
-                }
-                let swapchain = v.swapchain.get_or_insert_with(|| {
-                    Swapchain::new(0, 0).images_map(|_, ()| Texture::new(cx))
-                });
-
+                }*/
+                // lets make a new swapchain
+                let mut swapchain = Swapchain::new(0, 0).images_map(|_, ()| Texture::new(cx));
                 // Resize the swapchain and prepare its images for sharing.
                 (swapchain.width, swapchain.height) = new_size;
                 let shared_swapchain = swapchain.images_as_ref().images_map(|id, texture| {
@@ -254,6 +277,9 @@ impl RunView {
                     });
                     cx.get_shared_presentable_image_os_handle(&texture)
                 });
+                v.old2_swapchain = v.old_swapchain.take();
+                v.old_swapchain = v.swapchain.take();
+                v.swapchain = Some(swapchain);
 
                 // Inform the client about the new swapchain it *should* use
                 // (using older swapchains isn't an error, but the draw calls
