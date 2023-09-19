@@ -17,6 +17,7 @@ use {
         },
         makepad_shell::*,
     },
+    makepad_code_editor::decoration::{Decoration},
     makepad_http::server::*,
     std::{
         cell::Cell,
@@ -245,7 +246,7 @@ impl BuildManager {
     
     pub fn clear_log(&mut self, file_system:&mut FileSystem) {
         // lets clear all log related decorations
-        
+        file_system.clear_all_decorations();
         self.log.clear();
     }
     
@@ -314,6 +315,10 @@ impl BuildManager {
             // ok we have a cmd_id in wrap.msg
             match wrap.item {
                 LogItem::Location(loc) => {
+                    file_system.add_decoration(&loc.file_name, Decoration::new(
+                        0, loc.start,loc.start + loc.length
+                    ));
+                    file_system.redraw_view_by_path(cx, &loc.file_name, dock);
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Location(loc)));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
