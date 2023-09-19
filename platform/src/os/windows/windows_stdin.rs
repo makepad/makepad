@@ -184,7 +184,7 @@ impl Cx {
                             // poll the service for updates
                             // check signals
                             if Signal::check_and_clear_ui_signal(){
-                                //self.handle_media_signals();
+                                self.handle_media_signals();
                                 self.call_event_handler(&Event::Signal);
                             }
                             if self.handle_live_edit(){
