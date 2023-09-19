@@ -778,7 +778,7 @@ impl CodeEditor {
                 BlockElement::Line {line, ..} => {
                     self.draw_gutter.font_scale = line.scale();
                     buf.clear();
-                    let _ = write!(buf,"{: >4}", line_index);
+                    let _ = write!(buf,"{: >4}", line_index + 1);
                     self.draw_gutter.draw_abs(
                         cx,
                         DVec2 {
