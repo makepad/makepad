@@ -134,6 +134,7 @@ pub struct SharedPresentableImageOsHandle {
     pub _dummy_for_macos: Option<u32>,
 }
 
+
 /// DirectX 11 `HANDLE` from `IDXGIResource::GetSharedHandle`.
 #[cfg(target_os = "windows")]
 // FIXME(eddyb) actually use a newtype of `HANDLE` with manual trait impls.
