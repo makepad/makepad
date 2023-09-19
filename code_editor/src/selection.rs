@@ -136,23 +136,7 @@ impl SelectionSet {
         f: impl FnOnce(Selection) -> Selection,
     ) -> usize {
         self.selections[index] = f(self.selections[index]);
-        let mut index = index;
-        while index > 0 {
-            let prev_index = index - 1;
-            if !self.selections[prev_index].overlaps_with(self.selections[index]) {
-                break;
-            }
-            self.selections.remove(prev_index);
-            index -= 1;
-        }
-        while index + 1 < self.selections.len() {
-            let next_index = index + 1;
-            if !self.selections[index].overlaps_with(self.selections[next_index]) {
-                break;
-            }
-            self.selections.remove(next_index);
-        }
-        index
+        self.remove_overlapping_selections(index)
     }
 
     pub fn update_all_selections(
@@ -192,7 +176,7 @@ impl SelectionSet {
     }
 
     pub fn add_selection(&mut self, selection: Selection) -> usize {
-        match self
+        let index = match self
             .selections
             .binary_search_by_key(&selection.start(), |selection| selection.start())
         {
@@ -204,12 +188,33 @@ impl SelectionSet {
                 self.selections.insert(index, selection);
                 index
             }
-        }
+        };
+        self.remove_overlapping_selections(index)
     }
 
     pub fn set_selection(&mut self, selection: Selection) {
         self.selections.clear();
         self.selections.push(selection);
+    }
+
+    fn remove_overlapping_selections(&mut self, index: usize) -> usize {
+        let mut index = index;
+        while index > 0 {
+            let prev_index = index - 1;
+            if !self.selections[prev_index].overlaps_with(self.selections[index]) {
+                break;
+            }
+            self.selections.remove(prev_index);
+            index -= 1;
+        }
+        while index + 1 < self.selections.len() {
+            let next_index = index + 1;
+            if !self.selections[index].overlaps_with(self.selections[next_index]) {
+                break;
+            }
+            self.selections.remove(next_index);
+        }
+        index
     }
 }
 
