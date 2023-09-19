@@ -13,6 +13,7 @@ use {
         Token,
     },
     makepad_widgets::*,
+    std::fmt::Write,
     std::{mem, slice::Iter},
 };
 
@@ -105,8 +106,8 @@ live_design!{
             return sdf.fill(#08f8);
         }
     }
-        
-    DrawCodeText = {{DrawCodeText}}{
+    
+    DrawCodeText = {{DrawCodeText}} {
     }
     
     CodeEditor = {{CodeEditor}} {
@@ -126,11 +127,11 @@ live_design!{
         draw_text: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
-            fn blend_color(self, incol:vec4)->vec4{
-                if self.outline < 0.5{
+            fn blend_color(self, incol: vec4) -> vec4 {
+                if self.outline < 0.5 {
                     return incol
                 }
-                if self.pos.y<0.12{
+                if self.pos.y<0.12 {
                     return #f
                 }
                 return incol
@@ -151,7 +152,7 @@ live_design!{
             color: #C0C0C0,
         }
     }
-
+    
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
@@ -189,6 +190,8 @@ pub struct CodeEditor {
     draw_bg: DrawColor,
     #[rust(KeepCursorInView::Off)]
     keep_cursor_in_view: KeepCursorInView,
+    #[rust]
+    last_cursor_screen_pos: Option<DVec2>,
     
     #[rust]
     cell_size: DVec2,
@@ -198,6 +201,9 @@ pub struct CodeEditor {
     viewport_rect: Rect,
     #[rust]
     line_start: usize,
+    #[live(true)]
+    word_wrap: bool,
+
     #[rust]
     line_end: usize,
 }
@@ -207,6 +213,7 @@ enum KeepCursorInView {
     Always(DVec2, NextFrame),
     LockStart,
     Locked(DVec2),
+    FontResize(DVec2),
     Off
 }
 
@@ -217,7 +224,7 @@ impl KeepCursorInView {
             _ => false
         }
     }
-    fn is_locked(&self)->bool{
+    fn is_locked(&self) -> bool {
         match self {
             Self::LockStart | Self::Locked(_) => true,
             _ => false
@@ -265,6 +272,9 @@ impl CodeEditor {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
+        self.cell_size =
+        self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        
         let last_added_selection =
         session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
@@ -272,8 +282,9 @@ impl CodeEditor {
             last_added_selection.cursor.affinity,
         );
         let cursor_pos = dvec2(cursor_x, cursor_y) * self.cell_size;
-        match self.keep_cursor_in_view{
-            KeepCursorInView::Once | KeepCursorInView::Always(_,_)=>{
+        self.last_cursor_screen_pos = Some(cursor_pos - self.scroll_bars.get_scroll_pos());
+        match self.keep_cursor_in_view {
+            KeepCursorInView::Once | KeepCursorInView::Always(_, _) => {
                 // make a cursor bounding box
                 let pad_above = dvec2(self.cell_size.x * 8.0, self.cell_size.y);
                 let pad_below = dvec2(self.cell_size.x * 8.0, self.cell_size.y * 2.0);
@@ -284,25 +295,32 @@ impl CodeEditor {
                     self.keep_cursor_in_view = KeepCursorInView::Off
                 }
             }
-
-            KeepCursorInView::LockStart=>{
+            
+            KeepCursorInView::LockStart => {
                 // lets get the on screen position
                 let screen_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 self.keep_cursor_in_view = KeepCursorInView::Locked(screen_pos);
             }
-            KeepCursorInView::Locked(pos)=>{
+            KeepCursorInView::Locked(pos) => {
                 // ok so we want to keep cursor pos at the same screen position
                 let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 let delta = pos - new_pos;
-                let new_pos = self.scroll_bars.get_scroll_pos()-dvec2(0.0,delta.y);
+                let new_pos = self.scroll_bars.get_scroll_pos() - dvec2(0.0, delta.y);
                 self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
                 //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
             }
-            KeepCursorInView::Off=>{}
+            KeepCursorInView::FontResize(last_pos) => {
+                let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
+                let delta = last_pos - new_pos;
+                let new_pos = self.scroll_bars.get_scroll_pos() - dvec2(0.0, delta.y);
+                self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
+                self.keep_cursor_in_view = KeepCursorInView::Off
+            }
+            KeepCursorInView::Off => {
+                
+            }
         }
-
-        self.cell_size =
-        self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        
         let walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
         
@@ -333,9 +351,9 @@ impl CodeEditor {
         self.viewport_rect.pos += pad_left_top;
         self.viewport_rect.size -= pad_left_top;
         
-        session.set_wrap_column(Some(
+        session.set_wrap_column(if self.word_wrap {Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
-        ));
+        )} else {None});
         
         let scroll_pos = self.scroll_bars.get_scroll_pos();
         
@@ -356,7 +374,7 @@ impl CodeEditor {
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-
+        
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
             session.layout().height() * self.cell_size.y + (self.viewport_rect.size.y - self.cell_size.y),
@@ -364,12 +382,43 @@ impl CodeEditor {
         
         self.scroll_bars.end(cx);
         if session.update_folds() {
-             self.scroll_bars.area().redraw(cx);
+            self.scroll_bars.area().redraw(cx);
         }
-        else if self.keep_cursor_in_view.is_locked(){
+        else if self.keep_cursor_in_view.is_locked() {
             self.keep_cursor_in_view = KeepCursorInView::Off;
         }
     }
+    
+    pub fn reset_font_size(&mut self) {
+        self.draw_gutter.text_style.font_size = 9.0;
+        self.draw_text.text_style.font_size = 9.0;
+        if let Some(pos) = self.last_cursor_screen_pos {
+            self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
+        }
+    }
+    
+    pub fn decrease_font_size(&mut self) {
+        if self.draw_text.text_style.font_size > 3.0 {
+            self.draw_text.text_style.font_size -= 1.0;
+            self.draw_gutter.text_style.font_size =
+            self.draw_text.text_style.font_size;
+            if let Some(pos) = self.last_cursor_screen_pos {
+                self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
+            }
+        }
+    }
+    
+    pub fn increase_font_size(&mut self) {
+        if self.draw_text.text_style.font_size < 20.0 {
+            self.draw_text.text_style.font_size += 1.0;
+            self.draw_gutter.text_style.font_size =
+            self.draw_text.text_style.font_size;
+            if let Some(pos) = self.last_cursor_screen_pos {
+                self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
+            }
+        }
+    }
+    
     
     pub fn handle_event(
         &mut self,
@@ -398,10 +447,11 @@ impl CodeEditor {
             
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
+                is_repeat: false,
                 ..
             }) => {
                 session.fold();
-                if !self.keep_cursor_in_view.is_locked(){
+                if !self.keep_cursor_in_view.is_locked() {
                     self.keep_cursor_in_view = KeepCursorInView::LockStart;
                 }
                 self.redraw(cx);
@@ -411,10 +461,50 @@ impl CodeEditor {
                 ..
             }) => {
                 session.unfold();
-                if !self.keep_cursor_in_view.is_locked(){
+                if !self.keep_cursor_in_view.is_locked() {
                     self.keep_cursor_in_view = KeepCursorInView::LockStart;
                 }
                 self.redraw(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Minus,
+                modifiers: KeyModifiers {control, logo, ..},
+                ..
+            }) => {
+                if control || logo {
+                    self.decrease_font_size();
+                    self.redraw(cx);
+                }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Key0,
+                modifiers: KeyModifiers {control, logo, ..},
+                ..
+            }) => {
+                if control || logo {
+                    self.reset_font_size();
+                    self.redraw(cx);
+                }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Equals,
+                modifiers: KeyModifiers {control, logo, ..},
+                ..
+            }) => {
+                if control || logo {
+                    self.increase_font_size();
+                    self.redraw(cx);
+                }
+            }
+             Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyW,
+                modifiers: KeyModifiers {control, logo, ..},
+                ..
+            }) => {
+                if control || logo {
+                    self.word_wrap = !self.word_wrap;
+                    self.redraw(cx);
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
@@ -571,7 +661,7 @@ impl CodeEditor {
                 cx.set_cursor(MouseCursor::Text);
             }
             Hit::FingerMove(FingerMoveEvent {abs, ..}) => {
-                if let KeepCursorInView::Always(old_abs,_) = &mut self.keep_cursor_in_view{
+                if let KeepCursorInView::Always(old_abs, _) = &mut self.keep_cursor_in_view {
                     *old_abs = abs;
                 }
                 cx.set_cursor(MouseCursor::Text);
@@ -598,6 +688,7 @@ impl CodeEditor {
     fn draw_gutter(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
+        let mut buf = String::new();
         for element in session
             .layout()
             .block_elements(self.line_start, self.line_end)
@@ -605,14 +696,17 @@ impl CodeEditor {
             match element {
                 BlockElement::Line {line, ..} => {
                     self.draw_gutter.font_scale = line.scale();
+                    buf.clear();
+                    let _ = write!(buf,"{: >4}", line_index);
                     self.draw_gutter.draw_abs(
                         cx,
                         DVec2 {
                             x: 0.0,
                             y: origin_y,
                         } *self.cell_size
-                            + self.gutter_rect.pos,
-                        &format!("{: >4}", line_index),
+                            + self.gutter_rect.pos 
+                            + dvec2((1.0-line.scale()) * -self.cell_size.x + self.gutter_rect.size.x - line.scale() * self.gutter_rect.size.x,0.0),
+                            &buf
                     );
                     line_index += 1;
                     origin_y += line.height();
