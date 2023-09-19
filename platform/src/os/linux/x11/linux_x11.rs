@@ -21,7 +21,6 @@ use {
         cx::{Cx, OsType,LinuxWindowParams}, 
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
-        Texture,
     }
 };
 
@@ -351,12 +350,9 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) media: CxLinuxMedia,
+    pub(crate) media: CxLinuxMedia,
 
     // HACK(eddyb) generalize this to EGL, properly.
-    pub opengl_cx: Option<OpenglCx>,
-
-    pub swapchain: Option<[Texture; 2]>,
-    pub present_index: usize,
+    pub(super) opengl_cx: Option<OpenglCx>,
 }
 
