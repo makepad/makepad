@@ -49,9 +49,9 @@ pub struct ActiveBuild {
     pub process: BuildProcess,
     pub run_view_id: LiveId,
     pub cmd_id: Option<BuildCmdId>,
-    pub swapchain: [Texture; 2],
-    pub mac_resize_id: usize,
-    pub present_index: Cell<usize>,
+    pub swapchain: Option<cx_stdin::Swapchain<Texture>>,
+    pub last_presented_id: Cell<Option<cx_stdin::PresentableImageId>>,
+    pub last_presented_backup_for_resizing: Texture,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]

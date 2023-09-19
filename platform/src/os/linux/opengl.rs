@@ -20,9 +20,6 @@ use {
     },
 };
 
-#[cfg(target_os = "linux")]
-use crate::cx_stdin::linux_dma_buf;
-
 impl Cx {
     
     pub (crate) fn render_view(
@@ -193,18 +190,14 @@ impl Cx {
                         };
                         let cxtexture = &mut self.textures[texture_id];
 
-                        if cxtexture.desc.format.is_shared() {
-                            // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
-                            #[cfg(not(any(linux_direct, target_os="android")))]
-                            cxtexture.os.update_shared_texture(self.os.opengl_cx.as_ref().unwrap(), &cxtexture.desc);
-                        } else if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
+                        if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
                             cxtexture.update_image = false;
                             cxtexture.os.update_platform_texture_image2d(
                                 cxtexture.desc.width.unwrap() as u32,
                                 cxtexture.desc.height.unwrap() as u32,
                                 &cxtexture.image_u32
                             );
-                        }  
+                        }
                     }
                     for i in 0..sh.mapping.textures.len() {
                         let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
@@ -380,11 +373,17 @@ impl Cx {
                 gl_sys::FramebufferRenderbuffer(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT, gl_sys::RENDERBUFFER, self.passes[pass_id].os.gl_bugfix_depthbuffer.unwrap());
             }*/
         }
-        
+
+        // HACK(eddyb) drain error queue, so that we can check erors below.
+        while unsafe { gl_sys::GetError() } != 0 {}
+
         unsafe {
-            gl_sys::Viewport(0, 0, (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32);
+            let width = (pass_size.x * dpi_factor) as i32;
+            let height = (pass_size.y * dpi_factor) as i32;
+            gl_sys::Viewport(0, 0, width, height);
+            assert_eq!(gl_sys::GetError(), 0, "glTexImage2D(0, 0, {width}, {height}) failed");
         }
-        
+
         if clear_flags != 0 {
             unsafe {
                 if clear_flags & gl_sys::DEPTH_BUFFER_BIT != 0 {
@@ -817,8 +816,9 @@ pub struct CxOsTexture {
     pub height: u64,
     pub gl_texture: Option<u32>,
     pub gl_renderbuffer: Option<u32>,
+
     #[cfg(target_os = "linux")]
-    pub dma_buf_exported_image: Option<Box<linux_dma_buf::Image<std::os::fd::OwnedFd>>>,
+    pub dma_buf_exported_image: Option<Box<super::dma_buf::Image<std::os::fd::OwnedFd>>>,
 }
 
 impl CxOsTexture {
