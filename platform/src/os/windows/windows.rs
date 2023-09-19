@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::RefCell,
+        cell::{Cell,RefCell},
     },
     crate::{
         makepad_live_id::*,
@@ -21,6 +21,9 @@ use {
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         window::CxWindowPool,
+        windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        Texture,
+        windows::Win32::Foundation::HANDLE,
     }
 };
 
@@ -32,7 +35,10 @@ impl Cx {
         cx.borrow_mut().os_type = OsType::Windows;
         
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
-        
+
+        // hack: store ID3D11Device in CxOs, so texture-related operations become possible on the makepad/studio side, yet don't completely destroy the code there
+        cx.borrow_mut().os.d3d11_device = Cell::new(Some(d3d11_cx.borrow().device.clone()));
+
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
@@ -229,6 +235,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(get_win32_app_global().time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
@@ -368,5 +375,9 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
+    pub d3d11_device: Cell<Option<ID3D11Device>>,
+    pub (crate) swapchain: Option<[Texture; 2]>,
+    pub (crate) swapchain_handles: [HANDLE; 2],
+    pub (crate) present_index: usize,
     pub (crate) decoding: CxWindowsDecoding,
 }

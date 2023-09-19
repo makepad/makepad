@@ -1,12 +1,16 @@
 use {
     std::{
         rc::Rc,
-        cell::RefCell,
+        cell::{
+            Cell,
+            RefCell,
+        },
     },
     makepad_objc_sys::{
         msg_send,
         sel,
         sel_impl,
+        runtime::ObjcId,
     },
     crate::{
         makepad_live_id::*,
@@ -137,11 +141,14 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
-
-        
+        init_apple_classes_global();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
+
+        // store device object ID for double buffering
+        cx.borrow_mut().os.metal_device = Cell::new(Some(metal_cx.borrow().device));
+
         //let cx = Rc::new(RefCell::new(self));
         if std::env::args().find(|v| v == "--stdin-loop").is_some(){
             let mut cx = cx.borrow_mut();
@@ -151,7 +158,6 @@ impl Cx {
         }
         
         let metal_windows = Rc::new(RefCell::new(Vec::new()));
-        init_apple_classes_global();
         init_macos_app_global(Box::new({
             let cx = cx.clone();
             move | event | {
@@ -190,6 +196,7 @@ impl Cx {
                         if drawable == nil {
                             return
                         }
+                        self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
                         if metal_window.is_resizing {
                             self.draw_pass(*pass_id, metal_cx, DrawPassMode::Resizing(drawable));
                         }
@@ -200,9 +207,11 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
+                    self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
@@ -491,7 +500,11 @@ impl Cx {
                     get_macos_app_global().stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(items) => {
-                    get_macos_app_global().start_dragging(items);
+                    //  lets start dragging on the right window
+                    if let Some(metal_window) = metal_windows.iter_mut().next() {
+                        metal_window.cocoa_window.start_dragging(items);
+                        break;
+                    }
                 }
                 CxOsOp::UpdateMenu(menu) => {
                     get_macos_app_global().update_app_menu(&menu, &self.command_settings)
@@ -566,5 +579,5 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) decoding: CxAppleDecoding,
+    pub metal_device: Cell<Option<ObjcId>>,
 }
-

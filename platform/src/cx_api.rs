@@ -23,6 +23,7 @@ use {
             Area, 
             //DrawListArea
         },
+        texture::Texture,
         menu::Menu,
         pass::{
             PassId,
@@ -101,7 +102,7 @@ impl Cx {
         }
         Err(format!("Dependency not loaded {}", path))
     }
-    
+    pub fn null_texture(&self)->Texture{self.null_texture.clone()}
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn os_type(&self) -> &OsType {&self.os_type}
@@ -303,6 +304,18 @@ impl Cx {
     pub fn repaint_pass(&mut self, pass_id: PassId) {
         let cxpass = &mut self.passes[pass_id];
         cxpass.paint_dirty = true;
+    }
+    
+    pub fn repaint_pass_and_child_passes(&mut self, pass_id: PassId) {
+        let cxpass = &mut self.passes[pass_id];
+        cxpass.paint_dirty = true;
+        for sub_pass_id in self.passes.id_iter() {
+            if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
+                if dep_pass_id == pass_id {
+                    self.repaint_pass_and_child_passes(sub_pass_id);
+                }
+            }
+        }
     }
     
     pub fn redraw_pass_and_child_passes(&mut self, pass_id: PassId) {

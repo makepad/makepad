@@ -557,20 +557,28 @@ impl XlibApp {
                         break;
                     }
                     EventFlow::Wait => {
+                        let time = self.time_now();
                         self.timers.update_timers(&mut timer_ids);
                         for timer_id in &timer_ids{
                             self.do_callback(
-                                XlibEvent::Timer(TimerEvent {timer_id:*timer_id})
+                                XlibEvent::Timer(TimerEvent {
+                                    timer_id:*timer_id,
+                                    time: Some(time)
+                                })
                             );
                         }
                         self.timers.select(self.display_fd);
                         self.event_flow = EventFlow::Poll;
                     }
                     EventFlow::Poll => { 
+                        let time = self.time_now();
                         self.timers.update_timers(&mut timer_ids);
                         for timer_id in &timer_ids{
                             self.do_callback(
-                                XlibEvent::Timer(TimerEvent {timer_id:*timer_id})
+                                XlibEvent::Timer(TimerEvent {
+                                    timer_id:*timer_id,
+                                    time: Some(time)
+                                })
                             );
                         }
                         self.event_loop_poll();

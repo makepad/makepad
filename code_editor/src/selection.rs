@@ -2,7 +2,7 @@ use {
     crate::{
         layout::Layout,
         str::StrExt,
-        text::{Edit, Length, Position, Range},
+        text::{Edit, Length, Position},
     },
     std::{ops, ops::Deref, slice::Iter},
 };
@@ -54,10 +54,6 @@ impl Selection {
         self.end() - self.start()
     }
 
-    pub fn range(self) -> Range {
-        Range::new(self.start(), self.end()).unwrap()
-    }
-
     pub fn line_range(self) -> ops::Range<usize> {
         if self.anchor <= self.cursor.position {
             self.anchor.line_index..self.cursor.position.line_index + 1
@@ -102,7 +98,7 @@ impl Selection {
         }
     }
 
-    pub fn apply_edit(self, edit: &Edit) -> Selection {
+    pub fn apply_edit(self, edit: &Edit) -> Self {
         Self {
             anchor: self.anchor.apply_edit(edit),
             cursor: self.cursor.apply_edit(edit),
@@ -140,23 +136,7 @@ impl SelectionSet {
         f: impl FnOnce(Selection) -> Selection,
     ) -> usize {
         self.selections[index] = f(self.selections[index]);
-        let mut index = index;
-        while index > 0 {
-            let prev_index = index - 1;
-            if !self.selections[prev_index].overlaps_with(self.selections[index]) {
-                break;
-            }
-            self.selections.remove(prev_index);
-            index -= 1;
-        }
-        while index + 1 < self.selections.len() {
-            let next_index = index + 1;
-            if !self.selections[index].overlaps_with(self.selections[next_index]) {
-                break;
-            }
-            self.selections.remove(next_index);
-        }
-        index
+        self.remove_overlapping_selections(index)
     }
 
     pub fn update_all_selections(
@@ -178,7 +158,7 @@ impl SelectionSet {
                 self.selections[current_index] = merged_selection;
                 self.selections.remove(next_index);
                 if let Some(index) = &mut index {
-                    if next_index < *index {
+                    if next_index <= *index {
                         *index -= 1;
                     }
                 }
@@ -189,14 +169,14 @@ impl SelectionSet {
         index
     }
 
-    pub fn apply_change(&mut self, edit: &Edit) {
+    pub fn apply_edit(&mut self, edit: &Edit) {
         for selection in &mut self.selections {
             *selection = selection.apply_edit(edit);
         }
     }
 
     pub fn add_selection(&mut self, selection: Selection) -> usize {
-        match self
+        let index = match self
             .selections
             .binary_search_by_key(&selection.start(), |selection| selection.start())
         {
@@ -208,12 +188,33 @@ impl SelectionSet {
                 self.selections.insert(index, selection);
                 index
             }
-        }
+        };
+        self.remove_overlapping_selections(index)
     }
 
     pub fn set_selection(&mut self, selection: Selection) {
         self.selections.clear();
         self.selections.push(selection);
+    }
+
+    fn remove_overlapping_selections(&mut self, index: usize) -> usize {
+        let mut index = index;
+        while index > 0 {
+            let prev_index = index - 1;
+            if !self.selections[prev_index].overlaps_with(self.selections[index]) {
+                break;
+            }
+            self.selections.remove(prev_index);
+            index -= 1;
+        }
+        while index + 1 < self.selections.len() {
+            let next_index = index + 1;
+            if !self.selections[index].overlaps_with(self.selections[next_index]) {
+                break;
+            }
+            self.selections.remove(next_index);
+        }
+        index
     }
 }
 
@@ -329,7 +330,7 @@ impl Cursor {
                     .map(|(index, _)| index)
                     .unwrap(),
             },
-            affinity: Affinity::Before,
+            affinity: Affinity::After,
             preferred_column_index: None,
         }
     }
@@ -345,7 +346,7 @@ impl Cursor {
                     .map(|(index, _)| self.position.byte_index + index)
                     .unwrap_or(line.len()),
             },
-            affinity: Affinity::After,
+            affinity: Affinity::Before,
             preferred_column_index: None,
         }
     }
@@ -357,7 +358,7 @@ impl Cursor {
                 line_index: prev_line_index,
                 byte_index: lines[prev_line_index].len(),
             },
-            affinity: Affinity::Before,
+            affinity: Affinity::After,
             preferred_column_index: None,
         }
     }
@@ -368,7 +369,7 @@ impl Cursor {
                 line_index: self.position.line_index + 1,
                 byte_index: 0,
             },
-            affinity: Affinity::After,
+            affinity: Affinity::Before,
             preferred_column_index: None,
         }
     }
@@ -452,6 +453,16 @@ impl Cursor {
         Self {
             position: self.position.apply_edit(edit),
             ..self
+        }
+    }
+}
+
+impl From<Position> for Cursor {
+    fn from(position: Position) -> Self {
+        Self {
+            position,
+            affinity: Affinity::Before,
+            preferred_column_index: None,
         }
     }
 }

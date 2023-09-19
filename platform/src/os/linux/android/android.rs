@@ -461,7 +461,7 @@ impl Cx {
         if studio_http.is_none() {
             return
         }
-        let url = format!("http://{}/live_file", studio_http.unwrap());
+        let url = format!("http://{}/$live_file_change", studio_http.unwrap());
         let request = HttpRequest::new(url, HttpMethod::GET);
         unsafe {android_jni::to_java_http_request(live_id!(live_reload), request);}
     }
@@ -603,6 +603,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(self.os.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
@@ -703,13 +704,14 @@ impl Cx {
         let mut to_be_dispatched = Vec::with_capacity(self.os.timers.len());
         let mut to_be_removed = Vec::with_capacity(self.os.timers.len());
         let now = Instant::now();
-        
+        let time = self.os.time_now();
         for (id, timer) in self.os.timers.iter_mut() {
             let elapsed_time = now - timer.start_time;
             let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
             
             if elapsed_time > next_due_time {
-                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id}));
+                
+                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time:Some(time)}));
                 if timer.repeats {
                     timer.step += 1;
                 } else {
