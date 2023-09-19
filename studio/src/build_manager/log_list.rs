@@ -223,7 +223,7 @@ impl BuildManager {
             if let Some((build_id, log_item)) = self.log.get(item_id as usize) {
                 let binary = if self.active.builds.len()>1{
                     if let Some(build) = self.active.builds.get(&build_id) {
-                        &build.process.binary
+                        &build.log_index
                     }
                     else{""}
                 }else{""};
@@ -246,7 +246,7 @@ impl BuildManager {
                             binary = {text: (&binary)}
                             icon = {active_page: (map_level_to_icon(msg.level))},
                             body = {text: (&msg.msg)}
-                            location = {text: (format!("{}: {}:{}", msg.file_name, msg.range.start().line_index, msg.range.start().byte_index))}
+                            location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index, msg.start.byte_index))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
                         item.draw_widget_all(cx);

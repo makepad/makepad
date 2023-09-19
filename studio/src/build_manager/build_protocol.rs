@@ -1,6 +1,6 @@
 use crate::{
     makepad_live_id::LiveId,
-    makepad_code_editor::text::Range,
+    makepad_code_editor::text::{Position, Length},
     makepad_micro_serde::{SerBin, DeBin, DeBinErr},
 };
 
@@ -123,7 +123,8 @@ pub enum LogItemLevel{
 pub struct LogItemLocation{
     pub level: LogItemLevel,
     pub file_name: String,
-    pub range: Range,
+    pub start: Position,
+    pub length: Length,
     pub msg: String
 }
 

@@ -1,7 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    makepad_platform::{event::video_decoding::*, thread::*},
+    makepad_platform::{event::video_decoding::*},
     widget::*,
     VideoColorFormat,
 };
@@ -247,7 +247,7 @@ impl Video {
             }
         }
 
-        if self.tick.is_event(event) {            
+        if self.tick.is_event(event).is_some() {            
             self.maybe_advance_playback(cx);
 
             if self.should_fetch() {

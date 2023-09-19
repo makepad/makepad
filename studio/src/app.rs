@@ -246,7 +246,7 @@ impl AppMain for App {
                 }
                 else if let Some(mut run_view) = next.as_run_view().borrow_mut() {
                     let current_id = dock.drawing_item_id().unwrap();
-                    run_view.draw(cx, current_id, &self.build_manager);
+                    run_view.draw(cx, current_id, &mut self.build_manager);
                 }
                 else if let Some(mut log_list) = log_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_log(cx, &mut *log_list);
@@ -280,7 +280,7 @@ impl AppMain for App {
                     self.build_manager.start_recompile(cx);
                 }
                 else if let KeyCode::KeyK = key_code {
-                    self.build_manager.clear_log();
+                    self.build_manager.clear_log(&mut self.file_system);
                     log_list.redraw(cx);
                 }
             }
@@ -293,7 +293,7 @@ impl AppMain for App {
                 }
                 FileSystemAction::LiveReloadNeeded(live_file_change) => {
                     self.build_manager.live_reload_needed(live_file_change);
-                    self.build_manager.clear_log();
+                    self.build_manager.clear_log(&mut self.file_system);
                     log_list.redraw(cx);
                 }
             }
@@ -318,7 +318,7 @@ impl AppMain for App {
             }
         }
         
-        for action in self.build_manager.handle_event(cx, event) {
+        for action in self.build_manager.handle_event(cx, event, &mut self.file_system, &dock) {
             match action {
                 BuildManagerAction::RedrawLog => {
                     // if the log_list is tailing, set the new len
@@ -326,7 +326,7 @@ impl AppMain for App {
                 }
                 BuildManagerAction::StdinToHost {run_view_id, msg} =>{
                     if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut(){
-                        run_view.handle_stdin_to_host(cx, &msg);
+                        run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.build_manager);
                     }
                 }
                 _ => ()

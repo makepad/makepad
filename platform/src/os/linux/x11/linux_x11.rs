@@ -1,8 +1,9 @@
 use {
     std::cell::RefCell,
     std::rc::Rc,
-    self::super::{
-        opengl_x11::{OpenglWindow,OpenglCx},
+    self::super::opengl_x11::{
+        OpenglWindow,
+        OpenglCx
     },
     self::super::super::{
         egl_sys,
@@ -12,17 +13,15 @@ use {
     },
     crate::{
         cx_api::{CxOsOp, CxOsApi}, 
-        makepad_math::{dvec2},
+        makepad_math::dvec2,
         makepad_live_id::*,
         thread::Signal,
-        event::{
-            Event,
-        },
+        event::Event,
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
-        
+        Texture,
     }
 };
 
@@ -218,6 +217,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(get_xlib_app_global().time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
@@ -355,5 +355,8 @@ pub struct CxOs {
 
     // HACK(eddyb) generalize this to EGL, properly.
     pub opengl_cx: Option<OpenglCx>,
+
+    pub swapchain: Option<[Texture; 2]>,
+    pub present_index: usize,
 }
 

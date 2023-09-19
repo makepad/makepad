@@ -18,7 +18,7 @@ use {
         makepad_shader_compiler::ShaderRegistry,
         draw_shader::CxDrawShaders,
         draw_matrix::CxDrawMatrixPool,
-        os::CxOs,
+        os::{CxOs},
         debug::Debug,
         event::{
             DrawEvent,
@@ -39,7 +39,7 @@ use {
         window::CxWindowPool,
         draw_list::CxDrawListPool,
         pass::CxPassPool,
-        texture::CxTexturePool,
+        texture::{CxTexturePool,TextureDesc,TextureFormat,Texture},
         geometry::{
             Geometry,
             CxGeometryPool,
@@ -58,7 +58,7 @@ pub struct Cx {
     pub (crate) gpu_info: GpuInfo,
     pub (crate) xr_capabilities: XrCapabilities,
     pub (crate) cpu_cores: usize,
-    
+    pub null_texture: Texture,
     pub windows: CxWindowPool,
     pub passes: CxPassPool,
     pub draw_lists: CxDrawListPool,
@@ -195,23 +195,21 @@ impl Cx {
         //#[cfg(any(target_arch = "wasm32", target_os = "android"))]
         //crate::makepad_error_log::set_panic_hook();
         // the null texture
-        /*let mut textures = CxTexturePool::default();
-        textures.alloc_new(CxTexture {
-            desc: TextureDesc {
-                format: TextureFormat::ImageBGRA,
-                width: Some(4),
-                height: Some(4),
-                multisample: None
-            },
-            image_u32: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            //image_f32: Vec::new(),
-            update_image: true,
-            platform: CxOsTexture::default()
-        });*/
+        let mut textures = CxTexturePool::default();
+        let null_texture = textures.alloc();
+        let texture = &mut textures[null_texture.texture_id()];
+        texture.desc = TextureDesc {
+            format: TextureFormat::ImageBGRA,
+            width: Some(4),
+            height: Some(4),
+        };
+        texture.image_u32 = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        texture.update_image =  true;
         
         let (executor, spawner) = executor::new_executor_and_spawner();
         let (send, recv) = std::sync::mpsc::channel();
         Self {
+            null_texture,
             cpu_cores: 8,
             in_makepad_studio: false,
             os_type: OsType::Unknown,
@@ -223,7 +221,7 @@ impl Cx {
             draw_lists: Default::default(),
             draw_matrices: Default::default(),
             geometries: Default::default(),
-            textures: Default::default(),
+            textures,
             geometries_refs: Default::default(),
             
             draw_shaders: Default::default(),
@@ -268,7 +266,7 @@ impl Cx {
 
             executor: Some(executor),
             spawner,
-            
+
             self_ref: None
         }
     }
