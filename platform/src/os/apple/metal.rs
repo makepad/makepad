@@ -478,9 +478,9 @@ impl Cx {
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
-                if let Some(stdin_frame) = stdin_frame {
+                if let Some(_stdin_frame) = stdin_frame {
                     #[cfg(target_os = "macos")]
-                    Self::stdin_send_draw_complete(stdin_frame);
+                    Self::stdin_send_draw_complete(_stdin_frame);
                 }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
@@ -520,7 +520,8 @@ impl Cx {
         }
         self.draw_shaders.compile_set.clear();
     }
-
+    
+    #[cfg(target_os="macos")]
     pub fn get_shared_presentable_image_os_handle(
         &mut self,
         texture: &Texture,
@@ -533,6 +534,16 @@ impl Cx {
         // based entirely on its `PresentableImageId`.
         crate::cx_stdin::SharedPresentableImageOsHandle {
             _dummy_for_macos: None,
+        }
+    }
+    
+    #[cfg(target_os="ios")]
+    pub fn get_shared_presentable_image_os_handle(
+        &mut self,
+        _texture: &Texture,
+    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
+        crate::cx_stdin::SharedPresentableImageOsHandle {
+            _dummy_for_unsupported: None,
         }
     }
 }
@@ -946,6 +957,7 @@ impl CxOsTexture {
         }
     }
     
+    #[cfg(target_os = "macos")]
     pub fn update_from_shared_handle(
         &mut self,
         metal_cx: &MetalCx,

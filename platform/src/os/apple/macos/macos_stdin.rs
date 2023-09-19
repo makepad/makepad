@@ -86,17 +86,8 @@ impl Cx {
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
         let service_proxy = xpc_service_proxy();
 
-
-        // HACK(eddyb) there's no easy way (AFAICT) to make `stdin` non-blocking,
-        // and we want to be able to "see ahead" JSON messages, at the very least
-        // for catching up the client after a spam of `WindowSize`s from the host.
-        let swapchain_get_key32 = |swapchain: &Swapchain<_>| {
-            swapchain.presentable_images[0].id.as_u64() as u32
-        };
-        let latest_swapchain_key32 = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(!0));
         let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
         {
-            let latest_swapchain_key32 = latest_swapchain_key32.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(std::io::stdin().lock());
                 let mut line = String::new();
@@ -109,15 +100,6 @@ impl Cx {
                     // alright lets put the line in a json parser
                     match HostToStdin::deserialize_json(&line) {
                         Ok(msg) => {
-                            // Keep track of `WindowSize`s, because if we fall behind,
-                            // we end up with a backlog of useless outdated swapchains,
-                            // while not having any other way to determine they are.
-                            if let HostToStdin::WindowSize(ws) = &msg {
-                                latest_swapchain_key32.store(
-                                    swapchain_get_key32(&ws.swapchain),
-                                    std::sync::atomic::Ordering::Release,
-                                );
-                            }
                             if json_msg_tx.send(msg).is_err() {
                                 break;
                             }
