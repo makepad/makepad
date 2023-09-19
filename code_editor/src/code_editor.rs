@@ -187,7 +187,7 @@ pub struct CodeEditor {
     draw_cursor: DrawColor,
     #[live]
     draw_bg: DrawColor,
-    #[rust(KeepCursorInView::Never)]
+    #[rust(KeepCursorInView::Off)]
     keep_cursor_in_view: KeepCursorInView,
     
     #[rust]
@@ -205,19 +205,21 @@ pub struct CodeEditor {
 enum KeepCursorInView {
     Once,
     Always(DVec2, NextFrame),
-    Never
+    LockStart,
+    Locked(DVec2),
+    Off
 }
 
 impl KeepCursorInView {
-    fn is_never(&self) -> bool {
-        match self {
-            Self::Never => true,
-            _ => false
-        }
-    }
     fn is_once(&self) -> bool {
         match self {
             Self::Once => true,
+            _ => false
+        }
+    }
+    fn is_locked(&self)->bool{
+        match self {
+            Self::LockStart | Self::Locked(_) => true,
             _ => false
         }
     }
@@ -295,7 +297,9 @@ impl CodeEditor {
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
+        
         let scroll_pos = self.scroll_bars.get_scroll_pos();
+        
         self.line_start = session
             .layout()
             .find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
@@ -313,31 +317,58 @@ impl CodeEditor {
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-        if !self.keep_cursor_in_view.is_never() {
-            let last_added_selection =
-            session.selections()[session.last_added_selection_index().unwrap()];
-            let (x, y) = session.layout().logical_to_normalized_position(
-                last_added_selection.cursor.position,
-                last_added_selection.cursor.affinity,
-            );
-            // make a cursor bounding box
-            let pad_above = dvec2(self.cell_size.x * 8.0, self.cell_size.y);
-            let pad_below = dvec2(self.cell_size.x * 8.0, self.cell_size.y * 2.0);
-            let rect = Rect {pos: dvec2(x * self.cell_size.x, y * self.cell_size.y) - pad_above, size: pad_above + pad_below};
-            // only scroll into
-            self.scroll_bars.scroll_into_view(cx, rect);
-            if self.keep_cursor_in_view.is_once() {
-                self.keep_cursor_in_view = KeepCursorInView::Never
+        let last_added_selection =
+        session.selections()[session.last_added_selection_index().unwrap()];
+        let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
+            last_added_selection.cursor.position,
+            last_added_selection.cursor.affinity,
+        );
+        let cursor_pos = dvec2(cursor_x, cursor_y) * self.cell_size;
+        let mut shift = None;
+        match self.keep_cursor_in_view{
+            KeepCursorInView::Once | KeepCursorInView::Always(_,_)=>{
+                // make a cursor bounding box
+                let pad_above = dvec2(self.cell_size.x * 8.0, self.cell_size.y);
+                let pad_below = dvec2(self.cell_size.x * 8.0, self.cell_size.y * 2.0);
+                let rect = Rect {pos: cursor_pos - pad_above, size: pad_above + pad_below};
+                // only scroll into
+                self.scroll_bars.scroll_into_view(cx, rect);
+                if self.keep_cursor_in_view.is_once() {
+                    self.keep_cursor_in_view = KeepCursorInView::Off
+                }
             }
+            KeepCursorInView::LockStart=>{
+                // lets get the on screen position
+                let screen_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
+                self.keep_cursor_in_view = KeepCursorInView::Locked(screen_pos);
+            }
+            KeepCursorInView::Locked(pos)=>{
+                // ok so we want to keep cursor pos at the same screen position
+                let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
+                let delta = pos - new_pos;
+                shift = Some(delta);
+                let new_pos = self.scroll_bars.get_scroll_pos()-delta;
+                self.scroll_bars.set_scroll_pos(cx, new_pos);
+                //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
+            }
+            KeepCursorInView::Off=>{}
         }
         
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
             session.layout().height() * self.cell_size.y,
         );
+        if let Some(shift) = shift{
+            let range = cx.get_turtle_align_range();
+            cx.shift_align_range(&range, dvec2(0.0, shift.y));
+        }
+        
         self.scroll_bars.end(cx);
         if session.update_folds() {
-            cx.redraw_all();
+             self.scroll_bars.area().redraw(cx);
+        }
+        else if self.keep_cursor_in_view.is_locked(){
+            self.keep_cursor_in_view = KeepCursorInView::Off;
         }
     }
     
@@ -371,7 +402,9 @@ impl CodeEditor {
                 ..
             }) => {
                 session.fold();
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                if !self.keep_cursor_in_view.is_locked(){
+                    self.keep_cursor_in_view = KeepCursorInView::LockStart;
+                }
                 self.redraw(cx);
             }
             Hit::KeyUp(KeyEvent {
@@ -379,7 +412,9 @@ impl CodeEditor {
                 ..
             }) => {
                 session.unfold();
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                if !self.keep_cursor_in_view.is_locked(){
+                    self.keep_cursor_in_view = KeepCursorInView::LockStart;
+                }
                 self.redraw(cx);
             }
             Hit::KeyDown(KeyEvent {
@@ -530,7 +565,7 @@ impl CodeEditor {
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
             }
             Hit::FingerUp(_) => {
-                self.keep_cursor_in_view = KeepCursorInView::Never;
+                self.keep_cursor_in_view = KeepCursorInView::Off;
             }
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
