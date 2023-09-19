@@ -514,7 +514,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
         ])?;
         for line in answer.split("\n"){
             if line.contains("installationURL:"){
-                let path = &line[20..];
+                let path = &line[21..line.len()-1];
                 println!("GOT PATH: #{}#", path);
                 shell_env(&[], &cwd, "xcrun", &[
                     "devicectl",
