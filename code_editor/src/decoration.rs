@@ -113,17 +113,7 @@ impl DecorationSet {
 impl Default for DecorationSet {
     fn default() -> Self {
         Self {
-            decorations: vec![Decoration::new(
-                0,
-                Position {
-                    line_index: 0,
-                    byte_index: 4,
-                },
-                Position {
-                    line_index: 3,
-                    byte_index: 8,
-                },
-            )]
+            decorations: vec![]
         }
     }
 }

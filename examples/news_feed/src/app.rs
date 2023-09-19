@@ -23,6 +23,7 @@ live_design!{
     TEXT_SUB = {
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+        error1:1
     }
     
     TEXT_P = {
@@ -61,7 +62,7 @@ live_design!{
                 return sdf.result
             }
         }
-        padding2: 9.0
+        padding: 9.0
         text: ""
     }
     
