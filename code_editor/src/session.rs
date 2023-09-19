@@ -145,16 +145,17 @@ impl Session {
     }
 
     pub fn fold(&mut self) {
-        let text = self.document.as_text();
-        let lines = text.as_lines();
-        for line in 0..lines.len() {
-            let indent_level =
-                lines[line].indent().unwrap_or("").column_count() / self.settings.tab_column_count;
-            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
-                self.layout.borrow_mut().fold_column[line] =
+        let line_count = self.document().as_text().as_lines().len();
+        for line_index in 0..line_count {
+            let layout = self.layout();
+            let line = layout.line(line_index);
+            let indent_level = line.indent_column_count() / self.settings.tab_column_count;
+            drop(layout);
+            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line_index) {
+                self.layout.borrow_mut().fold_column[line_index] =
                     self.settings.fold_level * self.settings.tab_column_count;
-                self.unfolding_lines.remove(&line);
-                self.folding_lines.insert(line);
+                self.unfolding_lines.remove(&line_index);
+                self.folding_lines.insert(line_index);
             }
         }
     }
