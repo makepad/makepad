@@ -1,7 +1,7 @@
 use {
     crate::{
         char::CharExt,
-        decoration::Decoration,
+        decoration::{Decoration, DecorationSet},
         history::{EditKind, History},
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
@@ -42,17 +42,7 @@ impl Document {
                 block_inlays: Vec::new(),
             }),
             tokenizer: RefCell::new(Tokenizer::new(line_count)),
-            decorations: RefCell::new(vec![Decoration::new(
-                0,
-                Position {
-                    line_index: 0,
-                    byte_index: 4,
-                },
-                Position {
-                    line_index: 3,
-                    byte_index: 8,
-                },
-            )]),
+            decorations: RefCell::new(DecorationSet::new()),
             edit_senders: RefCell::new(HashMap::new()),
         }));
         inner.update_indent_state();
@@ -72,7 +62,7 @@ impl Document {
     }
 
     pub fn decorations(&self) -> Ref<'_, [Decoration]> {
-        Ref::map(self.0.decorations.borrow(), |decorations| decorations.as_slice())
+        Ref::map(self.0.decorations.borrow(), |decorations| decorations.as_decorations())
     }
 
     pub fn edit_selections(
@@ -166,6 +156,14 @@ impl Document {
         }
         drop(history);
         self.update_after_edit(origin_id, None, &edits);
+    }
+
+    pub fn add_decoration(&mut self, decoration: Decoration) {
+        self.0.decorations.borrow_mut().add_decoration(decoration);
+    }
+
+    pub fn clear_decorations(&mut self) {
+        self.0.decorations.borrow_mut().clear()
     }
 
     pub fn add_session(
@@ -369,9 +367,7 @@ impl Document {
         );
         let mut decorations = self.0.decorations.borrow_mut();
         for edit in edits {
-            for decoration in &mut *decorations {
-                *decoration = decoration.apply_edit(edit);
-            }
+            decorations.apply_edit(edit);
         }
         drop(decorations);
         for (&session_id, edit_sender) in &*self.0.edit_senders.borrow() {
@@ -671,7 +667,7 @@ struct DocumentInner {
     history: RefCell<History>,
     layout: RefCell<DocumentLayout>,
     tokenizer: RefCell<Tokenizer>,
-    decorations: RefCell<Vec<Decoration>>,
+    decorations: RefCell<DecorationSet>,
     edit_senders: RefCell<HashMap<SessionId, Sender<(Option<SelectionSet>, Vec<Edit>)>>>,
 }
 
