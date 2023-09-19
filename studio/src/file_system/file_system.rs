@@ -29,6 +29,7 @@ pub struct FileSystem {
     pub open_documents: HashMap<String, Option<Document>>
 }
 
+
 #[derive(Debug)]
 pub struct FileNode {
     pub parent_edge: Option<FileEdge>,
@@ -154,6 +155,7 @@ impl FileSystem {
         // ok lets see if we have a document
         // ifnot, we create a new one
         self.tab_id_to_path.insert(tab_id, path.clone());
+        
         if self.open_documents.get(&path).is_none(){
             self.open_documents.insert(path.clone(), None);
             self.file_client.send_request(FileRequest::OpenFile(path));

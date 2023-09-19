@@ -280,7 +280,7 @@ impl AppMain for App {
                     self.build_manager.start_recompile(cx);
                 }
                 else if let KeyCode::KeyK = key_code {
-                    self.build_manager.clear_log();
+                    self.build_manager.clear_log(&mut self.file_system);
                     log_list.redraw(cx);
                 }
             }
@@ -293,7 +293,7 @@ impl AppMain for App {
                 }
                 FileSystemAction::LiveReloadNeeded(live_file_change) => {
                     self.build_manager.live_reload_needed(live_file_change);
-                    self.build_manager.clear_log();
+                    self.build_manager.clear_log(&mut self.file_system);
                     log_list.redraw(cx);
                 }
             }
@@ -318,7 +318,7 @@ impl AppMain for App {
             }
         }
         
-        for action in self.build_manager.handle_event(cx, event, &dock) {
+        for action in self.build_manager.handle_event(cx, event, &mut self.file_system, &dock) {
             match action {
                 BuildManagerAction::RedrawLog => {
                     // if the log_list is tailing, set the new len
