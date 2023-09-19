@@ -33,12 +33,19 @@ public class VideoDecoder {
         mChunkSize = chunkSize;
 
         try {
+            Activity activity = mActivityReference.get();
+
             ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource(video);
             mExtractor.setDataSource(dataSource);
 
             int trackIndex = selectTrack(mExtractor);
             if (trackIndex < 0) {
-                throw new RuntimeException("No video track found in video");
+                if (activity != null) {
+                    activity.runOnUiThread(() -> {
+                        MakepadNative.onVideoDecodingError(mVideoId, "No video track found in video");
+                    });
+                }
+                return;
             }
             mExtractor.selectTrack(trackIndex);
             MediaFormat format = mExtractor.getTrackFormat(trackIndex);
@@ -65,7 +72,8 @@ public class VideoDecoder {
                     if (codecName.toLowerCase().contains("omx")) {
                         MediaCodecInfo.CodecCapabilities capabilities = codecInfo.getCapabilitiesForType(videoMimeType);
                         for (int color : capabilities.colorFormats) {
-                            Log.e("Makepad", "Supported Color Format: " + color);
+                            // Debug
+                            // Log.e("Makepad", "Supported Color Format: " + color);
                             if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible) {
                                 selectedCodecName = codecName;
                                 isHWCodec = true;
@@ -96,7 +104,8 @@ public class VideoDecoder {
 
             String colorFormatString = getColorFormatString(colorFormat);
             
-            Log.e("Makepad", "Using Codec: " + mCodec.getName());
+            // Debug
+            // Log.e("Makepad", "Using Codec: " + mCodec.getName());
 
             mInfo = new MediaCodec.BufferInfo();
             mInputEos = false;
@@ -105,7 +114,6 @@ public class VideoDecoder {
             mVideoWidth = format.getInteger(MediaFormat.KEY_WIDTH);
             mVideoHeight = format.getInteger(MediaFormat.KEY_HEIGHT);
 
-            Activity activity = mActivityReference.get();
             if (activity != null) {
                 activity.runOnUiThread(() -> {
                     MakepadNative.onVideoDecodingInitialized( 
@@ -118,7 +126,8 @@ public class VideoDecoder {
                 });
             }
         } catch (Exception e) {
-            Log.e("Makepad", "Error initializing video decoding", e);
+            String message = e.getMessage();
+            MakepadNative.onVideoDecodingError(mVideoId, message != null ? message : ("Error initializing video decoding: " + e.toString()));
         }
     }
 
@@ -153,16 +162,19 @@ public class VideoDecoder {
     }
 
     public void decodeVideoChunk(int maxFramesToDecode) {
+        Activity activity = mActivityReference.get();
         try {
             synchronized (this) {
                 if (mIsDecoding) {
-                    Log.e("Makepad", "Already decoding");
                     return;
                 }
                 mIsDecoding = true;
-
                 if (mExtractor == null || mCodec == null) {
-                    throw new IllegalStateException("Decoding hasn't been initialized");
+                    if (activity != null) {
+                        activity.runOnUiThread(() -> {
+                            MakepadNative.onVideoDecodingError(mVideoId, "Decoding hasn't been initialized for this video");
+                        });
+                    }
                 }
 
                 long framesDecodedThisChunk = 0;
@@ -237,7 +249,6 @@ public class VideoDecoder {
                 };
 
                 mIsDecoding = false;
-                Activity activity = mActivityReference.get();
                 if (activity != null) {
                     activity.runOnUiThread(() -> {
                         MakepadNative.onVideoChunkDecoded(mVideoId);
@@ -245,8 +256,12 @@ public class VideoDecoder {
                 }
             }
         } catch(Exception e) {
-            Log.e("Makepad", "Exception in decodeVideoChunk: " + e.getMessage());
-            Log.e("Makepad", "Exception in decodeVideoChunk: " + e.getStackTrace().toString());
+            if (activity != null) {
+                activity.runOnUiThread(() -> {
+                   String message = e.getMessage();
+            MakepadNative.onVideoDecodingError(mVideoId, message != null ? message : ("Error decoding video: " + e.toString()));
+                });
+            }
         }
     }
 
@@ -273,6 +288,13 @@ public class VideoDecoder {
     }
 
     public void cleanup() {
+        while (mIsDecoding) {
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         if (mCodec != null) {
             mCodec.stop();
             mCodec.release();
