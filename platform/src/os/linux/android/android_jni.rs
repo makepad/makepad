@@ -92,6 +92,10 @@ pub enum FromJavaMessage {
     VideoChunkDecoded {
         video_id: u64,
     },
+    VideoDecodingError {
+        video_id: u64,
+        error: String,
+    },
     Pause,
     Resume,
     Stop,
@@ -409,6 +413,20 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoChunkDeco
 ) {
     send_from_java_message(FromJavaMessage::VideoChunkDecoded {
         video_id: video_id as u64,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoDecodingError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    video_id: jni_sys::jlong,
+    error: jni_sys::jstring
+) {
+    let error_string =  unsafe { jstring_to_string(env, error) };
+    send_from_java_message(FromJavaMessage::VideoDecodingError {
+        video_id: video_id as u64,
+        error: error_string,
     });
 }
 
