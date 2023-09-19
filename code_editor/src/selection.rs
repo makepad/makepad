@@ -98,7 +98,7 @@ impl Selection {
         }
     }
 
-    pub fn apply_edit(self, edit: &Edit) -> Selection {
+    pub fn apply_edit(self, edit: &Edit) -> Self {
         Self {
             anchor: self.anchor.apply_edit(edit),
             cursor: self.cursor.apply_edit(edit),
@@ -185,7 +185,7 @@ impl SelectionSet {
         index
     }
 
-    pub fn apply_change(&mut self, edit: &Edit) {
+    pub fn apply_edit(&mut self, edit: &Edit) {
         for selection in &mut self.selections {
             *selection = selection.apply_edit(edit);
         }
@@ -448,6 +448,16 @@ impl Cursor {
         Self {
             position: self.position.apply_edit(edit),
             ..self
+        }
+    }
+}
+
+impl From<Position> for Cursor {
+    fn from(position: Position) -> Self {
+        Self {
+            position,
+            affinity: Affinity::Before,
+            preferred_column_index: None,
         }
     }
 }
