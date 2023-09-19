@@ -380,4 +380,5 @@ pub struct CxOs {
     pub (crate) swapchain_handles: [HANDLE; 2],
     pub (crate) present_index: usize,
     pub (crate) decoding: CxWindowsDecoding,
+    pub (crate) new_frame_being_rendered: bool,
 }
