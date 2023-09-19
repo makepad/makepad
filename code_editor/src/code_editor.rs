@@ -961,7 +961,6 @@ impl CodeEditor {
     fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_decoration = None;
         let decorations = session.document().decorations();
-        log!("GOT SET {:?}", decorations);
         let mut decorations = decorations.iter();
         while decorations.as_slice().first().map_or(false, | decoration | {
             decoration.end().line_index < self.line_start
