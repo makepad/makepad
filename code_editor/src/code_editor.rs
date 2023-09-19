@@ -551,14 +551,15 @@ impl CodeEditor {
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 modifiers: KeyModifiers {alt, ..},
+                tap_count,
                 ..
             }) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
-                        session.add_cursor(cursor, affinity);
+                        session.add_selection(cursor, affinity, tap_count);
                     } else {
-                        session.set_cursor(cursor, affinity);
+                        session.set_selection(cursor, affinity, tap_count);
                     }
                     self.redraw(cx);
                 }
@@ -793,7 +794,7 @@ impl CodeEditor {
             decorations.next().unwrap();
         }
         if decorations.as_slice().first().map_or(false, | decoration | {
-            decoration.start.line_index < self.line_start
+            decoration.start().line_index < self.line_start
         }) {
             active_decoration = Some(ActiveDecoration {
                 decoration: *decorations.next().unwrap(),
@@ -832,8 +833,6 @@ impl CodeEditor {
         }
         .draw_selection_layer(cx, session)
     }
-    
-    
     
     fn pick(&self, session: &Session, position: DVec2) -> Option<(Position, Affinity)> {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
@@ -1123,7 +1122,7 @@ impl<'a> DrawDecorationLayer<'a> {
             .as_slice()
             .first()
             .map_or(false, | decoration | {
-            decoration.start == position && affinity == Affinity::After
+            decoration.start() == position && affinity == Affinity::After
         })
         {
             let decoration = *self.decorations.next().unwrap();

@@ -60,17 +60,17 @@ impl Session {
                 injected_char_stack: Vec::new(),
                 highlighted_delimiter_positions: HashSet::new(),
             }),
-            decorations: RefCell::new(vec![Decoration {
-                id: 0,
-                start: Position {
+            decorations: RefCell::new(vec![Decoration::new(
+                0,
+                Position {
                     line_index: 0,
                     byte_index: 4,
                 },
-                length: Length {
-                    line_count: 3,
-                    byte_count: 8,
+                Position {
+                    line_index: 3,
+                    byte_index: 8,
                 },
-            }]),
+            )]),
             wrap_column: None,
             folding_lines: HashSet::new(),
             folded_lines: HashSet::new(),
@@ -200,23 +200,47 @@ impl Session {
         true
     }
 
-    pub fn set_cursor(&mut self, position: Position, affinity: Affinity) {
+    pub fn set_selection(&mut self, position: Position, affinity: Affinity, tap_count: u32) {
+        let mut selection= Selection::from(Cursor {
+            position,
+            affinity,
+            preferred_column_index: None,
+        });
+        if tap_count == 2 {
+            let text = self.document().as_text();
+            let lines = text.as_lines();
+            match lines[position.line_index][..position.byte_index].chars().next_back() {
+                Some(char) if char.is_opening_delimiter() => {
+                    let opening_delimiter_position = Position {
+                        line_index: position.line_index,
+                        byte_index: position.byte_index - char.len_utf8()
+                    };
+                    if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, char) {
+                        println!("PURE ZENIS {:?} {:?}", opening_delimiter_position, closing_delimiter_position);
+                        selection = Selection {
+                            cursor: Cursor::from(closing_delimiter_position),
+                            anchor: opening_delimiter_position,
+                        }
+                    }
+                }
+                _ => {}
+            }
+            drop(text);
+        };
+        println!("EUTA {:?}", selection);
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state
             .selections
-            .set_selection(Selection::from(Cursor {
-                position,
-                affinity,
-                preferred_column_index: None,
-            }));
+            .set_selection(selection);
         selection_state.last_added_selection_index = Some(0);
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
+        println!("WAS ZUM TEUFEL {:?}", self.selection_state.borrow().selections);
     }
 
-    pub fn add_cursor(&mut self, position: Position, affinity: Affinity) {
+    pub fn add_selection(&mut self, position: Position, affinity: Affinity, _tap_count: u32) {
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state.last_added_selection_index = Some(
             selection_state
@@ -275,6 +299,10 @@ impl Session {
         self.modify_selections(reset_anchor, |selection, layout| {
             selection.update_cursor(|cursor| cursor.move_down(layout))
         });
+    }
+
+    pub fn set_decorations(&mut self, decorations: Vec<Decoration>) {
+        *self.decorations.borrow_mut() = decorations;
     }
 
     pub fn insert(&mut self, text: Text) {
@@ -738,7 +766,7 @@ impl Session {
 
     pub fn handle_changes(&mut self) {
         while let Ok((selections, edits)) = self.edit_receiver.try_recv() {
-            self.apply_edits(selections, &edits);
+            self.update_after_edit(selections, &edits);
         }
     }
 
@@ -770,7 +798,7 @@ impl Session {
         self.document.force_new_group();
     }
 
-    fn apply_edits(&self, selections: Option<SelectionSet>, edits: &[Edit]) {
+    fn update_after_edit(&self, selections: Option<SelectionSet>, edits: &[Edit]) {
         for edit in edits {
             match edit.change {
                 Change::Insert(point, ref text) => {
@@ -835,10 +863,17 @@ impl Session {
             selection_state.selections = selections;
         } else {
             for edit in edits {
-                selection_state.selections.apply_change(edit);
+                selection_state.selections.apply_edit(edit);
             }
         }
         drop(selection_state);
+        let mut decorations = self.decorations.borrow_mut();
+        for edit in edits {
+            for decoration in &mut *decorations {
+                *decoration = decoration.apply_edit(edit);
+            }
+        }
+        drop(decorations);
         self.update_highlighted_delimiter_positions();
     }
 
