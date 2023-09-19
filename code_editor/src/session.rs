@@ -217,7 +217,6 @@ impl Session {
                         byte_index: position.byte_index - char.len_utf8()
                     };
                     if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, char) {
-                        println!("PURE ZENIS {:?} {:?}", opening_delimiter_position, closing_delimiter_position);
                         selection = Selection {
                             cursor: Cursor::from(closing_delimiter_position),
                             anchor: opening_delimiter_position,
@@ -228,7 +227,6 @@ impl Session {
             }
             drop(text);
         };
-        println!("EUTA {:?}", selection);
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state
             .selections
@@ -238,7 +236,6 @@ impl Session {
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
-        println!("WAS ZUM TEUFEL {:?}", self.selection_state.borrow().selections);
     }
 
     pub fn add_selection(&mut self, position: Position, affinity: Affinity, _tap_count: u32) {
