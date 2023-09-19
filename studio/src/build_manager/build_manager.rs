@@ -49,6 +49,8 @@ pub struct ActiveBuild {
     pub process: BuildProcess,
     pub run_view_id: LiveId,
     pub cmd_id: Option<BuildCmdId>,
+    pub old2_swapchain: Option<cx_stdin::Swapchain<Texture>>,
+    pub old_swapchain: Option<cx_stdin::Swapchain<Texture>>,
     pub swapchain: Option<cx_stdin::Swapchain<Texture>>,
     pub last_presented_id: Cell<Option<cx_stdin::PresentableImageId>>,
     pub last_presented_backup_for_resizing: Texture,

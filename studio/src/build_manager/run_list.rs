@@ -264,6 +264,8 @@ impl BuildManager {
                     run_view_id,
                     cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
                     swapchain: None,
+                    old_swapchain: None,
+                    old2_swapchain: None,
                     last_presented_id: Cell::new(None),
                     last_presented_backup_for_resizing: Texture::new(cx),
                 });
