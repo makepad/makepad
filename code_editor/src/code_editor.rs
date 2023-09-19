@@ -262,10 +262,46 @@ pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+        let last_added_selection =
+        session.selections()[session.last_added_selection_index().unwrap()];
+        let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
+            last_added_selection.cursor.position,
+            last_added_selection.cursor.affinity,
+        );
+        let cursor_pos = dvec2(cursor_x, cursor_y) * self.cell_size;
+        match self.keep_cursor_in_view{
+            KeepCursorInView::Once | KeepCursorInView::Always(_,_)=>{
+                // make a cursor bounding box
+                let pad_above = dvec2(self.cell_size.x * 8.0, self.cell_size.y);
+                let pad_below = dvec2(self.cell_size.x * 8.0, self.cell_size.y * 2.0);
+                let rect = Rect {pos: cursor_pos - pad_above, size: pad_above + pad_below};
+                // only scroll into
+                self.scroll_bars.scroll_into_view(cx, rect);
+                if self.keep_cursor_in_view.is_once() {
+                    self.keep_cursor_in_view = KeepCursorInView::Off
+                }
+            }
+            KeepCursorInView::LockStart=>{
+                // lets get the on screen position
+                let screen_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
+                self.keep_cursor_in_view = KeepCursorInView::Locked(screen_pos);
+            }
+            KeepCursorInView::Locked(pos)=>{
+                // ok so we want to keep cursor pos at the same screen position
+                let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
+                let delta = pos - new_pos;
+                let new_pos = self.scroll_bars.get_scroll_pos()-delta;
+                self.scroll_bars.set_scroll_pos(cx, new_pos);
+                //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
+            }
+            KeepCursorInView::Off=>{}
+        }
+        
         self.cell_size =
         self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         let walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
+        
         let turtle_rect = cx.turtle().rect();
         let gutter_width = (session .document() .as_text() .as_lines() .len() .to_string() .column_count() + 3) as f64
             * self.cell_size.x;
@@ -317,51 +353,11 @@ impl CodeEditor {
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-        let last_added_selection =
-        session.selections()[session.last_added_selection_index().unwrap()];
-        let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
-            last_added_selection.cursor.position,
-            last_added_selection.cursor.affinity,
-        );
-        let cursor_pos = dvec2(cursor_x, cursor_y) * self.cell_size;
-        let mut shift = None;
-        match self.keep_cursor_in_view{
-            KeepCursorInView::Once | KeepCursorInView::Always(_,_)=>{
-                // make a cursor bounding box
-                let pad_above = dvec2(self.cell_size.x * 8.0, self.cell_size.y);
-                let pad_below = dvec2(self.cell_size.x * 8.0, self.cell_size.y * 2.0);
-                let rect = Rect {pos: cursor_pos - pad_above, size: pad_above + pad_below};
-                // only scroll into
-                self.scroll_bars.scroll_into_view(cx, rect);
-                if self.keep_cursor_in_view.is_once() {
-                    self.keep_cursor_in_view = KeepCursorInView::Off
-                }
-            }
-            KeepCursorInView::LockStart=>{
-                // lets get the on screen position
-                let screen_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
-                self.keep_cursor_in_view = KeepCursorInView::Locked(screen_pos);
-            }
-            KeepCursorInView::Locked(pos)=>{
-                // ok so we want to keep cursor pos at the same screen position
-                let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
-                let delta = pos - new_pos;
-                shift = Some(delta);
-                let new_pos = self.scroll_bars.get_scroll_pos()-delta;
-                self.scroll_bars.set_scroll_pos(cx, new_pos);
-                //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
-            }
-            KeepCursorInView::Off=>{}
-        }
-        
+
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
             session.layout().height() * self.cell_size.y,
         );
-        if let Some(shift) = shift{
-            let range = cx.get_turtle_align_range();
-            cx.shift_align_range(&range, dvec2(0.0, shift.y));
-        }
         
         self.scroll_bars.end(cx);
         if session.update_folds() {
