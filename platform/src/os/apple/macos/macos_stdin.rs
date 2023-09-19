@@ -131,15 +131,6 @@ impl Cx {
             });
         }
 
-        let mut skip_outdated_swapchains_always = false;
-        let mut skip_outdated_swapchains_batch = false;
-        match std::env::var("MAKEPAD_WARP").ok().as_ref().map_or("", |s| &s[..]) {
-            "always" => skip_outdated_swapchains_always = true,
-            "batch" => skip_outdated_swapchains_batch = true,
-            "" => {}
-            s => error!("unknown `MAKEPAD_WARP={s}` value (only `always` and `batch` are allowed)"),
-        }
-
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
 
         let mut swapchain = None;
@@ -147,15 +138,10 @@ impl Cx {
         self.call_event_handler(&Event::Construct);
 
         let mut messages = std::collections::VecDeque::new();
-        let mut resizes_skipped = 0u32;
         loop {
-            let mut latest_swapchain_key32_in_batch = !0;
             loop {
                 match json_msg_rx.try_recv() {
                     Ok(msg) => {
-                        if let HostToStdin::WindowSize(ws) = &msg {
-                            latest_swapchain_key32_in_batch = swapchain_get_key32(&ws.swapchain);
-                        }
                         messages.push_back(msg);
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) if messages.is_empty() => return,
@@ -202,43 +188,13 @@ impl Cx {
                         self.call_event_handler(&Event::Scroll(e.into()))
                     }
                     HostToStdin::WindowSize(ws) => {
-                        // Always update the geometry, as latter input events might
-                        // need it to be accurately handled, while output swapchains
-                        // do not have the same semantic effect when they're missing.
+
                         let window = &mut self.windows[CxWindowPool::id_zero()];
                         window.window_geom = WindowGeom {
                             dpi_factor: ws.dpi_factor,
                             inner_size: dvec2(ws.swapchain.width as f64, ws.swapchain.height as f64) / ws.dpi_factor,
                             ..Default::default()
                         };
-
-                        // We could only have gotten to this point iff at some point
-                        // `swapchain_get_key32(&ws.swapchain)` had been stored into
-                        // `latest_swapchain_key32` - and if that's *not* anymore the
-                        // current value, a newer `WindowSize` was therefore observed,
-                        // which implies the host will ignore any attempt to present
-                        // on this swapchain (as it has lost all track of its backing
-                        // GPU memory etc.), and rendering on it at all is wasteful.
-                        let key32 = swapchain_get_key32(&ws.swapchain);
-                        let outdated_swapchain =
-                            skip_outdated_swapchains_always
-                                && key32 != latest_swapchain_key32.load(std::sync::atomic::Ordering::Acquire)
-                            || skip_outdated_swapchains_batch
-                                && key32 != latest_swapchain_key32_in_batch;
-                        if outdated_swapchain  {
-                            swapchain = None;
-                            resizes_skipped += 1;
-                            let npot = resizes_skipped.next_power_of_two();
-                            if
-                                (3..16).contains(&resizes_skipped)
-                                    || resizes_skipped >= 16 &&
-                                        (resizes_skipped == npot || resizes_skipped == npot * 3 / 2)
-                            {
-                                error!("!!! {resizes_skipped} `WindowSize`s skipped in a row !!!");
-                            }
-                            continue;
-                        }
-                        resizes_skipped = 0;
 
                         self.redraw_all();
 
