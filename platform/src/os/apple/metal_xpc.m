@@ -1,22 +1,23 @@
 #import <Foundation/Foundation.h>
+#include <stdint.h>
 
 @protocol MetalXPCProtocol
--(void)fetchTexture:(NSUInteger)index uid:(NSUInteger)uid with:(void (^)(NSObject*, NSUInteger))completion;
--(void)storeTexture:(NSUInteger)index obj:(NSObject*)obj uid:(NSUInteger)uid with:(void (^)())completion;;
+-(void)fetchTexture:(uint64_t)presentable_image_id_u64 _padding:(uint64_t)_padding with:(void (^)(NSObject*, /*padding*/uint64_t))completion;
+-(void)storeTexture:(uint64_t)presentable_image_id_u64 obj:(NSObject*)obj _padding:(uint64_t)_padding with:(void (^)())completion;
 @end
 
-Protocol* define_xpc_service_protocol(void){
+Protocol* define_xpc_service_protocol(void) {
     return @protocol(MetalXPCProtocol);
 }
 
-NSObject* get_fetch_texture_completion_block(void(^block)(NSObject*, NSUInteger)){
-    return Block_copy(^(NSObject * texture, NSUInteger uid){
-        block(texture, uid); 
+NSObject* hackily_heapify_block2_obj_u64(void(^block)(NSObject*, /*padding*/uint64_t)){
+    return Block_copy(^(NSObject *texture, uint64_t _padding) {
+        block(texture, _padding);
     });
 }
 
-NSObject* get_store_completion_block(void(^block)()){
-    return Block_copy(^(){
+NSObject* hackily_heapify_block0(void(^block)()) {
+    return Block_copy(^() {
         block();
     });
 }
