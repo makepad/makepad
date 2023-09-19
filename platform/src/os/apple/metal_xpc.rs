@@ -1,7 +1,7 @@
 
 use {
     std::collections::HashMap,
-    std::cell::RefCell,
+    std::ffi::c_void,
     std::sync::Mutex,
     std::ptr::NonNull,
     crate::{
@@ -14,6 +14,7 @@ use {
                 //nsstring_to_string,
                 str_to_nsstring,
             },
+            cx_stdin::PresentableImageId,
         },
     }
 };
@@ -31,7 +32,7 @@ struct MetalXPCClasses {
 
 #[derive(Default)]
 struct MetalXPCStorage {
-    pub textures: Mutex<RefCell<HashMap<u64, (RcObjcId,u64) >> >
+    pub textures_by_presentable_image_id_u64: Mutex<HashMap<u64, RcObjcId>>,
 }
 
 impl MetalXPCClasses {
@@ -46,8 +47,8 @@ impl MetalXPCClasses {
 
 extern {
     fn define_xpc_service_protocol() -> &'static Protocol;
-    fn get_fetch_texture_completion_block(data: u64) -> ObjcId;
-    fn get_store_completion_block(data: u64) -> ObjcId;
+    fn hackily_heapify_block2_obj_u64(data: *const c_void) -> ObjcId;
+    fn hackily_heapify_block0(data: *const c_void) -> ObjcId;
 }
 
 pub fn xpc_service_proxy_poll_run_loop() {
@@ -83,27 +84,26 @@ pub fn xpc_service_proxy() -> RcObjcId {
     }
 }
 
-pub fn fetch_xpc_service_texture(proxy: ObjcId, id: u64, uid:u64, f: Box<dyn Fn(RcObjcId, u64)>) {
+pub fn fetch_xpc_service_texture(proxy: ObjcId, id: PresentableImageId, f: impl Fn(RcObjcId) + 'static) {
     unsafe {
-        let texture_out = objc_block!(move | texture: ObjcId, uid: u64 | {
+        let completion_block = objc_block!(move |texture: ObjcId, _padding: u64| {
             //log!("FETCH RETUREND");
-            f(RcObjcId::from_unowned(NonNull::new(texture).unwrap()), uid)
+            f(RcObjcId::from_unowned(NonNull::new(texture).unwrap()))
         });
-        let completion_block = get_fetch_texture_completion_block(&texture_out as *const _ as u64);
-        let () = msg_send![proxy, fetchTexture: id uid:uid with: completion_block];
+        let completion_block = hackily_heapify_block2_obj_u64(&completion_block as *const _ as *const _);
+        let () = msg_send![proxy, fetchTexture: id.as_u64() _padding: 0 with: completion_block];
     } 
 }
 
-pub fn store_xpc_service_texture(id: u64, obj: ObjcId) {
+pub fn store_xpc_service_texture(id: PresentableImageId, obj: ObjcId) {
     //log!("STORING {}", obj as *const _ as u64);
     unsafe {
         let proxy = xpc_service_proxy();
-        let texture_out = objc_block!(move | _texture: ObjcId | {
+        let completion_block = objc_block!(move | | {
             //log!("store texture complete!");
         });
-        let completion_block = get_store_completion_block(&texture_out as *const _ as u64);
-        let uid = obj as * const _ as u64;
-        let () = msg_send![proxy.as_id(), storeTexture: id obj: obj uid: uid with: completion_block];
+        let completion_block = hackily_heapify_block0(&completion_block as *const _ as *const _);
+        let () = msg_send![proxy.as_id(), storeTexture: id.as_u64() obj: obj _padding: 0 with: completion_block];
     }
 }
 
@@ -166,26 +166,26 @@ pub fn define_xpc_service_delegate() -> *const Class {
 
 pub fn define_xpc_service_class() -> *const Class {
     
-    extern fn fetch_texture(_this: &Object, _: Sel, index: u64, _old_uid: u64, with: ObjcId) {
+    extern fn fetch_texture(_this: &Object, _: Sel, presentable_image_id_u64: u64, _padding: u64, completion: ObjcId) {
         let storage = get_metal_xpc_storage();
-        if let Some((obj, _uid)) = storage.textures.lock().unwrap().borrow_mut().get(&index) {
-            //if *uid != old_uid{
-                unsafe {objc_block_invoke!(with, invoke(
+        if let Some(obj) = storage.textures_by_presentable_image_id_u64.lock().unwrap().remove(&presentable_image_id_u64) {
+            unsafe {
+                objc_block_invoke!(completion, invoke(
                     (obj.as_id()): ObjcId,
                     (0): u64
-                ))}; 
-            //}
+                ));
+            }
         } 
         //insane_debug_out("GOT CALL! POST FETCH TEXTURE!");
     }
      
-    extern fn store_texture(_this: &Object, _: Sel, index: u64, obj: ObjcId, uid:u64, with: ObjcId) {
+    extern fn store_texture(_this: &Object, _: Sel, presentable_image_id_u64: u64, obj: ObjcId, _padding: u64, completion: ObjcId) {
         let storage = get_metal_xpc_storage();
-        storage.textures.lock().unwrap().borrow_mut().insert(
-            index,
-            (RcObjcId::from_unowned(NonNull::new(obj).unwrap()), uid)
+        storage.textures_by_presentable_image_id_u64.lock().unwrap().insert(
+            presentable_image_id_u64,
+            RcObjcId::from_unowned(NonNull::new(obj).unwrap())
         );
-        unsafe {objc_block_invoke!(with, invoke());}
+        unsafe {objc_block_invoke!(completion, invoke());}
         //insane_debug_out(&format!("STORE TEXTURE! {}", index));
     }
     
@@ -194,8 +194,8 @@ pub fn define_xpc_service_class() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(fetchTexture: uid: with:), fetch_texture as extern fn(&Object, Sel, u64, u64, ObjcId));
-        decl.add_method(sel!(storeTexture: obj: uid: with:), store_texture as extern fn(&Object, Sel, u64, ObjcId, u64, ObjcId));
+        decl.add_method(sel!(fetchTexture: _padding: with:), fetch_texture as extern fn(&Object, Sel, u64, u64, ObjcId));
+        decl.add_method(sel!(storeTexture: obj: _padding: with:), store_texture as extern fn(&Object, Sel, u64, ObjcId, u64, ObjcId));
         decl.add_protocol(define_xpc_service_protocol());
     }
     

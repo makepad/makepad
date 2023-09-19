@@ -16,7 +16,7 @@ use {
         texture::Texture,
         live_traits::LiveNew,
         thread::Signal,
-        os::cx_stdin::{HostToStdin, StdinToHost},
+        os::cx_stdin::{HostToStdin, StdinToHost, Swapchain},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
@@ -26,7 +26,11 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_handle_repaint(&mut self) {
+    pub (crate) fn stdin_handle_repaint(
+        &mut self,
+        swapchain: Option<&Swapchain<Texture>>,
+        present_index: &mut usize,
+    ) {
         self.os.opengl_cx.as_ref().unwrap().make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -34,20 +38,28 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    if self.os.swapchain.is_some() {
+                    if let Some(swapchain) = swapchain {
+                        // HACK(eddyb) retry loop in case we have broken images.
+                        for _ in 0..swapchain.presentable_images.len() {
+                            let current_image = &swapchain.presentable_images[*present_index];
+                            *present_index = (*present_index + 1) % swapchain.presentable_images.len();
 
-                        // render to swapchain
-                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
-                        self.draw_pass_to_texture(*pass_id, texture_id);
+                            if self.textures[current_image.image.texture_id()].os.gl_texture.is_none() {
+                                // FIXME(eddyb) ask the server for a new swapchain.
+                                continue;
+                            }
 
-                        // wait for GPU to finish rendering
-                        unsafe { gl_sys::Finish(); }
+                            // render to swapchain
+                            self.draw_pass_to_texture(*pass_id, current_image.image.texture_id());
 
-                        // inform host that frame is ready
-                        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(self.os.present_index).to_json().as_bytes());
+                            // wait for GPU to finish rendering
+                            unsafe { gl_sys::Finish(); }
 
-                        // flip to next one
-                        self.os.present_index = 1 - self.os.present_index;
+                            // inform host that frame is ready
+                            let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(current_image.id).to_json().as_bytes());
+
+                            break;
+                        }
                     }
                 }
                 CxPassParent::Pass(_) => {
@@ -65,8 +77,10 @@ impl Cx {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
 
         let mut reader = BufReader::new(std::io::stdin());
-        let mut window_size = None;
-        
+
+        let mut swapchain = None;
+        let mut present_index = 0;
+
         self.call_event_handler(&Event::Construct);
         
         loop {
@@ -117,11 +131,9 @@ impl Cx {
                             self.call_event_handler(&Event::Scroll(e.into()))
                         }
                         HostToStdin::WindowSize(ws) => {
-                            if window_size != Some(ws) {
+                            self.redraw_all();
 
-                                let dma_buf_image0 = ws.swapchain_handles[0];
-                                let dma_buf_image1 = ws.swapchain_handles[1];
-
+                            let new_swapchain = ws.swapchain.images_map(|_, dma_buf_image| {
                                 // HACK(eddyb) we get the host process's ID, and
                                 // a file descriptor *in that process* - normally
                                 // it'd need to be passed to this process via some
@@ -132,68 +144,54 @@ impl Cx {
                                 // so for now this requires `pidfd` (Linux 5.6+),
                                 // but could be reworked to use UNIX domain sockets
                                 // (with `SCM_RIGHTS` messages) instead, long-term.
+                                use crate::os::linux::dma_buf::pid_fd;
 
-                                let dma_buf_image0 = dma_buf_image0.planes_ref_map(|plane| plane.fd_map(|fd| {
+                                let dma_buf_image = dma_buf_image.planes_map(|plane| plane.fd_map(|fd| {
                                     // FIXME(eddyb) reuse `PidFd`s as the host PID
                                     // will never change (unless it can do client
                                     // handover, or there's "worker processes").
                                     pid_fd::PidFd::from_remote_pid(fd.remote_pid as pid_fd::pid_t)
                                         .and_then(|pid_fd| pid_fd.clone_remote_fd(fd.remote_fd))
                                 }));
-                                let dma_buf_image1 = dma_buf_image1.planes_ref_map(|plane| plane.fd_map(|fd| {
-                                    pid_fd::PidFd::from_remote_pid(fd.remote_pid as pid_fd::pid_t)
-                                        .and_then(|pid_fd| pid_fd.clone_remote_fd(fd.remote_fd))
-                                }));
 
-                                let new_textures = [Texture::new(self),Texture::new(self),];
+                                // FIXME(eddyb) is this necessary or could they be reused?
+                                let new_texture = Texture::new(self);
 
-                                if let Err(err) = &dma_buf_image0.planes.dma_buf_fd {
+                                if let Err(err) = &dma_buf_image.planes.dma_buf_fd {
                                     error!("failed to pidfd_getfd the DMA-BUF fd: {err:?}");
                                     if err.kind() == io::ErrorKind::Unsupported {
                                         error!("pidfd_getfd syscall requires at least Linux 5.6")
                                     }
                                 } else {
-                                    let dma_buf_image = dma_buf_image0.planes_map(|plane| plane.fd_map(Result::unwrap));
+                                    let dma_buf_image = dma_buf_image.planes_map(|plane| plane.fd_map(Result::unwrap));
 
                                     // update texture
-                                    let cxtexture = &mut self.textures[new_textures[0].texture_id()];
-                                    cxtexture.os.update_from_shared_dma_buf_image(
-                                        self.os.opengl_cx.as_ref().unwrap(),
-                                        &dma_buf_image,
-                                    );
-                                }
-                                if let Err(err) = &dma_buf_image1.planes.dma_buf_fd {
-                                    error!("failed to pidfd_getfd the DMA-BUF fd: {err:?}");
-                                    if err.kind() == io::ErrorKind::Unsupported {
-                                        error!("pidfd_getfd syscall requires at least Linux 5.6")
-                                    }
-                                } else {
-                                    let dma_buf_image = dma_buf_image1.planes_map(|plane| plane.fd_map(Result::unwrap));
-
-                                    // update texture
-                                    let cxtexture = &mut self.textures[new_textures[1].texture_id()];
-                                    cxtexture.os.update_from_shared_dma_buf_image(
-                                        self.os.opengl_cx.as_ref().unwrap(),
-                                        &dma_buf_image,
-                                    );
+                                    self.textures[new_texture.texture_id()]
+                                        .os.update_from_shared_dma_buf_image(
+                                            self.os.opengl_cx.as_ref().unwrap(),
+                                            &ws.swapchain,
+                                            &dma_buf_image,
+                                        );
                                 }
 
-                                self.os.swapchain = Some(new_textures);
+                                new_texture
+                            });
+                            let swapchain = swapchain.insert(new_swapchain);
 
-                                window_size = Some(ws);
-                                self.redraw_all();
+                            // reset present_index
+                            present_index = 0;
 
-                                let window = &mut self.windows[CxWindowPool::id_zero()];
-                                window.window_geom = WindowGeom {
-                                    dpi_factor: ws.dpi_factor,
-                                    inner_size: dvec2(ws.width, ws.height),
-                                    ..Default::default()
-                                };
-                                self.stdin_handle_platform_ops();
-                            }
+                            let window = &mut self.windows[CxWindowPool::id_zero()];
+                            window.window_geom = WindowGeom {
+                                dpi_factor: ws.dpi_factor,
+                                inner_size: dvec2(swapchain.width as f64, swapchain.height as f64) / ws.dpi_factor,
+                                ..Default::default()
+                            };
+
+                            self.stdin_handle_platform_ops(Some(swapchain), present_index);
                         }
 
-                        HostToStdin::Tick {frame: _, time, buffer_id: _} => if let Some(_ws) = window_size {
+                        HostToStdin::Tick {frame: _, time, buffer_id: _} => if swapchain.is_some() {
 
                             // poll the service for updates
                             // check signals
@@ -219,7 +217,7 @@ impl Cx {
                             }
                             
                             // we need to make this shared texture handle into a true metal one
-                            self.stdin_handle_repaint();
+                            self.stdin_handle_repaint(swapchain.as_ref(), &mut present_index);
                         }
                     }
                     Err(err) => { // we should output a log string
@@ -228,12 +226,16 @@ impl Cx {
                 }
             }
             // we should poll our runloop
-            self.stdin_handle_platform_ops();
+            self.stdin_handle_platform_ops(swapchain.as_ref(), present_index);
         }
     }
     
     
-    fn stdin_handle_platform_ops(&mut self) {
+    fn stdin_handle_platform_ops(
+        &mut self,
+        swapchain: Option<&Swapchain<Texture>>,
+        present_index: usize,
+    ) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -244,12 +246,11 @@ impl Cx {
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    if self.os.swapchain.is_some() {
-                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
+                    if let Some(swapchain) = swapchain {
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id,
+                            texture_id: swapchain.presentable_images[present_index].image.texture_id(),
                         }];
                     }
                 },
@@ -278,54 +279,4 @@ impl Cx {
         }
     }
     
-}
-
-/// Linux pidfd (file-descriptor-based API for "process handles") wrapper.
-///
-/// `PidFd` is used here specifically for its ability to clone any file descriptors
-/// from a remote process, similar to opening `/proc/$REMOTE_PID/fd/$REMOTE_FD`,
-/// but without all the caveats and failure modes around special file descriptors.
-//
-// FIXME(eddyb) `std::os::linux::process::PidFd` should be used/wrapped instead,
-// but for now it's still unstable, and it also lacks `pidfd_getfd` functionality,
-// as its main purpose appears to be creating a pidfd from `std::process::Command`.
-#[allow(non_camel_case_types, non_upper_case_globals)]
-mod pid_fd {
-    use std::{
-        ffi::{c_int, c_long, c_uint},
-        io,
-        os::{self, fd::{AsRawFd as _, FromRawFd as _}},
-    };
-
-    pub(super) type pid_t = c_int;
-
-    extern "C" { fn syscall(num: c_long, ...) -> c_long; }
-    const SYS_pidfd_open: c_long = 434;
-    const SYS_pidfd_getfd: c_long = 438;
-
-    pub(super) struct PidFd(os::fd::OwnedFd);
-    impl PidFd {
-        pub fn from_remote_pid(remote_pid: pid_t) -> Result<PidFd, io::Error> {
-            unsafe {
-                let flags: c_uint = 0;
-                let pid_fd = syscall(SYS_pidfd_open, remote_pid, flags);
-                if pid_fd == -1 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(PidFd(os::fd::OwnedFd::from_raw_fd(pid_fd as os::fd::RawFd)))
-                }
-            }
-        }
-        pub fn clone_remote_fd(&self, remote_fd: os::fd::RawFd) -> Result<os::fd::OwnedFd, io::Error> {
-            unsafe {
-                let flags: c_uint = 0;
-                let cloned_fd = syscall(SYS_pidfd_getfd, self.0.as_raw_fd(), remote_fd, flags);
-                if cloned_fd == -1 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(os::fd::OwnedFd::from_raw_fd(cloned_fd as os::fd::RawFd))
-                }
-            }
-        }
-    }
 }

@@ -18,164 +18,139 @@ use {
     }
 };
 
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct StdinWindowSize {
-    pub width: f64,
-    pub height: f64,
-    pub dpi_factor: f64,
-    
-    #[cfg(target_os = "macos")]
-    pub swapchain_front: u32,  // DX11 handles or XPC hashmap indices
-    
-    #[cfg(target_os = "macos")]
-    pub swapchain_handle: u64,  // DX11 handles or XPC hashmap indices
-    
-    #[cfg(target_os = "windows")]
-    pub swapchain_handles: [u64; 2],  // DX11 handles or XPC hashmap indices
-
-    // FIXME(eddyb) double-buffering support is intentionally left out, as it's
-    // being added to other OSes, this just uses the same name as that other work.
-    #[cfg(target_os = "linux")]
-    pub swapchain_handles: [linux_dma_buf::Image<linux_dma_buf::RemoteFd>; 2],
+// HACK(eddyb) more or less `<[T; N]>::each_ref`, which is still unstable.
+fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] {
+    let mut out_refs = std::mem::MaybeUninit::<[&T; N]>::uninit();
+    for (i, ref_elem) in ref_array.iter().enumerate() {
+        unsafe { *out_refs.as_mut_ptr().cast::<&T>().add(i) = ref_elem; }
+    }
+    unsafe { out_refs.assume_init() }
 }
 
-// FIXME(eddyb) move this into `os::linux` somewhere.
+pub const SWAPCHAIN_IMAGE_COUNT: usize = if cfg!(target_os = "macos") { 1 } else { 2 };
+
+/// "Swapchains" group together some number (i.e. `SWAPCHAIN_IMAGE_COUNT` here)
+/// of "presentable images", to form a queue of render targets which can be
+/// "presented" (to a surface, like a display, window, etc.) independently of
+/// rendering being done onto *other* "presentable images" in the "swapchain".
+///
+/// Certain configurations of swapchains often have older/more specific names,
+/// e.g. "double buffering" for `SWAPCHAIN_IMAGE_COUNT == 2` (or "triple" etc.).
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct Swapchain<I>
+    // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
+    where I: Sized
+{
+    pub width: u32,
+    pub height: u32,
+    pub presentable_images: [PresentableImage<I>; SWAPCHAIN_IMAGE_COUNT],
+}
+
+impl Swapchain<()> {
+    pub fn new(width: u32, height: u32) -> Self {
+        let presentable_images = [(); SWAPCHAIN_IMAGE_COUNT].map(|()| PresentableImage {
+            id: PresentableImageId::alloc(),
+            image: (),
+        });
+        Self { width, height, presentable_images }
+    }
+}
+
+impl<I> Swapchain<I> {
+    pub fn images_as_ref(&self) -> Swapchain<&I> {
+        let Swapchain { width, height, ref presentable_images } = *self;
+        let presentable_images = ref_array_to_array_of_refs(presentable_images)
+            .map(|&PresentableImage { id, ref image }| PresentableImage { id, image });
+        Swapchain { width, height, presentable_images }
+    }
+    pub fn images_map<I2>(self, mut f: impl FnMut(PresentableImageId, I) -> I2) -> Swapchain<I2> {
+        let Swapchain { width, height, presentable_images } = self;
+        let presentable_images = presentable_images
+            .map(|PresentableImage { id, image }| PresentableImage { id, image: f(id, image) });
+        Swapchain { width, height, presentable_images }
+    }
+}
+
+/// One of the "presentable images" of a [`SharedSwapchain`].
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct PresentableImage<I>
+    // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
+    where I: Sized
+{
+    pub id: PresentableImageId,
+    pub image: I,
+}
+
+/// Cross-process-unique (on best-effort) ID of a [`SharedPresentableImage`],
+/// such that multiple processes on the same system should be able to share
+/// swapchains with each-other and (effectively) never observe collisions.
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct PresentableImageId {
+    /// PID of the originating process (which allocated this ID).
+    origin_pid: u32,
+
+    /// The atomically-acquired value of a (private) counter, during allocation,
+    /// in the originating process, which will guarantee that the same process
+    /// continuously generating new swapchains will not overlap with itself,
+    /// unless it generates billions of swapchains, mixing old and new ones.
+    per_origin_counter: u32,
+}
+
+impl PresentableImageId {
+    pub fn alloc() -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+        Self {
+            origin_pid: std::process::id(),
+            per_origin_counter: COUNTER.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    pub fn as_u64(self) -> u64 {
+        let Self { origin_pid, per_origin_counter } = self;
+        (u64::from(origin_pid) << 32) | u64::from(per_origin_counter)
+    }
+}
+
+pub type SharedSwapchain = Swapchain<SharedPresentableImageOsHandle>;
+
+// FIXME(eddyb) move these type aliases into `os::{linux,apple,windows}`.
+
+/// [DMA-BUF](crate::os::linux::dma_buf)-backed image from `eglExportDMABUFImageMESA`.
 #[cfg(target_os = "linux")]
-pub mod linux_dma_buf {
-    use crate::makepad_micro_serde::*;
+pub type SharedPresentableImageOsHandle =
+    crate::os::linux::dma_buf::Image<crate::os::linux::dma_buf::RemoteFd>;
 
-    use std::os::{self, fd::AsRawFd as _};
+// HACK(eddyb) the macOS helper XPC service (in `os/apple/metal_xpc.{m,rs}`)
+// doesn't need/want any form of "handle passing", as the `id` field contains
+// all the disambiguating information it may need (however, long-term it'd
+// probably be better to use something like `IOSurface` + mach ports).
+#[cfg(target_os = "macos")]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImageOsHandle {
+    // HACK(eddyb) working around deriving limitations.
+    pub _dummy_for_macos: Option<u32>,
+}
 
-    #[derive(Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-    pub struct Image<FD>
-        // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-        where FD: Sized
-    {
-        // FIXME(eddyb) are these redundant with the `StdinWindowSize` size?
-        pub width: u32,
-        pub height: u32,
+/// DirectX 11 `HANDLE` from `IDXGIResource::GetSharedHandle`.
+#[cfg(target_os = "windows")]
+// FIXME(eddyb) actually use a newtype of `HANDLE` with manual trait impls.
+pub type SharedPresentableImageOsHandle = u64;
 
-        pub drm_format: DrmFormat,
-        // FIXME(eddyb) support 2-4 planes (not needed for RGBA, so most likely only
-        // relevant to YUV video decode streams - or certain forms of compression).
-        pub planes: ImagePlane<FD>,
-    }
+// FIXME(eddyb) use `enum Foo {}` here ideally, when the derives are fixed.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct SharedPresentableImageOsHandle {
+    // HACK(eddyb) working around deriving limitations.
+    pub _dummy_for_unsupported: Option<u32>,
+}
 
-    impl<FD> Image<FD> {
-        pub fn planes_map<FD2>(self, f: impl Fn(ImagePlane<FD>) -> ImagePlane<FD2>) -> Image<FD2> {
-            let Image { width, height, drm_format, planes: plane0 } = self;
-            Image { width, height, drm_format, planes: f(plane0) }
-        }
-        pub fn planes_ref_map<FD2>(&self, f: impl Fn(&ImagePlane<FD>) -> ImagePlane<FD2>) -> Image<FD2> {
-            let Image { width, height, drm_format, planes: ref plane0 } = *self;
-            Image { width, height, drm_format, planes: f(plane0) }
-        }
-    }
-
-    impl<FD> Copy for Image<FD> where ImagePlane<FD>: Copy {}
-    impl<FD> Clone for Image<FD> where ImagePlane<FD>: Clone {
-        fn clone(&self) -> Self {
-            self.planes_ref_map(|plane| plane.clone())
-        }
-    }
-
-    impl Image<os::fd::OwnedFd> {
-        pub fn as_remote(&self) -> Image<RemoteFd> {
-            self.planes_ref_map(|plane| plane.as_remote())
-        }
-    }
-
-    /// In the Linux DRM+KMS system (i.e. kernel-side GPU drivers), a "DRM format"
-    /// is an image format (i.e. a specific byte-level encoding of texel data)
-    /// that framebuffers (or more generally "surfaces" / "images") could use,
-    /// provided that all the GPUs involved support the specific format used.
-    ///
-    /// See also <https://docs.kernel.org/gpu/drm-kms.html#drm-format-handling>.
-    #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-    pub struct DrmFormat {
-        /// FourCC code for a "DRM format", i.e. one of the `DRM_FORMAT_*` values
-        /// defined in `drm/drm_fourcc.h`, and the main aspect of a "DRM format"
-        /// that userspace needs to care about (e.g. RGB vs YUV, bit width, etc.).
-        ///
-        /// For example, non-HDR RGBA surfaces will almost always use the format
-        /// `DRM_FORMAT_ABGR8888` (with FourCC `"AB24"`, i.e. `0x34324241`), and:
-        /// - "A" can be replaced with "X" (disabling the alpha channel)
-        /// - "AB" can be reversed, to get "BA" (ABGR -> BGRA)
-        /// - "B" can be replaced with "R" (ABGR -> ARGB)
-        /// - "AR" can be reversed, to get "RA" (ARGB -> RGBA)
-        /// - "24" can be replaced with "30" or "48" (increasing bits per channel)
-        ///
-        /// Some formats also require multiple "planes" (i.e. independent buffers),
-        /// and while that's commonly for YUV formats, planar RGBA also exists.
-        pub fourcc: u32,
-
-        /// Each "DRM format" may be further "modified" with additional features,
-        /// describing how memory is accessed by GPU texture units (e.g. "tiling"),
-        /// and optionally requiring additional "planes" for compression purposes.
-        ///
-        /// To userspace, the modifiers are almost always opaque and merely need to
-        /// be passed from an image exporter to an image importer, to correctly
-        /// interpret the GPU memory in the same way on both sides.
-        pub modifiers: u64,
-    }
-
-    #[derive(Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-    pub struct ImagePlane<FD>
-        // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
-        where FD: Sized
-    {
-        /// Linux DMA-BUF file descriptor, representing a generic GPU buffer object.
-        ///
-        /// See also <https://docs.kernel.org/driver-api/dma-buf.html>.
-        pub dma_buf_fd: FD,
-
-        /// This plane's starting position (in bytes), in the DMA-BUF buffer.
-        pub offset: u32,
-
-        /// This plane's stride (aka "pitch") for texel rows, in the DMA-BUF buffer.
-        pub stride: u32,
-    }
-
-    impl<FD> ImagePlane<FD> {
-        pub fn fd_as_ref(&self) -> ImagePlane<&FD> {
-            let ImagePlane { ref dma_buf_fd, offset, stride } = *self;
-            ImagePlane { dma_buf_fd, offset, stride }
-        }
-        pub fn fd_map<FD2>(self, f: impl FnOnce(FD) -> FD2) -> ImagePlane<FD2> {
-            let ImagePlane { dma_buf_fd, offset, stride } = self;
-            ImagePlane { dma_buf_fd: f(dma_buf_fd), offset, stride }
-        }
-    }
-
-    impl Copy for ImagePlane<RemoteFd> {}
-    impl Clone for ImagePlane<RemoteFd> {
-        fn clone(&self) -> Self {
-            self.fd_as_ref().fd_map(|&fd| fd)
-        }
-    }
-
-    impl Clone for ImagePlane<os::fd::OwnedFd> {
-        fn clone(&self) -> Self {
-            self.fd_as_ref().fd_map(|fd| fd.try_clone().unwrap())
-        }
-    }
-
-    impl ImagePlane<os::fd::OwnedFd> {
-        pub fn as_remote(&self) -> ImagePlane<RemoteFd> {
-            self.fd_as_ref().fd_map(|fd| RemoteFd {
-                remote_pid: std::process::id(),
-                remote_fd: fd.as_raw_fd(),
-            })
-        }
-    }
-
-    // HACK(eddyb) to avoid needing an UNIX domain socket, we pass file descriptors
-    // to child processes via `pidfd_getfd` (see also `linux_x11_stdin::pid_fd`).
-    #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-    pub struct RemoteFd {
-        pub remote_pid: u32,
-        pub remote_fd: i32,
-    }
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct StdinWindowSize {
+    pub dpi_factor: f64,
+    pub swapchain: SharedSwapchain,
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
@@ -285,10 +260,11 @@ pub enum HostToStdin{
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum StdinToHost{
+pub enum StdinToHost {
     ReadyToStart,
     SetCursor(MouseCursor),
-    DrawCompleteAndFlip(usize),  // the client is done drawing, and the texture is completely updated
+    // the client is done drawing, and the texture is completely updated
+    DrawCompleteAndFlip(PresentableImageId),
 }
 
 impl StdinToHost{
