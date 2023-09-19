@@ -39,7 +39,6 @@ use {
             TextInputEvent,
             TextClipboardEvent,
             TimerEvent,
-            DragItem,
             KeyModifiers,
         },
         cursor::MouseCursor,
