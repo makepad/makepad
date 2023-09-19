@@ -295,7 +295,9 @@ impl CodeEditor {
                 self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
                 //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
             }
-            KeepCursorInView::Off=>{}
+            KeepCursorInView::Off=>{
+                
+            }
         }
 
         self.cell_size =
@@ -396,6 +398,7 @@ impl CodeEditor {
             
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
+                is_repeat:false,
                 ..
             }) => {
                 session.fold();
