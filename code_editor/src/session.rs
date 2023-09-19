@@ -1000,6 +1000,19 @@ fn find_highlighted_delimiter_pair(
         }
         _ => {}
     }
+    // Cursor is before a closing delimiter
+    match lines[position.line_index][position.byte_index..]
+        .chars()
+        .next()
+    {
+        Some(ch) if ch.is_closing_delimiter() => {
+            let closing_delimiter_position = position;
+            if let Some(opening_delimiter_position) = find_opening_delimiter(lines, position, ch) {
+                return Some((opening_delimiter_position, closing_delimiter_position));
+            }
+        }
+        _ => {}
+    }
     // Cursor is after a closing delimiter
     match lines[position.line_index][..position.byte_index]
         .chars()
@@ -1029,19 +1042,6 @@ fn find_highlighted_delimiter_pair(
                 byte_index: position.byte_index - ch.len_utf8(),
             };
             if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, ch) {
-                return Some((opening_delimiter_position, closing_delimiter_position));
-            }
-        }
-        _ => {}
-    }
-    // Cursor is before a closing delimiter
-    match lines[position.line_index][position.byte_index..]
-        .chars()
-        .next()
-    {
-        Some(ch) if ch.is_closing_delimiter() => {
-            let closing_delimiter_position = position;
-            if let Some(opening_delimiter_position) = find_opening_delimiter(lines, position, ch) {
                 return Some((opening_delimiter_position, closing_delimiter_position));
             }
         }
