@@ -158,7 +158,7 @@ impl SelectionSet {
                 self.selections[current_index] = merged_selection;
                 self.selections.remove(next_index);
                 if let Some(index) = &mut index {
-                    if next_index < *index {
+                    if next_index <= *index {
                         *index -= 1;
                     }
                 }
