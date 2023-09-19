@@ -1,7 +1,6 @@
 use {
     crate::{
         char::CharExt,
-        decoration::Decoration,
         document::Document,
         history::EditKind,
         layout::{BlockElement, Layout, WrappedElement},
@@ -29,7 +28,6 @@ pub struct Session {
     document: Document,
     layout: RefCell<SessionLayout>,
     selection_state: RefCell<SelectionState>,
-    decorations: RefCell<Vec<Decoration>>,
     wrap_column: Option<usize>,
     folding_lines: HashSet<usize>,
     folded_lines: HashSet<usize>,
@@ -60,17 +58,6 @@ impl Session {
                 injected_char_stack: Vec::new(),
                 highlighted_delimiter_positions: HashSet::new(),
             }),
-            decorations: RefCell::new(vec![Decoration::new(
-                0,
-                Position {
-                    line_index: 0,
-                    byte_index: 4,
-                },
-                Position {
-                    line_index: 3,
-                    byte_index: 8,
-                },
-            )]),
             wrap_column: None,
             folding_lines: HashSet::new(),
             folded_lines: HashSet::new(),
@@ -113,12 +100,6 @@ impl Session {
     pub fn selections(&self) -> Ref<'_, [Selection]> {
         Ref::map(self.selection_state.borrow(), |selection_state| {
             selection_state.selections.as_selections()
-        })
-    }
-
-    pub fn decorations(&self) -> Ref<'_, [Decoration]> {
-        Ref::map(self.decorations.borrow(), |decorations| {
-            decorations.as_slice()
         })
     }
 
@@ -297,10 +278,6 @@ impl Session {
         self.modify_selections(reset_anchor, |selection, layout| {
             selection.update_cursor(|cursor| cursor.move_down(layout))
         });
-    }
-
-    pub fn set_decorations(&mut self, decorations: Vec<Decoration>) {
-        *self.decorations.borrow_mut() = decorations;
     }
 
     pub fn insert(&mut self, text: Text) {
@@ -865,13 +842,6 @@ impl Session {
             }
         }
         drop(selection_state);
-        let mut decorations = self.decorations.borrow_mut();
-        for edit in edits {
-            for decoration in &mut *decorations {
-                *decoration = decoration.apply_edit(edit);
-            }
-        }
-        drop(decorations);
         self.update_highlighted_delimiter_positions();
     }
 

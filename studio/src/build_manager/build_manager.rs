@@ -1,6 +1,7 @@
 
 use {
     crate::{
+        file_system::file_system::FileSystem,
         makepad_micro_serde::*,
         makepad_platform::*,
         makepad_widgets::*,
@@ -16,6 +17,7 @@ use {
         },
         makepad_shell::*,
     },
+    makepad_code_editor::decoration::{Decoration},
     makepad_http::server::*,
     std::{
         cell::Cell,
@@ -242,7 +244,9 @@ impl BuildManager {
         self.active.builds.clear();
     }
     
-    pub fn clear_log(&mut self) {
+    pub fn clear_log(&mut self, file_system:&mut FileSystem) {
+        // lets clear all log related decorations
+        file_system.clear_all_decorations();
         self.log.clear();
     }
     
@@ -255,9 +259,9 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dock:&DockRef) -> Vec<BuildManagerAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system:&mut FileSystem, dock:&DockRef) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
-        self.handle_event_with(cx, event, dock, &mut | _, action | actions.push(action));
+        self.handle_event_with(cx, event, file_system, dock, &mut | _, action | actions.push(action));
         actions
     }
     
@@ -274,7 +278,7 @@ impl BuildManager {
         let _ = self.send_file_change.send(live_file_change);
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dock:&DockRef, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system:&mut FileSystem, dock:&DockRef, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if let Event::Signal = event{
             if let Ok(mut addr) = self.recv_external_ip.try_recv(){
                 addr.set_port(self.http_port as u16);
@@ -284,7 +288,7 @@ impl BuildManager {
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            self.clear_log();
+            self.clear_log(file_system);
             /*state.editor_state.messages.clear();
             for doc in &mut state.editor_state.documents.values_mut() {
                 if let Some(inner) = &mut doc.inner {
@@ -311,10 +315,17 @@ impl BuildManager {
             // ok we have a cmd_id in wrap.msg
             match wrap.item {
                 LogItem::Location(loc) => {
+                    file_system.add_decoration(&loc.file_name, Decoration::new(
+                        0, loc.start,loc.start + loc.length
+                    ));
+                    file_system.redraw_view_by_path(cx, &loc.file_name, dock);
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Location(loc)));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
                     }
+                    //if let Some(doc) = file_system.open_documents.get(&path){
+                        
+                    //}
                     /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                         let doc = &mut editor_state.documents[*doc_id];
                         if let Some(inner) = &mut doc.inner {
