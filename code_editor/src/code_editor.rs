@@ -25,7 +25,7 @@ live_design!{
         branch_keyword: #C485BE,
         comment: #638D54,
         constant: #CC917B,
-        delimiter: #C0C0C0,
+        delimiter: #a,
         identifier: #D4D4D4,
         loop_keyword: #FF8C00,
         number: #B6CEAA,
@@ -34,6 +34,7 @@ live_design!{
         string: #CC917B,
         typename: #56C9B1;
         whitespace: #6E6E6E,
+        delimiter_highlight: #f,
     }
     
     DrawIndentGuide = {{DrawIndentGuide}} {
@@ -104,6 +105,9 @@ live_design!{
             return sdf.fill(#08f8);
         }
     }
+        
+    DrawCodeText = {{DrawCodeText}}{
+    }
     
     CodeEditor = {{CodeEditor}} {
         width: Fill,
@@ -117,15 +121,24 @@ live_design!{
         draw_gutter: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {},
-            color: #C0C0C0,
+            color: #5,
         }
         draw_text: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
+            fn blend_color(self, incol:vec4)->vec4{
+                if self.outline < 0.5{
+                    return incol
+                }
+                if self.pos.y<0.12{
+                    return #f
+                }
+                return incol
+            }
         }
         draw_indent_guide: {
             draw_depth: 1.0,
-            color: #C0C0C0,
+            color: #5,
         }
         draw_decoration: {
             draw_depth: 2.0,
@@ -138,6 +151,13 @@ live_design!{
             color: #C0C0C0,
         }
     }
+
+}
+
+#[derive(Live, LiveHook)]#[repr(C)]
+struct DrawCodeText {
+    #[deref] draw_super: DrawText,
+    #[live] outline: f32,
 }
 
 #[derive(Live)]
@@ -150,8 +170,11 @@ pub struct CodeEditor {
     draw_state: DrawStateWrap<Walk>,
     #[live]
     draw_gutter: DrawText,
+    
     #[live]
-    draw_text: DrawText,
+    draw_text: DrawCodeText,
+    
+    
     #[live]
     token_colors: TokenColors,
     #[live]
@@ -242,7 +265,7 @@ impl CodeEditor {
         let walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
         let turtle_rect = cx.turtle().rect();
-        let gutter_width = (session .document() .as_text() .as_lines() .len() .to_string() .column_count() + 1) as f64
+        let gutter_width = (session .document() .as_text() .as_lines() .len() .to_string() .column_count() + 3) as f64
             * self.cell_size.x;
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
@@ -554,7 +577,7 @@ impl CodeEditor {
                             y: origin_y,
                         } *self.cell_size
                             + self.gutter_rect.pos,
-                        &format!("{}", line_index),
+                        &format!("{: >4}", line_index),
                     );
                     line_index += 1;
                     origin_y += line.height();
@@ -629,12 +652,14 @@ impl CodeEditor {
                                         TokenKind::Typename => self.token_colors.typename,
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
+                                    self.draw_text.outline = 0.0;
                                     if let TokenKind::Delimiter = token.kind {
                                         if highlighted_delimiter_positions.contains(&Position {
                                             line_index,
                                             byte_index,
                                         }) {
-                                            self.draw_text.color = vec4(1.0, 0.0, 0.0, 1.0);
+                                            self.draw_text.outline = 1.0;
+                                            self.draw_text.color = self.token_colors.delimiter_highlight
                                         }
                                     }
                                     for grapheme in text_0.graphemes() {
@@ -1340,6 +1365,8 @@ struct TokenColors {
     constant: Vec4,
     #[live]
     delimiter: Vec4,
+    #[live]
+    delimiter_highlight: Vec4,
     #[live]
     identifier: Vec4,
     #[live]
