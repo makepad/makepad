@@ -61,7 +61,7 @@ live_design!{
                 return sdf.result
             }
         }
-        padding: 9.0
+        padding2: 9.0
         text: ""
     }
     
