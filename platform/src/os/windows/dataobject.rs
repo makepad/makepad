@@ -11,8 +11,6 @@ use {
                 System::{
                     Ole::CF_HDROP,
                     Com::{
-                        //IDataObject,
-                        //IDataObject_Impl,
                         FORMATETC,
                         STGMEDIUM,
                         STGMEDIUM_0,
@@ -25,7 +23,6 @@ use {
                 },
                 Foundation::{
                     BOOL,
-                    HGLOBAL,
                     S_OK,
                     E_NOTIMPL,
                     OLE_E_ADVISENOTSUPPORTED,
@@ -34,10 +31,15 @@ use {
                     DV_E_DVASPECT,
                     DV_E_LINDEX,
                     DV_E_TYMED,
+                    E_UNEXPECTED,
                 },
             },
         },
-        os::windows::enumformatetc::*,
+        os::windows::{
+            enumformatetc::*,
+            dropfiles::*,
+        },
+        event::DragItem,
     },
 };
 
@@ -226,15 +228,10 @@ impl IDataObject_Vtbl {
     }
 }
 
-// The actual data object is the encoded file list as HDROP/DROPFILES structure
-pub struct DataObject {
-    pub hglobal: HGLOBAL,
-}
-
 implement_com!{
-    for_struct: DataObject,
+    for_struct: DragItem,
     identity: IDataObject,
-    wrapper_struct: DataObject_Com,
+    wrapper_struct: DragItem_Com,
     interface_count: 1,
     interfaces: {
         0: IDataObject
@@ -242,20 +239,55 @@ implement_com!{
 }
 
 
-// IDataObject implementation for DataObject, containing a file list encoded as HDROP/DROPFILES structure
+// IDataObject implementation for DragItem
 
 #[allow(non_snake_case)]
-impl IDataObject_Impl for DataObject {
+impl IDataObject_Impl for DragItem {
 
-    fn GetData(&self, _: *const FORMATETC) -> core::Result<STGMEDIUM> {
+    fn GetData(&self, pformatetc: *const FORMATETC) -> core::Result<STGMEDIUM> {
 
-        let medium = STGMEDIUM {
-            tymed: TYMED_HGLOBAL.0 as u32,
-            u: STGMEDIUM_0 { hGlobal: self.hglobal, },
-            pUnkForRelease: std::mem::ManuallyDrop::new(None),
-        };
-        
-        Ok(medium)
+        // if no format was supplied, return DV_E_FORMATETC
+        if pformatetc == std::ptr::null_mut() {
+            Err(DV_E_FORMATETC.into())
+        }
+
+        else {
+
+            // if the format is not a CF_HDROP, deny
+            if unsafe { (*pformatetc).cfFormat } != CF_HDROP.0 as u16 {
+                Err(DV_E_FORMATETC.into())
+            }
+
+            // if the format's aspect is not DVASPECT_CONTENT, deny
+            else if unsafe { (*pformatetc).dwAspect } != DVASPECT_CONTENT.0 as u32 {
+                Err(DV_E_DVASPECT.into())
+            }
+
+            // if the index is not -1, deny
+            else if unsafe { (*pformatetc).lindex } != -1 {
+                Err(DV_E_LINDEX.into())
+            }
+
+            // if the medium is not a HGLOBAL, deny
+            else if unsafe { (*pformatetc).tymed } != TYMED_HGLOBAL.0 as u32 {
+                Err(DV_E_TYMED.into())
+            }
+
+            else {
+                let hglobal_opt = create_hglobal_for_dragitem(&self);
+
+                if let Some(hglobal) = hglobal_opt {
+                    Ok(STGMEDIUM {
+                        tymed: TYMED_HGLOBAL.0 as u32,
+                        u: STGMEDIUM_0 { hGlobal: hglobal, },
+                        pUnkForRelease: std::mem::ManuallyDrop::new(None),
+                    })
+                }
+                else {
+                    Err(E_UNEXPECTED.into())
+                }
+            }
+        }
     }
 
     fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> core::Result<()> {

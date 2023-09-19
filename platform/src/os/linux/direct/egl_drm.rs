@@ -1,6 +1,6 @@
 use {
     std::ffi::{CStr, CString},
-    std::os::raw::{c_char, c_int, c_uint, c_void},
+    std::os::raw::{c_int, c_uint, c_void},
     self::super::{
         drm_sys::*,
         gbm_sys::*,

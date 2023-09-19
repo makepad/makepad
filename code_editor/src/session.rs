@@ -3,7 +3,6 @@ use {
         char::CharExt,
         document::Document,
         history::EditKind,
-        iter::IteratorExt,
         layout::{BlockElement, Layout, WrappedElement},
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
@@ -56,7 +55,7 @@ impl Session {
             selection_state: RefCell::new(SelectionState {
                 selections: SelectionSet::new(),
                 last_added_selection_index: Some(0),
-                injected_delimiter_stack: Vec::new(),
+                injected_char_stack: Vec::new(),
                 highlighted_delimiter_positions: HashSet::new(),
             }),
             wrap_column: None,
@@ -127,16 +126,17 @@ impl Session {
     }
 
     pub fn fold(&mut self) {
-        let text = self.document.as_text();
-        let lines = text.as_lines();
-        for line in 0..lines.len() {
-            let indent_level =
-                lines[line].indent().unwrap_or("").column_count() / self.settings.tab_column_count;
-            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
-                self.layout.borrow_mut().fold_column[line] =
+        let line_count = self.document().as_text().as_lines().len();
+        for line_index in 0..line_count {
+            let layout = self.layout();
+            let line = layout.line(line_index);
+            let indent_level = line.indent_column_count() / self.settings.tab_column_count;
+            drop(layout);
+            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line_index) {
+                self.layout.borrow_mut().fold_column[line_index] =
                     self.settings.fold_level * self.settings.tab_column_count;
-                self.unfolding_lines.remove(&line);
-                self.folding_lines.insert(line);
+                self.unfolding_lines.remove(&line_index);
+                self.folding_lines.insert(line_index);
             }
         }
     }
@@ -182,23 +182,44 @@ impl Session {
         true
     }
 
-    pub fn set_cursor(&mut self, position: Position, affinity: Affinity) {
+    pub fn set_selection(&mut self, position: Position, affinity: Affinity, tap_count: u32) {
+        let mut selection= Selection::from(Cursor {
+            position,
+            affinity,
+            preferred_column_index: None,
+        });
+        if tap_count == 2 {
+            let text = self.document().as_text();
+            let lines = text.as_lines();
+            match lines[position.line_index][..position.byte_index].chars().next_back() {
+                Some(char) if char.is_opening_delimiter() => {
+                    let opening_delimiter_position = Position {
+                        line_index: position.line_index,
+                        byte_index: position.byte_index - char.len_utf8()
+                    };
+                    if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, char) {
+                        selection = Selection {
+                            cursor: Cursor::from(closing_delimiter_position),
+                            anchor: opening_delimiter_position,
+                        }
+                    }
+                }
+                _ => {}
+            }
+            drop(text);
+        };
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state
             .selections
-            .set_selection(Selection::from(Cursor {
-                position,
-                affinity,
-                preferred_column_index: None,
-            }));
+            .set_selection(selection);
         selection_state.last_added_selection_index = Some(0);
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
     }
 
-    pub fn add_cursor(&mut self, position: Position, affinity: Affinity) {
+    pub fn add_selection(&mut self, position: Position, affinity: Affinity, _tap_count: u32) {
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state.last_added_selection_index = Some(
             selection_state
@@ -209,7 +230,7 @@ impl Session {
                     preferred_column_index: None,
                 })),
         );
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
@@ -229,7 +250,7 @@ impl Session {
                     })
                 }),
         );
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
@@ -261,37 +282,58 @@ impl Session {
 
     pub fn insert(&mut self, text: Text) {
         let mut edit_kind = EditKind::Insert;
-        let mut inject_delimiter = None;
-        let mut uninject_delimiter = None;
-        let mut selection_state = self.selection_state.borrow_mut();
-        match text.to_single_char() {
-            Some(' ') => {
+        let mut inject_char = None;
+        let mut uninject_char = None;
+        {}
+        if let Some(char) = text.to_single_char() {
+            let mut selection_state = self.selection_state.borrow_mut();
+            if char == ' ' {
                 edit_kind = EditKind::InsertSpace;
-            }
-            Some(char) if char.is_opening_delimiter() => {
-                if selection_state.selections.iter().all(|selection| {
-                    !selection.is_empty()
-                        || self.document.as_text().as_lines()[selection.cursor.position.line_index]
-                            [selection.cursor.position.byte_index..]
-                            .chars()
-                            .all(|char| char.is_whitespace())
-                }) {
-                    let char = char.opposite_delimiter().unwrap();
-                    inject_delimiter = Some(char);
-                    selection_state.injected_delimiter_stack.push(char);
-                }
-            }
-            Some(char)
+            } else if char == '"' || char.is_opening_delimiter() {
                 if selection_state
-                    .injected_delimiter_stack
-                    .last()
-                    .map_or(false, |&last_char| last_char == char) =>
+                    .selections
+                    .iter()
+                    .all(|selection| !selection.is_empty())
+                    || selection_state.selections.iter().all(|selection| {
+                        selection.is_empty()
+                            && match self.document.as_text().as_lines()
+                                [selection.cursor.position.line_index]
+                                [selection.cursor.position.byte_index..]
+                                .chars()
+                                .next()
+                            {
+                                Some(char) => {
+                                    char == '"'
+                                        || char.is_closing_delimiter()
+                                        || char.is_whitespace()
+                                }
+                                None => true,
+                            }
+                    })
+                {
+                    // We are inserting either a string or opening delimiter, and either all
+                    // selections are non-empty, or all selections are empty and followed by either
+                    // a string or closing delimiter or whitespace. In this case, we automatically
+                    // inject the corresponding string or closing delimiter.
+                    let opposite_char = if char == '"' {
+                        '"'
+                    } else {
+                        char.opposite_delimiter().unwrap()
+                    };
+                    inject_char = Some(opposite_char);
+                    selection_state.injected_char_stack.push(opposite_char);
+                }
+            } else if selection_state
+                .injected_char_stack
+                .last()
+                .map_or(false, |&last_char| last_char == char)
             {
-                uninject_delimiter = Some(selection_state.injected_delimiter_stack.pop().unwrap());
+                // We are inserting a single character that we automatically injected earlier, so we need
+                // to uninject it before inserting it again.
+                uninject_char = Some(selection_state.injected_char_stack.pop().unwrap());
             }
-            _ => {}
+            drop(selection_state);
         }
-        drop(selection_state);
         self.document.edit_selections(
             self.id,
             edit_kind,
@@ -300,14 +342,17 @@ impl Session {
             |mut editor, position, length| {
                 let mut position = position;
                 let mut length = length;
-                if inject_delimiter.is_none() {
+                if inject_char.is_none() {
+                    // Only delete the selection if we are NOT injecting a character. This is for the
+                    // use case where we have selected `abc` and want to enclose it like: `{abc}`.
                     editor.apply_edit(Edit {
                         change: Change::Delete(position, length),
                         drift: Drift::Before,
                     });
                     length = Length::zero();
                 }
-                if let Some(uninject_delimiter) = uninject_delimiter {
+                if let Some(uninject_delimiter) = uninject_char {
+                    // To uninject a character, we simply delete it.
                     editor.apply_edit(Edit {
                         change: Change::Delete(
                             position,
@@ -324,7 +369,12 @@ impl Session {
                     drift: Drift::Before,
                 });
                 position += text.length();
-                if let Some(inject_delimiter) = inject_delimiter {
+                if let Some(inject_delimiter) = inject_char {
+                    // To inject a character, we do an extra insert with Drift::After so that the
+                    // cursor stays in place. Note that we have to add the selected length to our
+                    // position, because the selection is only deleted if we are NOT injecting a
+                    // character. This is for the use case where we have selected `abc` and want
+                    // to enclose it like: `{abc}`.
                     editor.apply_edit(Edit {
                         change: Change::Insert(position + length, Text::from(inject_delimiter)),
                         drift: Drift::After,
@@ -335,6 +385,10 @@ impl Session {
     }
 
     pub fn enter(&mut self) {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document.edit_selections(
             self.id,
             EditKind::Other,
@@ -409,6 +463,10 @@ impl Session {
     }
 
     pub fn delete(&mut self) {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document.edit_selections(
             self.id,
             EditKind::Delete,
@@ -486,6 +544,10 @@ impl Session {
     }
 
     pub fn backspace(&mut self) {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document.edit_selections(
             self.id,
             EditKind::Delete,
@@ -652,24 +714,13 @@ impl Session {
 
     pub fn copy(&self) -> String {
         let mut string = String::new();
-        for range in self
-            .selection_state
-            .borrow()
-            .selections
-            .iter()
-            .copied()
-            .merge(
-                |selection_0, selection_1| match selection_0.merge_with(selection_1) {
-                    Some(selection) => Ok(selection),
-                    None => Err((selection_0, selection_1)),
-                },
-            )
-            .map(|selection| selection.range())
-        {
+        for selection in &self.selection_state.borrow().selections {
             write!(
                 &mut string,
                 "{}",
-                self.document.as_text().slice(range.start(), range.extent())
+                self.document
+                    .as_text()
+                    .slice(selection.start(), selection.length())
             )
             .unwrap();
         }
@@ -677,18 +728,20 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.selection_state.borrow_mut().injected_char_stack.clear();
         self.document
             .undo(self.id, &self.selection_state.borrow().selections)
     }
 
     pub fn redo(&mut self) -> bool {
+        self.selection_state.borrow_mut().injected_char_stack.clear();
         self.document
             .redo(self.id, &self.selection_state.borrow().selections)
     }
 
     pub fn handle_changes(&mut self) {
         while let Ok((selections, edits)) = self.edit_receiver.try_recv() {
-            self.apply_edits(selections, &edits);
+            self.update_after_edit(selections, &edits);
         }
     }
 
@@ -713,14 +766,14 @@ impl Session {
                 }
                 selection
             });
-        selection_state.injected_delimiter_stack.clear();
+        selection_state.injected_char_stack.clear();
         drop(selection_state);
         drop(layout);
         self.update_highlighted_delimiter_positions();
         self.document.force_new_group();
     }
 
-    fn apply_edits(&self, selections: Option<SelectionSet>, edits: &[Edit]) {
+    fn update_after_edit(&self, selections: Option<SelectionSet>, edits: &[Edit]) {
         for edit in edits {
             match edit.change {
                 Change::Insert(point, ref text) => {
@@ -785,7 +838,7 @@ impl Session {
             selection_state.selections = selections;
         } else {
             for edit in edits {
-                selection_state.selections.apply_change(edit);
+                selection_state.selections.apply_edit(edit);
             }
         }
         drop(selection_state);
@@ -905,7 +958,7 @@ pub struct SessionLayout {
 struct SelectionState {
     selections: SelectionSet,
     last_added_selection_index: Option<usize>,
-    injected_delimiter_stack: Vec<char>,
+    injected_char_stack: Vec<char>,
     highlighted_delimiter_positions: HashSet<Position>,
 }
 
@@ -930,32 +983,107 @@ fn find_highlighted_delimiter_pair(
     lines: &[String],
     position: Position,
 ) -> Option<(Position, Position)> {
-    match find_opening_delimiter(lines, position) {
-        Some((opening_delimiter_position, opening_delimiter)) => {
-            match find_closing_delimiter(lines, position, opening_delimiter) {
-                Some(closing_delimiter_position) => {
-                    Some((opening_delimiter_position, closing_delimiter_position))
-                }
-                None => None,
+    // Cursor is before an opening delimiter
+    match lines[position.line_index][position.byte_index..]
+        .chars()
+        .next()
+    {
+        Some(ch) if ch.is_opening_delimiter() => {
+            let opening_delimiter_position = position;
+            if let Some(closing_delimiter_position) = find_closing_delimiter(
+                lines,
+                Position {
+                    line_index: position.line_index,
+                    byte_index: position.byte_index + ch.len_utf8(),
+                },
+                ch,
+            ) {
+                return Some((opening_delimiter_position, closing_delimiter_position));
             }
         }
-        None => None,
+        _ => {}
     }
-}
-
-fn find_opening_delimiter(lines: &[String], position: Position) -> Option<(Position, char)> {
+    // Cursor is before a closing delimiter
+    match lines[position.line_index][position.byte_index..]
+        .chars()
+        .next()
+    {
+        Some(ch) if ch.is_closing_delimiter() => {
+            let closing_delimiter_position = position;
+            if let Some(opening_delimiter_position) = find_opening_delimiter(lines, position, ch) {
+                return Some((opening_delimiter_position, closing_delimiter_position));
+            }
+        }
+        _ => {}
+    }
+    // Cursor is after a closing delimiter
     match lines[position.line_index][..position.byte_index]
         .chars()
         .next_back()
     {
-        Some(char) if char.is_opening_delimiter() => Some((
-            Position {
+        Some(ch) if ch.is_closing_delimiter() => {
+            let closing_delimiter_position = Position {
                 line_index: position.line_index,
-                byte_index: position.byte_index - char.len_utf8(),
-            },
-            char,
-        )),
-        _ => None,
+                byte_index: position.byte_index - ch.len_utf8(),
+            };
+            if let Some(opening_delimiter_position) =
+                find_opening_delimiter(lines, closing_delimiter_position, ch)
+            {
+                return Some((opening_delimiter_position, closing_delimiter_position));
+            }
+        }
+        _ => {}
+    }
+    // Cursor is after an opening delimiter
+    match lines[position.line_index][..position.byte_index]
+        .chars()
+        .next_back()
+    {
+        Some(ch) if ch.is_opening_delimiter() => {
+            let opening_delimiter_position = Position {
+                line_index: position.line_index,
+                byte_index: position.byte_index - ch.len_utf8(),
+            };
+            if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, ch) {
+                return Some((opening_delimiter_position, closing_delimiter_position));
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn find_opening_delimiter(
+    lines: &[String],
+    position: Position,
+    closing_delimiter: char,
+) -> Option<Position> {
+    let mut delimiter_stack = vec![closing_delimiter];
+    let mut position = position;
+    loop {
+        for char in lines[position.line_index][..position.byte_index]
+            .chars()
+            .rev()
+        {
+            position.byte_index -= char.len_utf8();
+            if char.is_closing_delimiter() {
+                delimiter_stack.push(char);
+            }
+            if char.is_opening_delimiter() {
+                if delimiter_stack.last() != Some(&char.opposite_delimiter().unwrap()) {
+                    return None;
+                }
+                delimiter_stack.pop().unwrap();
+                if delimiter_stack.is_empty() {
+                    return Some(position);
+                }
+            }
+        }
+        if position.line_index == 0 {
+            return None;
+        }
+        position.line_index -= 1;
+        position.byte_index = lines[position.line_index].len();
     }
 }
 

@@ -2,7 +2,7 @@
 use {
     std::collections::HashMap,
     std::cell::RefCell,
-    std::sync::{Mutex},
+    std::sync::Mutex,
     std::ptr::NonNull,
     crate::{
         //makepad_error_log::*,
@@ -62,7 +62,7 @@ pub fn xpc_service_proxy() -> RcObjcId {
     unsafe {
         if METAL_XPC_CLASSES == 0 as *const _ {
             METAL_XPC_CLASSES = Box::into_raw(Box::new(MetalXPCClasses::new()));
-        }
+        } 
         let connection: ObjcId = msg_send![class!(NSXPCConnection), new];
         let nsstring = str_to_nsstring("dev.makepad.metalxpc");
         let () = msg_send![connection, initWithMachServiceName: nsstring options: 0];
@@ -93,7 +93,6 @@ pub fn fetch_xpc_service_texture(proxy: ObjcId, id: u64, uid:u64, f: Box<dyn Fn(
         let () = msg_send![proxy, fetchTexture: id uid:uid with: completion_block];
     } 
 }
-
 
 pub fn store_xpc_service_texture(id: u64, obj: ObjcId) {
     //log!("STORING {}", obj as *const _ as u64);
@@ -167,15 +166,15 @@ pub fn define_xpc_service_delegate() -> *const Class {
 
 pub fn define_xpc_service_class() -> *const Class {
     
-    extern fn fetch_texture(_this: &Object, _: Sel, index: u64, old_uid: u64, with: ObjcId) {
+    extern fn fetch_texture(_this: &Object, _: Sel, index: u64, _old_uid: u64, with: ObjcId) {
         let storage = get_metal_xpc_storage();
-        if let Some((obj, uid)) = storage.textures.lock().unwrap().borrow_mut().get(&index) {
-            if *uid != old_uid{
+        if let Some((obj, _uid)) = storage.textures.lock().unwrap().borrow_mut().get(&index) {
+            //if *uid != old_uid{
                 unsafe {objc_block_invoke!(with, invoke(
                     (obj.as_id()): ObjcId,
-                    (*uid): u64
+                    (0): u64
                 ))}; 
-            }
+            //}
         } 
         //insane_debug_out("GOT CALL! POST FETCH TEXTURE!");
     }

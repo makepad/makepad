@@ -1,7 +1,7 @@
 use {
     makepad_objc_sys::{
         msg_send,
-        runtime::{YES},
+        runtime::YES,
         sel,
         class,
         sel_impl,
@@ -203,7 +203,7 @@ impl Cx {
                     if cxtexture.desc.format.is_shared() {
                         #[cfg(target_os = "macos")]
                         cxtexture.os.update_shared_texture(
-                            metal_cx,
+                            metal_cx.device,
                             &cxtexture.desc,
                         );
                     }
@@ -453,8 +453,8 @@ impl Cx {
             DrawPassMode::Texture => {
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
-            DrawPassMode::StdinMain => {
-                self.commit_command_buffer(Some(0), command_buffer, gpu_read_guards);
+            DrawPassMode::StdinMain(swap_buf) => {
+                self.commit_command_buffer(Some(swap_buf), command_buffer, gpu_read_guards);
             }
             DrawPassMode::Drawable(drawable) => {
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
@@ -471,12 +471,14 @@ impl Cx {
     
     fn commit_command_buffer(&mut self, stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
+        //let present_index = Arc::clone(&self.os.present_index);
+        //Self::stdin_send_draw_complete(&present_index);
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
-                if stdin_frame.is_some(){
+                if let Some(stdin_frame) = stdin_frame{
                     #[cfg(target_os = "macos")]
-                    Self::stdin_send_draw_complete();
+                    Self::stdin_send_draw_complete(stdin_frame);
                 }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
@@ -521,7 +523,7 @@ impl Cx {
 pub enum DrawPassMode {
     Texture,
     MTKView(ObjcId),
-    StdinMain,
+    StdinMain(u32),
     Drawable(ObjcId),
     Resizing(ObjcId)
 }
@@ -530,7 +532,7 @@ impl DrawPassMode {
     fn is_drawable(&self) -> Option<ObjcId> {
         match self {
             Self::Drawable(obj) | Self::Resizing(obj) => Some(*obj),
-            Self::StdinMain | Self::Texture | Self::MTKView(_) => None
+            Self::StdinMain(_) | Self::Texture | Self::MTKView(_) => None
         }
     }
 }
@@ -872,9 +874,9 @@ impl CxOsTexture {
     }
     
     #[cfg(target_os = "macos")]
-    fn update_shared_texture(
+    pub fn update_shared_texture(
         &mut self,
-        metal_cx: &MetalCx,
+        metal_device: ObjcId,
         desc: &TextureDesc,
     ) {
         // we need a width/height for this one.
@@ -907,9 +909,9 @@ impl CxOsTexture {
                 let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
                 match desc.format {
                     TextureFormat::SharedBGRA(shared_id) => {
-                        let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
-                        // lets send this to the other side.
+                        let texture: ObjcId = msg_send![metal_device, newSharedTextureWithDescriptor: descriptor];
                         let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
+                        //log!("sending texture {:?},{:?} to XPC",shared_id,shared);
                         // lets send it over
                         //log!("STORING SHARED TEXTURE {}", shared_id);
                         store_xpc_service_texture(shared_id, shared);
@@ -935,11 +937,15 @@ impl CxOsTexture {
         shared_handle: ObjcId,
         width: u64,
         height: u64,
-    ) {
+    )->bool{
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
         }).unwrap());
-        
+        let width2: u64 = unsafe{msg_send![texture.as_id(), width]};
+        let height2: u64 = unsafe{msg_send![texture.as_id(), height]};
+        if width2 != width || height2 != height{
+            return false
+        }
         self.inner = Some(CxOsTextureInner {
             is_initial: true,
             width,
@@ -947,6 +953,7 @@ impl CxOsTexture {
             format: TextureFormat::SharedBGRA(0),
             texture,
         });
+        true
     }
     
     fn update_render_target(
