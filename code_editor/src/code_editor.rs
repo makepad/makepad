@@ -281,6 +281,7 @@ impl CodeEditor {
                     self.keep_cursor_in_view = KeepCursorInView::Off
                 }
             }
+
             KeepCursorInView::LockStart=>{
                 // lets get the on screen position
                 let screen_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
@@ -296,7 +297,7 @@ impl CodeEditor {
             }
             KeepCursorInView::Off=>{}
         }
-        
+
         self.cell_size =
         self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         let walk = self.draw_state.get().unwrap();
