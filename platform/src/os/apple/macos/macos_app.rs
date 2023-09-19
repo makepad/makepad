@@ -39,7 +39,6 @@ use {
             TextInputEvent,
             TextClipboardEvent,
             TimerEvent,
-            DragItem,
             KeyModifiers,
         },
         cursor::MouseCursor,
@@ -654,13 +653,14 @@ impl MacosApp {
         
         let len = get_macos_app_global().timers.len() ;
         for i in 0..len {
+            let time = get_macos_app_global().time_now();
             if get_macos_app_global().timers[i].nstimer == nstimer {
                 let timer_id = get_macos_app_global().timers[i].timer_id;
                 if !get_macos_app_global().timers[i].repeats {
                     get_macos_app_global().timers.remove(i);
                 }
                 
-                MacosApp::do_callback(MacosEvent::Timer(TimerEvent {timer_id: timer_id}));
+                MacosApp::do_callback(MacosEvent::Timer(TimerEvent {time:Some(time), timer_id: timer_id}));
                 // break the eventloop if its in blocked mode
                 unsafe {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -710,7 +710,7 @@ impl MacosApp {
     pub fn send_paint_event() {
         MacosApp::do_callback(MacosEvent::Paint);
     }
-    
+    /*
     #[cfg(target_os = "macos")]
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
        unsafe {
@@ -727,5 +727,5 @@ impl MacosApp {
             let cocoa_window = &mut *(cocoa_window as *mut MacosWindow);
             cocoa_window.start_dragging(ns_event, items);
         };
-    }
+    }*/
 }

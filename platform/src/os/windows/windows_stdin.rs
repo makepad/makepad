@@ -23,42 +23,48 @@ use {
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
+        windows::Win32::Foundation::HANDLE,
     } 
 };
 
 impl Cx {
     
-    pub (crate) fn stdin_handle_repaint(&mut self, _d3d11_cx: &mut D3d11Cx,fb_texture: &Texture) {
+    pub (crate) fn stdin_handle_repaint(&mut self, d3d11_cx: &mut D3d11Cx) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    log!("Window");
-                    self.draw_pass_to_texture(*pass_id, _d3d11_cx, fb_texture);
-                    let _ = io::stdout().write_all(StdinToHost::DrawComplete.to_json().as_bytes());
+
+                    // render to swapchain
+                    if self.os.swapchain.is_some() {
+                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
+                        self.draw_pass_to_texture(*pass_id, d3d11_cx, texture_id);
+                    }
+
+                    // wait for GPU to finish rendering
+                    d3d11_cx.wait_for_gpu();
+
+                    // inform host that a frame is ready
+                    let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(self.os.present_index).to_json().as_bytes());
+
+                    // flip to next one
+                    self.os.present_index = 1 - self.os.present_index;
                 }
                 CxPassParent::Pass(_) => {
-                    log!("CxPassParent::Pass");
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(*pass_id, _d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 },
                 CxPassParent::None => {
-                    log!("CxPassParent::None");
-                    self.draw_pass_to_magic_texture(*pass_id, _d3d11_cx);
+                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
                 }
             }
         }
     }
     
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
-
-        log!("client: stdin_event_loop");
-
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-        let fb_texture = Texture::new(self);
-        let mut dx11_shared_handle = crate::windows::Win32::Foundation::HANDLE(0);
 
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
@@ -113,6 +119,30 @@ impl Cx {
                             self.call_event_handler(&Event::Scroll(e.into()))
                         }
                         HostToStdin::WindowSize(ws) => {
+
+                            // first update the swapchain
+                            if self.os.swapchain_handles[0].0 as u64 != ws.swapchain_handles[0] {
+
+                                // we got a new texture handles
+                                let textures = [Texture::new(self),Texture::new(self),];
+
+                                let handle = HANDLE(ws.swapchain_handles[0] as isize);
+                                let cxtexture = &mut self.textures[textures[0].texture_id()];
+                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
+                                self.os.swapchain_handles[0] = handle;
+
+                                let handle = HANDLE(ws.swapchain_handles[1] as isize);
+                                let cxtexture = &mut self.textures[textures[1].texture_id()];
+                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
+                                self.os.swapchain_handles[1] = handle;
+
+                                self.os.swapchain = Some(textures);
+
+                                // and reset present_index
+                                self.os.present_index = 0;
+                            }
+
+                            // redraw the window if needed
                             if window_size != Some(ws) {
                                 window_size = Some(ws);
                                 self.redraw_all();
@@ -123,7 +153,8 @@ impl Cx {
                                     inner_size: dvec2(ws.width, ws.height),
                                     ..Default::default()
                                 };
-                                self.stdin_handle_platform_ops(d3d11_cx, &fb_texture);
+
+                                self.stdin_handle_platform_ops(d3d11_cx);
                             }
                         }
                         HostToStdin::Tick {frame: _, time,..} => if let Some(_ws) = window_size {
@@ -150,23 +181,8 @@ impl Cx {
                                 self.hlsl_compile_shaders(d3d11_cx);
                             }
                             
-                            // we need to make this shared texture handle into a true metal one
-                            self.stdin_handle_repaint(d3d11_cx,&fb_texture);
-                        }
-                        HostToStdin::Dx11SharedHandle(marshalled_handle) => {
-
-                            // convert u64 back to handle
-                            let handle = crate::windows::Win32::Foundation::HANDLE(marshalled_handle as isize);
-
-                            if handle != dx11_shared_handle {
-                                
-                                // we got a new texture handle
-                                dx11_shared_handle = handle;
-
-                                // update texture
-                                let cxtexture = &mut self.textures[fb_texture.texture_id()];
-                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
-                            }
+                            // repaint
+                            self.stdin_handle_repaint(d3d11_cx);
                         }
                     }
                     Err(err) => { // we should output a log string
@@ -175,12 +191,11 @@ impl Cx {
                 }
             }
             // we should poll our runloop
-            self.stdin_handle_platform_ops(d3d11_cx, &fb_texture);
+            self.stdin_handle_platform_ops(d3d11_cx);
         }
     }
-    
-    
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &D3d11Cx, main_texture: &Texture) {
+        
+    fn stdin_handle_platform_ops(&mut self, _metal_cx: &D3d11Cx) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -191,11 +206,14 @@ impl Cx {
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
-                        //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                        texture_id: main_texture.texture_id()
-                    }];
+                    if self.os.swapchain.is_some() {
+                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
+                        pass.color_textures = vec![CxPassColorTexture {
+                            clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                            texture_id,
+                        }];
+                    }
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());

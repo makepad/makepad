@@ -1,14 +1,12 @@
 use {
     std::{
-        sync::{Arc, Mutex},
-        cell::RefCell,
         io,
         io::prelude::*,
         io::BufReader,
-        path::{Path},
-        io::{Write},
+        path::Path,
+        io::Write,
         fs,
-        process::{Command}
+        process::Command,
     },
     crate::{
         makepad_live_id::*,
@@ -40,23 +38,49 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_send_draw_complete(){
-        let _ = io::stdout().write_all(StdinToHost::DrawComplete.to_json().as_bytes());
+    pub (crate) fn stdin_send_draw_complete(buf:u32){
+
+        // get the current present index
+        //let mut index = present_index.lock().unwrap();
+        //log!("frame {} ready, sending message to host",index);
+
+        // send message
+        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(buf as usize).to_json().as_bytes());
+
+        // flip swapchain
+        //*index = 1 - *index;
     }
     
-    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx) {
+    pub (crate) fn stdin_handle_repaint(&mut self, metal_cx: &mut MetalCx, texture:Texture, time:f32, swapchain_front:u32) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(window_id) => {
-                    if window_id == CxWindowPool::id_zero() {
-                        self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain);
-                    }
+                CxPassParent::Window(_) => {
+
+                    // make sure rendering is done onto the right texture
+                    //if let Some(swapchain) = self.os.swapchain.as_ref() {
+                        //let present_index = *self.os.present_index.lock().unwrap();
+                    let texture_id = texture.texture_id();//swapchain[present_index].texture_id();
+                    let window = &mut self.windows[CxWindowPool::id_zero()];
+                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                    pass.color_textures = vec![CxPassColorTexture {
+                        clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        texture_id,
+                    }];
+                    //}
+                    //else {
+                   //     log!("wanting to paint, but there is no swapchain yet");
+                    //}
+                                
+                    // render to swapchain
+                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain(swapchain_front));
+
+                    // and then wait for GPU, which calls stdin_send_draw_complete when its done
                 }
                 CxPassParent::Pass(_) => {
-                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
@@ -68,9 +92,6 @@ impl Cx {
     
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-        let fb_shared = Arc::new(Mutex::new(RefCell::new(None)));
-        let mut shared_check = 0;
-        let fb_texture = Texture::new(self);
         let service_proxy = xpc_service_proxy();
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
@@ -125,30 +146,54 @@ impl Cx {
                             self.call_event_handler(&Event::Scroll(e.into()))
                         }
                         HostToStdin::WindowSize(ws) => {
+
+                            // update the swapchain resources
+                            
+
+                            // and reset present index
+                            //*self.os.present_index.lock().unwrap() = 0;
+
+                            // and window size might have changed
                             if window_size != Some(ws) {
                                 window_size = Some(ws);
                                 self.redraw_all();
-                                
+
                                 let window = &mut self.windows[CxWindowPool::id_zero()];
                                 window.window_geom = WindowGeom {
                                     dpi_factor: ws.dpi_factor,
                                     inner_size: dvec2(ws.width, ws.height),
                                     ..Default::default()
                                 };
-                                self.stdin_handle_platform_ops(metal_cx, &fb_texture);
+                                self.stdin_handle_platform_ops(metal_cx);
                             }
                         }
-                        HostToStdin::Tick {frame: _, time, buffer_id} => if let Some(ws) = window_size {
-                            // poll the service for updates
-                            let uid = if let Some((_, uid)) = fb_shared.lock().unwrap().borrow().as_ref() {*uid}else {0};
-                            fetch_xpc_service_texture(service_proxy.as_id(), buffer_id, uid, Box::new({
-                                let fb_shared = fb_shared.clone();
-                                move | shared_handle,
-                                shared_uid | {
-                                    *fb_shared.lock().unwrap().borrow_mut() = Some((shared_handle, shared_uid));
-                                }
-                            }));
+                        HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(ws) = window_size {
                             
+                            let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
+                            
+                            // lets fetch the framebuffers
+                            fetch_xpc_service_texture(service_proxy.as_id(),ws.swapchain_handle,0,Box::new({
+                                let tx_fb = tx_fb.clone();
+                                move |objcid,_uid| {
+                                    let _ = tx_fb.send(objcid);
+                                }
+                            })); 
+                            let mut tex = None;
+                            while let Ok(fb) = rx_fb.recv(){
+                                let texture = Texture::new(self);
+                                let cxtexture = &mut self.textures[texture.texture_id()];
+                                if !cxtexture.os.update_from_shared_handle(
+                                    metal_cx,
+                                    fb.as_id(),
+                                    (ws.width * ws.dpi_factor) as u64 ,
+                                    (ws.height * ws.dpi_factor) as u64,
+                                ){
+                                    break;
+                                }
+                                tex = Some(texture);
+                                break
+                            }
+
                             // check signals
                             if Signal::check_and_clear_ui_signal() {
                                 self.handle_media_signals();
@@ -170,28 +215,11 @@ impl Cx {
                                 self.call_draw_event();
                                 self.mtl_compile_shaders(metal_cx);
                             }
-                            
-                            // lets render to the framebuffer
-                            if let Some((shared_handle, shared_uid)) = fb_shared.lock().unwrap().borrow().as_ref() {
-                                if shared_check != *shared_uid {
-                                    shared_check = *shared_uid;
-                                    let window = &mut self.windows[CxWindowPool::id_zero()];
-                                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                                    pass.paint_dirty = true;
-                                    // alright so. lets update the shared texture
-                                    let fb_texture = &mut self.textures[fb_texture.texture_id()];
-                                    fb_texture.os.update_from_shared_handle(
-                                        metal_cx,
-                                        shared_handle.as_id(),
-                                        (ws.width * ws.dpi_factor) as u64,
-                                        (ws.height * ws.dpi_factor) as u64
-                                    );
-                                }
+
+                            if tex.is_some(){
+                                self.stdin_handle_repaint(metal_cx, tex.unwrap(), time as f32, ws.swapchain_front);
                             }
-                            // we need to make this shared texture handle into a true metal one
-                            self.stdin_handle_repaint(metal_cx);
                         }
-                        _=>()
                     }
                     Err(err) => { // we should output a log string
                         error!("Cant parse stdin-JSON {} {:?}", line, err);
@@ -199,7 +227,7 @@ impl Cx {
                 }
             }
             // we should poll our runloop
-            self.stdin_handle_platform_ops(metal_cx, &fb_texture);
+            self.stdin_handle_platform_ops(metal_cx);
             xpc_service_proxy_poll_run_loop();
         }
     }
@@ -291,19 +319,14 @@ impl Cx {
     }
     
     
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, main_texture: &Texture) {
+    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(_window_id) => {
                     let window = &mut self.windows[CxWindowPool::id_zero()];
                     window.is_created = true;
                     // lets set up our render pass target
-                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    pass.color_textures = vec![CxPassColorTexture {
-                        //clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                        clear_color: PassClearColor::ClearWith(pass.clear_color),
-                        texture_id: main_texture.texture_id()
-                    }];
+                    
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());

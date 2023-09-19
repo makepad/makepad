@@ -3,7 +3,10 @@ use {
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
-        cell::RefCell,
+        cell::{
+            Cell,
+            RefCell,
+        },
     },
     crate::{
         log,
@@ -96,13 +99,6 @@ use {
                         DROPEFFECT_COPY,
                         DROPEFFECT_MOVE,
                     },
-                    Memory::{
-                        GlobalAlloc,
-                        GMEM_ZEROINIT,
-                        GMEM_FIXED,
-                        GlobalLock,
-                        GlobalUnlock,
-                    },
                 },
             },
         },
@@ -123,7 +119,7 @@ use {
 pub const FALSE: BOOL = BOOL(0);
 pub const TRUE: BOOL = BOOL(1);
 
-static mut WIN32_APP: Option<RefCell<Win32App>> = None;
+static mut WIN32_APP: Option<RefCell<Win32App >> = None;
 
 pub fn get_win32_app_global() -> std::cell::RefMut<'static, Win32App> {
     unsafe {
@@ -159,9 +155,9 @@ pub struct Win32App {
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: MouseCursor,
-    pub current_internal_drag_item: Option<DragItem >,
     pub currently_clicked_window_id: Option<WindowId >,
-    pub start_dragging_items: Option<Vec<DragItem >>
+    pub start_dragging_items: Option<Vec<DragItem >>,
+    pub is_dragging_internal: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -224,8 +220,8 @@ impl Win32App {
             timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
             current_cursor: MouseCursor::Default,
-            current_internal_drag_item: None,
             currently_clicked_window_id: None,
+            is_dragging_internal: Cell::new(false),
         };
         win32_app.dpi_functions.become_dpi_aware();
         
@@ -319,10 +315,14 @@ impl Win32App {
             }
         };
         // call the dependencies
+        let time =get_win32_app_global().time_now();
         if let Some(hit_timer) = hit_timer {
             match hit_timer {
                 Win32Timer::Timer {timer_id, ..} => {
-                    Win32App::do_callback(Win32Event::Timer(TimerEvent {timer_id: timer_id}));
+                    Win32App::do_callback(Win32Event::Timer(TimerEvent {
+                        time: Some(time),
+                        timer_id: timer_id
+                    }));
                 },
                 Win32Timer::Resize {..} => {
                     Win32App::do_callback(Win32Event::Paint);
@@ -412,58 +412,20 @@ impl Win32App {
                     // only drag if something is there
                     if (path.len() > 0) || internal_id.is_some() {
                         
-                        // save this drag item
-                        get_win32_app_global().current_internal_drag_item = Some(DragItem::FilePath {
-                            path: path.clone(),
-                            internal_id: internal_id.clone(),
-                        });
+                        // create COM IDataObject that hosts the drag item
+                        let data_object: IDataObject = DragItem::FilePath {path: path.clone(), internal_id: internal_id.clone(),}.into();
                         
-                        // encode filename
-                        let mut encoded_filename: Vec<u16> = path.encode_utf16().collect();
-                        encoded_filename.push(0);
-                        
-                        // only one filename
-                        encoded_filename.push(0);
-                        
-                        // create a Windows global memory buffer that can contain DROPFILES and this filename with zeros
-                        let size_in_bytes = 20 + encoded_filename.len() * 2;
-                        let hglobal = unsafe {GlobalAlloc(GMEM_ZEROINIT | GMEM_FIXED, size_in_bytes)}.unwrap();
-                        let hglobal_raw_ptr = unsafe {GlobalLock(hglobal)};
-                        
-                        // initialize the DROPFILES part
-                        let i32_slice = unsafe {std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut i32, 5)};
-                        i32_slice[0] = 20; // offset to filename
-                        i32_slice[1] = 0;
-                        i32_slice[2] = 0;
-                        i32_slice[3] = 0;
-                        i32_slice[4] = 1; // not 0 because 16-bit characters in the filename
-                        
-                        // and then append the encoded filename
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                encoded_filename.as_ptr(),
-                                (hglobal_raw_ptr as *mut u8).offset(20) as *mut u16,
-                                encoded_filename.len(),
-                            )
-                        };
-                        
-                        // ready
-                        unsafe {GlobalUnlock(hglobal)}.unwrap();
-                        
-                        // create COM data object that hosts the hglobal
-                        let data_object: IDataObject = DataObject {hglobal,}.into();
-                        
-                        // create COM drop source to indicate when to stop dragging
+                        // create COM IDropSource to indicate when to stop dragging
                         let drop_source: IDropSource = DropSource {}.into();
                         
-                        // DoDragDrop is synchronous, so this thread will block until the file was dropped somewhere... let's see how that works out...
+                        get_win32_app_global().is_dragging_internal.replace(true);
                         let mut effect = DROPEFFECT(0);
                         match unsafe {DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect)} {
                             DRAGDROP_S_DROP => {/*log!("DoDragDrop: succesful")*/},
                             DRAGDROP_S_CANCEL => {/*log!("DoDragDrop: canceled")*/},
                             _ => {log!("DoDragDrop: failed for some reason")},
                         }
-                        get_win32_app_global().current_internal_drag_item = None;
+                        get_win32_app_global().is_dragging_internal.replace(false);
                     }
                 },
                 _ => {
@@ -474,8 +436,8 @@ impl Win32App {
                 let mut win32_app = get_win32_app_global();
                 for slot in 0..win32_app.timers.len() {
                     if let Win32Timer::DragDrop {win32_id} = win32_app.timers[slot] {
-                       win32_app.timers[slot] = Win32Timer::Free;
-                       unsafe {KillTimer(None, win32_id).unwrap();}
+                        win32_app.timers[slot] = Win32Timer::Free;
+                        unsafe {KillTimer(None, win32_id).unwrap();}
                     }
                 }
             }

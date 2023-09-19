@@ -1,5 +1,5 @@
 use makepad_widgets::*;
-
+   
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -21,7 +21,6 @@ live_design!{
     FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
-        
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
@@ -62,7 +61,7 @@ live_design!{
                 return sdf.result
             }
         }
-        padding: 9.0
+        padding2: 9.0
         text: ""
     }
     

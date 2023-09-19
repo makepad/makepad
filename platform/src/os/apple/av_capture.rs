@@ -46,7 +46,6 @@ impl AvCaptureSession {
         device: &RcObjcId,
         format: VideoFormat
     ) -> Self {
-        
         // lets start a capture session with a callback
         unsafe {
             let session: ObjcId = msg_send![class!(AVCaptureSession), alloc];
@@ -54,10 +53,8 @@ impl AvCaptureSession {
             
             let input: ObjcId = msg_send![class!(AVCaptureDeviceInput), alloc];
             let mut err: ObjcId = nil;
-            
             let () = msg_send![input, initWithDevice: device.as_id() error: &mut err];
             OSError::from_nserror(err).unwrap();
-            
             let callback = AvVideoCaptureCallback::new(Box::new(move | sample_buffer | {
                 if let Some(cb) = &mut *capture_cb.try_lock().unwrap() {
                     
@@ -81,10 +78,10 @@ impl AvCaptureSession {
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
                 }
             }));
-            
+
             let () = msg_send![session, beginConfiguration];
             let () = msg_send![session, addInput: input];
-            
+
             let mut err: ObjcId = nil;
             let () = msg_send![device.as_id(), lockForConfiguration: &mut err];
             OSError::from_nserror(err).unwrap();
@@ -119,7 +116,6 @@ impl AvCaptureSession {
             let () = msg_send![session, commitConfiguration];
             
             let () = msg_send![session, startRunning];
-            
             Self {
                 queue,
                 input_id,
@@ -183,7 +179,6 @@ impl AvCaptureAccess {
                 let av_format = input.av_formats.iter().find( | v | v.format_id == d.1).unwrap();
                 let video_capture_cb = self.video_input_cb[index].clone();
                 let video_format = input.desc.formats.iter().find( | v | v.format_id == d.1).unwrap();
-                println!("{:?}", video_format);
                 self.sessions.push(AvCaptureSession::start_session(
                     video_capture_cb,
                     d.0,
