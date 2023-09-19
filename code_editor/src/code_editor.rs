@@ -61,7 +61,7 @@ live_design!{
     DrawSelection = {{DrawSelection}} {
         uniform gloopiness: 8.0
         uniform border_radius: 2.0
-        
+        uniform focus: 1.0
         fn vertex(self) -> vec4 {
             let clipped: vec2 = clamp(
                 self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
@@ -103,7 +103,7 @@ live_design!{
                 );
                 sdf.gloop(self.gloopiness);
             }
-            return sdf.fill(#08f8);
+            return sdf.fill(mix(#5558,#08f8,self.focus));
         }
     }
     
@@ -147,9 +147,51 @@ live_design!{
         draw_selection: {
             draw_depth: 3.0,
         }
+        
         draw_cursor: {
             draw_depth: 4.0,
+            instance blink: 0.0
+            instance focus: 0.0
+            fn pixel(self) -> vec4 {
+                let color = mix(#0000,mix(self.color, #0000, self.blink),self.focus);
+                return vec4(color.rgb*color.a, color.a);
+            }
             color: #C0C0C0,
+        }
+        
+        animator: {
+            blink = {
+                default: off
+                off = {
+                    from: {all: Forward {duration:0.05}}
+                    apply: {
+                        draw_cursor: {blink:0.0}
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink:1.0}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration:0.05}}
+                    apply: {
+                        draw_cursor: {focus:0.0}
+                        draw_selection: {focus:0.0}
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {focus:1.0}
+                        draw_selection: {focus:1.0}
+                    }
+                }
+            }
         }
     }
     
@@ -204,6 +246,15 @@ pub struct CodeEditor {
     #[live(true)]
     word_wrap: bool,
 
+    #[live(0.5)]
+    blink_speed: f64,
+
+    #[animator]
+    animator: Animator,
+    
+    #[rust]
+    blink_timer: Timer,
+    
     #[rust]
     line_end: usize,
 }
@@ -274,7 +325,7 @@ impl CodeEditor {
 
         self.cell_size =
         self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        
+            
         let last_added_selection =
         session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
@@ -431,6 +482,12 @@ impl CodeEditor {
         a
     }
     
+    pub fn reset_cursor_blinker(&mut self, cx:&mut Cx){
+        self.animator_cut(cx, id!(blink.off));
+        cx.stop_timer(self.blink_timer);
+        self.blink_timer = cx.start_timeout(self.blink_speed)
+    }
+    
     pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
@@ -438,13 +495,30 @@ impl CodeEditor {
         session: &mut Session,
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
+       self.animator_handle_event(cx, event);
+       
         session.handle_changes();
+        
         self.scroll_bars.handle_event_with(cx, event, &mut | cx, _ | {
             cx.redraw_all();
         });
-        
+        if self.blink_timer.is_event(event).is_some(){
+            if self.animator_in_state(cx, id!(blink.off)){
+                self.animator_play(cx, id!(blink.on));
+            }
+            else{
+                self.animator_play(cx, id!(blink.off));
+            }
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
+        let mut keyboard_moved_cursor = false;
         match event.hits(cx, self.scroll_bars.area()) {
-            
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+            }
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 is_repeat: false,
@@ -512,7 +586,7 @@ impl CodeEditor {
                 ..
             }) => {
                 session.move_left(!shift);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
             Hit::KeyDown(KeyEvent {
@@ -521,7 +595,7 @@ impl CodeEditor {
                 ..
             }) => {
                 session.move_right(!shift);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
             Hit::KeyDown(KeyEvent {
@@ -530,7 +604,7 @@ impl CodeEditor {
                 ..
             }) => {
                 session.move_up(!shift);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
             Hit::KeyDown(KeyEvent {
@@ -539,13 +613,13 @@ impl CodeEditor {
                 ..
             }) => {
                 session.move_down(!shift);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
             Hit::TextInput(TextInputEvent {ref input, ..}) if input.len() > 0 => {
                 session.insert(input.into());
                 self.redraw(cx);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
@@ -554,7 +628,7 @@ impl CodeEditor {
             }) => {
                 session.enter();
                 self.redraw(cx);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
@@ -564,7 +638,7 @@ impl CodeEditor {
             }) => {
                 session.indent();
                 self.redraw(cx);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
@@ -574,7 +648,7 @@ impl CodeEditor {
             }) => {
                 session.outdent();
                 self.redraw(cx);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
@@ -583,7 +657,7 @@ impl CodeEditor {
             }) => {
                 session.delete();
                 self.redraw(cx);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
@@ -592,17 +666,17 @@ impl CodeEditor {
             }) => {
                 session.backspace();
                 self.redraw(cx);
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::TextCopy(ce) => {
                 *ce.response.borrow_mut() = Some(session.copy());
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
             }
             Hit::TextCut(ce) => {
                 *ce.response.borrow_mut() = Some(session.copy());
                 session.delete();
-                self.keep_cursor_in_view = KeepCursorInView::Once;
+                keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
             Hit::KeyDown(KeyEvent {
@@ -618,7 +692,7 @@ impl CodeEditor {
                 if session.undo() {
                     cx.redraw_all();
                     dispatch_action(cx, CodeEditorAction::TextDidChange);
-                    self.keep_cursor_in_view = KeepCursorInView::Once;
+                    keyboard_moved_cursor = true;
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -634,7 +708,7 @@ impl CodeEditor {
                 if session.redo() {
                     self.redraw(cx);
                     dispatch_action(cx, CodeEditorAction::TextDidChange);
-                    self.keep_cursor_in_view = KeepCursorInView::Once;
+                    keyboard_moved_cursor = true;
                 }
             }
             Hit::FingerDown(FingerDownEvent {
@@ -652,15 +726,18 @@ impl CodeEditor {
                     }
                     self.redraw(cx);
                 }
+                self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
             }
             Hit::FingerUp(_) => {
+                self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Off;
             }
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
             Hit::FingerMove(FingerMoveEvent {abs, ..}) => {
+                self.reset_cursor_blinker(cx);
                 if let KeepCursorInView::Always(old_abs, _) = &mut self.keep_cursor_in_view {
                     *old_abs = abs;
                 }
@@ -672,6 +749,10 @@ impl CodeEditor {
                 }
             }
             _ => {}
+        }
+        if keyboard_moved_cursor{
+            self.keep_cursor_in_view = KeepCursorInView::Once;
+            self.reset_cursor_blinker(cx);
         }
         if let KeepCursorInView::Always(abs, next) = &mut self.keep_cursor_in_view {
             if next.is_event(event).is_some() {
@@ -879,7 +960,8 @@ impl CodeEditor {
     
     fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_decoration = None;
-        let decorations = session.decorations();
+        let decorations = session.document().decorations();
+        log!("GOT SET {:?}", decorations);
         let mut decorations = decorations.iter();
         while decorations.as_slice().first().map_or(false, | decoration | {
             decoration.end().line_index < self.line_start

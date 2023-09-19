@@ -1,6 +1,7 @@
 use {
     crate::{
         char::CharExt,
+        decoration::{Decoration, DecorationSet},
         history::{EditKind, History},
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
@@ -27,12 +28,12 @@ use {
 pub struct Document(Rc<DocumentInner>);
 
 impl Document {
-    pub fn new(text: Text) -> Self {
+    pub fn new(text: Text, decorations:DecorationSet) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
             .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
             .collect();
-        let session = Self(Rc::new(DocumentInner {
+        let inner = Self(Rc::new(DocumentInner {
             history: RefCell::new(History::from(text)),
             layout: RefCell::new(DocumentLayout {
                 indent_state: (0..line_count).map(|_| None).collect(),
@@ -41,14 +42,15 @@ impl Document {
                 block_inlays: Vec::new(),
             }),
             tokenizer: RefCell::new(Tokenizer::new(line_count)),
+            decorations: RefCell::new(decorations),
             edit_senders: RefCell::new(HashMap::new()),
         }));
-        session.update_indent_state();
-        session.0.tokenizer.borrow_mut().update(
-            &session.0.history.borrow().as_text(),
-            &mut session.0.layout.borrow_mut().tokens,
+        inner.update_indent_state();
+        inner.0.tokenizer.borrow_mut().update(
+            &inner.0.history.borrow().as_text(),
+            &mut inner.0.layout.borrow_mut().tokens,
         );
-        session
+        inner
     }
 
     pub fn as_text(&self) -> Ref<'_, Text> {
@@ -57,6 +59,10 @@ impl Document {
 
     pub fn layout(&self) -> Ref<'_, DocumentLayout> {
         self.0.layout.borrow()
+    }
+
+    pub fn decorations(&self) -> Ref<'_, [Decoration]> {
+        Ref::map(self.0.decorations.borrow(), |decorations| decorations.as_decorations())
     }
 
     pub fn edit_selections(
@@ -150,6 +156,14 @@ impl Document {
         }
         drop(history);
         self.update_after_edit(origin_id, None, &edits);
+    }
+
+    pub fn add_decoration(&mut self, decoration: Decoration) {
+        self.0.decorations.borrow_mut().add_decoration(decoration);
+    }
+
+    pub fn clear_decorations(&mut self) {
+        self.0.decorations.borrow_mut().clear()
     }
 
     pub fn add_session(
@@ -351,6 +365,11 @@ impl Document {
             self.0.history.borrow().as_text(),
             &mut self.0.layout.borrow_mut().tokens,
         );
+        let mut decorations = self.0.decorations.borrow_mut();
+        for edit in edits {
+            decorations.apply_edit(edit);
+        }
+        drop(decorations);
         for (&session_id, edit_sender) in &*self.0.edit_senders.borrow() {
             if session_id == origin_id {
                 edit_sender
@@ -648,6 +667,7 @@ struct DocumentInner {
     history: RefCell<History>,
     layout: RefCell<DocumentLayout>,
     tokenizer: RefCell<Tokenizer>,
+    decorations: RefCell<DecorationSet>,
     edit_senders: RefCell<HashMap<SessionId, Sender<(Option<SelectionSet>, Vec<Edit>)>>>,
 }
 
