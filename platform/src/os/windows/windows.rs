@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{Cell,RefCell},
+        cell::RefCell,
     },
     crate::{
         makepad_live_id::*,
@@ -22,8 +22,6 @@ use {
         cx_api::{CxOsApi, CxOsOp},
         window::CxWindowPool,
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
-        Texture,
-        windows::Win32::Foundation::HANDLE,
     }
 };
 
@@ -37,7 +35,7 @@ impl Cx {
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
 
         // hack: store ID3D11Device in CxOs, so texture-related operations become possible on the makepad/studio side, yet don't completely destroy the code there
-        cx.borrow_mut().os.d3d11_device = Cell::new(Some(d3d11_cx.borrow().device.clone()));
+        cx.borrow_mut().os.d3d11_device = Some(d3d11_cx.borrow().device.clone());
 
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
@@ -375,10 +373,7 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
-    pub d3d11_device: Cell<Option<ID3D11Device>>,
-    pub (crate) swapchain: Option<[Texture; 2]>,
-    pub (crate) swapchain_handles: [HANDLE; 2],
-    pub (crate) present_index: usize,
+    pub (crate) d3d11_device: Option<ID3D11Device>,
     pub (crate) decoding: CxWindowsDecoding,
-    pub (crate) new_frame_being_rendered: bool,
+    pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableImageId>,
 }

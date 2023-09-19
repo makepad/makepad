@@ -18,7 +18,7 @@ use {
         thread::Signal,
         os::{
             d3d11::D3d11Cx,
-            cx_stdin::{HostToStdin, StdinToHost},
+            cx_stdin::{HostToStdin, StdinToHost, Swapchain},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
@@ -28,47 +28,35 @@ use {
 };
 
 impl Cx {
-    
-    pub (crate) fn stdin_send_draw_complete_and_flip(&mut self) {
 
-        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(self.os.present_index).to_json().as_bytes());
-        
-        /*
-        if let Some(swapchain) = self.os.swapchain.as_ref() {
-            if self.os.present_index < swapchain.len() - 1 {
-                self.os.present_index += 1;
-            }
-            else {
-                self.os.present_index = 0;
-            }    
-        }*/
-
-        //self.os.present_index = 1 - self.os.present_index;
-    }
-
-    pub (crate) fn stdin_handle_repaint(&mut self, d3d11_cx: &mut D3d11Cx) {
+    pub (crate) fn stdin_handle_repaint(
+        &mut self,
+        d3d11_cx: &mut D3d11Cx,
+        swapchain: Option<&Swapchain<Texture>>,
+        present_index: &mut usize,
+    ) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-
                     // only render to swapchain if swapchain exists
-                    if self.os.swapchain.is_some() {
+                    if let Some(swapchain) = swapchain {
 
                         // and if GPU is not already rendering something else
-                        if !self.os.new_frame_being_rendered {
+                        if self.os.new_frame_being_rendered.is_none() {
+                            let current_image = &swapchain.presentable_images[*present_index];
+                            *present_index = (*present_index + 1) % swapchain.presentable_images.len();
 
-                            // render
-                            let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
-                            self.draw_pass_to_texture(*pass_id, d3d11_cx, texture_id);
+                            // render to swapchain
+                            self.draw_pass_to_texture(*pass_id, d3d11_cx, current_image.image.texture_id());
 
                             // start GPU event query
                             d3d11_cx.start_querying();
 
                             // and inform event_loop to go poll GPU readiness
-                            self.os.new_frame_being_rendered = true;
+                            self.os.new_frame_being_rendered = Some(current_image.id);
                         }
                     }
                 }
@@ -87,7 +75,9 @@ impl Cx {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
 
         let mut reader = BufReader::new(std::io::stdin());
-        let mut window_size = None;
+
+        let mut swapchain = None;
+        let mut present_index = 0;
         
         self.call_event_handler(&Event::Construct);
         
@@ -141,45 +131,31 @@ impl Cx {
                             self.call_event_handler(&Event::Scroll(e.into()))
                         }
                         HostToStdin::WindowSize(ws) => {
+                            self.redraw_all();
 
-                            // first update the swapchain
-                            if self.os.swapchain_handles[0].0 as u64 != ws.swapchain_handles[0] {
+                            let new_swapchain = ws.swapchain.images_map(|_, handle| {
+                                let handle = HANDLE(handle as isize);
 
-                                // we got a new texture handles
-                                let textures = [Texture::new(self),Texture::new(self),];
+                                let texture = Texture::new(self);
+                                self.textures[texture.texture_id()]
+                                    .os.update_from_shared_handle(d3d11_cx, handle);
+                                texture
+                            });
+                            let swapchain = swapchain.insert(new_swapchain);
 
-                                let handle = HANDLE(ws.swapchain_handles[0] as isize);
-                                let cxtexture = &mut self.textures[textures[0].texture_id()];
-                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
-                                self.os.swapchain_handles[0] = handle;
+                            // reset present_index
+                            present_index = 0;
 
-                                let handle = HANDLE(ws.swapchain_handles[1] as isize);
-                                let cxtexture = &mut self.textures[textures[1].texture_id()];
-                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
-                                self.os.swapchain_handles[1] = handle;
+                            let window = &mut self.windows[CxWindowPool::id_zero()];
+                            window.window_geom = WindowGeom {
+                                dpi_factor: ws.dpi_factor,
+                                inner_size: dvec2(swapchain.width as f64, swapchain.height as f64) / ws.dpi_factor,
+                                ..Default::default()
+                            };
 
-                                self.os.swapchain = Some(textures);
-
-                                // and reset present_index
-                                self.os.present_index = 0;
-                            }
-
-                            // redraw the window if needed
-                            if window_size != Some(ws) {
-                                window_size = Some(ws);
-                                self.redraw_all();
-                                
-                                let window = &mut self.windows[CxWindowPool::id_zero()];
-                                window.window_geom = WindowGeom {
-                                    dpi_factor: ws.dpi_factor,
-                                    inner_size: dvec2(ws.width, ws.height),
-                                    ..Default::default()
-                                };
-
-                                self.stdin_handle_platform_ops(d3d11_cx);
-                            }
+                            self.stdin_handle_platform_ops(Some(swapchain), present_index);
                         }
-                        HostToStdin::Tick {frame: _, time,..} => if let Some(_ws) = window_size {
+                        HostToStdin::Tick {frame: _, time,..} => if swapchain.is_some() {
 
                             // poll the service for updates
                             // check signals
@@ -205,7 +181,7 @@ impl Cx {
                             }
                             
                             // repaint
-                            self.stdin_handle_repaint(d3d11_cx);
+                            self.stdin_handle_repaint(d3d11_cx, swapchain.as_ref(), &mut present_index);
                         }
                     }
                     Err(err) => { // we should output a log string
@@ -214,19 +190,23 @@ impl Cx {
                 }
             }
             // we should poll our runloop
-            self.stdin_handle_platform_ops(d3d11_cx);
+            self.stdin_handle_platform_ops(swapchain.as_ref(), present_index);
 
             // check if GPU is ready to flip frames
-            if self.os.new_frame_being_rendered {
+            if let Some(rendered_image_id) = self.os.new_frame_being_rendered {
                 if d3d11_cx.is_gpu_done() {
-                    self.stdin_send_draw_complete_and_flip();
-                    self.os.new_frame_being_rendered = false;
+                    let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(rendered_image_id).to_json().as_bytes());
+                    self.os.new_frame_being_rendered = None;
                 }
             }
         }
     }
         
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &D3d11Cx) {
+    fn stdin_handle_platform_ops(
+        &mut self,
+        swapchain: Option<&Swapchain<Texture>>,
+        present_index: usize,
+    ) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -237,12 +217,11 @@ impl Cx {
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    if self.os.swapchain.is_some() {
-                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
+                    if let Some(swapchain) = swapchain {
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id,
+                            texture_id: swapchain.presentable_images[present_index].image.texture_id(),
                         }];
                     }
                 },
