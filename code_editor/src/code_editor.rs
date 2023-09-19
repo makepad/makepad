@@ -262,6 +262,9 @@ pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+        self.cell_size =
+        self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+
         let last_added_selection =
         session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
@@ -300,8 +303,6 @@ impl CodeEditor {
             }
         }
 
-        self.cell_size =
-        self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         let walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
         
@@ -371,6 +372,28 @@ impl CodeEditor {
         }
     }
     
+    pub fn reset_font_size(&mut self){
+        self.draw_gutter.text_style.font_size = 9.0;
+        self.draw_text.text_style.font_size = 9.0;
+    }
+    
+    pub fn decrease_font_size(&mut self){
+        if self.draw_text.text_style.font_size > 3.0{
+            self.draw_text.text_style.font_size -= 1.0;
+            self.draw_gutter.text_style.font_size =
+            self.draw_text.text_style.font_size;
+        }
+    }
+
+    pub fn increase_font_size(&mut self){
+        if self.draw_text.text_style.font_size < 20.0{
+            self.draw_text.text_style.font_size += 1.0;
+            self.draw_gutter.text_style.font_size =
+            self.draw_text.text_style.font_size;
+        }
+    }
+
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -416,6 +439,36 @@ impl CodeEditor {
                     self.keep_cursor_in_view = KeepCursorInView::LockStart;
                 }
                 self.redraw(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Minus,
+                modifiers: KeyModifiers {control,logo, ..},
+                ..
+            }) => {
+                if control||logo{
+                    self.decrease_font_size();
+                    self.redraw(cx);
+                }
+            }
+             Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Key0,
+                modifiers: KeyModifiers {control,logo, ..},
+                ..
+            }) => {
+                if control||logo{
+                    self.reset_font_size();
+                    self.redraw(cx);
+                }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Equals,
+                modifiers: KeyModifiers {control,logo, ..},
+                ..
+            }) => {
+                if control||logo{
+                    self.increase_font_size();
+                    self.redraw(cx);
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
