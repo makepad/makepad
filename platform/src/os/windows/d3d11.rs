@@ -124,7 +124,6 @@ use crate::{
                     },
                 },
             },
-            System::Threading::Sleep,
         },
     },
 };
@@ -664,21 +663,15 @@ impl D3d11Cx {
         }
     }
 
-    pub fn wait_for_gpu(&self) {
+    pub fn start_querying(&self) {
 
         // QUERY_EVENT signals when rendering is complete
         unsafe { self.context.End(&self.query) };
+    }
 
-        // wait for status with GetData
-        // (calling context.GetData doesn't distinguish between S_OK and S_FALSE, so call vtable directly)
-        while unsafe { (Interface::vtable(&self.context).GetData)(Interface::as_raw(&self.context),Interface::as_raw(&self.query),std::ptr::null_mut(),0,0) } == S_FALSE {
-
-            unsafe { Sleep(1) };  // set to 1ms, but in practice probably somewhere around 10 or 15 ms
-            
-            // so let's see if this even works well enough for 60Hz framerate...
-
-            // and otherwise needs shorter waiting API, but please no spinning
-        }
+    pub fn is_gpu_done(&self) -> bool {
+        let hresult = unsafe { (Interface::vtable(&self.context).GetData)(Interface::as_raw(&self.context),Interface::as_raw(&self.query),std::ptr::null_mut(),0,0) };
+        hresult != S_FALSE
     }
 }
 
