@@ -291,8 +291,8 @@ impl CodeEditor {
                 // ok so we want to keep cursor pos at the same screen position
                 let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 let delta = pos - new_pos;
-                let new_pos = self.scroll_bars.get_scroll_pos()-delta;
-                self.scroll_bars.set_scroll_pos(cx, new_pos);
+                let new_pos = self.scroll_bars.get_scroll_pos()-dvec2(0.0,delta.y);
+                self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
                 //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
             }
             KeepCursorInView::Off=>{}
@@ -357,7 +357,7 @@ impl CodeEditor {
 
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
-            session.layout().height() * self.cell_size.y,
+            session.layout().height() * self.cell_size.y + (self.viewport_rect.size.y - self.cell_size.y),
         );
         
         self.scroll_bars.end(cx);
