@@ -45,6 +45,7 @@ use {
             VideoDecodingInitializedEvent,
             VideoColorFormat,
             VideoStreamEvent,
+            VideoDecodingErrorEvent,
             HttpRequest,
             HttpMethod,
         },
@@ -286,6 +287,15 @@ impl Cx {
                     },
                     FromJavaMessage::VideoChunkDecoded {video_id} => {
                         let e = Event::VideoChunkDecoded(LiveId(video_id));
+                        self.call_event_handler(&e);
+                    },
+                    FromJavaMessage::VideoDecodingError {video_id, error} => {
+                        let e = Event::VideoDecodingError(
+                            VideoDecodingErrorEvent {
+                                video_id: LiveId(video_id),
+                                error,
+                            }
+                        );
                         self.call_event_handler(&e);
                     },
                     FromJavaMessage::Pause => {
