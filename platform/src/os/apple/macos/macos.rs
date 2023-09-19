@@ -208,7 +208,7 @@ impl Cx {
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(*pass_id, metal_cx, DrawPassModeTexture);
                 },
                 CxPassParent::None => {
                     self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
