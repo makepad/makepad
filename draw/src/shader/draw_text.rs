@@ -25,6 +25,7 @@ live_design!{
         varying tex_coord2: vec2
         varying tex_coord3: vec2
         varying clipped: vec2
+        varying pos: vec2
         
         fn vertex(self) -> vec4 {
             let min_pos = vec2(self.rect_pos.x, self.rect_pos.y)
@@ -44,6 +45,7 @@ live_design!{
                 self.font_t2.xy,
                 normalized.xy
             )
+            self.pos = normalized;
             /*
             self.tex_coord2 = mix(
                 self.font_t1.xy,
@@ -68,7 +70,9 @@ live_design!{
         fn get_color(self) -> vec4 {
             return self.color;
         }
-        
+        fn blend_color(self, incol:vec4)->vec4{
+            return incol
+        }
         fn pixel(self) -> vec4 {
             
             //let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
@@ -101,7 +105,7 @@ live_design!{
             
             s = pow(s, self.curve);
             let col = self.get_color(); //color!(white);//get_color();
-            return vec4(s * col.rgb * self.brightness * col.a, s * col.a);
+            return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
         }
     }
 }
