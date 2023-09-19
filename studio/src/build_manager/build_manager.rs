@@ -42,16 +42,15 @@ live_design!{
         recompile_timeout: 0.2
     }
 }
-
+pub const MAX_SWAPCHAIN_HISTORY:usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
     pub item_id: LiveId,
     pub process: BuildProcess,
     pub run_view_id: LiveId,
     pub cmd_id: Option<BuildCmdId>,
-    pub old2_swapchain: Option<cx_stdin::Swapchain<Texture>>,
-    pub old_swapchain: Option<cx_stdin::Swapchain<Texture>>,
-    pub swapchain: Option<cx_stdin::Swapchain<Texture>>,
+    pub swapchain_history: [Option<cx_stdin::Swapchain<Texture>>;MAX_SWAPCHAIN_HISTORY],
+    //pub swapchain: Option<cx_stdin::Swapchain<Texture>>,
     pub last_presented_id: Cell<Option<cx_stdin::PresentableImageId>>,
     pub last_presented_backup_for_resizing: Texture,
 }
