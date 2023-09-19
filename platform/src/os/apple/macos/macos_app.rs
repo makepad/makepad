@@ -711,7 +711,7 @@ impl MacosApp {
     pub fn send_paint_event() {
         MacosApp::do_callback(MacosEvent::Paint);
     }
-    
+    /*
     #[cfg(target_os = "macos")]
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
        unsafe {
@@ -728,5 +728,5 @@ impl MacosApp {
             let cocoa_window = &mut *(cocoa_window as *mut MacosWindow);
             cocoa_window.start_dragging(ns_event, items);
         };
-    }
+    }*/
 }
