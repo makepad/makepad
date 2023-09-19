@@ -27,7 +27,7 @@ fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] 
     unsafe { out_refs.assume_init() }
 }
 
-pub const SWAPCHAIN_IMAGE_COUNT: usize = if cfg!(target_os = "macos") { 1 } else { 2 };
+pub const SWAPCHAIN_IMAGE_COUNT: usize = if cfg!(any(target_os = "macos",target_os = "windows")) { 1 } else { 2 };
 
 /// "Swapchains" group together some number (i.e. `SWAPCHAIN_IMAGE_COUNT` here)
 /// of "presentable images", to form a queue of render targets which can be
