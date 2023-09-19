@@ -166,8 +166,6 @@ pub struct CodeEditor {
     draw_bg: DrawColor,
     #[rust(KeepCursorInView::Never)]
     keep_cursor_in_view: KeepCursorInView,
-    #[rust]
-    mouse_cursor_timer: NextFrame,
     
     #[rust]
     cell_size: DVec2,
@@ -183,7 +181,7 @@ pub struct CodeEditor {
 
 enum KeepCursorInView {
     Once,
-    Always(DVec2,),
+    Always(DVec2, NextFrame),
     Never
 }
 
@@ -506,17 +504,18 @@ impl CodeEditor {
                     }
                     self.redraw(cx);
                 }
-                self.keep_cursor_in_view = KeepCursorInView::Always(abs);
-                self.mouse_cursor_timer = cx.new_next_frame()
+                self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
             }
-            Hit::FingerUp(_)=>{
+            Hit::FingerUp(_) => {
                 self.keep_cursor_in_view = KeepCursorInView::Never;
             }
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
             Hit::FingerMove(FingerMoveEvent {abs, ..}) => {
-                self.keep_cursor_in_view = KeepCursorInView::Always(abs);
+                if let KeepCursorInView::Always(old_abs,_) = &mut self.keep_cursor_in_view{
+                    *old_abs = abs;
+                }
                 cx.set_cursor(MouseCursor::Text);
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
@@ -526,13 +525,14 @@ impl CodeEditor {
             }
             _ => {}
         }
-        if self.mouse_cursor_timer.is_event(event).is_some(){
-            if let KeepCursorInView::Always(abs) = self.keep_cursor_in_view{
+        if let KeepCursorInView::Always(abs, next) = &mut self.keep_cursor_in_view {
+            if next.is_event(event).is_some() {
+                *next = cx.new_next_frame();
+                let abs = *abs;
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     self.redraw(cx);
                 }
-                self.mouse_cursor_timer = cx.new_next_frame();
             }
         }
     }
