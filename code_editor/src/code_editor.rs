@@ -274,7 +274,7 @@ impl CodeEditor {
 
         self.cell_size =
         self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        
+            
         let last_added_selection =
         session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
