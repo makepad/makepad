@@ -305,7 +305,6 @@ impl CodeEditor {
             KeepCursorInView::FontResize(last_pos) => {
                 let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 let delta = last_pos - new_pos;
-                log!("{}", delta.y);
                 let new_pos = self.scroll_bars.get_scroll_pos() - dvec2(0.0, delta.y);
                 self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
                 self.keep_cursor_in_view = KeepCursorInView::Off
