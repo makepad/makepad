@@ -13,24 +13,36 @@ live_design!{
         draw_app: {
             texture tex: texture2d
             instance recompiling: 0.0
+            instance started: 0.0
             fn pixel(self) -> vec4 {
                 //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
                 let fb = sample2d_rt(self.tex, self.pos)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }
-                return mix(fb, #4, self.recompiling * 0.4);
+                return mix(#2,mix(fb, #4, self.recompiling * 0.4),self.started);
             }
         }
         animator: {
+            started = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {draw_app: {started: 0.0}}
+                }
+                on = {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {draw_app: {started: 1.0}}
+                }
+            }
             recompiling = {
                 default: off,
                 off = {
-                    from: {all: Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.05}}
                     apply: {draw_app: {recompiling: 0.0}}
                 }
                 on = {
-                    from: {all: Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.05}}
                     apply: {draw_app: {recompiling: 1.0}}
                 }
             }
@@ -51,7 +63,8 @@ pub struct RunView {
     #[rust] timer: Timer,
     #[rust(100usize)] redraw_countdown: usize,
     #[rust] time: f64,
-    #[rust] frame: u64
+    #[rust] frame: u64,
+    #[rust] started: bool
 }
 
 
@@ -172,6 +185,10 @@ impl RunView {
             StdinToHost::DrawCompleteAndFlip(present_index) => {
                 for v in manager.active.builds.values_mut() {
                     if v.run_view_id == run_view_id {
+                        if !self.started{
+                            self.started = true;
+                            self.animator_play(cx, id!(started.on));
+                        }
                         self.redraw_countdown = 20;
                         v.present_index.set(*present_index);
                         self.draw_app.set_texture(0, &v.swapchain[*present_index]);

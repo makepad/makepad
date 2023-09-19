@@ -500,7 +500,11 @@ impl Cx {
                     get_macos_app_global().stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(items) => {
-                    get_macos_app_global().start_dragging(items);
+                    //  lets start dragging on the right window
+                    if let Some(metal_window) = metal_windows.iter_mut().next() {
+                        metal_window.cocoa_window.start_dragging(items);
+                        break;
+                    }
                 }
                 CxOsOp::UpdateMenu(menu) => {
                     get_macos_app_global().update_app_menu(&menu, &self.command_settings)
