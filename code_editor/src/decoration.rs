@@ -12,7 +12,13 @@ pub struct Decoration {
 
 impl Decoration {
     pub fn new(id: usize, start: Position, end: Position) -> Self {
-        assert!(start <= end);
+        if start > end{
+            return Self {
+                id,
+                start:end,
+                end:start,
+            }
+        }
         Self {
             id,
             start,
