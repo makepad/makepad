@@ -16,6 +16,12 @@ pub struct VideoDecodingInitializedEvent {
     pub duration: u128,
 }
 
+#[derive(Clone, Debug)]
+pub struct VideoDecodingErrorEvent {
+    pub video_id: LiveId,
+    pub error: String,
+}
+
 #[derive(Default, Clone, Copy, Debug)]
 pub enum VideoColorFormat {
     YUV420Planar,

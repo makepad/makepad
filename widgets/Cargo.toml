@@ -1,17 +1,17 @@
 [package]
 name = "makepad-widgets"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad widgets"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "3wXZ4mCWrFtrkr38MyxIpOySFgU="
+metadata.makepad-auto-version = "nQYCoAJ96K3n9XXRK0D_S1AdBnY="
 
 [dependencies]
-makepad-draw = { path = "../draw", version = "0.3.0" }
-makepad-derive-widget = {path = "./derive_widget", version="0.3.0"}
+makepad-draw = { path = "../draw", version = "0.4.0" }
+makepad-derive-widget = {path = "./derive_widget", version="0.4.0"}
 makepad-zune-jpeg ={ path = "../libs/zune-jpeg", version = "0.3.17" }
 makepad-zune-png ={ path = "../libs/zune-png", version = "0.2.1" }
 #makepad-image-formats ={ path = "../libs/image_formats", version = "0.3.0" }

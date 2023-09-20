@@ -1,10 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{
-            Cell,
-            RefCell,
-        },
+        cell::RefCell,
     },
     makepad_objc_sys::{
         msg_send,
@@ -147,7 +144,7 @@ impl Cx {
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
 
         // store device object ID for double buffering
-        cx.borrow_mut().os.metal_device = Cell::new(Some(metal_cx.borrow().device));
+        cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
 
         //let cx = Rc::new(RefCell::new(self));
         if std::env::args().find(|v| v == "--stdin-loop").is_some(){
@@ -579,5 +576,5 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) decoding: CxAppleDecoding,
-    pub metal_device: Cell<Option<ObjcId>>,
+    pub metal_device: Option<ObjcId>,
 }
