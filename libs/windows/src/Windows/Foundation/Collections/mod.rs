@@ -1,4 +1,4 @@
-#[doc = "*Required features: `\"Foundation_Collections\"`*"]
+
 #[repr(transparent)]
 pub struct IIterable<T>(::windows_core::IUnknown, ::core::marker::PhantomData<T>)
 where
