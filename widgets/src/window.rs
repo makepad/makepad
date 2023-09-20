@@ -14,7 +14,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct Window {
-    #[rust] caption_size: DVec2,
+    //#[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
     #[live] mouse_cursor_size: DVec2,
     #[live] demo: bool,
@@ -150,7 +150,7 @@ impl Window {
                 if dq.window_id == self.window.window_id() {
                     // alright we should query the caption area.
                     // we should build an api for that
-                    if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
+                    if dq.abs.y < 20.{
                         if dq.abs.x < 50. {
                             dq.response.set(WindowDragQueryResponse::SysMenu);
                         }
@@ -158,6 +158,9 @@ impl Window {
                             dq.response.set(WindowDragQueryResponse::Caption);
                         }
                     }
+                    /*
+                    if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
+                    }*/
                 }
                 true
             }
