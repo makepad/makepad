@@ -55,7 +55,7 @@ Now this tool can be used to install toolchains per platform needed
 
 ```cargo makepad ios install-toolchain```
 
-```cargo makepad android install-toolchain```
+```cargo makepad android --abi=all install-toolchain```
 
 ## Running makepad studio
 
