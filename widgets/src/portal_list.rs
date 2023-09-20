@@ -688,7 +688,7 @@ impl Widget for PortalList {
                             if self.first_id == self.range_start && self.first_scroll > 0.0 {
                                 self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
                             }
-                            else if total_delta > 10.0 && scaled_delta.abs() > self.flick_scroll_minimum{
+                            else if total_delta.abs() > 10.0 && scaled_delta.abs() > self.flick_scroll_minimum{
                                 
                                 self.scroll_state = ScrollState::Flick {
                                     delta: scaled_delta.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum),
