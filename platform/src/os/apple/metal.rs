@@ -531,7 +531,7 @@ impl Cx {
     }
     
     #[cfg(target_os="macos")]
-    pub fn get_shared_presentable_image_os_handle(
+    pub fn share_texture_for_presentable_image(
         &mut self,
         texture: &Texture,
     ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
@@ -547,7 +547,7 @@ impl Cx {
     }
     
     #[cfg(target_os="ios")]
-    pub fn get_shared_presentable_image_os_handle(
+    pub fn share_texture_for_presentable_image(
         &mut self,
         _texture: &Texture,
     ) -> crate::cx_stdin::SharedPresentableImageOsHandle {

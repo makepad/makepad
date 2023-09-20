@@ -16,7 +16,7 @@ use {
         texture::{Texture, TextureDesc, TextureFormat},
         live_traits::LiveNew,
         thread::Signal,
-        os::cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
+        os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
@@ -73,6 +73,11 @@ impl Cx {
     }
     
     pub fn stdin_event_loop(&mut self) {
+        let aux_chan_client_endpoint =
+            aux_chan::InheritableClientEndpoint::from_process_args_in_client()
+                .and_then(|chan| chan.into_uninheritable())
+                .expect("failed to acquire auxiliary channel");
+
 
         let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
         {
@@ -155,53 +160,28 @@ impl Cx {
                     self.redraw_all();
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    let new_swapchain = new_swapchain.images_map(|id, dma_buf_image| {
-                        // HACK(eddyb) we get the host process's ID, and
-                        // a file descriptor *in that process* - normally
-                        // it'd need to be passed to this process via some
-                        // objcap mechanism (e.g. UNIX domain sockets),
-                        // but all we have is JSON, and even using procfs
-                        // (i.e. opening `/proc/$REMOTE_PID/fd/$REMOTE_FD`)
-                        // doesn't play well with non-file file descriptors,
-                        // so for now this requires `pidfd` (Linux 5.6+),
-                        // but could be reworked to use UNIX domain sockets
-                        // (with `SCM_RIGHTS` messages) instead, long-term.
-                        use crate::os::linux::dma_buf::pid_fd;
-
-                        let dma_buf_image = dma_buf_image.planes_map(|plane| plane.fd_map(|fd| {
-                            // FIXME(eddyb) reuse `PidFd`s as the host PID
-                            // will never change (unless it can do client
-                            // handover, or there's "worker processes").
-                            pid_fd::PidFd::from_remote_pid(fd.remote_pid as pid_fd::pid_t)
-                                .and_then(|pid_fd| pid_fd.clone_remote_fd(fd.remote_fd))
-                        }));
-
-                        // FIXME(eddyb) is this necessary or could they be reused?
+                    let new_swapchain = new_swapchain.images_map(|pi| {
                         let new_texture = Texture::new(self);
-
-                        if let Err(err) = &dma_buf_image.planes.dma_buf_fd {
-                            error!("failed to pidfd_getfd the DMA-BUF fd: {err:?}");
-                            if err.kind() == io::ErrorKind::Unsupported {
-                                error!("pidfd_getfd syscall requires at least Linux 5.6")
-                            }
-                        } else {
-                            let dma_buf_image = dma_buf_image.planes_map(|plane| plane.fd_map(Result::unwrap));
-
-                            // update texture
-                            let desc = TextureDesc {
-                                format: TextureFormat::SharedBGRA(id),
-                                width: Some(new_swapchain.alloc_width as usize),
-                                height: Some(new_swapchain.alloc_height as usize),
-                            };
-                            new_texture.set_desc(self, desc);
-                            self.textures[new_texture.texture_id()]
+                        match pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
+                            Ok(pi) => {
+                                // update texture
+                                let desc = TextureDesc {
+                                    format: TextureFormat::SharedBGRA(pi.id),
+                                    width: Some(new_swapchain.alloc_width as usize),
+                                    height: Some(new_swapchain.alloc_height as usize),
+                                };
+                                new_texture.set_desc(self, desc);
+                                self.textures[new_texture.texture_id()]
                                 .os.update_from_shared_dma_buf_image(
                                     self.os.opengl_cx.as_ref().unwrap(),
                                     &desc,
-                                    &dma_buf_image,
+                                    &pi.image,
                                 );
+                            }
+                            Err(err) => {
+                                error!("failed to receive new swapchain on auxiliary channel: {err:?}");
+                            }
                         }
-
                         new_texture
                     });
                     let swapchain = swapchain.insert(new_swapchain);

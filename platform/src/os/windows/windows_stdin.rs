@@ -162,12 +162,12 @@ impl Cx {
                     self.redraw_all();
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    let new_swapchain = new_swapchain.images_map(|id, handle| {
-                        let handle = HANDLE(handle as isize);
+                    let new_swapchain = new_swapchain.images_map(|pi| {
+                        let handle = HANDLE(pi.image as isize);
                         
                         let texture = Texture::new(self);
                         let desc = TextureDesc {
-                            format: TextureFormat::SharedBGRA(id),
+                            format: TextureFormat::SharedBGRA(pi.id),
                             width: Some(new_swapchain.alloc_width as usize),
                             height: Some(new_swapchain.alloc_height as usize),
                         };
