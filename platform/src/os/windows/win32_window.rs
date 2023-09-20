@@ -467,10 +467,10 @@ impl Win32Window {
                     }
                     _ => ()
                 }
-                if ycoord < rect.top + 50 && xcoord < rect.left + 50 {
+                if ycoord < rect.top + 20 && xcoord < rect.left + 50 {
                     return LRESULT(HTSYSMENU as isize);
                 }
-                if ycoord < rect.top + 50 && xcoord < rect.right - 300 {
+                if ycoord < rect.top + 20 && xcoord < rect.right - 300 {
                     return LRESULT(HTCAPTION as isize);
                 }
                 return LRESULT(HTCLIENT as isize);
