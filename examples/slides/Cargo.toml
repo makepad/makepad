@@ -8,5 +8,5 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "_Cje-i05FmRoF8Bp-FtTHnJ3-fA="
 
 [dependencies]
-makepad-code-editor = { path = "../../code_editor", version = "0.3.0" }
+makepad-code-editor = { path = "../../code_editor", version = "0.4.0" }
 makepad-widgets = { path = "../../widgets", version = "0.4.0" }
