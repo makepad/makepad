@@ -42,13 +42,19 @@ Our native builds work on the stable Rust toolchain. However, some of the errors
 For the non standard build targets (ios, android, wasm) we have a buildtool called 'cargo-makepad' that you need to install.
 
 Install it from the repo:
+
 ```cargo install --path=./tools/cargo_makepad```
+
 Or install it from cargo (might be behind the repo)
+
 ```cargo install cargo-makepad```
 
 Now this tool can be used to install toolchains per platform needed
+
 ```cargo makepad wasm install-toolchain```
+
 ```cargo makepad ios install-toolchain```
+
 ```cargo makepad android install-toolchain```
 
 ## Running makepad studio
@@ -58,10 +64,15 @@ Makepad studio allows you to easily build and view the examples, and it uses car
 ```cargo run -p makepad-studio --release```
 
 If you build the wasm applications, you can open it on:
+
 http://127.0.0.1:8001/examples/ironfish/src/index.html
+
 http://127.0.0.1:8001/examples/fractal_zoom/src/index.html
+
 http://127.0.0.1:8001/examples/simple/src/index.html
+
 http://127.0.0.1:8001/examples/news_feed/src/index.html
+
 
 ```cargo run -p makepad-studio --release```
 
