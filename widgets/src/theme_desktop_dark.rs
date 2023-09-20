@@ -720,7 +720,7 @@ live_design!{
             quit = Item{
                 name:"Quit",
                 shift: false,
-                key_code: KeyQ,
+                key: KeyQ,
                 enabled: true
             }
         }
