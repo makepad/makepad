@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! # Linux cross-process DMA-BUF-based image ("texture") sharing
 //!
 //! An [`Image<FD>`] primarily contains [DMA-BUF] (`FD`-typed) file descriptor(s)
