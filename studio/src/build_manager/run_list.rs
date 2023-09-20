@@ -264,6 +264,7 @@ impl BuildManager {
                     cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
                     swapchain: None,
                     last_swapchain_with_completed_draws: None,
+                    aux_chan_host_endpoint: None,
                 });
             }
             if process.target.runs_in_studio(){

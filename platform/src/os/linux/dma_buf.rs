@@ -23,9 +23,7 @@
 
 use crate::makepad_micro_serde::*;
 
-use std::os::{self, fd::AsRawFd as _};
-
-#[derive(Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct Image<FD>
     // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
     where FD: Sized
@@ -37,26 +35,9 @@ pub struct Image<FD>
 }
 
 impl<FD> Image<FD> {
-    pub fn planes_map<FD2>(self, f: impl Fn(ImagePlane<FD>) -> ImagePlane<FD2>) -> Image<FD2> {
+    pub fn planes_fd_map<FD2>(self, f: impl FnMut(FD) -> FD2) -> Image<FD2> {
         let Image { drm_format, planes: plane0 } = self;
-        Image { drm_format, planes: f(plane0) }
-    }
-    pub fn planes_ref_map<FD2>(&self, f: impl Fn(&ImagePlane<FD>) -> ImagePlane<FD2>) -> Image<FD2> {
-        let Image { drm_format, planes: ref plane0 } = *self;
-        Image { drm_format, planes: f(plane0) }
-    }
-}
-
-impl<FD> Copy for Image<FD> where ImagePlane<FD>: Copy {}
-impl<FD> Clone for Image<FD> where ImagePlane<FD>: Clone {
-    fn clone(&self) -> Self {
-        self.planes_ref_map(|plane| plane.clone())
-    }
-}
-
-impl Image<os::fd::OwnedFd> {
-    pub fn as_remote(&self) -> Image<RemoteFd> {
-        self.planes_ref_map(|plane| plane.as_remote())
+        Image { drm_format, planes: plane0.fd_map(f) }
     }
 }
 
@@ -94,7 +75,7 @@ pub struct DrmFormat {
     pub modifiers: u64,
 }
 
-#[derive(Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct ImagePlane<FD>
     // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
     where FD: Sized
@@ -112,92 +93,8 @@ pub struct ImagePlane<FD>
 }
 
 impl<FD> ImagePlane<FD> {
-    pub fn fd_as_ref(&self) -> ImagePlane<&FD> {
-        let ImagePlane { ref dma_buf_fd, offset, stride } = *self;
-        ImagePlane { dma_buf_fd, offset, stride }
-    }
-    pub fn fd_map<FD2>(self, f: impl FnOnce(FD) -> FD2) -> ImagePlane<FD2> {
+    fn fd_map<FD2>(self, f: impl FnOnce(FD) -> FD2) -> ImagePlane<FD2> {
         let ImagePlane { dma_buf_fd, offset, stride } = self;
         ImagePlane { dma_buf_fd: f(dma_buf_fd), offset, stride }
-    }
-}
-
-impl Copy for ImagePlane<RemoteFd> {}
-impl Clone for ImagePlane<RemoteFd> {
-    fn clone(&self) -> Self {
-        self.fd_as_ref().fd_map(|&fd| fd)
-    }
-}
-
-impl Clone for ImagePlane<os::fd::OwnedFd> {
-    fn clone(&self) -> Self {
-        self.fd_as_ref().fd_map(|fd| fd.try_clone().unwrap())
-    }
-}
-
-impl ImagePlane<os::fd::OwnedFd> {
-    pub fn as_remote(&self) -> ImagePlane<RemoteFd> {
-        self.fd_as_ref().fd_map(|fd| RemoteFd {
-            remote_pid: std::process::id(),
-            remote_fd: fd.as_raw_fd(),
-        })
-    }
-}
-
-// HACK(eddyb) to avoid needing an UNIX domain socket, we pass file descriptors
-// to child processes via `pidfd_getfd` (see also `linux_x11_stdin::pid_fd`).
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct RemoteFd {
-    pub remote_pid: u32,
-    pub remote_fd: i32,
-}
-
-/// Linux pidfd (file-descriptor-based API for "process handles") wrapper.
-///
-/// `PidFd` is used here specifically for its ability to clone any file descriptors
-/// from a remote process, similar to opening `/proc/$REMOTE_PID/fd/$REMOTE_FD`,
-/// but without all the caveats and failure modes around special file descriptors.
-//
-// FIXME(eddyb) `std::os::linux::process::PidFd` should be used/wrapped instead,
-// but for now it's still unstable, and it also lacks `pidfd_getfd` functionality,
-// as its main purpose appears to be creating a pidfd from `std::process::Command`.
-#[allow(non_camel_case_types, non_upper_case_globals)]
-pub(super) mod pid_fd {
-    use std::{
-        ffi::{c_int, c_long, c_uint},
-        io,
-        os::{self, fd::{AsRawFd as _, FromRawFd as _}},
-    };
-
-    pub(crate) type pid_t = c_int;
-
-    extern "C" { fn syscall(num: c_long, ...) -> c_long; }
-    const SYS_pidfd_open: c_long = 434;
-    const SYS_pidfd_getfd: c_long = 438;
-
-    pub(crate) struct PidFd(os::fd::OwnedFd);
-    impl PidFd {
-        pub fn from_remote_pid(remote_pid: pid_t) -> Result<PidFd, io::Error> {
-            unsafe {
-                let flags: c_uint = 0;
-                let pid_fd = syscall(SYS_pidfd_open, remote_pid, flags);
-                if pid_fd == -1 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(PidFd(os::fd::OwnedFd::from_raw_fd(pid_fd as os::fd::RawFd)))
-                }
-            }
-        }
-        pub fn clone_remote_fd(&self, remote_fd: os::fd::RawFd) -> Result<os::fd::OwnedFd, io::Error> {
-            unsafe {
-                let flags: c_uint = 0;
-                let cloned_fd = syscall(SYS_pidfd_getfd, self.0.as_raw_fd(), remote_fd, flags);
-                if cloned_fd == -1 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(os::fd::OwnedFd::from_raw_fd(cloned_fd as os::fd::RawFd))
-                }
-            }
-        }
     }
 }
