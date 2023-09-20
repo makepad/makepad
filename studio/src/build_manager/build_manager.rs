@@ -58,6 +58,8 @@ pub struct ActiveBuild {
     /// While not strictly necessary, it can also accept *new* draws to any of
     /// its images, which allows the client to catch up a frame or two, visually.
     pub last_swapchain_with_completed_draws: Option<cx_stdin::Swapchain<Texture>>,
+
+    pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -378,6 +380,15 @@ impl BuildManager {
                                 level: BuildMsgLevel::Log,
                                 line
                             }));*/
+                        }
+                    }
+                }
+                LogItem::AuxChanHostEndpointCreated(aux_chan_host_endpoint) => {
+                    for active_build in active.builds.values_mut() {
+                        if active_build.cmd_id == Some(wrap.cmd_id) {
+                            assert!(active_build.aux_chan_host_endpoint.is_none());
+                            active_build.aux_chan_host_endpoint = Some(aux_chan_host_endpoint);
+                            break;
                         }
                     }
                 }

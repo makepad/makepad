@@ -257,6 +257,7 @@ impl RunView {
             let min_height = ((inner_height * dpi_factor).ceil() as u32).max(1);
             let active_build_needs_new_swapchain = manager.active.builds.values_mut()
                 .find(|v| v.run_view_id == run_view_id)
+                .filter(|v| v.aux_chan_host_endpoint.is_some())
                 .filter(|v| {
                     v.swapchain.as_ref().map(|swapchain| {
                         min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
@@ -280,7 +281,7 @@ impl RunView {
                     }
                 }
                 let swapchain = v.swapchain.get_or_insert_with(|| {
-                    Swapchain::new(0, 0).images_map(|_, ()| Texture::new(cx))
+                    Swapchain::new(0, 0).images_map(|_| Texture::new(cx))
                 });
 
                 // Update the swapchain allocated size, rounding it up to
@@ -288,20 +289,48 @@ impl RunView {
                 swapchain.alloc_width = min_width.max(64).next_power_of_two();
                 swapchain.alloc_height = min_height.max(64).next_power_of_two();
 
-                // Prepare swapchain images for sharing.
-                let shared_swapchain = swapchain.images_as_ref().images_map(|id, texture| {
-                    texture.set_desc(cx, TextureDesc {
-                        format: TextureFormat::SharedBGRA(id),
+                // Prepare a version of the swapchain for cross-process sharing.
+                let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
+                    pi.image.set_desc(cx, TextureDesc {
+                        format: TextureFormat::SharedBGRA(pi.id),
                         width: Some(swapchain.alloc_width as usize),
                         height: Some(swapchain.alloc_height as usize),
                     });
-                    cx.get_shared_presentable_image_os_handle(&texture)
+                    cx.share_texture_for_presentable_image(&pi.image)
                 });
 
-                // Inform the client about the new swapchain it *should* use
-                // (using older swapchains isn't an error, but the draw calls
-                // will either be noops, or write to orphaned GPU memory ranges).
-                manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(shared_swapchain));
+                let shared_swapchain =  {
+                    // FIMXE(eddyb) this could be platform-agnostic if the serializer
+                    // could drive the out-of-band UNIX domain socket messaging itself.
+                    #[cfg(target_os = "linux")] {
+                        shared_swapchain.images_map(|pi| {
+                            pi.send_fds_to_aux_chan(v.aux_chan_host_endpoint.as_ref().unwrap())
+                                .map(|pi| pi.image)
+                        })
+                    }
+                    #[cfg(not(target_os = "linux"))] {
+                        shared_swapchain.images_map(|pi| std::io::Result::Ok(pi.image))
+                    }
+                };
+
+                let mut any_errors = false;
+                for pi in &shared_swapchain.presentable_images {
+                    if let Err(err) = &pi.image {
+                        // FIXME(eddyb) is this recoverable or should the whole
+                        // client be restarted? desyncs can get really bad...
+                        error!("failed to send swapchain image to client: {:?}", err);
+                        any_errors = true;
+                    }
+                }
+
+                if !any_errors {
+                    // Inform the client about the new swapchain it *should* use
+                    // (using older swapchains isn't an error, but the draw calls
+                    // will either be noops, or write to orphaned GPU memory ranges).
+                    manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(
+                        shared_swapchain.images_map(|pi| pi.image.unwrap()),
+                    ));
+                }
             }
         }
         
