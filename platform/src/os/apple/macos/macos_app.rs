@@ -524,7 +524,7 @@ impl MacosApp {
             
             let () = msg_send![ns_app, finishLaunching];
            // get_macos_app_global().init_quit_menu();
-            get_macos_app_global().startup_focus_hack();
+           // get_macos_app_global().startup_focus_hack();
             loop {
                 let event_flow = get_macos_app_global().event_flow;
                 match event_flow {
