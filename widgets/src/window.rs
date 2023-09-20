@@ -4,7 +4,6 @@ use crate::{
     makepad_draw::*,
     nav_control::NavControl,
     button::*,
-    // window_menu::*,
     view::*,
     widget::*,
 };

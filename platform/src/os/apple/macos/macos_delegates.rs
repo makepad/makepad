@@ -33,9 +33,6 @@ use {
                 load_mouse_cursor
             },
         },
-        menu::{
-            MenuCommand
-        },
         cursor::MouseCursor,
         event::{
             DragEvent,
@@ -87,14 +84,14 @@ pub fn define_menu_target_class() -> *const Class {
     extern fn menu_action(this: &Object, _sel: Sel, _item: ObjcId) {
         //println!("markedRange");
         unsafe {
-            let command_u64: u64 = *this.get_ivar("command_usize");
+            let command_u64: u64 = *this.get_ivar("command_u64");
             /*let cmd = if let Ok(status_map) = ca.status_map.lock() {
                 *status_map.usize_to_command.get(&command_usize).expect("")
             }
             else {
                 panic!("Cannot lock cmd_map")
             };*/
-            MacosApp::send_command_event(MenuCommand(LiveId(command_u64)));
+            MacosApp::send_command_event(LiveId(command_u64));
         }
     }
     
@@ -103,7 +100,7 @@ pub fn define_menu_target_class() -> *const Class {
     unsafe {
         decl.add_method(sel!(menuAction:), menu_action as extern fn(&Object, Sel, ObjcId));
     }
-    decl.add_ivar::<usize>("command_usize");
+    decl.add_ivar::<usize>("command_u64");
     return decl.register();
 }
 
