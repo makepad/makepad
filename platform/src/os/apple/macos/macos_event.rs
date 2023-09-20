@@ -1,6 +1,7 @@
 use crate::{
+    makepad_live_id::*,
     window::WindowId,
-    menu::MenuCommand,
+    //menu::MenuCommand,
     event::{
         MouseDownEvent,
         MouseUpEvent,
@@ -45,5 +46,5 @@ pub enum MacosEvent {
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
-    MenuCommand(MenuCommand),
+    MacosMenuCommand(LiveId),
 }
