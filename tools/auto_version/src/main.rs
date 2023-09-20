@@ -8,7 +8,7 @@ use std::io::prelude::*;
 
 fn main() {
     
-    let ignore_list = [Path::new("./target").into(), Path::new("./.git").into(), Path::new("./Cargo.toml").into()];
+    let ignore_list = [Path::new("./target").into(), Path::new("./tools").into(), Path::new("./local").into(),Path::new("./.git").into(), Path::new("./Cargo.toml").into()];
     
     let mut crate_stack = Vec::new();
     let mut crates = Vec::new();
@@ -72,10 +72,14 @@ fn main() {
         "dependencies.",
         "target.wasm32-unknown-unknown.dependencies.",
         "target.aarch64-apple-darwin.dependencies.",
-        "target.x86_64-unknown-linux-gnu.dependencies.",
-        "target.armv7-unknown-linux-gnueabihf.dependencies.",
-        "target.x86_64-pc-windows-gnu.dependencies.",
-        "target.x86_64-pc-windows-msvc.dependencies."
+        "target.x86_64-apple-darwin.dependencies.",
+        "target.x86_64-apple-ios.dependencies.",
+        "target.aarch64-apple-ios-sim.dependencies.",
+        "target.aarch64-apple-ios.dependencies.",
+        "target.aarch64-unknown-linux-gnu.dependencies.",
+        "target.'cfg(windows)'.dependencies.makepad-futures-legacy.",
+        "target.'cfg(windows)'.dependencies.makepad-windows.",
+        "target.'cfg(windows)'.dependencies.windows-targets."
     ];
     
     let mut ver_crates = Vec::new();
@@ -83,6 +87,7 @@ fn main() {
     // iterate all found crates and build up version info/dep info
     for c in crates {
         let cargo_str = fs::read_to_string(&c.cargo).unwrap();
+        
         let toml = makepad_toml_parser::parse_toml(&cargo_str).unwrap();
 
         let old_sha1 = if let Some(Toml::Str(ver, _)) = toml.get("package.metadata.makepad-auto-version") {
@@ -108,6 +113,7 @@ fn main() {
             for pref in target_deps {
                 if let Some(pref) = key.strip_prefix(pref) {
                     if let Some(dep) = pref.strip_suffix(".version") {
+                        println!("GOT DEP {}", dep.to_string());
                         deps.push(dep.to_string());
                     }
                 }
@@ -152,8 +158,8 @@ fn main() {
             let ver = c.package_version.strip_prefix("0.").unwrap().strip_suffix(".0").unwrap();
             let version: u64 = ver.parse().unwrap();
             
-            let next_version = format!("0.{}.0", version + 1);
-            //let next_version = format!("0.3.0");
+            //let next_version = format!("0.{}.0", version + 1);
+            let next_version = format!("0.4.0");
             
             patch_cargo(&c.cargo, "package.version", &next_version, write);
             patch_cargo(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, write);
