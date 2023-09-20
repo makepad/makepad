@@ -673,6 +673,9 @@ live_design!{
         }
     }
     
+    WindowMenu = <WindowMenuBase>{
+    }
+    
     Window = <WindowBase> {
         pass: {clear_color: (THEME_COLOR_CLEAR)}
         flow: Down
@@ -711,7 +714,16 @@ live_design!{
                 xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
             }
         }
-        
+        window_menu = <WindowMenu>{
+            main = Main{items:[app]}
+            app = Sub{name:"Makepad",items:[quit]}
+            quit = Item{
+                name:"Quit",
+                shift: false,
+                key_code: KeyQ,
+                enabled: true
+            }
+        }
         body = <KeyboardView>{
             keyboard_min_shift: 30,
             width: Fill,

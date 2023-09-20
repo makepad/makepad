@@ -299,6 +299,9 @@ impl Cx {
                         window.win32_window.restore();
                     }
                 },
+                CxOsOp::Quit=>{
+                    ret = EventFlow::Exit
+                }
                 CxOsOp::FullscreenWindow(_window_id) => {
                     todo!()
                 },
@@ -334,7 +337,7 @@ impl Cx {
                 CxOsOp::StartDragging(dragged_item) => {
                     get_win32_app_global().start_dragging(dragged_item);
                 },
-                CxOsOp::UpdateMenu(_menu) => {
+                CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest {request_id: _, request: _} => {
                     //todo!()

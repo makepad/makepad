@@ -263,6 +263,9 @@ impl Cx {
                         }
                     }
                 },
+                CxOsOp::Quit=>{
+                    ret = EventFlow::Exit
+                }
                 CxOsOp::MinimizeWindow(window_id) => {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         window.xlib_window.minimize();
@@ -312,7 +315,7 @@ impl Cx {
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
                 },
-                CxOsOp::UpdateMenu(_menu) => {
+                CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
