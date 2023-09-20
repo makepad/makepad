@@ -31,6 +31,7 @@ pub mod portal_list;
 pub mod desktop_button;
 pub mod window;
 pub mod scroll_shadow;
+pub mod window_menu;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -44,8 +45,6 @@ pub mod file_tree;
 pub mod slides_view;
 pub mod color_picker;
 
-#[macro_use]
-pub mod window_menu;
 pub mod debug_view;
 pub mod nav_control;
 

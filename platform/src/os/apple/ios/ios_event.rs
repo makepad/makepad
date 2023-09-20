@@ -1,6 +1,5 @@
 use {
     crate::{
-        menu::MenuCommand,
         event::{
             MouseDownEvent,
             MouseUpEvent,
@@ -38,5 +37,4 @@ pub enum IosEvent {
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
-    MenuCommand(MenuCommand),
 }
