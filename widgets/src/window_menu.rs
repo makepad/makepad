@@ -16,11 +16,11 @@ live_design!{
 pub enum WindowMenuItem {
     #[pick {items: vec![]}]
     Main{items:Vec<LiveId>},
-    #[live {name:"Unknown".to_string(), shift: false, key_code:KeyCode::KeyQ, enabled:true }]
+    #[live {name:"Unknown".to_string(), shift: false, key:KeyCode::Unknown, enabled:true }]
     Item{
         name: String,
         shift: bool,
-        key_code: KeyCode,
+        key: KeyCode,
         enabled: bool
     },
     #[live {name:"Unknown".to_string(), items:vec![] }]
@@ -82,12 +82,12 @@ impl LiveHook for WindowMenu {
                             }
                             return MacosMenu::Main{items:out}
                         }
-                        WindowMenuItem::Item{name, shift, key_code, enabled}=>{
+                        WindowMenuItem::Item{name, shift, key, enabled}=>{
                             return MacosMenu::Item{
                                 command,
                                 name,
                                 shift,
-                                key_code,
+                                key,
                                 enabled
                             }
                         }
