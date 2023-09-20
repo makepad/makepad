@@ -68,7 +68,7 @@ pub enum TextureFormat {
     RenderBGRA,
     RenderBGRAf16,
     RenderBGRAf32,
-    SharedBGRA(u64),
+    SharedBGRA(crate::cx_stdin::PresentableImageId),
     //    ImageBGRAf32,
     //    ImageRf32,
     //    ImageRGf32,

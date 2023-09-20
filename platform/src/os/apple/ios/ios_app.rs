@@ -383,13 +383,14 @@ impl IosApp {
     
     pub fn send_timer_received(nstimer: ObjcId) {
         let len = get_ios_app_global().timers.len();
+        let time = get_ios_app_global().time_now();
         for i in 0..len {
             if get_ios_app_global().timers[i].nstimer == nstimer {
                 let timer_id = get_ios_app_global().timers[i].timer_id;
                 if !get_ios_app_global().timers[i].repeats {
                     get_ios_app_global().timers.remove(i);
                 }
-                IosApp::do_callback(IosEvent::Timer(TimerEvent {timer_id: timer_id}));
+                IosApp::do_callback(IosEvent::Timer(TimerEvent {timer_id: timer_id, time:Some(time)}));
             }
         }
     }

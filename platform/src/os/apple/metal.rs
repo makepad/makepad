@@ -21,11 +21,13 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
+            cx_stdin::PresentableImageId,
         },
         draw_list::DrawListId,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth, PassId},
         texture::{
+            Texture,
             TextureFormat,
             TextureDesc,
         },
@@ -469,16 +471,16 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, stdin_frame: Option<PresentableImageId>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
-                if let Some(stdin_frame) = stdin_frame{
+                if let Some(_stdin_frame) = stdin_frame {
                     #[cfg(target_os = "macos")]
-                    Self::stdin_send_draw_complete(stdin_frame);
+                    Self::stdin_send_draw_complete(_stdin_frame);
                 }
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
@@ -518,12 +520,38 @@ impl Cx {
         }
         self.draw_shaders.compile_set.clear();
     }
+    
+    #[cfg(target_os="macos")]
+    pub fn get_shared_presentable_image_os_handle(
+        &mut self,
+        texture: &Texture,
+    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        cxtexture.os.update_shared_texture(self.os.metal_device.unwrap(), &cxtexture.desc);
+
+        // HACK(eddyb) macOS has no real `SharedPresentableImageOsHandle` because
+        // the texture is actually shared through an XPC helper service instead,
+        // based entirely on its `PresentableImageId`.
+        crate::cx_stdin::SharedPresentableImageOsHandle {
+            _dummy_for_macos: None,
+        }
+    }
+    
+    #[cfg(target_os="ios")]
+    pub fn get_shared_presentable_image_os_handle(
+        &mut self,
+        _texture: &Texture,
+    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
+        crate::cx_stdin::SharedPresentableImageOsHandle {
+            _dummy_for_unsupported: None,
+        }
+    }
 }
 
 pub enum DrawPassMode {
     Texture,
     MTKView(ObjcId),
-    StdinMain(u32),
+    StdinMain(PresentableImageId),
     Drawable(ObjcId),
     Resizing(ObjcId)
 }
@@ -874,7 +902,7 @@ impl CxOsTexture {
     }
     
     #[cfg(target_os = "macos")]
-    pub fn update_shared_texture(
+    fn update_shared_texture(
         &mut self,
         metal_device: ObjcId,
         desc: &TextureDesc,
@@ -911,10 +939,8 @@ impl CxOsTexture {
                     TextureFormat::SharedBGRA(shared_id) => {
                         let texture: ObjcId = msg_send![metal_device, newSharedTextureWithDescriptor: descriptor];
                         let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
-                        //log!("sending texture {:?},{:?} to XPC",shared_id,shared);
-                        // lets send it over
-                        //log!("STORING SHARED TEXTURE {}", shared_id);
                         store_xpc_service_texture(shared_id, shared);
+                        let _: () = msg_send![shared, release];
                         texture
                     }
                     _ => panic!(),
@@ -931,13 +957,19 @@ impl CxOsTexture {
         }
     }
     
+    #[cfg(target_os = "macos")]
     pub fn update_from_shared_handle(
         &mut self,
         metal_cx: &MetalCx,
+
+        swapchain: &crate::cx_stdin::Swapchain<impl Sized>,
+
         shared_handle: ObjcId,
-        width: u64,
-        height: u64,
-    )->bool{
+    ) -> bool {
+        let width = swapchain.width as u64;
+        let height = swapchain.height as u64;
+        let [presentable_image] = &swapchain.presentable_images;
+
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
         }).unwrap());
@@ -950,7 +982,7 @@ impl CxOsTexture {
             is_initial: true,
             width,
             height,
-            format: TextureFormat::SharedBGRA(0),
+            format: TextureFormat::SharedBGRA(presentable_image.id),
             texture,
         });
         true
