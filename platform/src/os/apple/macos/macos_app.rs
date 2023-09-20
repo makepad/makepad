@@ -171,7 +171,7 @@ impl MacosApp {
                 name:"Makepad".to_string(),
                 items:vec![MacosMenu::Item{
                     command:live_id!(quit),
-                    key_code:KeyCode::KeyQ,
+                    key:KeyCode::KeyQ,
                     shift: false,
                     enabled: true,
                     name:"Quit Example".to_string()
@@ -223,13 +223,13 @@ impl MacosApp {
                         make_menu(sub_menu, delegate, menu_target_class, item);
                     }
                 },
-                MacosMenu::Item {name, command, shift, key_code, enabled} => {
+                MacosMenu::Item {name, command, shift, key, enabled} => {
                     
                     let sub_item: ObjcId = msg_send![
                         parent_menu,
                         addItemWithTitle: str_to_nsstring(name)
                         action: sel!(menuAction:)
-                        keyEquivalent: str_to_nsstring(keycode_to_menu_key(*key_code, *shift))
+                        keyEquivalent: str_to_nsstring(keycode_to_menu_key(*key, *shift))
                     ];
                     let target: ObjcId = msg_send![menu_target_class, new];
                     let () = msg_send![sub_item, setTarget: target];

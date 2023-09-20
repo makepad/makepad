@@ -56,11 +56,11 @@ live_design!{
                 app = Sub{name:"Makepad Studio", items:[about, line, settings, line, quit]}
                 about = Item{name:"About Makepad Studio",enabled: false}
                 settings = Item{name:"Settings",enabled: false}
-                quit = Item{name:"Quit Makepad Studio",}
+                quit = Item{name:"Quit Makepad Studio",key:KeyQ}
                 
                 file = Sub{name:"File", items:[new_file, new_window, line, save_as, line, rename, line, close_editor, close_window]}
-                new_file = Item{name:"New File",enabled: false, shift:true, key_code: KeyN}
-                new_window = Item{name:"New Window",enabled: false,  shift:true, key_code: KeyN}
+                new_file = Item{name:"New File",enabled: false, shift:true, key: KeyN}
+                new_window = Item{name:"New Window",enabled: false,  shift:true, key: KeyN}
                 save_as = Item{name:"Save As",enabled: false}
                 rename = Item{name:"Rename",enabled: false}
                 close_editor = Item{name:"Close Editor",enabled: false}
@@ -88,7 +88,7 @@ live_design!{
                 run = Sub{name:"Run", items:[run_program]}
                 run_program = Item{name:"Run Program",enabled: false}
 
-                window = Sub{name:"Window", items:[run_program]}
+                window = Sub{name:"Window", items:[minimize, zoom, line, all_to_front]}
                 minimize = Item{name:"Minimize",enabled: false}
                 zoom = Item{name:"Zoom",enabled: false}
                 all_to_front = Item{name:"Bring All to Front",enabled: false}
