@@ -410,7 +410,7 @@ impl CodeEditor {
         
         self.line_start = session
             .layout()
-            .find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
+            .find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y - self.cell_size.y);
         self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
@@ -428,7 +428,7 @@ impl CodeEditor {
         
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
-            session.layout().height() * self.cell_size.y + (self.viewport_rect.size.y - self.cell_size.y),
+            session.layout().height() * self.cell_size.y + (self.viewport_rect.size.y),
         );
         
         self.scroll_bars.end(cx);
@@ -778,7 +778,7 @@ impl CodeEditor {
                 BlockElement::Line {line, ..} => {
                     self.draw_gutter.font_scale = line.scale();
                     buf.clear();
-                    let _ = write!(buf,"{: >4}", line_index);
+                    let _ = write!(buf,"{: >4}", line_index + 1);
                     self.draw_gutter.draw_abs(
                         cx,
                         DVec2 {

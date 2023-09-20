@@ -58,7 +58,7 @@ pub struct RunView {
     #[animator] animator: Animator,
     #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
-    #[rust] last_size: (usize, usize),
+    #[rust] last_size: (u32, u32),
     #[rust] tick: NextFrame,
     #[rust] timer: Timer,
     #[rust(100usize)] redraw_countdown: usize,
@@ -182,18 +182,22 @@ impl RunView {
                 self.last_size = Default::default();
                 self.redraw(cx);
             }
-            StdinToHost::DrawCompleteAndFlip(present_index) => {
-                for v in manager.active.builds.values_mut() {
-                    if v.run_view_id == run_view_id {
-                        if !self.started{
-                            self.started = true;
-                            self.animator_play(cx, id!(started.on));
+            &StdinToHost::DrawCompleteAndFlip(drawn_presentable_id) => {
+                if let Some(v) = manager.active.builds.values_mut().find(|v| v.run_view_id == run_view_id) {
+                    for swapchain in &v.swapchain_history{
+                        if let Some(swapchain) = swapchain {
+                            if let Some(pi) = swapchain.presentable_images.iter().find(|pi| pi.id == drawn_presentable_id) {
+                                if !self.started{
+                                    self.started = true;
+                                    self.animator_play(cx, id!(started.on));
+                                }
+                                self.redraw_countdown = 20;
+                                v.last_presented_id.set(Some(pi.id));
+                                self.draw_app.set_texture(0, &pi.image);
+                            }
                         }
-                        self.redraw_countdown = 20;
-                        v.present_index.set(*present_index);
-                        self.draw_app.set_texture(0, &v.swapchain[*present_index]);
-                        v.mac_resize_id = 1 - present_index;
                     }
+                    //}
                 }
             }
         }
@@ -211,112 +215,38 @@ impl RunView {
         let walk = if let Some(walk) = self.draw_state.get() {walk}else {panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
-        
-        for v in manager.active.builds.values_mut() {
-            if v.run_view_id == run_view_id {
-                
-                // update texture size and indicate new size to client if needed
-                let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
-                if new_size != self.last_size {
-                    self.last_size = new_size;
-                    self.redraw_countdown = 20;
-                    // update descriptors for swapchain textures
-                    let ids = [run_view_id.0 & 0x0000FFFFFFFFFFFF, run_view_id.0 | 0x0001000000000000];
-                    let descs = [TextureDesc {
-                        format: TextureFormat::SharedBGRA(ids[0]),
-                        width: Some(new_size.0.max(1)),
-                        height: Some(new_size.1.max(1)),
-                    }, TextureDesc {
-                        format: TextureFormat::SharedBGRA(ids[1]),
-                        width: Some(new_size.0.max(1)),
-                        height: Some(new_size.1.max(1)),
-                    }];
-                    
-                    // make sure the actual shared texture resources exist, and get their handles                   
-                    #[cfg(target_os = "windows")] {
-                        v.swapchain[0].set_desc(cx, descs[0]);
-                        v.swapchain[1].set_desc(cx, descs[1]);
-                        
-                        let mut handles = [0u64, 0u64];
-                        
-                        let d3d11_device = cx.cx.os.d3d11_device.replace(None).unwrap();
-                        
-                        let cxtexture = &mut cx.textures[v.swapchain[0].texture_id()];
-                        cxtexture.os.update_shared_texture(&d3d11_device, new_size.0 as u32, new_size.1 as u32);
-                        handles[0] = cxtexture.os.shared_handle.0 as u64;
-                        
-                        let cxtexture = &mut cx.textures[v.swapchain[1].texture_id()];
-                        cxtexture.os.update_shared_texture(&d3d11_device, new_size.0 as u32, new_size.1 as u32);
-                        handles[1] = cxtexture.os.shared_handle.0 as u64;
-                        
-                        cx.cx.os.d3d11_device.replace(Some(d3d11_device));
-                        manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
-                            width: rect.size.x,
-                            height: rect.size.y,
-                            dpi_factor: dpi_factor,
-                            swapchain_handles: handles,
-                        }));
-                    };
-                    
-                    #[cfg(target_os = "macos")] {
-                        // macos alternates resizes with doublebuffering NOT frames
-                        let id = v.mac_resize_id;
-                        v.swapchain[id].set_desc(cx, descs[id]);
-                        let metal_device = cx.cx.os.metal_device.replace(None).unwrap();
-                        // ok so we have to alternate which buffer we resize
-                        let cxtexture = &mut cx.textures[v.swapchain[id].texture_id()];
-                        cxtexture.os.update_shared_texture(metal_device, &descs[id]);
-                        
-                        cx.cx.os.metal_device.replace(Some(metal_device));
-                        // for macos, pass the hashmap indices to the client, so they can find the right texture in XPC
-                        // send size update to client
-                        let swapchain_front = v.mac_resize_id as u32;
-                        manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
-                            width: rect.size.x,
-                            height: rect.size.y,
-                            dpi_factor: dpi_factor,
-                            swapchain_handle: ids[id],
-                            swapchain_front
-                        }));
-                    };
-                    
-                    #[cfg(target_os = "linux")]
-                    {
-                        v.swapchain[0].set_desc(cx, descs[0]);
-                        v.swapchain[1].set_desc(cx, descs[1]);
-                        
-                        // HACK(eddyb) normally this would be triggered later,
-                        // but we need it *before* `get_shared_texture_dma_buf_image`.
-                        {
-                            // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
-                            let cxtexture = &mut cx.cx.textures[v.swapchain[0].texture_id()];
-                            #[cfg(not(any(linux_direct, target_os = "android")))]
-                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &descs[0]);
-                            
-                            let cxtexture = &mut cx.cx.textures[v.swapchain[1].texture_id()];
-                            #[cfg(not(any(linux_direct, target_os = "android")))]
-                            cxtexture.os.update_shared_texture(cx.cx.os.opengl_cx.as_ref().unwrap(), &descs[1]);
-                        }
-                        
-                        let handles = [
-                            cx.get_shared_texture_dma_buf_image(&v.swapchain[0]),
-                            cx.get_shared_texture_dma_buf_image(&v.swapchain[1]),
-                        ];
-                        
-                        manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
-                            width: rect.size.x,
-                            height: rect.size.y,
-                            dpi_factor: dpi_factor,
-                            swapchain_handles: handles,
-                        }));
-                    };
-                    
+
+        if let Some(v) = manager.active.builds.values_mut().find(|v| v.run_view_id == run_view_id) {
+            let new_size = (
+                ((rect.size.x * dpi_factor) as u32).max(1),
+                ((rect.size.y * dpi_factor) as u32).max(1),
+            );
+            if new_size != self.last_size {
+                self.last_size = new_size;
+                self.redraw_countdown = 20;
+
+
+                // lets make a new swapchain
+                let mut swapchain = Swapchain::new(0, 0).images_map(|_, ()| Texture::new(cx));
+                // Resize the swapchain and prepare its images for sharing.
+                (swapchain.width, swapchain.height) = new_size;
+                let shared_swapchain = swapchain.images_as_ref().images_map(|id, texture| {
+                    texture.set_desc(cx, TextureDesc {
+                        format: TextureFormat::SharedBGRA(id),
+                        width: Some(swapchain.width as usize),
+                        height: Some(swapchain.height as usize),
+                    });
+                    cx.get_shared_presentable_image_os_handle(&texture)
+                });
+                for i in 0..v.swapchain_history.len()-1{
+                    v.swapchain_history[i] = v.swapchain_history[i+1].take();
                 }
-                
-                // make sure it's going to present the right texture
-                
-                
-                break
+                v.swapchain_history[v.swapchain_history.len()-1] = Some(swapchain);
+
+                manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
+                    dpi_factor: dpi_factor,
+                    swapchain: shared_swapchain,
+                }));
             }
         }
         
