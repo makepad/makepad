@@ -1,18 +1,18 @@
 [package]
 name = "makepad-derive-live"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad platform live DSL derive macros"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "RRw-q02kBlulgVcIVqoQZz2dsy4="
+metadata.makepad-auto-version = "WdRXXraJBSsai1JC7Y6zIlkz6OI="
 
 [lib]
 proc-macro = true
 
 [dependencies]
-makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "0.3.0" }
-makepad-live-id = { path = "../../libs/live_id", version = "0.3.0" }
+makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "0.4.0" }
+makepad-live-id = { path = "../../libs/live_id", version = "0.4.0" }
 
