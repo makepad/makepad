@@ -59,9 +59,15 @@ Now this tool can be used to install toolchains per platform needed
 
 ## Running makepad studio
 
-Makepad studio allows you to easily build and view the examples, and it uses cargo-makepad internally so be sure to install it.
+Makepad studio allows you to easily build and view the examples, and it uses cargo-makepad internally so be sure to install cargo-makepad as shown above.
 
 ```cargo run -p makepad-studio --release```
+
+Or install it from cargo (might be behind the repo)
+
+```cargo install makepad-studio```
+
+
 
 If you build the wasm applications, you can open it on:
 
