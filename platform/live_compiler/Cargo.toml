@@ -1,16 +1,16 @@
 [package]
 name = "makepad-live-compiler"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad platform live DSL compiler"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "lv9Ck9H-tdFAdDRkNSdlJel7vBE="
+metadata.makepad-auto-version = "AymaVQcCQ4FnxmTJ6IMxoKBpcEM="
 
 [dependencies]
-makepad-derive-live = { path = "../derive_live", version = "0.3.0" }
-makepad-math = { path = "../../libs/math", version = "0.3.0" }
-makepad-live-tokenizer = { path = "../live_tokenizer", version = "0.3.0" }
+makepad-derive-live = { path = "../derive_live", version = "0.4.0" }
+makepad-math = { path = "../../libs/math", version = "0.4.0" }
+makepad-live-tokenizer = { path = "../live_tokenizer", version = "0.4.0" }
 
