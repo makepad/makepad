@@ -14,7 +14,7 @@ workspace.members = [
 #    "tools/video_mixer",
     "tools/cargo_makepad",
 #    "tools/windows_strip",
-     "tools/auto_version",
+#     "tools/auto_version",
 #    "tools/web_server", 
 #    "tools/file_router", 
 #    "tools/wasm_strip",
