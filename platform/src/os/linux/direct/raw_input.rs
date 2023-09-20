@@ -686,10 +686,10 @@ impl RawInput {
                 InputEventType::EV_SYN => {
                     let code: EvSynCodes = unsafe { std::mem::transmute_copy(&new.code) };
                     match code {
-                        EvSynCodes::SYN_REPORT => {
+                        EvSynCodes::SYN_REPORT => { //end of event reached
                             self.process_event(&mut evts, &mut dir_evts, time, window_id);
                         },
-                        EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore info till now and up untill the next SYN_REPORT
+                        EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
                             evts.clear();
                             while let Ok(dropped) = self.receiver.try_recv() {
                                 match dropped.ty {
