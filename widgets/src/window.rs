@@ -148,15 +148,16 @@ impl Window {
             },
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-                    // alright we should query the caption area.
-                    // we should build an api for that
-                    if dq.abs.y < 20.{
+                    let size = self.window.get_inner_size(cx);
+                    
+                    if dq.abs.y < 25.{
                         if dq.abs.x < 50. {
                             dq.response.set(WindowDragQueryResponse::SysMenu);
                         }
-                        else {
+                        else if dq.abs.x < size.x - 135.0{
                             dq.response.set(WindowDragQueryResponse::Caption);
                         }
+                        cx.set_cursor(MouseCursor::Default);
                     }
                     /*
                     if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
