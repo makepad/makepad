@@ -29,10 +29,6 @@ use {
             CxKeyboard,
             NextFrame,
         },
-        menu::{
-            CxCommandSetting,
-            MenuCommand
-        },
         cx_api::CxOsOp,
         area::Area,
         gpu_info::GpuInfo,
@@ -98,9 +94,6 @@ pub struct Cx {
     pub (crate) live_file_change_sender: std::sync::mpsc::Sender<Vec<LiveFileChange >>,
 
     pub shader_registry: ShaderRegistry,
-    
-    #[allow(dead_code)]
-    pub (crate) command_settings: HashMap<MenuCommand, CxCommandSetting>,
     
     pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
@@ -253,8 +246,6 @@ impl Cx {
             live_file_change_sender: send,
             
             shader_registry: ShaderRegistry::new(),
-            
-            command_settings: HashMap::new(),
             
             os: CxOs::default(),
             

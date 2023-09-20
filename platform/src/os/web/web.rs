@@ -406,6 +406,7 @@ impl Cx {
                     window.window_geom = self.os.window_geom.clone();
                     window.is_created = true;
                 },
+                CxOsOp::Quit=>{}
                 CxOsOp::CloseWindow(_window_id) => {
                 },
                 CxOsOp::MinimizeWindow(_window_id) => {
@@ -455,7 +456,7 @@ impl Cx {
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
                 }
-                CxOsOp::UpdateMenu(_menu) => {
+                CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest{request_id, request} => {
                     let headers = request.get_headers_string();
