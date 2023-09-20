@@ -603,6 +603,15 @@ enum EvRepCodes {
     REP_CNT			=EvRepCodes::REP_PERIOD_MAX as u16 + 1,
 }
 
+#[allow(unused)]
+#[repr(i32)]
+#[derive(Clone, Copy, Debug)]
+enum KeyAction {
+    KeyUp		=0x00,
+    KeyDown 	=0x01,
+    KeyRepeat   =0x02,
+}
+
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 struct InputEvent {
@@ -655,280 +664,333 @@ impl RawInput {
     }
     
     pub fn poll_raw_input(&mut self, time: f64, window_id: WindowId) -> Vec<DirectEvent> {
-        let mut evts = Vec::new();
-        let mut mouse_moved = false;
-        while let Ok(new) = self.receiver.try_recv() {
-            dbg!(new);
+        let mut dir_evts: Vec<DirectEvent> = Vec::new();
+        let mut evts: Vec<InputEvent> = Vec::new();
+        loop {
+            let new = match self.receiver.try_recv() {
+                Ok(new) => new, //new event
+                Err(err) => {
+                    match err {
+                        mpsc::TryRecvError::Empty =>  {
+                            if evts.len()>0 {
+                                continue; //partial message read that hasnt been cleared out, keep reading
+                            } else {
+                                break; //nothing to read
+                            }
+                        },
+                        mpsc::TryRecvError::Disconnected => break //no input devices?
+                    }
+                }
+            };
             match new.ty {
-                InputEventType::EV_REL => { // relative input
-                    let code: EvRelCodes = unsafe { std::mem::transmute_copy(&new.code) };
+                InputEventType::EV_SYN => {
+                    let code: EvSynCodes = unsafe { std::mem::transmute_copy(&new.code) };
                     match code {
-                       EvRelCodes::REL_X => {
-                            self.abs.x += new.value as f64;
-                            if self.abs.x < 0.0{ self.abs.x = 0.0}
-                            if self.abs.x > self.width{ self.abs.x = self.width}
-                            mouse_moved = true;
+                        EvSynCodes::SYN_REPORT => {
+                            self.process_event(&mut evts, &mut dir_evts, time, window_id);
                         },
-                        EvRelCodes::REL_Y => {
-                            self.abs.y += new.value as f64;
-                            if self.abs.y < 0.0{ self.abs.y = 0.0}
-                            if self.abs.y > self.height{ self.abs.y = self.height}
-                            mouse_moved = true;
-                        }
-                        _ => ()
+                        EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore info till now and up untill the next SYN_REPORT
+                            evts.clear();
+                            while let Ok(dropped) = self.receiver.try_recv() {
+                                match dropped.ty {
+                                    InputEventType::EV_SYN => {
+                                        if dropped.code == EvSynCodes::SYN_REPORT as u16 {
+                                            break;
+                                        }
+                                    },
+                                    _ => continue
+                                }
+                            }
+                            continue;
+                        },
+                        _ => evts.push(new)
                     }
                 }
-                InputEventType::EV_ABS => { // absolute input
-                    let code: EvAbsCodes = unsafe { std::mem::transmute_copy(&new.code) };
-                    match code {
-                        EvAbsCodes::ABS_X => {
-                            self.abs.x = (new.value as f64 / 32767.0) * self.width;
-                            mouse_moved = true;
-                        },
-                        EvAbsCodes::ABS_Y => {
-                            self.abs.y = (new.value as f64 / 32767.0) * self.height;
-                            mouse_moved = true;
-                        },
-                        EvAbsCodes::ABS_MT_POSITION_X => {
-                            self.abs.x = new.value as f64 / self.dpi_factor; 
-                            mouse_moved = true;
-                        },
-                        EvAbsCodes::ABS_MT_POSITION_Y => {
-                            self.abs.y = new.value as f64 / self.dpi_factor;
-                            mouse_moved = true;
-                        },
-                        _=> ()
-                    }
+                _ => {
+                    evts.push(new);
                 }
-                InputEventType::EV_KEY => { // key press
-                    let code: EvKeyCodes = unsafe { std::mem::transmute_copy(&new.code) };
-                    let key_up = new.value == 0;
-                    let key_down = new.value == 1;
-                    let key_repeat = new.value == 2;
-                    let key_code = match code {
-                        EvKeyCodes::KEY_ESC => KeyCode::Escape,
-                        EvKeyCodes::KEY_1 => KeyCode::Key1,
-                        EvKeyCodes::KEY_2 => KeyCode::Key2,
-                        EvKeyCodes::KEY_3 => KeyCode::Key3,
-                        EvKeyCodes::KEY_4 => KeyCode::Key4,
-                        EvKeyCodes::KEY_5 => KeyCode::Key5,
-                        EvKeyCodes::KEY_6 => KeyCode::Key6,
-                        EvKeyCodes::KEY_7 => KeyCode::Key7,
-                        EvKeyCodes::KEY_8 => KeyCode::Key8,
-                        EvKeyCodes::KEY_9 => KeyCode::Key9,
-                        EvKeyCodes::KEY_0 => KeyCode::Key0,
-                        EvKeyCodes::KEY_MINUS => KeyCode::Minus,
-                        EvKeyCodes::KEY_EQUAL => KeyCode::Equals,
-                        EvKeyCodes::KEY_BACKSPACE => KeyCode::Backspace,
-                        EvKeyCodes::KEY_TAB => KeyCode::Tab,
-                        EvKeyCodes::KEY_Q => KeyCode::KeyQ,
-                        EvKeyCodes::KEY_W => KeyCode::KeyW,
-                        EvKeyCodes::KEY_E => KeyCode::KeyE,
-                        EvKeyCodes::KEY_R => KeyCode::KeyR,
-                        EvKeyCodes::KEY_T => KeyCode::KeyT,
-                        EvKeyCodes::KEY_Y => KeyCode::KeyY,
-                        EvKeyCodes::KEY_U => KeyCode::KeyU,
-                        EvKeyCodes::KEY_I => KeyCode::KeyI,
-                        EvKeyCodes::KEY_O => KeyCode::KeyO,
-                        EvKeyCodes::KEY_P => KeyCode::KeyP,
-                        EvKeyCodes::KEY_LEFTBRACE => KeyCode::LBracket,
-                        EvKeyCodes::KEY_RIGHTBRACE => KeyCode::RBracket,
-                        EvKeyCodes::KEY_ENTER => KeyCode::ReturnKey,
-                        EvKeyCodes::KEY_LEFTCTRL => KeyCode::Control,
-                        EvKeyCodes::KEY_A => KeyCode::KeyA,
-                        EvKeyCodes::KEY_S => KeyCode::KeyS,
-                        EvKeyCodes::KEY_D => KeyCode::KeyD,
-                        EvKeyCodes::KEY_F => KeyCode::KeyF,
-                        EvKeyCodes::KEY_G => KeyCode::KeyG,
-                        EvKeyCodes::KEY_H => KeyCode::KeyH,
-                        EvKeyCodes::KEY_J => KeyCode::KeyJ,
-                        EvKeyCodes::KEY_K => KeyCode::KeyK,
-                        EvKeyCodes::KEY_L => KeyCode::KeyL,
-                        EvKeyCodes::KEY_SEMICOLON => KeyCode::Semicolon,
-                        EvKeyCodes::KEY_APOSTROPHE => KeyCode::Quote,
-                        EvKeyCodes::KEY_GRAVE => KeyCode::Backtick,
-                        EvKeyCodes::KEY_LEFTSHIFT => KeyCode::Shift,
-                        EvKeyCodes::KEY_BACKSLASH => KeyCode::Backslash,
-                        EvKeyCodes::KEY_Z => KeyCode::KeyZ,
-                        EvKeyCodes::KEY_X => KeyCode::KeyX,
-                        EvKeyCodes::KEY_C => KeyCode::KeyC,
-                        EvKeyCodes::KEY_V => KeyCode::KeyV,
-                        EvKeyCodes::KEY_B => KeyCode::KeyB,
-                        EvKeyCodes::KEY_N => KeyCode::KeyN,
-                        EvKeyCodes::KEY_M => KeyCode::KeyM,
-                        EvKeyCodes::KEY_COMMA => KeyCode::Comma,
-                        EvKeyCodes::KEY_DOT => KeyCode::Period,
-                        EvKeyCodes::KEY_SLASH => KeyCode::Slash,
-                        EvKeyCodes::KEY_RIGHTSHIFT => KeyCode::Shift,
-                        EvKeyCodes::KEY_KPASTERISK => KeyCode::NumpadMultiply,
-                        EvKeyCodes::KEY_LEFTALT => KeyCode::Alt,
-                        EvKeyCodes::KEY_SPACE => KeyCode::Space,
-                        EvKeyCodes::KEY_CAPSLOCK => KeyCode::Capslock,
-                        EvKeyCodes::KEY_F1 => KeyCode::F1,
-                        EvKeyCodes::KEY_F2 => KeyCode::F2,
-                        EvKeyCodes::KEY_F3 => KeyCode::F3,
-                        EvKeyCodes::KEY_F4 => KeyCode::F4,
-                        EvKeyCodes::KEY_F5 => KeyCode::F5,
-                        EvKeyCodes::KEY_F6 => KeyCode::F6,
-                        EvKeyCodes::KEY_F7 => KeyCode::F7,
-                        EvKeyCodes::KEY_F8 => KeyCode::F8,
-                        EvKeyCodes::KEY_F9 => KeyCode::F9,
-                        EvKeyCodes::KEY_F10 => KeyCode::F10,
-                        EvKeyCodes::KEY_NUMLOCK => KeyCode::Numlock,
-                        EvKeyCodes::KEY_SCROLLLOCK => KeyCode::ScrollLock,
-                        EvKeyCodes::KEY_KP7 => KeyCode::Numpad7,
-                        EvKeyCodes::KEY_KP8 => KeyCode::Numpad8,
-                        EvKeyCodes::KEY_KP9 => KeyCode::Numpad9,
-                        EvKeyCodes::KEY_KPMINUS => KeyCode::NumpadSubtract,
-                        EvKeyCodes::KEY_KP4 => KeyCode::Numpad4,
-                        EvKeyCodes::KEY_KP5 => KeyCode::Numpad5,
-                        EvKeyCodes::KEY_KP6 => KeyCode::Numpad6,
-                        EvKeyCodes::KEY_KPPLUS => KeyCode::NumpadAdd,
-                        EvKeyCodes::KEY_KP1 => KeyCode::Numpad1,
-                        EvKeyCodes::KEY_KP2 => KeyCode::Numpad2,
-                        EvKeyCodes::KEY_KP3 => KeyCode::Numpad3,
-                        EvKeyCodes::KEY_KP0 => KeyCode::Numpad0,
-                        EvKeyCodes::KEY_KPDOT => KeyCode::NumpadDecimal,
-                        EvKeyCodes::KEY_ZENKAKUHANKAKU => KeyCode::Unknown,
-                        EvKeyCodes::KEY_102ND => KeyCode::Backtick, //Seems odd but this was in the code this replaced
-                        EvKeyCodes::KEY_F11 => KeyCode::F11,
-                        EvKeyCodes::KEY_F12 => KeyCode::F12,
-                        EvKeyCodes::KEY_RO => KeyCode::NumpadDivide, //Seems odd but this was in the code this replaced
-                        EvKeyCodes::KEY_KPENTER => KeyCode::NumpadEnter,
-                        EvKeyCodes::KEY_RIGHTCTRL => KeyCode::Control,
-                        EvKeyCodes::KEY_KPSLASH => KeyCode::NumpadDivide,
-                        EvKeyCodes::KEY_SYSRQ => KeyCode::PrintScreen,
-                        EvKeyCodes::KEY_RIGHTALT => KeyCode::Alt,
-                        EvKeyCodes::KEY_HOME => KeyCode::Home,
-                        EvKeyCodes::KEY_UP => KeyCode::ArrowUp,
-                        EvKeyCodes::KEY_PAGEUP => KeyCode::PageUp,
-                        EvKeyCodes::KEY_LEFT => KeyCode::ArrowLeft,
-                        EvKeyCodes::KEY_RIGHT => KeyCode::ArrowRight,
-                        EvKeyCodes::KEY_END => KeyCode::End,
-                        EvKeyCodes::KEY_DOWN => KeyCode::ArrowDown,
-                        EvKeyCodes::KEY_PAGEDOWN => KeyCode::PageDown,
-                        EvKeyCodes::KEY_INSERT => KeyCode::Insert,
-                        EvKeyCodes::KEY_DELETE => KeyCode::Delete,
-                        EvKeyCodes::KEY_LEFTMETA => KeyCode::Logo,
-                        EvKeyCodes::KEY_RIGHTMETA => KeyCode::Logo,
-                        _ => KeyCode::Unknown,
-                    };
-                    match key_code {
-                        KeyCode::Shift => self.modifiers.shift = key_down,
-                        KeyCode::Control => self.modifiers.control = key_down,
-                        KeyCode::Logo => self.modifiers.logo = key_down,
-                        KeyCode::Alt => self.modifiers.alt = key_down,
-                        _ => ()
-                    };
-                    if key_down && !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
-                        let uc = self.modifiers.shift;
-                        let inp = key_code.to_char(uc);
-                        if let Some(inp) = inp {
-                            evts.push(DirectEvent::TextInput(TextInputEvent {
-                                input: format!("{}", inp),
-                                was_paste: false,
-                                replace_last: false
-                            }));
-                        }
-                    }
-                    match code { //check mouse input
-                        EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
-                            if mouse_moved {
-                                mouse_moved = false;
-                                evts.push(DirectEvent::MouseMove(MouseMoveEvent {
-                                    abs: self.abs,
-                                    window_id,
-                                    modifiers: self.modifiers,
-                                    time,
-                                    handled: Cell::new(Area::Empty),
-                                }));
-                            }
-    
-                            if key_down{
-                                evts.push(DirectEvent::MouseDown(MouseDownEvent {
-                                    button: (new.code - EvKeyCodes::BTN_LEFT as u16) as usize,
-                                    abs: self.abs,
-                                    window_id,
-                                    modifiers: self.modifiers,
-                                    time,
-                                    handled: Cell::new(Area::Empty),
-                                }));
-                            }
-                            else if key_up{
-                                evts.push(DirectEvent::MouseUp(MouseUpEvent {
-                                    button: (new.code - EvKeyCodes::BTN_LEFT as u16) as usize,
-                                    abs: self.abs,
-                                    window_id,
-                                    modifiers: self.modifiers,
-                                    time,
-                                }));
-                            }
-                        },
-                        EvKeyCodes::BTN_TOUCH => {
-                            if mouse_moved {
-                                mouse_moved = false;
-                                evts.push(DirectEvent::MouseMove(MouseMoveEvent {
-                                    abs: self.abs,
-                                    window_id,
-                                    modifiers: self.modifiers,
-                                    time,
-                                    handled: Cell::new(Area::Empty),
-                                }));
-                            }
-    
-                            if key_down{
-                                evts.push(DirectEvent::MouseDown(MouseDownEvent {
-                                    button: 0usize,
-                                    abs: self.abs,
-                                    window_id,
-                                    modifiers: self.modifiers,
-                                    time,
-                                    handled: Cell::new(Area::Empty),
-                                }));
-                            }
-                            else if key_up{
-                                evts.push(DirectEvent::MouseUp(MouseUpEvent {
-                                    button: 0usize,
-                                    abs: self.abs,
-                                    window_id,
-                                    modifiers: self.modifiers,
-                                    time,
-                                }));
-                            }
-                        }
-                        _ => {
-                            if key_down || key_repeat{
-                                evts.push(DirectEvent::KeyDown(KeyEvent {
-                                    key_code,
-                                    is_repeat: key_repeat,
-                                    modifiers: self.modifiers,
-                                    time
-                                }));
-                            }
-                            else if key_up{
-                                evts.push(DirectEvent::KeyUp(KeyEvent {
-                                    key_code,
-                                    is_repeat: false,
-                                    modifiers: self.modifiers,
-                                    time
-                                }));
-                            }
-                        }
-                    }
-                }
-                _ => ()
             }
         }
-        if mouse_moved {
-            evts.push(DirectEvent::MouseMove(MouseMoveEvent {
-                abs: self.abs,
-                window_id,
-                modifiers: self.modifiers,
-                time,
-                handled: Cell::new(Area::Empty),
-            }));
+        dir_evts
+    }
+
+    fn process_event(&mut self, evts: &mut Vec<InputEvent>, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId) {
+        while let Some(evt) = evts.pop() {
+            match evt.ty {
+                InputEventType::EV_REL => { // relative input
+                    self.process_rel_event(evt, dir_evts, time, window_id)
+                }
+                InputEventType::EV_ABS => { // absolute input
+                    self.process_abs_event(evt, dir_evts, time, window_id)
+                }
+                InputEventType::EV_KEY => { // key press
+                    self.process_key_event(evt, dir_evts, time, window_id)
+                }
+                    _ => ()
+            }
         }
-        
-        evts
+    }
+
+    fn process_rel_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId){
+        let code: EvRelCodes = unsafe { std::mem::transmute(evt.code) };
+        match code {
+            EvRelCodes::REL_X => {
+                self.abs.x += evt.value as f64;
+                if self.abs.x < 0.0{ self.abs.x = 0.0}
+                if self.abs.x > self.width{ self.abs.x = self.width}
+                
+            },
+            EvRelCodes::REL_Y => {
+                self.abs.y += evt.value as f64;
+                if self.abs.y < 0.0{ self.abs.y = 0.0}
+                if self.abs.y > self.height{ self.abs.y = self.height}
+            },
+            _ => return ()
+        }
+        dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+            abs: self.abs,
+            window_id,
+            modifiers: self.modifiers,
+            time,
+            handled: Cell::new(Area::Empty),
+        }))
+    }
+
+    fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId){
+        let code: EvAbsCodes = unsafe { std::mem::transmute(evt.code) };
+        match code {
+            EvAbsCodes::ABS_X => {
+                self.abs.x = (evt.value as f64 / 32767.0) * self.width;
+            },
+            EvAbsCodes::ABS_Y => {
+                self.abs.y = (evt.value as f64 / 32767.0) * self.height;
+            },
+            EvAbsCodes::ABS_MT_POSITION_X => {
+                self.abs.x = evt.value as f64 / self.dpi_factor; 
+            },
+            EvAbsCodes::ABS_MT_POSITION_Y => {
+                self.abs.y = evt.value as f64 / self.dpi_factor;
+            },
+            _=> return ()
+        }
+        dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+            abs: self.abs,
+            window_id,
+            modifiers: self.modifiers,
+            time,
+            handled: Cell::new(Area::Empty),
+        }))
+    }
+
+    fn process_key_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId){
+        let code: EvKeyCodes = unsafe { std::mem::transmute(evt.code) };
+        let key_action: KeyAction = unsafe {std::mem::transmute(evt.value) };
+        let key_code = match code {
+            EvKeyCodes::KEY_ESC => KeyCode::Escape,
+            EvKeyCodes::KEY_1 => KeyCode::Key1,
+            EvKeyCodes::KEY_2 => KeyCode::Key2,
+            EvKeyCodes::KEY_3 => KeyCode::Key3,
+            EvKeyCodes::KEY_4 => KeyCode::Key4,
+            EvKeyCodes::KEY_5 => KeyCode::Key5,
+            EvKeyCodes::KEY_6 => KeyCode::Key6,
+            EvKeyCodes::KEY_7 => KeyCode::Key7,
+            EvKeyCodes::KEY_8 => KeyCode::Key8,
+            EvKeyCodes::KEY_9 => KeyCode::Key9,
+            EvKeyCodes::KEY_0 => KeyCode::Key0,
+            EvKeyCodes::KEY_MINUS => KeyCode::Minus,
+            EvKeyCodes::KEY_EQUAL => KeyCode::Equals,
+            EvKeyCodes::KEY_BACKSPACE => KeyCode::Backspace,
+            EvKeyCodes::KEY_TAB => KeyCode::Tab,
+            EvKeyCodes::KEY_Q => KeyCode::KeyQ,
+            EvKeyCodes::KEY_W => KeyCode::KeyW,
+            EvKeyCodes::KEY_E => KeyCode::KeyE,
+            EvKeyCodes::KEY_R => KeyCode::KeyR,
+            EvKeyCodes::KEY_T => KeyCode::KeyT,
+            EvKeyCodes::KEY_Y => KeyCode::KeyY,
+            EvKeyCodes::KEY_U => KeyCode::KeyU,
+            EvKeyCodes::KEY_I => KeyCode::KeyI,
+            EvKeyCodes::KEY_O => KeyCode::KeyO,
+            EvKeyCodes::KEY_P => KeyCode::KeyP,
+            EvKeyCodes::KEY_LEFTBRACE => KeyCode::LBracket,
+            EvKeyCodes::KEY_RIGHTBRACE => KeyCode::RBracket,
+            EvKeyCodes::KEY_ENTER => KeyCode::ReturnKey,
+            EvKeyCodes::KEY_LEFTCTRL => KeyCode::Control,
+            EvKeyCodes::KEY_A => KeyCode::KeyA,
+            EvKeyCodes::KEY_S => KeyCode::KeyS,
+            EvKeyCodes::KEY_D => KeyCode::KeyD,
+            EvKeyCodes::KEY_F => KeyCode::KeyF,
+            EvKeyCodes::KEY_G => KeyCode::KeyG,
+            EvKeyCodes::KEY_H => KeyCode::KeyH,
+            EvKeyCodes::KEY_J => KeyCode::KeyJ,
+            EvKeyCodes::KEY_K => KeyCode::KeyK,
+            EvKeyCodes::KEY_L => KeyCode::KeyL,
+            EvKeyCodes::KEY_SEMICOLON => KeyCode::Semicolon,
+            EvKeyCodes::KEY_APOSTROPHE => KeyCode::Quote,
+            EvKeyCodes::KEY_GRAVE => KeyCode::Backtick,
+            EvKeyCodes::KEY_LEFTSHIFT => KeyCode::Shift,
+            EvKeyCodes::KEY_BACKSLASH => KeyCode::Backslash,
+            EvKeyCodes::KEY_Z => KeyCode::KeyZ,
+            EvKeyCodes::KEY_X => KeyCode::KeyX,
+            EvKeyCodes::KEY_C => KeyCode::KeyC,
+            EvKeyCodes::KEY_V => KeyCode::KeyV,
+            EvKeyCodes::KEY_B => KeyCode::KeyB,
+            EvKeyCodes::KEY_N => KeyCode::KeyN,
+            EvKeyCodes::KEY_M => KeyCode::KeyM,
+            EvKeyCodes::KEY_COMMA => KeyCode::Comma,
+            EvKeyCodes::KEY_DOT => KeyCode::Period,
+            EvKeyCodes::KEY_SLASH => KeyCode::Slash,
+            EvKeyCodes::KEY_RIGHTSHIFT => KeyCode::Shift,
+            EvKeyCodes::KEY_KPASTERISK => KeyCode::NumpadMultiply,
+            EvKeyCodes::KEY_LEFTALT => KeyCode::Alt,
+            EvKeyCodes::KEY_SPACE => KeyCode::Space,
+            EvKeyCodes::KEY_CAPSLOCK => KeyCode::Capslock,
+            EvKeyCodes::KEY_F1 => KeyCode::F1,
+            EvKeyCodes::KEY_F2 => KeyCode::F2,
+            EvKeyCodes::KEY_F3 => KeyCode::F3,
+            EvKeyCodes::KEY_F4 => KeyCode::F4,
+            EvKeyCodes::KEY_F5 => KeyCode::F5,
+            EvKeyCodes::KEY_F6 => KeyCode::F6,
+            EvKeyCodes::KEY_F7 => KeyCode::F7,
+            EvKeyCodes::KEY_F8 => KeyCode::F8,
+            EvKeyCodes::KEY_F9 => KeyCode::F9,
+            EvKeyCodes::KEY_F10 => KeyCode::F10,
+            EvKeyCodes::KEY_NUMLOCK => KeyCode::Numlock,
+            EvKeyCodes::KEY_SCROLLLOCK => KeyCode::ScrollLock,
+            EvKeyCodes::KEY_KP7 => KeyCode::Numpad7,
+            EvKeyCodes::KEY_KP8 => KeyCode::Numpad8,
+            EvKeyCodes::KEY_KP9 => KeyCode::Numpad9,
+            EvKeyCodes::KEY_KPMINUS => KeyCode::NumpadSubtract,
+            EvKeyCodes::KEY_KP4 => KeyCode::Numpad4,
+            EvKeyCodes::KEY_KP5 => KeyCode::Numpad5,
+            EvKeyCodes::KEY_KP6 => KeyCode::Numpad6,
+            EvKeyCodes::KEY_KPPLUS => KeyCode::NumpadAdd,
+            EvKeyCodes::KEY_KP1 => KeyCode::Numpad1,
+            EvKeyCodes::KEY_KP2 => KeyCode::Numpad2,
+            EvKeyCodes::KEY_KP3 => KeyCode::Numpad3,
+            EvKeyCodes::KEY_KP0 => KeyCode::Numpad0,
+            EvKeyCodes::KEY_KPDOT => KeyCode::NumpadDecimal,
+            EvKeyCodes::KEY_ZENKAKUHANKAKU => KeyCode::Unknown,
+            EvKeyCodes::KEY_102ND => KeyCode::Backtick, //Seems odd but this was in the code this replaced
+            EvKeyCodes::KEY_F11 => KeyCode::F11,
+            EvKeyCodes::KEY_F12 => KeyCode::F12,
+            EvKeyCodes::KEY_RO => KeyCode::NumpadDivide, //Seems odd but this was in the code this replaced
+            EvKeyCodes::KEY_KPENTER => KeyCode::NumpadEnter,
+            EvKeyCodes::KEY_RIGHTCTRL => KeyCode::Control,
+            EvKeyCodes::KEY_KPSLASH => KeyCode::NumpadDivide,
+            EvKeyCodes::KEY_SYSRQ => KeyCode::PrintScreen,
+            EvKeyCodes::KEY_RIGHTALT => KeyCode::Alt,
+            EvKeyCodes::KEY_HOME => KeyCode::Home,
+            EvKeyCodes::KEY_UP => KeyCode::ArrowUp,
+            EvKeyCodes::KEY_PAGEUP => KeyCode::PageUp,
+            EvKeyCodes::KEY_LEFT => KeyCode::ArrowLeft,
+            EvKeyCodes::KEY_RIGHT => KeyCode::ArrowRight,
+            EvKeyCodes::KEY_END => KeyCode::End,
+            EvKeyCodes::KEY_DOWN => KeyCode::ArrowDown,
+            EvKeyCodes::KEY_PAGEDOWN => KeyCode::PageDown,
+            EvKeyCodes::KEY_INSERT => KeyCode::Insert,
+            EvKeyCodes::KEY_DELETE => KeyCode::Delete,
+            EvKeyCodes::KEY_LEFTMETA => KeyCode::Logo,
+            EvKeyCodes::KEY_RIGHTMETA => KeyCode::Logo,
+            _ => KeyCode::Unknown,
+        };
+        match key_action {
+            KeyAction::KeyDown => {
+                match key_code {
+                    KeyCode::Shift => self.modifiers.shift = true,
+                    KeyCode::Control => self.modifiers.control = true,
+                    KeyCode::Logo => self.modifiers.logo = true,
+                    KeyCode::Alt => self.modifiers.alt = true,
+                    _ => ()
+                };
+                match code {
+                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
+                        dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
+                            button: (evt.code - EvKeyCodes::BTN_LEFT as u16) as usize,
+                            abs: self.abs,
+                            window_id,
+                            modifiers: self.modifiers,
+                            time,
+                            handled: Cell::new(Area::Empty),
+                        }))
+                    },
+                    EvKeyCodes::BTN_TOUCH => {
+                        dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
+                            button: 0usize,
+                            abs: self.abs,
+                            window_id,
+                            modifiers: self.modifiers,
+                            time,
+                            handled: Cell::new(Area::Empty),
+                        }))
+                    },
+                    _ => {
+                        if !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
+                            let uc = self.modifiers.shift;
+                            let inp = key_code.to_char(uc);
+                            if let Some(inp) = inp {
+                                dir_evts.push(DirectEvent::TextInput(TextInputEvent {
+                                    input: format!("{}", inp),
+                                    was_paste: false,
+                                    replace_last: false
+                                }));
+                            }
+                        }
+                        dir_evts.push(DirectEvent::KeyDown(KeyEvent {
+                            key_code,
+                            is_repeat: false,
+                            modifiers: self.modifiers,
+                            time
+                        }))
+                    }
+                }
+                
+            },
+            KeyAction::KeyUp => {
+                match key_code {
+                    KeyCode::Shift => self.modifiers.shift = false,
+                    KeyCode::Control => self.modifiers.control = false,
+                    KeyCode::Logo => self.modifiers.logo = false,
+                    KeyCode::Alt => self.modifiers.alt = false,
+                    _ => ()
+                };
+                match code {
+                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
+                        dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
+                            button: (evt.code - EvKeyCodes::BTN_LEFT as u16) as usize,
+                            abs: self.abs,
+                            window_id,
+                            modifiers: self.modifiers,
+                            time,
+                        }))
+                    },
+                    EvKeyCodes::BTN_TOUCH => {
+                        dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
+                            button: 0usize,
+                            abs: self.abs,
+                            window_id,
+                            modifiers: self.modifiers,
+                            time,
+                        }))
+                    },
+                    _ => {
+                        dir_evts.push(DirectEvent::KeyUp(KeyEvent {
+                            key_code,
+                            is_repeat: false,
+                            modifiers: self.modifiers,
+                            time
+                        }))
+                    }
+                }
+            },
+            KeyAction::KeyRepeat => {
+                dir_evts.push(DirectEvent::KeyDown(KeyEvent {
+                    key_code,
+                    is_repeat: false,
+                    modifiers: self.modifiers,
+                    time
+                }))
+            }
+        }
     }
 }
+
