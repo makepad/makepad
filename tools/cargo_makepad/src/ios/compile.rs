@@ -500,7 +500,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
     let ios_deploy = cwd.join(format!("{}/ios-deploy/build/Release/", env!("CARGO_MANIFEST_DIR")));
     
     // kill previous lldb
-    let ios_version = signing.ios_version.unwrap_or("16".to_string());
+    let ios_version = signing.ios_version.unwrap_or("17".to_string());
     
     if ios_version == "17"  {
         let answer = shell_env_cap(&[], &cwd, "xcrun", &[
@@ -515,7 +515,6 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
         for line in answer.split("\n"){
             if line.contains("installationURL:"){
                 let path = &line[21..line.len()-1];
-                println!("GOT PATH: #{}#", path);
                 shell_env(&[], &cwd, "xcrun", &[
                     "devicectl",
                     "device",
@@ -528,12 +527,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
                 return Ok(())
             }
         }
-        
         println!("TODO: We need to fish out LONGID from the answer {}", answer);
-        
-        
-        //xcrun devicectl device install app --device 00008110-001XXXXXXXXXX ./xgen/Build/Products/Release-iphoneos/nilo.app
-        //xcrun devicectl device process launch --device 00008110-001XXXXXXXXXX file:///private/var/containers/Bundle/Application/1604D2D5-35F3-4E43-8B47-1DEF5D778480/nilo.app
     }
     else {
         let ps_result = shell_env_cap(&[], &ios_deploy, "ps", &[]) ?;
