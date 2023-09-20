@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::{
     makepad_derive_widget::*,
     widget::*,
@@ -55,8 +56,8 @@ pub struct Dock {
     #[rust] tab_bars: ComponentMap<LiveId, TabBarWrap>,
     #[rust] splitters: ComponentMap<LiveId, Splitter>,
     
-    #[rust] dock_items: ComponentMap<LiveId, DockItem>,
-    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+    #[rust] dock_items: HashMap<LiveId, DockItem>,
+    #[rust] templates: HashMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
     #[rust] drop_state: Option<DropPosition>,
     #[rust] dock_item_iter_stack: Vec<(LiveId, usize)>,
@@ -64,7 +65,7 @@ pub struct Dock {
 
 pub struct DockVisibleItemIterator<'a> {
     stack: &'a mut Vec<(LiveId, usize)>,
-    dock_items: &'a ComponentMap<LiveId, DockItem>,
+    dock_items: &'a HashMap<LiveId, DockItem>,
     items: &'a ComponentMap<LiveId, (LiveId, WidgetRef)>,
 }
 

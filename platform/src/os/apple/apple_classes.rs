@@ -26,9 +26,9 @@ use {
             },
             cx_native::EventFlow,
         },
-        menu::{
-            CxCommandSetting
-        },
+        //menu::{
+        //    CxCommandSetting
+        //},
         //turtle::{
         //    Rect
         //},
@@ -42,9 +42,8 @@ use {
             KeyModifiers,
         },
         cursor::MouseCursor,
-        menu::{
-            Menu,
-            MenuCommand
+        macos_menu::{
+            MacosMenu,
         },
     }
 };

@@ -28,7 +28,7 @@ mod window;
 mod pass;
 mod texture;
 mod cursor;
-mod menu;
+mod macos_menu;
 mod animator;
 mod gpu_info;
 mod geometry;
@@ -134,7 +134,6 @@ pub use {
             RectArea,
             InstanceArea
         },
-        menu::MenuCommand,
         midi::*,
         audio::*,
         thread::*,
@@ -193,7 +192,7 @@ pub use {
             VideoColorFormat,
         },
         cursor::MouseCursor,
-        menu::Menu,
+        macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
         window::WindowHandle,
         pass::{
