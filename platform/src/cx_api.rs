@@ -24,7 +24,7 @@ use {
             //DrawListArea
         },
         texture::Texture,
-        menu::Menu,
+        macos_menu::MacosMenu,
         pass::{
             PassId,
             CxPassRect,
@@ -65,8 +65,10 @@ pub enum CxOsOp {
     SetCursor(MouseCursor),
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
     StopTimer(u64),
+    Quit,
+    
     StartDragging(Vec<DragItem>),
-    UpdateMenu(Menu),
+    UpdateMacosMenu(MacosMenu),
     ShowClipboardActions(String),
 
     HttpRequest{request_id: LiveId, request:HttpRequest},
@@ -111,8 +113,12 @@ impl Cx {
     pub fn cpu_cores(&self) -> usize {self.cpu_cores}
     pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
-    pub fn update_menu(&mut self, menu: Menu) {
-        self.platform_ops.push(CxOsOp::UpdateMenu(menu));
+    pub fn update_macos_menu(&mut self, menu: MacosMenu) {
+        self.platform_ops.push(CxOsOp::UpdateMacosMenu(menu));
+    }
+    
+    pub fn quit(&mut self){
+        self.platform_ops.push(CxOsOp::Quit);
     }
     
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
