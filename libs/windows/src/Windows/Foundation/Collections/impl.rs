@@ -1,4 +1,4 @@
-#[doc = "*Required features: `\"Foundation_Collections\"`, `\"implement\"`*"]
+
 pub trait IIterable_Impl<T>: Sized
 where
     T: ::windows_core::RuntimeType + 'static,

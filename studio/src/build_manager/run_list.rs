@@ -258,14 +258,15 @@ impl BuildManager {
             if active.builds.get(&build_id).is_none() {
                 let index = active.builds.len();
                 active.builds.insert(build_id, ActiveBuild {
-                    mac_resize_id: 0,
                     item_id,
                     log_index: format!("[{}]", index),
                     process: process.clone(),
                     run_view_id,
                     cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
-                    swapchain: [Texture::new(cx),Texture::new(cx),],
-                    present_index: Cell::new(0),
+                    //swapchain: None,
+                    swapchain_history: [None,None,None,None],
+                    last_presented_id: Cell::new(None),
+                    last_presented_backup_for_resizing: Texture::new(cx),
                 });
             }
             if process.target.runs_in_studio(){

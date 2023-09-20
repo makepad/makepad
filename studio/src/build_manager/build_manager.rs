@@ -17,6 +17,7 @@ use {
         },
         makepad_shell::*,
     },
+    makepad_code_editor::{text::Position,decoration::{Decoration}},
     makepad_http::server::*,
     std::{
         cell::Cell,
@@ -41,16 +42,17 @@ live_design!{
         recompile_timeout: 0.2
     }
 }
-
+pub const MAX_SWAPCHAIN_HISTORY:usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
     pub item_id: LiveId,
     pub process: BuildProcess,
     pub run_view_id: LiveId,
     pub cmd_id: Option<BuildCmdId>,
-    pub swapchain: [Texture; 2],
-    pub mac_resize_id: usize,
-    pub present_index: Cell<usize>,
+    pub swapchain_history: [Option<cx_stdin::Swapchain<Texture>>;MAX_SWAPCHAIN_HISTORY],
+    //pub swapchain: Option<cx_stdin::Swapchain<Texture>>,
+    pub last_presented_id: Cell<Option<cx_stdin::PresentableImageId>>,
+    pub last_presented_backup_for_resizing: Texture,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -243,9 +245,10 @@ impl BuildManager {
         self.active.builds.clear();
     }
     
-    pub fn clear_log(&mut self, file_system:&mut FileSystem) {
+    pub fn clear_log(&mut self, cx:&mut Cx, dock:&DockRef, file_system:&mut FileSystem) {
         // lets clear all log related decorations
-        
+        file_system.clear_all_decorations();
+        file_system.redraw_all_views(cx, dock);
         self.log.clear();
     }
     
@@ -287,7 +290,7 @@ impl BuildManager {
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            self.clear_log(file_system);
+            self.clear_log(cx, &dock,file_system);
             /*state.editor_state.messages.clear();
             for doc in &mut state.editor_state.documents.values_mut() {
                 if let Some(inner) = &mut doc.inner {
@@ -314,6 +317,15 @@ impl BuildManager {
             // ok we have a cmd_id in wrap.msg
             match wrap.item {
                 LogItem::Location(loc) => {
+                    let pos = Position{
+                        line_index: loc.start.line_index - 1,
+                        byte_index: loc.start.byte_index - 1
+                    };
+                        
+                    file_system.add_decoration(&loc.file_name, Decoration::new(
+                        0,pos ,pos + loc.length
+                    ));
+                    file_system.redraw_view_by_path(cx, &loc.file_name, dock);
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Location(loc)));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
