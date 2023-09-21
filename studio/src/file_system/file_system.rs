@@ -24,9 +24,9 @@ pub struct FileSystem {
     pub file_client: FileClient,
     pub root_path: String,
     pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
-    pub tab_id_to_path: HashMap<LiveId, String>,
+    pub tab_id_to_file_node_id: HashMap<LiveId, FileNodeId>,
     pub tab_id_to_session: HashMap<LiveId, Session>,
-    pub open_documents: HashMap<String, OpenDoc>
+    pub open_documents: HashMap<FileNodeId, OpenDoc>
 }
 
 pub enum OpenDoc {
@@ -65,10 +65,14 @@ impl FileSystem {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
+    pub fn path_from_file_id(&self, _path:&str)->Option<FileNodeId>{
+        None
+    }
+    
     pub fn get_session_mut(&mut self, tab_id: LiveId) -> Option<&mut Session> {
         // lets see if we have a document yet
-        if let Some(path) = self.tab_id_to_path.get(&tab_id) {
-            if let Some(OpenDoc::Document(document)) = self.open_documents.get(path) {
+        if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
+            if let Some(OpenDoc::Document(document)) = self.open_documents.get(file_id) {
                 return Some(match self.tab_id_to_session.entry(tab_id) {
                     hash_map::Entry::Occupied(o) => o.into_mut(),
                     hash_map::Entry::Vacant(v) => v.insert(Session::new(document.clone()))
@@ -94,16 +98,17 @@ impl FileSystem {
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     FileResponse::OpenFile(result) => match result {
-                        Ok((unix_path, data)) => {
+                        Ok((_unix_path, data, id)) => {
+                            let file_id = FileNodeId(LiveId(id));
                             let dock = ui.dock(id!(dock));
-                            for (tab_id, path) in &self.tab_id_to_path {
-                                if unix_path == *path {
+                            for (tab_id, file_id) in &self.tab_id_to_file_node_id {
+                                if id == file_id.0.0 {
                                     dock.redraw_tab(cx, *tab_id);
                                 }
                             }
-                            if let Some(OpenDoc::Decorations(dec)) = self.open_documents.get(&unix_path) {
+                            if let Some(OpenDoc::Decorations(dec)) = self.open_documents.get(&file_id) {
                                 let dec = dec.clone();
-                                self.open_documents.insert(unix_path, OpenDoc::Document(Document::new(data.into(), dec)));
+                                self.open_documents.insert(file_id, OpenDoc::Document(Document::new(data.into(), dec)));
                             }else {panic!()}
                             
                             ui.redraw(cx);
@@ -116,7 +121,7 @@ impl FileSystem {
                         }
                     }
                     FileResponse::SaveFile(result) => match result {
-                        Ok((path, old, new)) => {
+                        Ok((path, old, new, _id)) => {
                             // alright file has been saved
                             // now we need to check if a live_design!{} changed or something outside it
                             if old != new {
@@ -160,14 +165,15 @@ impl FileSystem {
         }
     }
     
-    pub fn request_open_file(&mut self, tab_id: LiveId, path: String) {
+    pub fn request_open_file(&mut self, tab_id: LiveId, file_id: FileNodeId) {
         // ok lets see if we have a document
         // ifnot, we create a new one
-        self.tab_id_to_path.insert(tab_id, path.clone());
+        self.tab_id_to_file_node_id.insert(tab_id, file_id);
         
-        if self.open_documents.get(&path).is_none() {
-            self.open_documents.insert(path.clone(), OpenDoc::Decorations(DecorationSet::new()));
-            self.file_client.send_request(FileRequest::OpenFile(path));
+        if self.open_documents.get(&file_id).is_none() {
+            self.open_documents.insert(file_id, OpenDoc::Decorations(DecorationSet::new()));
+            let path = self.file_node_path(file_id);
+            self.file_client.send_request(FileRequest::OpenFile(path, file_id.0.0));
         }
     }
     
@@ -175,18 +181,19 @@ impl FileSystem {
     pub fn request_save_file(&mut self, tab_id: LiveId) {
         // ok lets see if we have a document
         // ifnot, we create a new one
-        if let Some(path) = self.tab_id_to_path.get(&tab_id) {
-            if let Some(OpenDoc::Document(doc)) = self.open_documents.get(path) {
+        if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
+            if let Some(OpenDoc::Document(doc)) = self.open_documents.get(&file_id) {
                 let text = doc.as_text().to_string();
-                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text));
+                let path = self.file_node_path(*file_id);
+                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text, file_id.0.0));
             }
         };
     }
     
-    pub fn clear_decorations(&mut self, path: &str) {
+    pub fn clear_decorations(&mut self, file_node_id: &FileNodeId) {
         // ok lets see if we have a document
         // ifnot, we create a new one
-        match self.open_documents.get_mut(path) {
+        match self.open_documents.get_mut(file_node_id) {
             Some(OpenDoc::Decorations(dec)) => dec.clear(),
             Some(OpenDoc::Document(doc)) => doc.clear_decorations(),
             None => ()
@@ -204,24 +211,24 @@ impl FileSystem {
         }
     }
     
-    pub fn redraw_view_by_path(&mut self, cx:&mut Cx, path:&str, dock:&DockRef){
-        for (tab_id,pathc) in &self.tab_id_to_path{
-            if path == pathc{
+    pub fn redraw_view_by_file_id(&mut self, cx:&mut Cx, id:FileNodeId, dock:&DockRef){
+        for (tab_id,file_id) in &self.tab_id_to_file_node_id{
+            if id == *file_id{
                 dock.item(*tab_id).redraw(cx)
             }
         }
     }
     
     pub fn redraw_all_views(&mut self, cx:&mut Cx, dock:&DockRef){
-        for (tab_id,_) in &self.tab_id_to_path{
+        for (tab_id,_) in &self.tab_id_to_file_node_id{
             dock.item(*tab_id).redraw(cx)
         }
     }
     
-    pub fn add_decoration(&mut self, path: &str, dec: Decoration) {
+    pub fn add_decoration(&mut self, file_id:FileNodeId, dec: Decoration) {
         // ok lets see if we have a document
         // ifnot, we create a new one
-        match self.open_documents.get_mut(path) {
+        match self.open_documents.get_mut(&file_id) {
             Some(OpenDoc::Decorations(decs)) => decs.add_decoration(dec),
             Some(OpenDoc::Document(doc)) => {
                 doc.add_decoration(dec);
@@ -229,7 +236,7 @@ impl FileSystem {
             None => {
                 let mut set = DecorationSet::new();
                 set.add_decoration(dec);
-                self.open_documents.insert(path.to_string(), OpenDoc::Decorations(set));
+                self.open_documents.insert(file_id, OpenDoc::Decorations(set));
             }
         };
     }
@@ -269,6 +276,14 @@ impl FileSystem {
         }
         path
     }
+    
+    pub fn ensure_unique_tab_names(&self, _cx:&mut Cx, _dock: &DockRef) {
+       // alright so. what do we do.
+       // we first connect colliding names
+       // and then add more path elements till they dont
+       
+    }
+    
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
         fn create_file_node(
