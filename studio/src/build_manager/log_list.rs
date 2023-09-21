@@ -203,6 +203,10 @@ live_design!{
     }
     
 }
+pub enum LogListAction{
+    JumpToError,
+    None
+}
 
 impl BuildManager {
     
@@ -261,5 +265,17 @@ impl BuildManager {
             item.draw_widget_all(cx);
         }
         //profile_end!(dt);
+    }
+    
+    pub fn handle_log_list(&mut self, _cx: &mut Cx, _log_list: &PortalListRef, item_id: u64, item: WidgetRef, actions: &WidgetActions)->Vec<LogListAction>{
+        // ok lets see if someone clicked our jump to error
+        if item.link_label(id!(location)).pressed(actions) {
+            if let Some((_build_id, log_item)) = self.log.get(item_id as usize) {
+                // alright lets select a file tab or open the file
+                // and lets jump to the location
+                
+            }
+        }
+        Vec::new()
     }
 }
