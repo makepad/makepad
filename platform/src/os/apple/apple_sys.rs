@@ -708,6 +708,17 @@ pub struct MTLRegion {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct MTLViewport {
+    pub originX: f64,
+    pub originY: f64,
+    pub width: f64,
+    pub height: f64,
+    pub znear: f64,
+    pub zfar: f64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct CGSize {
     pub width: f64,
     pub height: f64,

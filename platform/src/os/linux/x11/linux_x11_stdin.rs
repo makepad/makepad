@@ -13,10 +13,10 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::Texture,
+        texture::{Texture, TextureDesc, TextureFormat},
         live_traits::LiveNew,
         thread::Signal,
-        os::cx_stdin::{HostToStdin, StdinToHost, Swapchain},
+        os::cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
@@ -35,39 +35,38 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
+        for &pass_id in &passes_todo {
+            match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
+                    // only render to swapchain if swapchain exists
                     if let Some(swapchain) = swapchain {
-                        // HACK(eddyb) retry loop in case we have broken images.
-                        for _ in 0..swapchain.presentable_images.len() {
-                            let current_image = &swapchain.presentable_images[*present_index];
-                            *present_index = (*present_index + 1) % swapchain.presentable_images.len();
+                        let current_image = &swapchain.presentable_images[*present_index];
+                        *present_index = (*present_index + 1) % swapchain.presentable_images.len();
 
-                            if self.textures[current_image.image.texture_id()].os.gl_texture.is_none() {
-                                // FIXME(eddyb) ask the server for a new swapchain.
-                                continue;
-                            }
+                        // render to swapchain
+                        self.draw_pass_to_texture(pass_id, current_image.image.texture_id());
 
-                            // render to swapchain
-                            self.draw_pass_to_texture(*pass_id, current_image.image.texture_id());
+                        // wait for GPU to finish rendering
+                        unsafe { gl_sys::Finish(); }
 
-                            // wait for GPU to finish rendering
-                            unsafe { gl_sys::Finish(); }
+                        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+                        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                        let presentable_draw = PresentableDraw {
+                            target_id: current_image.id,
+                            width: (pass_rect.size.x * dpi_factor) as u32,
+                            height: (pass_rect.size.y * dpi_factor) as u32,
+                        };
 
-                            // inform host that frame is ready
-                            let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(current_image.id).to_json().as_bytes());
-
-                            break;
-                        }
+                        // inform host that frame is ready
+                        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
                     }
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_magic_texture(pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_magic_texture(pass_id);
                 }
             }
         }
@@ -147,21 +146,16 @@ impl Cx {
                 HostToStdin::Scroll(e) => {
                     self.call_event_handler(&Event::Scroll(e.into()))
                 }
-                HostToStdin::WindowSize(ws) => {
-                    // Always update the geometry, as latter input events might
-                    // need it to be accurately handled, while output swapchains
-                    // do not have the same semantic effect when they're missing.
-                    let window = &mut self.windows[CxWindowPool::id_zero()];
-                    window.window_geom = WindowGeom {
-                        dpi_factor: ws.dpi_factor,
-                        inner_size: dvec2(ws.swapchain.width as f64, ws.swapchain.height as f64) / ws.dpi_factor,
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
+                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                        dpi_factor,
+                        inner_size: dvec2(inner_width, inner_height),
                         ..Default::default()
                     };
-
-
                     self.redraw_all();
-
-                    let new_swapchain = ws.swapchain.images_map(|_, dma_buf_image| {
+                }
+                HostToStdin::Swapchain(new_swapchain) => {
+                    let new_swapchain = new_swapchain.images_map(|id, dma_buf_image| {
                         // HACK(eddyb) we get the host process's ID, and
                         // a file descriptor *in that process* - normally
                         // it'd need to be passed to this process via some
@@ -194,10 +188,16 @@ impl Cx {
                             let dma_buf_image = dma_buf_image.planes_map(|plane| plane.fd_map(Result::unwrap));
 
                             // update texture
+                            let desc = TextureDesc {
+                                format: TextureFormat::SharedBGRA(id),
+                                width: Some(new_swapchain.alloc_width as usize),
+                                height: Some(new_swapchain.alloc_height as usize),
+                            };
+                            new_texture.set_desc(self, desc);
                             self.textures[new_texture.texture_id()]
                                 .os.update_from_shared_dma_buf_image(
                                     self.os.opengl_cx.as_ref().unwrap(),
-                                    &ws.swapchain,
+                                    &desc,
                                     &dma_buf_image,
                                 );
                         }
@@ -209,6 +209,7 @@ impl Cx {
                     // reset present_index
                     present_index = 0;
 
+                    self.redraw_all();
                     self.stdin_handle_platform_ops(Some(swapchain), present_index);
                 }
 
@@ -239,8 +240,7 @@ impl Cx {
                         self.call_draw_event();
                         self.opengl_compile_shaders();
                     }
-                    
-                    // we need to make this shared texture handle into a true metal one
+
                     self.stdin_handle_repaint(swapchain.as_ref(), &mut present_index);
                 }
             }
