@@ -239,6 +239,9 @@ impl BuildManager {
             }
             let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
             active_build.cmd_id = Some(cmd_id);
+            active_build.swapchain = None;
+            active_build.last_swapchain_with_completed_draws = None;
+            active_build.aux_chan_host_endpoint = None;
         }
     }
     
@@ -298,12 +301,14 @@ impl BuildManager {
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
             self.clear_log(cx, &dock,file_system);
-            /*state.editor_state.messages.clear();
-            for doc in &mut state.editor_state.documents.values_mut() {
-                if let Some(inner) = &mut doc.inner {
-                    inner.msg_cache.clear();
+            
+            if let Some(mut dock) = dock.borrow_mut(){
+                for (_id, (_, item)) in dock.items().iter(){
+                    if let Some(mut run_view) = item.as_run_view().borrow_mut(){
+                        run_view.resend_framebuffer(cx);
+                    }
                 }
-            }*/
+            }
             dispatch_event(cx, BuildManagerAction::RedrawLog)
         }
         
@@ -386,7 +391,7 @@ impl BuildManager {
                 LogItem::AuxChanHostEndpointCreated(aux_chan_host_endpoint) => {
                     for active_build in active.builds.values_mut() {
                         if active_build.cmd_id == Some(wrap.cmd_id) {
-                            assert!(active_build.aux_chan_host_endpoint.is_none());
+                            //assert!(active_build.aux_chan_host_endpoint.is_none());
                             active_build.aux_chan_host_endpoint = Some(aux_chan_host_endpoint);
                             break;
                         }
@@ -556,7 +561,7 @@ impl BuildManager {
         std::thread::spawn(move || {
             let dummy = studio_uid.0.to_be_bytes();
             loop {
-                write_discovery.send_to(&dummy, "255.255.255.255:41533").unwrap();
+                let _ = write_discovery.send_to(&dummy, "255.255.255.255:41533");
                 thread::sleep(time::Duration::from_millis(100));
             }
         });
