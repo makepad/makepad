@@ -412,7 +412,7 @@ impl Win32Window {
                 //let xcoord = (lparam.0 & 0xffff) as u16 as i16 as i32;
                 let abs = window.get_mouse_pos_from_lparam(lparam);
                 let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-                const EDGE: f64 = 8.0; 
+                const EDGE: f64 = 4.0; 
                 let dpi = window.get_dpi_factor();
                 GetWindowRect(hwnd, &mut rect).unwrap();
                 let rect = Rect{pos:dvec2(rect.left as f64 / dpi, rect.top as f64 / dpi),
