@@ -1,6 +1,6 @@
 [package]
 name = "makepad-example-news-feed"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad news feed example"
@@ -8,4 +8,4 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "zqpv-Yj-K7WNVK2I8h5Okhho46Q="
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "0.5.0" }
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }
