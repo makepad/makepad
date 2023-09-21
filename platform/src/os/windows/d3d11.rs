@@ -501,7 +501,7 @@ impl Cx {
         self.draw_shaders.compile_set.clear();
     }
 
-    pub fn get_shared_presentable_image_os_handle(
+    pub fn share_texture_for_presentable_image(
         &mut self,
         texture: &Texture,
     ) -> crate::cx_stdin::SharedPresentableImageOsHandle {

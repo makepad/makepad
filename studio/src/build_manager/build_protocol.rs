@@ -160,7 +160,7 @@ pub enum BuildCmd {
     HostToStdin(String)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LogItemWrap {
     pub cmd_id: BuildCmdId,
     pub item: LogItem
@@ -190,9 +190,10 @@ pub struct LogItemBare{
     pub line: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum LogItem {
     Bare(LogItemBare),
     Location(LogItemLocation),
     StdinToHost(String),
+    AuxChanHostEndpointCreated(crate::makepad_platform::cx_stdin::aux_chan::HostEndpoint),
 }
