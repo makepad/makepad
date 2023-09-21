@@ -276,7 +276,20 @@ impl DrawVars {
                     cx.draw_shaders.error_fingerprints.push(fingerprint);
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
-                    log!("Error {}", err);
+                    if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                        crate::makepad_error_log::log_with_type(
+                            &err.file,
+                            err.span.start.line+1,
+                            err.span.start.column+2,
+                            err.span.end.line+1,
+                            err.span.end.column+2,
+                            &err.message,
+                            LogType::Error
+                        );
+                    }
+                    else{
+                        log!("Error {}", err);
+                    }
                 }
                 Ok(()) => {
                     // OK! SO the shader parsed
