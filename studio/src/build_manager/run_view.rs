@@ -225,7 +225,7 @@ impl RunView {
                         try_present_through(&v.last_swapchain_with_completed_draws);
                     }
                     #[cfg(target_os="windows")]{
-                        self.run_tick(cx, self.time_now(), run_view_id, manager)
+                        self.run_tick(cx, self.time_now(), run_view_id, manager);
                         self.redraw(cx);
                     }
                 }
