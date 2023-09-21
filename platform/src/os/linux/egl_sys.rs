@@ -90,6 +90,12 @@ unsafe extern "C" fn(
     attrib_list: *const EGLint,
 ) -> EGLImageKHR,
 >;
+pub type PFNEGLDESTROYIMAGEKHRPROC = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    image: EGLImageKHR,
+) -> EGLBoolean,
+>;
 pub type PFNEGLCREATEPBUFFERSURFACEPROC = ::std::option::Option<
 unsafe extern "C" fn(
     dpy: EGLDisplay,
@@ -267,6 +273,7 @@ pub struct LibEgl {
     pub eglSwapInterval: PFNEGLSWAPINTERVALPROC,
 
     pub eglCreateImageKHR: PFNEGLCREATEIMAGEKHRPROC,
+    pub eglDestroyImageKHR: PFNEGLDESTROYIMAGEKHRPROC,
     pub eglExportDMABUFImageQueryMESA: PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC,
     pub eglExportDMABUFImageMESA: PFNEGLEXPORTDMABUFIMAGEMESAPROC,
     pub eglGetPlatformDisplayEXT: PFNEGLGETPLATFORMDISPLAYEXTPROC,
@@ -359,6 +366,7 @@ impl LibEgl {
             eglSwapInterval: module.get_symbol("eglSwapInterval").ok(),
 
             eglCreateImageKHR: get_ext_fn!("eglCreateImageKHR"),
+            eglDestroyImageKHR: get_ext_fn!("eglDestroyImageKHR"),
             eglExportDMABUFImageQueryMESA: get_ext_fn!("eglExportDMABUFImageQueryMESA"),
             eglExportDMABUFImageMESA: get_ext_fn!("eglExportDMABUFImageMESA"),
             eglGetPlatformDisplayEXT: get_ext_fn!("eglGetPlatformDisplayEXT"),
