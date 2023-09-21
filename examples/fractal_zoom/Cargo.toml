@@ -1,6 +1,6 @@
 [package]
 name = "makepad-example-fractal-zoom"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad fractal zoom example"
@@ -10,6 +10,6 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "-HQyt_6S4hcP4_ja_KDjE6dYxko="
 
 [dependencies]
-makepad-widgets = {path="../../widgets", version="0.5.0"}
+makepad-widgets = {path="../../widgets", version="0.6.0"}
 
 
