@@ -8,6 +8,7 @@ use {
         str::StrExt,
         text::Position,
         token::TokenKind,
+        text::Length,
         Line,
         Selection,
         Token,
@@ -280,6 +281,7 @@ enum KeepCursorInView {
     Locked(DVec2),
     LockedCenter(DVec2, Position, Affinity),
     FontResize(DVec2),
+    JumpToPosition,
     Off
 }
 
@@ -402,6 +404,18 @@ impl CodeEditor {
                 self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
                 //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
             }
+            KeepCursorInView::JumpToPosition => {
+                // alright so we need to make sure that cursor_pos
+                // is in view.
+                let padd = dvec2(self.cell_size.x*10.0,self.cell_size.y*10.0);
+                self.scroll_bars.scroll_into_view(cx,
+                    Rect{
+                        pos: cursor_pos-padd,
+                        size: 2.0*padd
+                    }
+                );
+                self.keep_cursor_in_view = KeepCursorInView::Off;
+            }
             KeepCursorInView::FontResize(last_pos) => {
                 let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 let delta = last_pos - new_pos;
@@ -484,8 +498,14 @@ impl CodeEditor {
         }
     }
     
-    pub fn set_cursor_and_scroll(&mut self, cx:&mut Cx, pos:Position, session: &mut Session){
-        
+    pub fn set_key_focus(&mut self, cx:&mut Cx){
+        cx.set_key_focus(self.scroll_bars.area());
+    }
+    
+    pub fn set_cursor_and_scroll(&mut self, cx:&mut Cx, pos:Position, _lenght:Length, session: &mut Session){
+        session.set_selection(pos, Affinity::Before, 1);
+        self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
+        self.redraw(cx);
     }
     
     pub fn reset_font_size(&mut self) {
