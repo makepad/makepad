@@ -228,7 +228,7 @@ impl RunView {
     }
     
     
-    pub fn resend_framebuffer(&mut self, cx: &mut Cx) {
+    pub fn resend_framebuffer(&mut self, _cx: &mut Cx) {
         self.last_size = dvec2(0.0,0.0);
     }
     
