@@ -27,7 +27,13 @@ fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] 
     unsafe { out_refs.assume_init() }
 }
 
-pub const SWAPCHAIN_IMAGE_COUNT: usize = if cfg!(any(target_os = "macos",target_os = "windows")) { 1 } else { 2 };
+pub const SWAPCHAIN_IMAGE_COUNT: usize = match () {
+    // HACK(eddyb) done like this so that we can override each target easily.
+    _ if cfg!(target_os = "linux")   => 3,
+    _ if cfg!(target_os = "macos")   => 1,
+    _ if cfg!(target_os = "windows") => 2,
+    _ => 2,
+};
 
 /// "Swapchains" group together some number (i.e. `SWAPCHAIN_IMAGE_COUNT` here)
 /// of "presentable images", to form a queue of render targets which can be
@@ -41,33 +47,36 @@ pub struct Swapchain<I>
     // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
     where I: Sized
 {
-    pub width: u32,
-    pub height: u32,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
     pub presentable_images: [PresentableImage<I>; SWAPCHAIN_IMAGE_COUNT],
 }
 
 impl Swapchain<()> {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(alloc_width: u32, alloc_height: u32) -> Self {
         let presentable_images = [(); SWAPCHAIN_IMAGE_COUNT].map(|()| PresentableImage {
             id: PresentableImageId::alloc(),
             image: (),
         });
-        Self { width, height, presentable_images }
+        Self { alloc_width, alloc_height, presentable_images }
     }
 }
 
 impl<I> Swapchain<I> {
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&PresentableImage<I>> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
     pub fn images_as_ref(&self) -> Swapchain<&I> {
-        let Swapchain { width, height, ref presentable_images } = *self;
+        let Swapchain { alloc_width, alloc_height, ref presentable_images } = *self;
         let presentable_images = ref_array_to_array_of_refs(presentable_images)
             .map(|&PresentableImage { id, ref image }| PresentableImage { id, image });
-        Swapchain { width, height, presentable_images }
+        Swapchain { alloc_width, alloc_height, presentable_images }
     }
-    pub fn images_map<I2>(self, mut f: impl FnMut(PresentableImageId, I) -> I2) -> Swapchain<I2> {
-        let Swapchain { width, height, presentable_images } = self;
+    pub fn images_map<I2>(self, mut f: impl FnMut(PresentableImage<I>) -> I2) -> Swapchain<I2> {
+        let Swapchain { alloc_width, alloc_height, presentable_images } = self;
         let presentable_images = presentable_images
-            .map(|PresentableImage { id, image }| PresentableImage { id, image: f(id, image) });
-        Swapchain { width, height, presentable_images }
+            .map(|pi| PresentableImage { id: pi.id, image: f(pi) });
+        Swapchain { alloc_width, alloc_height, presentable_images }
     }
 }
 
@@ -112,6 +121,14 @@ impl PresentableImageId {
         let Self { origin_pid, per_origin_counter } = self;
         (u64::from(origin_pid) << 32) | u64::from(per_origin_counter)
     }
+
+    // NOT public intentionally! (while not too dangerous, this could be misused)
+    fn from_u64(pid_and_counter: u64) -> Self {
+        Self {
+            origin_pid: (pid_and_counter >> 32) as u32,
+            per_origin_counter: pid_and_counter as u32,
+        }
+    }
 }
 
 pub type SharedSwapchain = Swapchain<SharedPresentableImageOsHandle>;
@@ -121,7 +138,7 @@ pub type SharedSwapchain = Swapchain<SharedPresentableImageOsHandle>;
 /// [DMA-BUF](crate::os::linux::dma_buf)-backed image from `eglExportDMABUFImageMESA`.
 #[cfg(target_os = "linux")]
 pub type SharedPresentableImageOsHandle =
-    crate::os::linux::dma_buf::Image<crate::os::linux::dma_buf::RemoteFd>;
+    crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>;
 
 // HACK(eddyb) the macOS helper XPC service (in `os/apple/metal_xpc.{m,rs}`)
 // doesn't need/want any form of "handle passing", as the `id` field contains
@@ -130,10 +147,9 @@ pub type SharedPresentableImageOsHandle =
 #[cfg(target_os = "macos")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedPresentableImageOsHandle {
-    // HACK(eddyb) working around deriving limitations.
+    // HACK(eddyb) non-`()` field working around deriving limitations.
     pub _dummy_for_macos: Option<u32>,
 }
-
 
 /// DirectX 11 `HANDLE` from `IDXGIResource::GetSharedHandle`.
 #[cfg(target_os = "windows")]
@@ -144,14 +160,144 @@ pub type SharedPresentableImageOsHandle = u64;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedPresentableImageOsHandle {
-    // HACK(eddyb) working around deriving limitations.
+    // HACK(eddyb) non-`()` field working around deriving limitations.
     pub _dummy_for_unsupported: Option<u32>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct StdinWindowSize {
-    pub dpi_factor: f64,
-    pub swapchain: SharedSwapchain,
+/// Auxiliary communication channel, besides stdin (only on Linux).
+#[cfg(target_os = "linux")]
+pub mod aux_chan {
+    use super::*;
+    use crate::os::linux::ipc::{self as linux_ipc, FixedSizeEncoding};
+    use std::{io, os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd}};
+
+    // HACK(eddyb) `io::Error::other` stabilization is too recent.
+    fn io_error_other(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+        io::Error::new(io::ErrorKind::Other, error)
+    }
+
+    // Host->Client and Client->Host message types.
+    pub type H2C = (PresentableImageId, OwnedFd);
+    pub type C2H = linux_ipc::Never;
+
+    impl FixedSizeEncoding<{u64::BYTE_LEN}, 0> for PresentableImageId {
+        fn encode(&self) -> ([u8; Self::BYTE_LEN], [std::os::fd::BorrowedFd<'_>; 0]) {
+            let (bytes, []) = self.as_u64().encode();
+            (bytes, [])
+        }
+        fn decode(bytes: [u8; Self::BYTE_LEN], fds: [OwnedFd; 0]) -> Self {
+            Self::from_u64(u64::decode(bytes, fds))
+        }
+    }
+
+    pub type HostEndpoint = linux_ipc::Channel<H2C, C2H>;
+    pub type ClientEndpoint = linux_ipc::Channel<C2H, H2C>;
+    pub fn make_host_and_client_endpoint_pair() -> io::Result<(HostEndpoint, ClientEndpoint)> {
+        linux_ipc::channel()
+    }
+
+    pub type InheritableClientEndpoint = linux_ipc::InheritableChannel<C2H, H2C>;
+    impl InheritableClientEndpoint {
+        pub fn extra_args_for_client_spawning(&self) -> [String; 1] {
+            [format!("--stdin-loop-aux-chan-fd={}", self.as_fd().as_raw_fd())]
+        }
+        pub fn from_process_args_in_client() -> io::Result<Self> {
+            for arg in std::env::args() {
+                if let Some(fd) = arg.strip_prefix("--stdin-loop-aux-chan-fd=") {
+                    let raw_fd = fd.parse().map_err(io_error_other)?;
+                    let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+                    return Ok(Self::from(owned_fd));
+                }
+            }
+            Err(io_error_other("missing --stdin-loop-aux-chan-fd argument"))
+        }
+    }
+
+    // HACK(eddyb) this type being serialized/deserialized doesn't really ensure
+    // anything in and of itself, it's only used here to guide correct usage
+    // through types - ideally host<->client (de)serialization itself would
+    // handle all the file descriptors passing necessary, but for now this helps.
+    #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+    pub struct AuxChannedImageFd {
+        // HACK(eddyb) non-`()` field working around deriving limitations.
+        _private: Option<u32>,
+    }
+    type PrDmaBufImg<FD> = PresentableImage<crate::os::linux::dma_buf::Image<FD>>;
+    impl PrDmaBufImg<OwnedFd> {
+        pub fn send_fds_to_aux_chan(self, host_endpoint: &HostEndpoint)
+            -> io::Result<PrDmaBufImg<AuxChannedImageFd>>
+        {
+            let Self { id, image } = self;
+            let mut plane_idx = 0;
+            let mut success = Ok(());
+            let image = image.planes_fd_map(|fd| {
+                assert_eq!(plane_idx, 0, "only images with one DMA-BUF plane are supported");
+                plane_idx += 1;
+                if success.is_ok() {
+                    success = host_endpoint.send((self.id, fd));
+                }
+                AuxChannedImageFd { _private: None }
+            });
+            success?;
+            Ok(PresentableImage { id, image })
+        }
+    }
+    impl PrDmaBufImg<AuxChannedImageFd> {
+        pub fn recv_fds_from_aux_chan(self, client_endpoint: &ClientEndpoint)
+            -> io::Result<PrDmaBufImg<OwnedFd>>
+        {
+            let Self { id, image } = self;
+            let mut plane_idx = 0;
+            let mut success = Ok(());
+            let image = image.planes_fd_map(|_| {
+                assert_eq!(plane_idx, 0, "only images with one DMA-BUF plane are supported");
+                plane_idx += 1;
+
+                client_endpoint.recv().and_then(|(recv_id, recv_fd)|
+                if recv_id != id {
+                    Err(io_error_other(format!(
+                        "recv_fds_from_aux_chan: ID mismatch \
+                         (expected {id:?}, got {recv_id:?}",
+                    )))
+                } else {
+                    Ok(recv_fd)
+                }).map_err(|err| if success.is_ok() { success = Err(err); })
+            });
+            success?;
+            Ok(PresentableImage {
+                id,
+                image: image.planes_fd_map(Result::unwrap)
+            })
+        }
+    }
+}
+#[cfg(not(target_os = "linux"))]
+pub mod aux_chan {
+    use std::io;
+
+    #[derive(Clone)]
+    pub struct HostEndpoint { _private: () }
+    pub struct ClientEndpoint { _private: () }
+    pub fn make_host_and_client_endpoint_pair() -> io::Result<(HostEndpoint, ClientEndpoint)> {
+        Ok((HostEndpoint { _private: () }, ClientEndpoint { _private: () }))
+    }
+
+    pub struct InheritableClientEndpoint(ClientEndpoint);
+    impl ClientEndpoint {
+        pub fn into_child_process_inheritable(
+            self,
+        ) -> io::Result<InheritableClientEndpoint> {
+            Ok(InheritableClientEndpoint(self))
+        }
+    }
+    impl InheritableClientEndpoint {
+        pub fn into_uninheritable(self) -> io::Result<ClientEndpoint> {
+            Ok(self.0)
+        }
+        pub fn extra_args_for_client_spawning(&self) -> [String; 0] {
+            []
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
@@ -242,7 +388,14 @@ impl From<StdinScroll> for ScrollEvent {
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum HostToStdin{
-    WindowSize(StdinWindowSize),
+    Swapchain(SharedSwapchain),
+    WindowGeomChange {
+        dpi_factor: f64,
+        // HACK(eddyb) `DVec` (like `WindowGeom`'s `inner_size` field) can't
+        // be used here due to it not implementing (de)serialization traits.
+        inner_width: f64,
+        inner_height: f64,
+    },
     Tick{
         buffer_id: u64,
         frame: u64,
@@ -260,12 +413,23 @@ pub enum HostToStdin{
     },
 }
 
+/// After a successful client-side draw, all the host needs to know, so it can
+/// present the result, is the swapchain image used, and the sub-area within
+/// that image that was being used to draw the entire client window (with the
+/// whole allocated area rarely used, except just before needing a new swapchain).
+#[derive(Copy, Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct PresentableDraw {
+    pub target_id: PresentableImageId,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost {
     ReadyToStart,
     SetCursor(MouseCursor),
     // the client is done drawing, and the texture is completely updated
-    DrawCompleteAndFlip(PresentableImageId),
+    DrawCompleteAndFlip(PresentableDraw)
 }
 
 impl StdinToHost{

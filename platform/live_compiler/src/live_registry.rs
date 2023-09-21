@@ -529,40 +529,45 @@ impl LiveRegistry {
     }
     
     pub fn process_file_changes(&mut self, changes: Vec<LiveFileChange>, errors:&mut Vec<LiveError >){
+        let mut any_changes = false;
         for change in changes {
-            let file_id = self.file_name_to_file_id(&change.file_name).unwrap();
-            let module_id = self.file_id_to_module_id(file_id).unwrap();
-            let live_file = self.file_id_to_file_mut(file_id);
-            match Self::tokenize_from_str_live_design(&change.content, TextPos::default(), file_id, None) {
-                Err(msg) => errors.push(msg), //panic!("Lex error {}", msg),
-                Ok(new_tokens) => {
-                    let mut parser = LiveParser::new(&new_tokens, &live_file.live_type_infos, file_id);
-                    match parser.parse_live_document() {
-                        Err(msg) => {
-                            errors.push(msg);
-                        },
-                        Ok(mut ld) => { // only swap it out when it parses
-                            for node in &mut ld.nodes {
-                                match &mut node.value {
-                                    LiveValue::Import(live_import) => {
-                                        if live_import.module_id.0 == live_id!(crate) { // patch up crate refs
-                                           live_import.module_id.0 = module_id.0
-                                        };
+            if let Some(file_id) = self.file_name_to_file_id(&change.file_name){
+                let module_id = self.file_id_to_module_id(file_id).unwrap();
+                let live_file = self.file_id_to_file_mut(file_id);
+                match Self::tokenize_from_str_live_design(&change.content, TextPos::default(), file_id, None) {
+                    Err(msg) => errors.push(msg), //panic!("Lex error {}", msg),
+                    Ok(new_tokens) => {
+                        let mut parser = LiveParser::new(&new_tokens, &live_file.live_type_infos, file_id);
+                        match parser.parse_live_document() {
+                            Err(msg) => {
+                                errors.push(msg);
+                            },
+                            Ok(mut ld) => { // only swap it out when it parses
+                                for node in &mut ld.nodes {
+                                    match &mut node.value {
+                                        LiveValue::Import(live_import) => {
+                                            if live_import.module_id.0 == live_id!(crate) { // patch up crate refs
+                                               live_import.module_id.0 = module_id.0
+                                            };
+                                        }
+                                        _=>()
                                     }
-                                    _=>()
                                 }
+                                any_changes = true;
+                                ld.tokens = new_tokens;
+                                live_file.original = ld;
+                                live_file.reexpand = true;
+                                live_file.generation.next_gen();
                             }
-                            ld.tokens = new_tokens;
-                            live_file.original = ld;
-                            live_file.reexpand = true;
-                            live_file.generation.next_gen();
-                        }
-                    };
+                        };
+                    }
                 }
-            };
+            }
         }
-        // try to re-expand
-        self.expand_all_documents(errors);
+        if any_changes{
+            // try to re-expand
+            self.expand_all_documents(errors);
+        }
     }
 
     pub fn register_live_file(

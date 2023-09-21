@@ -89,6 +89,7 @@ impl BuildConnection {
         let path = shared.read().unwrap().path.clone();
         
         let args: Vec<String> = match &what.target {
+            #[cfg(not(target_os="windows"))]
             BuildTarget::ReleaseStudio => vec![
                 "run".into(),
                 "nightly".into(),
@@ -102,6 +103,7 @@ impl BuildConnection {
                 "--message-format=json".into(),
                 "--stdin-loop".into(),
             ],
+            #[cfg(not(target_os="windows"))]
             BuildTarget::DebugStudio => vec![
                 "run".into(),
                 "nightly".into(),
@@ -216,9 +218,18 @@ impl BuildConnection {
             BuildServerProcess {
                 cmd_id,
                 stdin_sender: Mutex::new(process.stdin_sender.clone()),
-                line_sender: Mutex::new(process.line_sender.clone())
+                line_sender: Mutex::new(process.line_sender.clone()),
             }
         );
+
+        // HACK(eddyb) do this first, as there is no way to actually send the
+        // initial swapchain to the client at all, unless we have this first
+        // (thankfully sending this before we ever read from the client means
+        // it will definitely arrive before C->H ReadyToStart triggers anything).
+        msg_sender.send_message(cmd_id.wrap_msg(
+            LogItem::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
+        ));
+
         let mut stderr_state = StdErrState::First;
         let stdin_sender = process.stdin_sender.clone();
         std::thread::spawn(move || {
@@ -350,7 +361,7 @@ pub trait MsgSender: Send {
         );
     }
     
-    
+
     fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogItemLevel, file_name: String, start: Position, length: Length, msg: String) {
         self.send_message(
             cmd_id.wrap_msg(LogItem::Location(LogItemLocation {

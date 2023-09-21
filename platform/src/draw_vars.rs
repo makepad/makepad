@@ -134,22 +134,7 @@ impl DrawVars {
     pub fn empty_texture(&mut self, slot: usize) {
         self.texture_slots[slot] = None;
     }
-    
-    pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            for input in &sh.mapping.user_uniforms.inputs {
-                let offset = input.offset;
-                let slots = input.slots;
-                if input.id == uniform[0] {
-                    for i in 0..value.len().min(slots) {
-                        self.user_uniforms[offset + i] = value[i]
-                    }
-                }
-            }
-        }
-    }
-    
+
     pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
@@ -291,7 +276,20 @@ impl DrawVars {
                     cx.draw_shaders.error_fingerprints.push(fingerprint);
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
-                    log!("Error {}", err);
+                    if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                        crate::makepad_error_log::log_with_type(
+                            &err.file,
+                            err.span.start.line+1,
+                            err.span.start.column+2,
+                            err.span.end.line+1,
+                            err.span.end.column+2,
+                            &err.message,
+                            LogType::Error
+                        );
+                    }
+                    else{
+                        log!("Error {}", err);
+                    }
                 }
                 Ok(()) => {
                     // OK! SO the shader parsed
@@ -476,14 +474,14 @@ impl DrawVars {
         }
     }
     
-    pub fn get_instance(&self, cx: &mut Cx, id: LiveId, value: &mut [f32]){
+    pub fn get_instance(&self, cx: &mut Cx, inst: &[LiveId], value: &mut [f32]){
         if let Some(draw_shader) = self.draw_shader {
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
             let self_slice = self.as_slice();
             for input in &sh.mapping.instances.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
-                if input.id == id {
+                if input.id == inst[0] {
                     for i in 0..value.len().min(slots) {
                         value[i] = self_slice[offset + i]
                     }
@@ -492,13 +490,28 @@ impl DrawVars {
         }
     }
     
-    pub fn get_uniform(&self, cx: &mut Cx, id: LiveId, value: &mut [f32]){
+    pub fn set_var_instance(&mut self, cx:&Cx, instance: &[LiveId], value: &[f32]) {
+        if let Some(draw_shader) = self.draw_shader {
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            for input in &sh.mapping.var_instances.inputs {
+                let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
+                let slots = input.slots;
+                if input.id == instance[0] {
+                    for i in 0..value.len().min(slots) {
+                        self.var_instances[offset + i] = value[i];
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn get_uniform(&self, cx: &mut Cx, uniform: &[LiveId], value: &mut [f32]){
         if let Some(draw_shader) = self.draw_shader {
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
             for input in &sh.mapping.user_uniforms.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
-                if input.id == id {
+                if input.id == uniform[0] {
                     for i in 0..value.len().min(slots) {
                         value[i] = self.user_uniforms[offset + i];
                     }
@@ -507,6 +520,22 @@ impl DrawVars {
         }
     }
     
+    pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
+        if let Some(draw_shader) = self.draw_shader {
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            for input in &sh.mapping.user_uniforms.inputs {
+                let offset = input.offset;
+                let slots = input.slots;
+                if input.id == uniform[0] {
+                    for i in 0..value.len().min(slots) {
+                        self.user_uniforms[offset + i] = value[i]
+                    }
+                }
+            }
+        }
+    }
+    
+        
     pub fn init_slicer(
         &mut self,
         cx: &mut Cx,
