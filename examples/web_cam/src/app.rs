@@ -103,7 +103,8 @@ impl AppMain for App {
                 self.start_inputs(cx);
             }
             Event::VideoInputs(devices) => {
-                let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 3840, 2160, 60.0);
+                log!("{:?}", devices);
+                let input = devices.find_highest_at_res(devices.find_device("FaceTime HD Camera"), 1920, 1080, 30.0);
                 cx.use_video_input(&input);
             }
             _ => ()
