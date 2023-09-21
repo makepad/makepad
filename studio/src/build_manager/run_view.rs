@@ -93,7 +93,7 @@ impl RunView {
         });
         if self.redraw_countdown>0 {
             self.redraw_countdown -= 1;
-            //self.redraw(cx);
+            self.redraw(cx);
             self.tick = cx.new_next_frame();
         }
         else {
@@ -105,9 +105,11 @@ impl RunView {
         
         self.animator_handle_event(cx, event);
         if let Some(te) = self.timer.is_event(event) {
+            #[cfg(not(target_os="windows"))]
             self.run_tick(cx, te.time.unwrap_or(0.0), run_view_id, manager)
         }
         if let Some(te) = self.tick.is_event(event) {
+            #[cfg(not(target_os="windows"))]
             self.run_tick(cx, te.time, run_view_id, manager)
         }
     }
@@ -218,7 +220,8 @@ impl RunView {
                         // what lets us accept draws is their target `Texture`s.
                         try_present_through(&v.last_swapchain_with_completed_draws);
                     }
-                    self.redraw(cx);
+                    #[cfg(target_os="windows")]
+                    self.run_tick(cx, te.time, run_view_id, manager)
                 }
             }
         }
