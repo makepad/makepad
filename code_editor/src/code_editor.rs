@@ -160,7 +160,11 @@ live_design!{
         }
         
         draw_cursor_bg: {
-            color: #4447,
+            instance focus: 0.0
+            fn pixel(self) -> vec4 {
+                let color = mix(#0000,#4447,self.focus);
+                return vec4(color.rgb*color.a, color.a);
+            }
         }
         
         animator: {
@@ -185,6 +189,7 @@ live_design!{
                     from: {all: Forward {duration:0.05}}
                     apply: {
                         draw_cursor: {focus:0.0}
+                        draw_cursor_bg: {focus:0.0}
                         draw_selection: {focus:0.0}
                     }
                 }
@@ -192,6 +197,7 @@ live_design!{
                     from: {all: Forward {duration: 0.05}}
                     apply: {
                         draw_cursor: {focus:1.0}
+                        draw_cursor_bg: {focus:1.0}
                         draw_selection: {focus:1.0}
                     }
                 }
