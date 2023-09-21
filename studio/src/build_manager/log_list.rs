@@ -280,8 +280,8 @@ impl BuildManager {
                         ret.push(LogListAction::JumpToError{
                             file_name:msg.file_name.clone(), 
                             start:Position{
-                                line_index: msg.start.line_index - 1,
-                                byte_index: msg.start.byte_index - 1,
+                                line_index: msg.start.line_index.max(1) - 1,
+                                byte_index: msg.start.byte_index.max(1) - 1,
                             },
                             length:msg.length
                         })
