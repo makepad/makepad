@@ -26,14 +26,14 @@ pub fn rustup_toolchain_install() -> Result<(), String> {
     shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "component",
         "add",
-        "rust-std"
+        "rust-std",
         "--toolchain",
         "nightly",
     ]) ?
     shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "component",
         "add",
-        "rust-src"
+        "rust-src",
         "--toolchain",
         "nightly",
     ]) ?;
