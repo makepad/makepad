@@ -51,6 +51,7 @@ live_design!{
     }
 }
 
+use std::time::Instant;
 
 #[derive(Live)]
 pub struct RunView {
@@ -63,6 +64,7 @@ pub struct RunView {
     #[rust] last_size: DVec2,
     #[rust] tick: NextFrame,
     #[rust] timer: Timer,
+    #[rust(Instant::now())] time_start:Instant,
     #[rust(100usize)] redraw_countdown: usize,
     #[rust] time: f64,
     #[rust] frame: u64,
@@ -83,7 +85,10 @@ impl LiveHook for RunView {
 }
 
 impl RunView {
-    
+    pub fn time_now(&self) -> f64 {
+        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
+        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+    }
     pub fn run_tick(&mut self, cx: &mut Cx, time: f64, run_view_id: LiveId, manager: &mut BuildManager) {
         self.frame += 1;
         manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
@@ -221,7 +226,7 @@ impl RunView {
                         try_present_through(&v.last_swapchain_with_completed_draws);
                     }
                     #[cfg(target_os="windows")]
-                    self.run_tick(cx, te.time, run_view_id, manager)
+                    self.run_tick(cx, self.time_now(), run_view_id, manager)
                 }
             }
         }
