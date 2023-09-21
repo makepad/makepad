@@ -227,6 +227,12 @@ impl RunView {
         self.draw_app.redraw(cx);
     }
     
+    
+    pub fn resend_framebuffer(&mut self, cx: &mut Cx) {
+        self.last_size = dvec2(0.0,0.0);
+    }
+    
+    
     pub fn draw(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager) {
         
         // alright so here we draw em texturezs
