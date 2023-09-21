@@ -57,6 +57,9 @@ impl Swapchain<()> {
 }
 
 impl<I> Swapchain<I> {
+    pub fn get_image(&self, id: PresentableImageId) -> Option<&PresentableImage<I>> {
+        self.presentable_images.iter().find(|pi| pi.id == id)
+    }
     pub fn images_as_ref(&self) -> Swapchain<&I> {
         let Swapchain { width, height, ref presentable_images } = *self;
         let presentable_images = ref_array_to_array_of_refs(presentable_images)
