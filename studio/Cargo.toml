@@ -1,19 +1,19 @@
 [package]
 name = "makepad-studio"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad studio"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "WKhz3eZv4bsFIOxthPAjSF40a-c="
+metadata.makepad-auto-version = "Z--f4tIJEjAxr8FpHwkfLT043ME="
 
 [dependencies]
-makepad-widgets = {path="../widgets" , version="0.5.0"}
-makepad-code-editor = {path="../code_editor", version="0.5.0"}
-makepad-file-protocol = {path="./file_protocol", version="0.4.0"}
-makepad-file-server = {path="./file_server", version="0.4.0"}
+makepad-widgets = {path="../widgets" , version="0.6.0"}
+makepad-code-editor = {path="../code_editor", version="0.6.0"}
+makepad-file-protocol = {path="./file_protocol", version="0.5.0"}
+makepad-file-server = {path="./file_server", version="0.5.0"}
 makepad-shell = {path="../libs/shell" , version="0.4.0"}
 makepad-http = { path = "../libs/http", version = "0.4.0" } 
 
