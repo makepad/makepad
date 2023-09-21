@@ -484,6 +484,10 @@ impl CodeEditor {
         }
     }
     
+    pub fn set_cursor_and_scroll(&mut self, cx:&mut Cx, pos:Position, session: &mut Session){
+        
+    }
+    
     pub fn reset_font_size(&mut self) {
         self.draw_gutter.text_style.font_size = 9.0;
         self.draw_text.text_style.font_size = 9.0;
