@@ -24,6 +24,7 @@ pub struct FileSystem {
     pub file_client: FileClient,
     pub root_path: String,
     pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
+    pub path_to_file_node_id: HashMap<String, FileNodeId>,
     pub tab_id_to_file_node_id: HashMap<LiveId, FileNodeId>,
     pub tab_id_to_session: HashMap<LiveId, Session>,
     pub open_documents: HashMap<FileNodeId, OpenDoc>
@@ -65,8 +66,8 @@ impl FileSystem {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
-    pub fn path_from_file_id(&self, _path:&str)->Option<FileNodeId>{
-        None
+    pub fn path_to_file_node_id(&self, path:&str)->Option<FileNodeId>{
+        self.path_to_file_node_id.get(path).cloned()
     }
     
     pub fn get_session_mut(&mut self, tab_id: LiveId) -> Option<&mut Session> {
@@ -288,6 +289,8 @@ impl FileSystem {
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
         fn create_file_node(
             file_node_id: Option<FileNodeId>,
+            node_path: String,
+            path_to_file_id: &mut HashMap<String, FileNodeId>,
             file_nodes: &mut LiveIdMap<FileNodeId, FileNode>,
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
@@ -308,6 +311,13 @@ impl FileSystem {
                             name: entry.name.clone(),
                             file_node_id: create_file_node(
                                 None,
+                                if node_path.len()>0{
+                                    format!("{}/{}", node_path, entry.name.clone())
+                                }
+                                else{
+                                    format!("{}", entry.name.clone())
+                                },
+                                path_to_file_id,
                                 file_nodes,
                                 Some(FileEdge {
                                     name: entry.name,
@@ -321,16 +331,20 @@ impl FileSystem {
                     FileNodeData::File {..} => None,
                 },
             };
+            path_to_file_id.insert(node_path, file_node_id);
             file_nodes.insert(file_node_id, node);
             file_node_id
         }
         
         self.root_path = tree_data.root_path;
         
+        
         self.file_nodes.clear();
         
         create_file_node(
             Some(live_id!(root).into()),
+            "".to_string(),
+            &mut self.path_to_file_node_id,
             &mut self.file_nodes,
             None,
             tree_data.root,
