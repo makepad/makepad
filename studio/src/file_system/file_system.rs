@@ -76,6 +76,15 @@ impl FileSystem {
         self.path_to_file_node_id.get(path).cloned()
     }
     
+    pub fn file_node_id_to_tab_id(&self, file_node: FileNodeId)->Option<LiveId>{
+        for (tab, id) in &self.tab_id_to_file_node_id{
+            if *id == file_node{
+                return Some(*tab)
+            }
+        }
+        None
+    }
+    
     pub fn get_session_mut(&mut self, tab_id: LiveId) -> Option<&mut Session> {
         // lets see if we have a document yet
         if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
