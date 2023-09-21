@@ -13,12 +13,12 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::Texture,
+        texture::{Texture, TextureDesc, TextureFormat},
         live_traits::LiveNew,
         thread::Signal,
         os::{
             d3d11::D3d11Cx,
-            cx_stdin::{HostToStdin, StdinToHost, Swapchain},
+            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
@@ -38,8 +38,8 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
+        for &pass_id in &passes_todo {
+            match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     // only render to swapchain if swapchain exists
                     if let Some(swapchain) = swapchain {
@@ -50,38 +50,39 @@ impl Cx {
                             *present_index = (*present_index + 1) % swapchain.presentable_images.len();
                             
                             // render to swapchain
-                            self.draw_pass_to_texture(*pass_id, d3d11_cx, current_image.image.texture_id());
+                            self.draw_pass_to_texture(pass_id, d3d11_cx, current_image.image.texture_id());
+
+                            let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+                            let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                            let future_presentable_draw = PresentableDraw {
+                                target_id: current_image.id,
+                                width: (pass_rect.size.x * dpi_factor) as u32,
+                                height: (pass_rect.size.y * dpi_factor) as u32,
+                            };
                             
                             // start GPU event query
                             d3d11_cx.start_querying();
                             
                             // and inform event_loop to go poll GPU readiness
-                            self.os.new_frame_being_rendered = Some(current_image.id);
+                            self.os.new_frame_being_rendered = Some(future_presentable_draw);
                         }
                     }
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(pass_id, d3d11_cx);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(pass_id, d3d11_cx);
                 }
             }
         }
     }
     
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
-        // HACK(eddyb) there's no easy way (AFAICT) to make `stdin` non-blocking,
-        // and we want to be able to "see ahead" JSON messages, at the very least
-        // for catching up the client after a spam of `WindowSize`s from the host.
-        let swapchain_get_key32 = | swapchain: &Swapchain<_> | {
-            swapchain.presentable_images[0].id.as_u64() as u32
-        };
-        let latest_swapchain_key32 = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(!0));
+
         let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
         {
-            let latest_swapchain_key32 = latest_swapchain_key32.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(std::io::stdin().lock());
                 let mut line = String::new();
@@ -94,15 +95,6 @@ impl Cx {
                     // alright lets put the line in a json parser
                     match HostToStdin::deserialize_json(&line) {
                         Ok(msg) => {
-                            // Keep track of `WindowSize`s, because if we fall behind,
-                            // we end up with a backlog of useless outdated swapchains,
-                            // while not having any other way to determine they are.
-                            if let HostToStdin::WindowSize(ws) = &msg {
-                                latest_swapchain_key32.store(
-                                    swapchain_get_key32(&ws.swapchain),
-                                    std::sync::atomic::Ordering::Release,
-                                );
-                            }
                             if json_msg_tx.send(msg).is_err() {
                                 break;
                             }
@@ -161,51 +153,25 @@ impl Cx {
                 HostToStdin::Scroll(e) => {
                     self.call_event_handler(&Event::Scroll(e.into()))
                 }
-                HostToStdin::WindowSize(ws) => {
-                    // Always update the geometry, as latter input events might
-                    // need it to be accurately handled, while output swapchains
-                    // do not have the same semantic effect when they're missing.
-                    let window = &mut self.windows[CxWindowPool::id_zero()];
-                    window.window_geom = WindowGeom {
-                        dpi_factor: ws.dpi_factor,
-                        inner_size: dvec2(ws.swapchain.width as f64, ws.swapchain.height as f64) / ws.dpi_factor,
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
+                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                        dpi_factor,
+                        inner_size: dvec2(inner_width, inner_height),
                         ..Default::default()
                     };
-                    
-                    // We could only have gotten to this point iff at some point
-                    // `swapchain_get_key32(&ws.swapchain)` had been stored into
-                    // `latest_swapchain_key32` - and if that's *not* anymore the
-                    // current value, a newer `WindowSize` was therefore observed,
-                    // which implies the host will ignore any attempt to present
-                    // on this swapchain (as it has lost all track of its backing
-                    // GPU memory etc.), and rendering on it at all is wasteful.
-                    /*let key32 = swapchain_get_key32(&ws.swapchain);
-                    let outdated_swapchain =
-                    skip_outdated_swapchains_always
-                        && key32 != latest_swapchain_key32.load(std::sync::atomic::Ordering::Acquire)
-                        || skip_outdated_swapchains_batch
-                        && key32 != latest_swapchain_key32_in_batch;
-                    if outdated_swapchain {
-                        swapchain = None;
-                        resizes_skipped += 1;
-                        let npot = resizes_skipped.next_power_of_two();
-                        if
-                        (3..16).contains(&resizes_skipped)
-                            || resizes_skipped >= 16 &&
-                        (resizes_skipped == npot || resizes_skipped == npot * 3 / 2)
-                        {
-                            error!("!!! {resizes_skipped} `WindowSize`s skipped in a row !!!");
-                        }
-                        continue;
-                    }
-                    resizes_skipped = 0;*/
-                    
                     self.redraw_all();
-                    
-                    let new_swapchain = ws.swapchain.images_map( | _, handle | {
+                }
+                HostToStdin::Swapchain(new_swapchain) => {
+                    let new_swapchain = new_swapchain.images_map(|id, handle| {
                         let handle = HANDLE(handle as isize);
                         
                         let texture = Texture::new(self);
+                        let desc = TextureDesc {
+                            format: TextureFormat::SharedBGRA(id),
+                            width: Some(new_swapchain.alloc_width as usize),
+                            height: Some(new_swapchain.alloc_height as usize),
+                        };
+                        texture.set_desc(self, desc);
                         self.textures[texture.texture_id()]
                             .os.update_from_shared_handle(d3d11_cx, handle);
                         texture
@@ -215,6 +181,7 @@ impl Cx {
                     // reset present_index
                     present_index = 0;
                     
+                    self.redraw_all();
                     self.stdin_handle_platform_ops(Some(swapchain), present_index);
                 }
                 HostToStdin::Tick {frame: _, time, ..} => if swapchain.is_some() {
@@ -249,9 +216,9 @@ impl Cx {
                     
                     
                     // check if GPU is ready to flip frames
-                    if let Some(rendered_image_id) = self.os.new_frame_being_rendered {
+                    if let Some(presentable_draw) = self.os.new_frame_being_rendered {
                         if d3d11_cx.is_gpu_done() {
-                            let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(rendered_image_id).to_json().as_bytes());
+                            let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
                             self.os.new_frame_being_rendered = None;
                         }
                     }
