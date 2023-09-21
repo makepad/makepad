@@ -1,13 +1,13 @@
 [package]
 name = "makepad-file-protocol"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad file protocol"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "VZ5vYXKbN_2vn1pB3o5jiLIAJXc="
+metadata.makepad-auto-version = "Su7rRY-U0fRX8f5tyYCXxK7dubk="
 
 [dependencies]
 makepad-live-id = { path = "../../libs/live_id", version = "0.4.0"}

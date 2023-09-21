@@ -482,6 +482,14 @@ impl Dock {
         }
     }
     
+    
+    fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name:String) {
+        if let Some(DockItem::Tab{name, ..}) = self.dock_items.get_mut(&tab_id){
+            *name = new_name;
+            self.redraw_tab(cx, tab_id);
+        }
+    }
+    
     fn redraw_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
@@ -1056,6 +1064,13 @@ impl DockRef {
             dock.create_tab(cx, parent, item, kind, name, closable);
         }
     }
+    
+    pub fn set_tab_title(&self, cx: &mut Cx, tab:LiveId, title:String) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.set_tab_title(cx, tab, title);
+        }
+    }
+    
     
     pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<LiveId> {
         if let Some(mut dock) = self.borrow_mut() {

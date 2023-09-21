@@ -14,9 +14,10 @@ live_design!{
             texture tex: texture2d
             instance recompiling: 0.0
             instance started: 0.0
+            instance tex_scale: vec2(0.0, 0.0),
             fn pixel(self) -> vec4 {
                 //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
-                let fb = sample2d_rt(self.tex, self.pos)
+                let fb = sample2d_rt(self.tex, self.pos * self.tex_scale)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }
@@ -56,15 +57,16 @@ pub struct RunView {
     #[walk] walk: Walk,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[animator] animator: Animator,
+    #[live] tex_scale: Vec2,
     #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
-    #[rust] last_size: (u32, u32),
+    #[rust] last_size: DVec2,
     #[rust] tick: NextFrame,
     #[rust] timer: Timer,
     #[rust(100usize)] redraw_countdown: usize,
     #[rust] time: f64,
     #[rust] frame: u64,
-    #[rust] started: bool
+    #[rust] started: bool,
 }
 
 
@@ -182,22 +184,40 @@ impl RunView {
                 self.last_size = Default::default();
                 self.redraw(cx);
             }
-            &StdinToHost::DrawCompleteAndFlip(drawn_presentable_id) => {
+            &StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
                 if let Some(v) = manager.active.builds.values_mut().find(|v| v.run_view_id == run_view_id) {
-                    for swapchain in &v.swapchain_history{
-                        if let Some(swapchain) = swapchain {
-                            if let Some(pi) = swapchain.presentable_images.iter().find(|pi| pi.id == drawn_presentable_id) {
-                                if !self.started{
-                                    self.started = true;
-                                    self.animator_play(cx, id!(started.on));
-                                }
-                                self.redraw_countdown = 20;
-                                v.last_presented_id.set(Some(pi.id));
-                                self.draw_app.set_texture(0, &pi.image);
-                            }
+                    // Only allow presenting images in the current host swapchain
+                    // (or the previous one, before any draws on the current one),
+                    // and look them up by their unique IDs, to avoid rendering
+                    // different textures than the ones the client just drew to.
+                    let mut try_present_through = |swapchain: &Option<Swapchain<Texture>>| {
+                        let swapchain = swapchain.as_ref()?;
+                        let drawn = swapchain.get_image(presentable_draw.target_id)?;
+                        self.draw_app.set_texture(0, &drawn.image);
+                        self.draw_app.draw_vars.set_var_instance(cx, id!(tex_scale), &[
+                            (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
+                            (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
+                        ]);
+
+                        if !self.started {
+                            self.started = true;
+                            self.animator_play(cx, id!(started.on));
                         }
+                        self.redraw_countdown = 20;
+
+                        Some(())
+                    };
+
+                    if try_present_through(&v.swapchain).is_some() {
+                        // The client is now drawing to the current swapchain,
+                        // we can discard any previous one we were stashing.
+                        v.last_swapchain_with_completed_draws = None;
+                    } else {
+                        // New draws to a previous swapchain are fine, just means
+                        // the client hasn't yet drawn on the current swapchain,
+                        // what lets us accept draws is their target `Texture`s.
+                        try_present_through(&v.last_swapchain_with_completed_draws);
                     }
-                    //}
                 }
             }
         }
@@ -206,6 +226,12 @@ impl RunView {
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.draw_app.redraw(cx);
     }
+    
+    
+    pub fn resend_framebuffer(&mut self, _cx: &mut Cx) {
+        self.last_size = dvec2(0.0,0.0);
+    }
+    
     
     pub fn draw(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager) {
         
@@ -216,37 +242,101 @@ impl RunView {
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
 
-        if let Some(v) = manager.active.builds.values_mut().find(|v| v.run_view_id == run_view_id) {
-            let new_size = (
-                ((rect.size.x * dpi_factor) as u32).max(1),
-                ((rect.size.y * dpi_factor) as u32).max(1),
-            );
-            if new_size != self.last_size {
-                self.last_size = new_size;
-                self.redraw_countdown = 20;
+        if self.last_size != rect.size {
+            self.last_size = rect.size;
+            self.redraw_countdown = 20;
 
+            // FIXME(eddyb) there's no type or naming scheme that tells apart
+            // DPI-scaled and non-DPI-scaled values (other than float-vs-int).
+            let DVec2 { x: inner_width, y: inner_height } = self.last_size;
 
-                // lets make a new swapchain
-                let mut swapchain = Swapchain::new(0, 0).images_map(|_, ()| Texture::new(cx));
-                // Resize the swapchain and prepare its images for sharing.
-                (swapchain.width, swapchain.height) = new_size;
-                let shared_swapchain = swapchain.images_as_ref().images_map(|id, texture| {
-                    texture.set_desc(cx, TextureDesc {
-                        format: TextureFormat::SharedBGRA(id),
-                        width: Some(swapchain.width as usize),
-                        height: Some(swapchain.height as usize),
-                    });
-                    cx.get_shared_presentable_image_os_handle(&texture)
+            // Try to only send the new geometry information to the client
+            // most of the time, letting it draw on its existing swapchain,
+            // and only replace the swapchain when a larger one is needed.
+            manager.send_host_to_stdin(run_view_id, HostToStdin::WindowGeomChange {
+                dpi_factor,
+                inner_width,
+                inner_height,
+            });
+
+            let min_width = ((inner_width * dpi_factor).ceil() as u32).max(1);
+            let min_height = ((inner_height * dpi_factor).ceil() as u32).max(1);
+            let active_build_needs_new_swapchain = manager.active.builds.values_mut()
+                .find(|v| v.run_view_id == run_view_id)
+                .filter(|v| v.aux_chan_host_endpoint.is_some())
+                .filter(|v| {
+                    v.swapchain.as_ref().map(|swapchain| {
+                        min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
+                    }).unwrap_or(true)
                 });
-                for i in 0..v.swapchain_history.len()-1{
-                    v.swapchain_history[i] = v.swapchain_history[i+1].take();
+            if let Some(v) = active_build_needs_new_swapchain {
+                // HACK(eddyb) there is no check that there were any draws on
+                // the current swapchain, but the absence of an older swapchain
+                // (i.e. `last_swapchain_with_completed_draws`) implies either
+                // zero draws so far, or a draw to the current one discarded it.
+                if v.last_swapchain_with_completed_draws.is_none() {
+                    v.last_swapchain_with_completed_draws = v.swapchain.take();
                 }
-                v.swapchain_history[v.swapchain_history.len()-1] = Some(swapchain);
 
-                manager.send_host_to_stdin(run_view_id, HostToStdin::WindowSize(StdinWindowSize {
-                    dpi_factor: dpi_factor,
-                    swapchain: shared_swapchain,
-                }));
+                // `Texture`s can be reused, but all `PresentableImageId`s must
+                // be regenerated, to tell apart swapchains when e.g. resizing
+                // constantly, so textures keep getting created and replaced.
+                if let Some(swapchain) = &mut v.swapchain {
+                    for pi in &mut swapchain.presentable_images {
+                        pi.id = cx_stdin::PresentableImageId::alloc();
+                    }
+                }
+                let swapchain = v.swapchain.get_or_insert_with(|| {
+                    Swapchain::new(0, 0).images_map(|_| Texture::new(cx))
+                });
+
+                // Update the swapchain allocated size, rounding it up to
+                // reduce the need for further swapchain recreation.
+                swapchain.alloc_width = min_width.max(64).next_power_of_two();
+                swapchain.alloc_height = min_height.max(64).next_power_of_two();
+
+                // Prepare a version of the swapchain for cross-process sharing.
+                let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
+                    pi.image.set_desc(cx, TextureDesc {
+                        format: TextureFormat::SharedBGRA(pi.id),
+                        width: Some(swapchain.alloc_width as usize),
+                        height: Some(swapchain.alloc_height as usize),
+                    });
+                    cx.share_texture_for_presentable_image(&pi.image)
+                });
+
+                let shared_swapchain =  {
+                    // FIMXE(eddyb) this could be platform-agnostic if the serializer
+                    // could drive the out-of-band UNIX domain socket messaging itself.
+                    #[cfg(target_os = "linux")] {
+                        shared_swapchain.images_map(|pi| {
+                            pi.send_fds_to_aux_chan(v.aux_chan_host_endpoint.as_ref().unwrap())
+                                .map(|pi| pi.image)
+                        })
+                    }
+                    #[cfg(not(target_os = "linux"))] {
+                        shared_swapchain.images_map(|pi| std::io::Result::Ok(pi.image))
+                    }
+                };
+
+                let mut any_errors = false;
+                for pi in &shared_swapchain.presentable_images {
+                    if let Err(err) = &pi.image {
+                        // FIXME(eddyb) is this recoverable or should the whole
+                        // client be restarted? desyncs can get really bad...
+                        error!("failed to send swapchain image to client: {:?}", err);
+                        any_errors = true;
+                    }
+                }
+
+                if !any_errors {
+                    // Inform the client about the new swapchain it *should* use
+                    // (using older swapchains isn't an error, but the draw calls
+                    // will either be noops, or write to orphaned GPU memory ranges).
+                    manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(
+                        shared_swapchain.images_map(|pi| pi.image.unwrap()),
+                    ));
+                }
             }
         }
         
