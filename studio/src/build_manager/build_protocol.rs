@@ -91,13 +91,13 @@ impl BuildTarget {
         }
     }
     
-    pub const RELEASE:u64 = 2;
-    pub const DEBUG:u64 = 3;
-    pub const PROFILER:u64 = 4;
-    pub const IOS_SIM:u64 = 5;
-    pub const IOS_DEVICE:u64 = 6;
-    pub const ANDROID:u64 = 7;
-    pub const WEBASSEMBLY:u64 = 8;
+    pub const RELEASE:u64 = 0;
+    pub const DEBUG:u64 = 1;
+    pub const PROFILER:u64 = 2;
+    pub const IOS_SIM:u64 = 3;
+    pub const IOS_DEVICE:u64 = 4;
+    pub const ANDROID:u64 = 5;
+    pub const WEBASSEMBLY:u64 = 6;
     pub fn len() -> u64 {7}
     pub fn name(idx: u64) -> &'static str {
         match idx {
