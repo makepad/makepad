@@ -22,7 +22,7 @@ live_design!{
     
     TEXT_SUB = {
         font_size: (FONT_SIZE_SUB),
-        font2: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
     
     TEXT_P = {
