@@ -7,7 +7,7 @@ use {
             build_protocol::*,
         },
         makepad_widgets::*,
-        makepad_code_editor::text::{Position},
+        makepad_code_editor::text::{Position, Length},
         makepad_widgets::portal_list::PortalList,
     },
     std::{
@@ -205,7 +205,7 @@ live_design!{
     
 }
 pub enum LogListAction {
-    JumpToError{file_name:String, start:Position},
+    JumpToError{file_name:String, start:Position, length:Length},
     None
 }
 
@@ -277,7 +277,14 @@ impl BuildManager {
                 // and lets jump to the location
                 match log_item {
                     LogItem::Location(msg) => {
-                        ret.push(LogListAction::JumpToError{file_name:msg.file_name.clone(), start:msg.start})
+                        ret.push(LogListAction::JumpToError{
+                            file_name:msg.file_name.clone(), 
+                            start:Position{
+                                line_index: msg.start.line_index - 1,
+                                byte_index: msg.start.byte_index - 1,
+                            },
+                            length:msg.length
+                        })
                     }
                     _ => ()
                 }
