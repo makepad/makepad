@@ -378,10 +378,26 @@ impl Cx {
         while unsafe { gl_sys::GetError() } != 0 {}
 
         unsafe {
-            let width = (pass_size.x * dpi_factor) as i32;
-            let height = (pass_size.y * dpi_factor) as i32;
-            gl_sys::Viewport(0, 0, width, height);
-            assert_eq!(gl_sys::GetError(), 0, "glTexImage2D(0, 0, {width}, {height}) failed");
+            let (x, mut y) = (0, 0);
+            let width = (pass_size.x * dpi_factor) as u32;
+            let height = (pass_size.y * dpi_factor) as u32;
+
+            // HACK(eddyb) to try and match DirectX and Metal conventions, we
+            // need the viewport to be placed on the other end of the Y axis.
+            if let [color_texture] = color_textures {
+                let cxtexture = &mut self.textures[color_texture.texture_id];
+                if cxtexture.os.gl_texture.is_some() {
+                    if let Some(alloc_height) = cxtexture.os.alloc_desc.height {
+                        let alloc_height = alloc_height as u32;
+                        if alloc_height > height {
+                            y = alloc_height - height;
+                        }
+                    }
+                }
+            }
+
+            gl_sys::Viewport(x as i32, y as i32, width as i32, height as i32);
+            assert_eq!(gl_sys::GetError(), 0, "glTexImage2D({x}, {y}, {width}, {height}) failed");
         }
 
         if clear_flags != 0 {
