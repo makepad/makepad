@@ -411,8 +411,9 @@ impl AppMain for App {
             if self.build_manager.handle_tab_close(tab_id){
                 log_list.redraw(cx);
                 run_list.redraw(cx);
-                self.file_system.ensure_unique_tab_names(cx, &dock);
             }
+            self.file_system.remove_tab(tab_id);
+            self.file_system.ensure_unique_tab_names(cx, &dock);
         }
         
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {

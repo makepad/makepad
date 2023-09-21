@@ -66,7 +66,12 @@ impl FileSystem {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
-    pub fn path_to_file_node_id(&self, path:&str)->Option<FileNodeId>{
+    pub fn remove_tab(&mut self, tab_id:LiveId){
+        self.tab_id_to_file_node_id.remove(&tab_id);
+        self.tab_id_to_session.remove(&tab_id);
+    }
+    
+    pub fn path_to_file_node_id(&self, path: &str) -> Option<FileNodeId> {
         self.path_to_file_node_id.get(path).cloned()
     }
     
@@ -212,21 +217,21 @@ impl FileSystem {
         }
     }
     
-    pub fn redraw_view_by_file_id(&mut self, cx:&mut Cx, id:FileNodeId, dock:&DockRef){
-        for (tab_id,file_id) in &self.tab_id_to_file_node_id{
-            if id == *file_id{
+    pub fn redraw_view_by_file_id(&mut self, cx: &mut Cx, id: FileNodeId, dock: &DockRef) {
+        for (tab_id, file_id) in &self.tab_id_to_file_node_id {
+            if id == *file_id {
                 dock.item(*tab_id).redraw(cx)
             }
         }
     }
     
-    pub fn redraw_all_views(&mut self, cx:&mut Cx, dock:&DockRef){
-        for (tab_id,_) in &self.tab_id_to_file_node_id{
+    pub fn redraw_all_views(&mut self, cx: &mut Cx, dock: &DockRef) {
+        for (tab_id, _) in &self.tab_id_to_file_node_id {
             dock.item(*tab_id).redraw(cx)
         }
     }
     
-    pub fn add_decoration(&mut self, file_id:FileNodeId, dec: Decoration) {
+    pub fn add_decoration(&mut self, file_id: FileNodeId, dec: Decoration) {
         // ok lets see if we have a document
         // ifnot, we create a new one
         match self.open_documents.get_mut(&file_id) {
@@ -278,11 +283,76 @@ impl FileSystem {
         path
     }
     
-    pub fn ensure_unique_tab_names(&self, _cx:&mut Cx, _dock: &DockRef) {
-       // alright so. what do we do.
-       // we first connect colliding names
-       // and then add more path elements till they dont
-       
+    pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
+        // alright so. what do we do.
+        // we first connect colliding names
+        // and then add more path elements till they dont
+        for (outer_tab_id, outer_id) in &self.tab_id_to_file_node_id {
+            for (inner_tab_id, inner_id) in &self.tab_id_to_file_node_id {
+                if outer_tab_id != inner_tab_id && outer_id == inner_id {
+                    // here we have multiple views
+                }
+            }
+        }
+        
+        let mut min_diff:HashMap<FileNodeId,usize> = HashMap::new();
+        let mut outer_path = Vec::new();
+        let mut inner_path = Vec::new();
+        for (_outer_tab_id, outer_file_id) in &self.tab_id_to_file_node_id {
+            let mut outer = &self.file_nodes[*outer_file_id];
+            outer_path.clear();
+            while let Some(edge) = &outer.parent_edge {
+                outer_path.push(&edge.name);
+                outer = &self.file_nodes[edge.file_node_id];
+            }
+            if min_diff.get(&outer_file_id).is_none(){
+                min_diff.insert(*outer_file_id,0);
+            }
+            for (_inner_tab_id, inner_file_id) in &self.tab_id_to_file_node_id {
+                let mut inner = &self.file_nodes[*inner_file_id];
+                inner_path.clear();
+                while let Some(edge) = &inner.parent_edge {
+                    inner_path.push(&edge.name);
+                    inner = &self.file_nodes[edge.file_node_id];
+                }
+                for i in 0..inner_path.len().min(outer_path.len()){
+                    if inner_path[i] != outer_path[i]{
+                        // store the min depth at which these ones are different
+                        if let Some(min) = min_diff.get_mut(&inner_file_id){
+                            *min = (*min).max(i);
+                        }
+                        else{
+                            min_diff.insert(*inner_file_id, i);
+                        }
+                        if let Some(min) = min_diff.get_mut(&outer_file_id){
+                            *min = (*min).max(i);
+                        }
+                        else{
+                            min_diff.insert(*outer_file_id, i);
+                        }
+                    }
+                }
+            }
+        }
+        // now loop over the tabs
+        for (tab_id, file_id) in &self.tab_id_to_file_node_id {
+            if let Some(min) = min_diff.get(&file_id){
+                let mut inner = &self.file_nodes[*file_id];
+                inner_path.clear();
+                while let Some(edge) = &inner.parent_edge {
+                    inner_path.push(&edge.name);
+                    inner = &self.file_nodes[edge.file_node_id];
+                }
+                let mut name = String::new();
+                for i in (0..*min+1).rev(){
+                    if name.len()>0{
+                        name.push_str("/");
+                    }
+                    name.push_str(inner_path[i]);
+                }
+                dock.set_tab_title(cx, *tab_id, name);
+            }
+        }
     }
     
     
@@ -311,10 +381,10 @@ impl FileSystem {
                             name: entry.name.clone(),
                             file_node_id: create_file_node(
                                 None,
-                                if node_path.len()>0{
+                                if node_path.len()>0 {
                                     format!("{}/{}", node_path, entry.name.clone())
                                 }
-                                else{
+                                else {
                                     format!("{}", entry.name.clone())
                                 },
                                 path_to_file_id,
