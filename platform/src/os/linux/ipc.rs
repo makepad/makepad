@@ -169,6 +169,11 @@ mod sys {
 mod sys {
     #![allow(non_camel_case_types)]
 
+    // HACK(eddyb) `io::Error::other` stabilization is too recent.
+    fn io_error_other(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+        io::Error::new(io::ErrorKind::Other, error)
+    }
+
     use super::*;
     use std::{
         ffi::{c_int, c_void},
@@ -251,7 +256,7 @@ mod sys {
             return Err(io::Error::last_os_error());
         }
         if written_len as usize != bytes.len() {
-            return Err(io::Error::other(format!(
+            return Err(io_error_other(format!(
                 "partial write (only {written_len} out of {})",
                 bytes.len()
             )));
@@ -288,13 +293,13 @@ mod sys {
         // but for now this is not particularly a notable surface of attack.
 
         if read_len as usize != expected_len {
-            return Err(io::Error::other(format!(
+            return Err(io_error_other(format!(
                 "partial read: only {read_len} out of {expected_len}"
             )));
         }
 
         if msg.msg_controllen != expected_msg_controllen {
-            return Err(io::Error::other(format!(
+            return Err(io_error_other(format!(
                 "recvmsg msg_controllen mismatch: got {}, expected {expected_msg_controllen}",
                 msg.msg_controllen,
             )));
@@ -302,18 +307,18 @@ mod sys {
 
         let cmsg = unsafe { cmsg_buf.assume_init() };
         if cmsg.header.cmsg_len != expected_cmsg_len {
-            return Err(io::Error::other(format!(
+            return Err(io_error_other(format!(
                 "recvmsg cmsg_len mismatch: got {}, expected {expected_cmsg_len}",
                 cmsg.header.cmsg_len
             )));
         }
 
         if (cmsg.header.cmsg_level, cmsg.header.cmsg_type) != (SOL_SOCKET, SCM_RIGHTS) {
-            return Err(io::Error::other(format!("unsupported non-SCM_RIGHTS CMSG")));
+            return Err(io_error_other(format!("unsupported non-SCM_RIGHTS CMSG")));
         }
 
         if cmsg.fds.iter().any(|fd| fd.is_none()) {
-            return Err(io::Error::other(format!("recvmsg got invalid (-1) fds")));
+            return Err(io_error_other(format!("recvmsg got invalid (-1) fds")));
         }
 
         Ok(cmsg.fds.map(Option::unwrap))
