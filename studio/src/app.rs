@@ -427,7 +427,28 @@ impl AppMain for App {
         for (item_id, item) in log_list.items_with_actions(&actions) {
             for action in self.build_manager.handle_log_list(cx, &log_list, item_id, item, &actions) {
                 match action {
-                    LogListAction::JumpToError => {
+                    LogListAction::JumpToError{file_name, start} => {
+                        // lets find a tab if we have it otherwise open it
+                        if let Some(file_id) = self.file_system.path_to_file_node_id(&file_name) {
+                            if let Some(tab_id) = self.file_system.file_node_id_to_tab_id(file_id){
+                                dock.select_tab(cx, tab_id);
+                                // ok lets scroll into view
+                                if let Some(mut editor) = dock.item(tab_id).as_code_editor().borrow_mut() {
+                                    if let Some(session) = self.file_system.get_session_mut(tab_id) {
+                                        editor.set_cursor_and_scroll(cx, start, session);
+                                    }
+                                }
+                            }
+                            else{
+                                // lets open the editor
+                                let tab_id = LiveId::unique();
+                                self.file_system.request_open_file(tab_id, file_id);
+                                // lets add a file tab 'somewhere'
+                                dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
+                                // lets scan the entire doc for duplicates
+                                self.file_system.ensure_unique_tab_names(cx, &dock)
+                            }
+                        }
                     }
                     _ => ()
                 }
