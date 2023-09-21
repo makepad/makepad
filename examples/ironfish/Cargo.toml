@@ -1,13 +1,13 @@
 [package]
 name = "makepad-example-ironfish"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad ironfish example"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "q3iXctaUzz9aepXObs23m5TNlOM="
+metadata.makepad-auto-version = "SERZftlt_guLUnOKc-t4SNqvbkg="
 
 [dependencies]
 makepad-synth-ironfish = { path = "./synth_ironfish", version = "0.6.0" }
