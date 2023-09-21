@@ -14,7 +14,7 @@ live_design!{
                 <SlidesView> {
                     
                     <SlideChapter> {
-                        title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
+                        title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs For Rust"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
