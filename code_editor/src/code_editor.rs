@@ -116,7 +116,7 @@ live_design!{
         margin: 0,
         scroll_bars: <ScrollBars> {}
         draw_bg: {
-            draw_depth: 0.0,
+           // draw_depth: 0.0,
             color: #2a
         }
         draw_gutter: {
@@ -138,18 +138,18 @@ live_design!{
             }
         }
         draw_indent_guide: {
-            draw_depth: 1.0,
+           // draw_depth: 1.0,
             color: #5,
         }
         draw_decoration: {
-            draw_depth: 2.0,
+          //  draw_depth: 2.0,
         }
         draw_selection: {
-            draw_depth: 3.0,
+           // draw_depth: 3.0,
         }
         
         draw_cursor: {
-            draw_depth: 4.0,
+          //  draw_depth: 4.0,
             instance blink: 0.0
             instance focus: 0.0
             fn pixel(self) -> vec4 {
@@ -157,6 +157,10 @@ live_design!{
                 return vec4(color.rgb*color.a, color.a);
             }
             color: #C0C0C0,
+        }
+        
+        draw_cursor_bg: {
+            color: #4447,
         }
         
         animator: {
@@ -228,6 +232,8 @@ pub struct CodeEditor {
     draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
+    #[live]
+    draw_cursor_bg: DrawColor,
     #[live]
     draw_bg: DrawColor,
     #[rust(KeepCursorInView::Off)]
@@ -447,11 +453,12 @@ impl CodeEditor {
         );
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        
         self.draw_gutter(cx, session);
+        self.draw_selection_layer(cx, session);
         self.draw_text_layer(cx, session);
         self.draw_indent_guide_layer(cx, session);
         self.draw_decoration_layer(cx, session);
-        self.draw_selection_layer(cx, session);
         
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
@@ -1573,6 +1580,18 @@ impl<'a> DrawSelectionLayer<'a> {
         column_index: usize,
     ) {
         let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+        
+        self.code_editor.draw_cursor_bg.draw_abs(cx, Rect {
+                pos: DVec2 {
+                    x:self.code_editor.unscrolled_rect.pos.x, 
+                    y: (origin_y + y)*self.code_editor.cell_size.y+ self.code_editor.viewport_rect.pos.y
+                }, 
+                size: DVec2 {
+                    x: self.code_editor.unscrolled_rect.size.x,
+                    y: line.scale() *self.code_editor.cell_size.y,
+                },
+            });
+        
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
