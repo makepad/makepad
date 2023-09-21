@@ -484,10 +484,8 @@ impl DrawVars {
                 let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
                 let slots = input.slots;
                 if input.id == instance[0] {
-                    if input.id == instance[0] {
-                        for i in 0..value.len().min(slots) {
-                            self.var_instances[offset + i] = value[i];
-                        }
+                    for i in 0..value.len().min(slots) {
+                        self.var_instances[offset + i] = value[i];
                     }
                 }
             }
