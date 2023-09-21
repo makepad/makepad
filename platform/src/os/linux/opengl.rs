@@ -397,7 +397,7 @@ impl Cx {
             }
 
             gl_sys::Viewport(x as i32, y as i32, width as i32, height as i32);
-            assert_eq!(gl_sys::GetError(), 0, "glTexImage2D({x}, {y}, {width}, {height}) failed");
+            assert_eq!(gl_sys::GetError(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
         }
 
         if clear_flags != 0 {
@@ -832,9 +832,6 @@ pub struct CxOsTexture {
     pub height: u64,
     pub gl_texture: Option<u32>,
     pub gl_renderbuffer: Option<u32>,
-
-    #[cfg(target_os = "linux")]
-    pub dma_buf_exported_image: Option<Box<super::dma_buf::Image<std::os::fd::OwnedFd>>>,
 }
 
 impl CxOsTexture {

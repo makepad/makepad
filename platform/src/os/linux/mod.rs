@@ -12,6 +12,8 @@ pub mod opengl;
 
 #[cfg(not(target_os="android"))]
 pub mod dma_buf;
+#[cfg(not(target_os="android"))]
+pub mod ipc;
 
 #[cfg(not(target_os="android"))]
 pub mod alsa_sys;
