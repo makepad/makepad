@@ -427,7 +427,7 @@ impl AppMain for App {
         for (item_id, item) in log_list.items_with_actions(&actions) {
             for action in self.build_manager.handle_log_list(cx, &log_list, item_id, item, &actions) {
                 match action {
-                    LogListAction::JumpToError{file_name, start} => {
+                    LogListAction::JumpToError{file_name, start, length} => {
                         // lets find a tab if we have it otherwise open it
                         if let Some(file_id) = self.file_system.path_to_file_node_id(&file_name) {
                             if let Some(tab_id) = self.file_system.file_node_id_to_tab_id(file_id){
@@ -435,7 +435,8 @@ impl AppMain for App {
                                 // ok lets scroll into view
                                 if let Some(mut editor) = dock.item(tab_id).as_code_editor().borrow_mut() {
                                     if let Some(session) = self.file_system.get_session_mut(tab_id) {
-                                        editor.set_cursor_and_scroll(cx, start, session);
+                                        editor.set_cursor_and_scroll(cx, start, length, session);
+                                        editor.set_key_focus(cx);
                                     }
                                 }
                             }
