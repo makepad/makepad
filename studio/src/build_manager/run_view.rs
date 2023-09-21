@@ -98,6 +98,7 @@ impl RunView {
         });
         if self.redraw_countdown>0 {
             self.redraw_countdown -= 1;
+            #[cfg(not(target_os="windows"))]
             self.redraw(cx);
             self.tick = cx.new_next_frame();
         }
@@ -109,13 +110,11 @@ impl RunView {
     pub fn pump_event_loop(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
         
         self.animator_handle_event(cx, event);
-        if let Some(te) = self.timer.is_event(event) {
-            #[cfg(not(target_os="windows"))]
-            self.run_tick(cx, te.time.unwrap_or(0.0), run_view_id, manager)
+        if let Some(_) = self.timer.is_event(event) {
+            self.run_tick(cx, self.time_now(), run_view_id, manager)
         }
-        if let Some(te) = self.tick.is_event(event) {
-            #[cfg(not(target_os="windows"))]
-            self.run_tick(cx, te.time, run_view_id, manager)
+        if let Some(_) = self.tick.is_event(event) {
+            self.run_tick(cx, self.time_now(), run_view_id, manager)
         }
     }
     
@@ -225,8 +224,10 @@ impl RunView {
                         // what lets us accept draws is their target `Texture`s.
                         try_present_through(&v.last_swapchain_with_completed_draws);
                     }
-                    #[cfg(target_os="windows")]
-                    self.run_tick(cx, self.time_now(), run_view_id, manager)
+                    #[cfg(target_os="windows")]{
+                        self.run_tick(cx, self.time_now(), run_view_id, manager)
+                        self.redraw(cx);
+                    }
                 }
             }
         }
