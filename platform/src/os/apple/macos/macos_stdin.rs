@@ -17,7 +17,7 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::Texture,
+        texture::{Texture, TextureDesc, TextureFormat},
         live_traits::LiveNew,
         thread::Signal,
         os::{
@@ -28,7 +28,7 @@ use {
                 fetch_xpc_service_texture,
             },
             metal::{MetalCx, DrawPassMode},
-            cx_stdin::{HostToStdin, StdinToHost, Swapchain, PresentableImageId},
+            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
@@ -38,11 +38,11 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_send_draw_complete(presented_image_id: PresentableImageId) {
-        //log!("image {} presented, sending message to host", presented_image_id.as_u64());
+    pub (crate) fn stdin_send_draw_complete(presentable_draw: PresentableDraw) {
+        //log!("image {} presented, sending message to host", presentable_draw.target_id.as_u64());
 
         // send message
-        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presented_image_id).to_json().as_bytes());
+        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
     }
     
     pub (crate) fn stdin_handle_repaint(
@@ -54,9 +54,9 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(time as f32);
-            match self.passes[*pass_id].parent.clone() {
+        for &pass_id in &passes_todo {
+            self.passes[pass_id].set_time(time as f32);
+            match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     let [current_image] = &swapchain.presentable_images;
                     if let Some(texture) = &current_image.image {
@@ -67,17 +67,25 @@ impl Cx {
                             texture_id: texture.texture_id(),
                         }];
 
+                        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+                        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                        let future_presentable_draw = PresentableDraw {
+                            target_id: current_image.id,
+                            width: (pass_rect.size.x * dpi_factor) as u32,
+                            height: (pass_rect.size.y * dpi_factor) as u32,
+                        };
+
                         // render to swapchain
-                        self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain(current_image.id));
+                        self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw));
 
                         // and then wait for GPU, which calls stdin_send_draw_complete when its done
                     }
                 }
                 CxPassParent::Pass(_) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
@@ -157,19 +165,18 @@ impl Cx {
                 HostToStdin::Scroll(e) => {
                     self.call_event_handler(&Event::Scroll(e.into()))
                 }
-                HostToStdin::WindowSize(ws) => {
-
-                    let window = &mut self.windows[CxWindowPool::id_zero()];
-                    window.window_geom = WindowGeom {
-                        dpi_factor: ws.dpi_factor,
-                        inner_size: dvec2(ws.swapchain.width as f64, ws.swapchain.height as f64) / ws.dpi_factor,
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
+                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                        dpi_factor,
+                        inner_size: dvec2(inner_width, inner_height),
                         ..Default::default()
                     };
+                    self.redraw_all();
+                }
+                HostToStdin::Swapchain(new_swapchain) => {
+                    swapchain = Some(new_swapchain.images_map(|_, _| None));
 
                     self.redraw_all();
-
-                    swapchain = Some(ws.swapchain.images_map(|_, _| None));
-
                     self.stdin_handle_platform_ops(metal_cx);
                 }
                 HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(swapchain) = &mut swapchain {
@@ -185,9 +192,15 @@ impl Cx {
                         ); 
                         if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(1)) {
                             let texture = Texture::new(self);
+                            let desc = TextureDesc {
+                                format: TextureFormat::SharedBGRA(presentable_image.id),
+                                width: Some(swapchain.alloc_width as usize),
+                                height: Some(swapchain.alloc_height as usize),
+                            };
+                            texture.set_desc(self, desc);
                             if self.textures[texture.texture_id()].os.update_from_shared_handle(
                                 metal_cx,
-                                swapchain,
+                                &desc,
                                 fb.as_id(),
                             ) {
                                 let [presentable_image] = &mut swapchain.presentable_images;

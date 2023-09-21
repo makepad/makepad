@@ -27,7 +27,13 @@ fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] 
     unsafe { out_refs.assume_init() }
 }
 
-pub const SWAPCHAIN_IMAGE_COUNT: usize = if cfg!(any(target_os = "macos",target_os = "windows")) { 1 } else { 2 };
+pub const SWAPCHAIN_IMAGE_COUNT: usize = match () {
+    // HACK(eddyb) done like this so that we can override each target easily.
+    _ if cfg!(target_os = "linux")   => 2,
+    _ if cfg!(target_os = "macos")   => 1,
+    _ if cfg!(target_os = "windows") => 1,
+    _ => 2,
+};
 
 /// "Swapchains" group together some number (i.e. `SWAPCHAIN_IMAGE_COUNT` here)
 /// of "presentable images", to form a queue of render targets which can be
@@ -41,18 +47,18 @@ pub struct Swapchain<I>
     // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
     where I: Sized
 {
-    pub width: u32,
-    pub height: u32,
+    pub alloc_width: u32,
+    pub alloc_height: u32,
     pub presentable_images: [PresentableImage<I>; SWAPCHAIN_IMAGE_COUNT],
 }
 
 impl Swapchain<()> {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(alloc_width: u32, alloc_height: u32) -> Self {
         let presentable_images = [(); SWAPCHAIN_IMAGE_COUNT].map(|()| PresentableImage {
             id: PresentableImageId::alloc(),
             image: (),
         });
-        Self { width, height, presentable_images }
+        Self { alloc_width, alloc_height, presentable_images }
     }
 }
 
@@ -61,16 +67,16 @@ impl<I> Swapchain<I> {
         self.presentable_images.iter().find(|pi| pi.id == id)
     }
     pub fn images_as_ref(&self) -> Swapchain<&I> {
-        let Swapchain { width, height, ref presentable_images } = *self;
+        let Swapchain { alloc_width, alloc_height, ref presentable_images } = *self;
         let presentable_images = ref_array_to_array_of_refs(presentable_images)
             .map(|&PresentableImage { id, ref image }| PresentableImage { id, image });
-        Swapchain { width, height, presentable_images }
+        Swapchain { alloc_width, alloc_height, presentable_images }
     }
     pub fn images_map<I2>(self, mut f: impl FnMut(PresentableImageId, I) -> I2) -> Swapchain<I2> {
-        let Swapchain { width, height, presentable_images } = self;
+        let Swapchain { alloc_width, alloc_height, presentable_images } = self;
         let presentable_images = presentable_images
             .map(|PresentableImage { id, image }| PresentableImage { id, image: f(id, image) });
-        Swapchain { width, height, presentable_images }
+        Swapchain { alloc_width, alloc_height, presentable_images }
     }
 }
 
@@ -137,7 +143,6 @@ pub struct SharedPresentableImageOsHandle {
     pub _dummy_for_macos: Option<u32>,
 }
 
-
 /// DirectX 11 `HANDLE` from `IDXGIResource::GetSharedHandle`.
 #[cfg(target_os = "windows")]
 // FIXME(eddyb) actually use a newtype of `HANDLE` with manual trait impls.
@@ -149,12 +154,6 @@ pub type SharedPresentableImageOsHandle = u64;
 pub struct SharedPresentableImageOsHandle {
     // HACK(eddyb) working around deriving limitations.
     pub _dummy_for_unsupported: Option<u32>,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct StdinWindowSize {
-    pub dpi_factor: f64,
-    pub swapchain: SharedSwapchain,
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
@@ -245,7 +244,14 @@ impl From<StdinScroll> for ScrollEvent {
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum HostToStdin{
-    WindowSize(StdinWindowSize),
+    Swapchain(SharedSwapchain),
+    WindowGeomChange {
+        dpi_factor: f64,
+        // HACK(eddyb) `DVec` (like `WindowGeom`'s `inner_size` field) can't
+        // be used here due to it not implementing (de)serialization traits.
+        inner_width: f64,
+        inner_height: f64,
+    },
     Tick{
         buffer_id: u64,
         frame: u64,
@@ -263,12 +269,23 @@ pub enum HostToStdin{
     },
 }
 
+/// After a successful client-side draw, all the host needs to know, so it can
+/// present the result, is the swapchain image used, and the sub-area within
+/// that image that was being used to draw the entire client window (with the
+/// whole allocated area rarely used, except just before needing a new swapchain).
+#[derive(Copy, Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct PresentableDraw {
+    pub target_id: PresentableImageId,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost {
     ReadyToStart,
     SetCursor(MouseCursor),
     // the client is done drawing, and the texture is completely updated
-    DrawCompleteAndFlip(PresentableImageId),
+    DrawCompleteAndFlip(PresentableDraw)
 }
 
 impl StdinToHost{
