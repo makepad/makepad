@@ -5,14 +5,13 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     App = {{App}} {
-
-        ui: <Window>{
+        
+        ui: <Window> {
             show_bg: true
             width: Fill,
             height: Fill
             body = {
                 <SlidesView> {
-                    goal_pos: 0.0
                     
                     <SlideChapter> {
                         title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
@@ -38,38 +37,34 @@ live_design!{
                         title = {text: "Rust appears"},
                         <SlideBody> {text: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
                     }
-                    <Slide> {title = {text: "Rust is fast: SIMD Mandelbrot"}, 
-                        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
-                        draw_bg: { color: #x1A, radius: 5.0 }
-
+                    <Slide> {
+                        title = {text: "Rust is fast: SIMD Mandelbrot"},
+                        align: {x: 0.0, y: 0.5} flow: Down,
+                        spacing: 10,
+                        padding: 50
+                        draw_bg: {color: #x1A, radius: 5.0}
                     }
-    
-                    <Slide> {title = {text: "Instanced rendering"}, 
-                        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
-                        draw_bg: { color: #x1A, radius: 5.0 }
-
+                    
+                    <Slide> {
+                        title = {text: "Instanced rendering"},
+                        align: {x: 0.0, y: 0.5} flow: Down,
+                        spacing: 10,
+                        padding: 50
+                        draw_bg: {color: #x1A, radius: 5.0}
                     }
                     
                     <Slide> {
                         title = {text: "Our goal:\nUnify coding and UI design again."},
                         <SlideBody> {text: "As it was in Visual Basic.\nNow with modern design."}
                     }
-    
-                    <Slide> {title = {text: "Ironfish Desktop"}, 
-
-                    }
                     
-                    <Slide> {title = {text: "Ironfish Mobile"}, 
-
-                    }
+                    <Slide> {title = {text: "Ironfish Desktop"},}
                     
-                    <Slide> {title = {text: "Multi modal"}, 
-
-                    }
+                    <Slide> {title = {text: "Ironfish Mobile"},}
                     
-                    <Slide> {title = {text: "Visual design"}, 
-
-                    }
+                    <Slide> {title = {text: "Multi modal"},}
+                    
+                    <Slide> {title = {text: "Visual design"},}
                     
                     <Slide> {
                         title = {text: "Our UI language: Live."},
@@ -80,17 +75,17 @@ live_design!{
                         title = {text: "These slides are a Makepad app"},
                         <SlideBody> {text: "- Show source\n"}
                         <SlideBody> {text: "- Show Rust API\n"}
-                    }                
+                    }
                     
                     <Slide> {
                         title = {text: "Future"},
                         <SlideBody> {text: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
-                    }                
+                    }
                     
                     <Slide> {
                         title = {text: "Build for Android"},
                         <SlideBody> {text: "- SDK installer\n- Cargo makepad android\n"}
-                    }                
+                    }
                 }
             }
         }
@@ -132,15 +127,15 @@ impl LiveHook for App {
     }
 }
 
-impl App{
-    async fn _do_network_request(_cx:CxRef, _ui:WidgetRef, _url:&str)->String{
+impl App {
+    async fn _do_network_request(_cx: CxRef, _ui: WidgetRef, _url: &str) -> String {
         //let x = fetch(urL).await;
         //ui.get_label(id!(thing)).set_text(&mut *cx.borrow_mut(), x);
         "".to_string()
     }
 }
 
-impl AppMain for App{
+impl AppMain for App {
     
     
     // This function is used to handle any incoming events from the host system. It is called
@@ -166,7 +161,7 @@ impl AppMain for App{
             // Get a reference to our label from the frame, update its text, and schedule a redraw
             // for it.
             let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+            label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
         }
     }
 }

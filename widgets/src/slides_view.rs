@@ -20,12 +20,13 @@ pub struct SlidesView {
     #[live] current_slide: f64,
     #[live] goal_slide: f64,
     #[live] anim_speed: f64,
-    #[rust] _draw_state: DrawStateWrap<DrawState>,
+    #[rust] draw_state: DrawStateWrap<DrawState>,
 }
 
 #[derive(Clone)]
 enum DrawState {
-    _Drawing(usize),
+    DrawFirst,
+    DrawSecond,
 }
 
 impl LiveHook for SlidesView {
@@ -85,15 +86,15 @@ impl Widget for SlidesView {
         let uid = self.widget_uid();
         // lets grab the two slides we are seeing
         let current = self.current_slide.floor() as usize;
-        if let Some(current) = self.draw_order.get(current){
-            if let Some(current) = self.children.get(&current){
+        if let Some(current) = self.draw_order.get(current) {
+            if let Some(current) = self.children.get(&current) {
                 current.handle_widget_event_with(cx, event, dispatch_action);
             }
         }
-        if self.current_slide.fract() >0.0{
+        if self.current_slide.fract() >0.0 {
             let next = current + 1;
-            if let Some(next) = self.draw_order.get(next){
-                if let Some(next) = self.children.get(&next){
+            if let Some(next) = self.draw_order.get(next) {
+                if let Some(next) = self.children.get(&next) {
                     next.handle_widget_event_with(cx, event, dispatch_action);
                 }
             }
@@ -117,13 +118,56 @@ impl Widget for SlidesView {
         }
     }
     
-    fn draw_walk_widget(&mut self, _cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         // alright lets draw the child slide
         // we always maximally show 2 slides
-       /* if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
-            self.draw_bg.begin(cx, walk);
+        if self.draw_state.begin(cx, DrawState::DrawFirst) {
+            cx.begin_turtle(walk, Layout::flow_overlay());
+            let rect = cx.turtle().rect();
+            cx.begin_turtle(Walk {
+                abs_pos: None,
+                margin: Default::default(),
+                width: Size::Fill,
+                height: Size::Fill
+            }, Layout::flow_down().with_scroll(
+                dvec2(rect.size.x * self.current_slide.fract(), 0.0)
+            ));
+            
         }
-        self.frame.draw_walk_widget(cx, walk)*/
+        if let Some(DrawState::DrawFirst) = self.draw_state.get() {
+            let first = self.current_slide.floor() as usize;
+            if let Some(first) = self.draw_order.get(first) {
+                if let Some(slide) = self.children.get(&first) {
+                    let walk = slide.walk(cx);
+                    slide.draw_walk_widget(cx, walk) ?;
+                }
+            }
+            cx.end_turtle();
+            let rect = cx.turtle().rect();
+            log!("{}", rect.size.x * self.current_slide.fract());
+            cx.begin_turtle(Walk {
+                abs_pos: None,
+                margin: Default::default(),
+                width: Size::Fill,
+                height: Size::Fill
+            }, Layout::flow_down().with_scroll(
+                dvec2(-rect.size.x * (1.0-self.current_slide.fract()), 0.0)
+            ));
+            self.draw_state.set(DrawState::DrawSecond);
+        }
+        if let Some(DrawState::DrawSecond) = self.draw_state.get() {
+            if self.current_slide.fract() > 0.0 {
+                let second = self.current_slide.floor() as usize + 1;
+                if let Some(second) = self.draw_order.get(second) {
+                    if let Some(slide) = self.children.get(&second) {
+                        let walk = slide.walk(cx);
+                        slide.draw_walk_widget(cx, walk) ?;
+                    }
+                }
+            }
+        }
+        cx.end_turtle();
+        cx.end_turtle_with_area(&mut self.area);
         WidgetDraw::done()
     }
 }
@@ -163,7 +207,7 @@ impl SlidesView {
                     self.next_frame(cx);
                     self.area.redraw(cx);
                 }
-                else{
+                else {
                     self.current_slide = self.current_slide.round();
                 }
                 
@@ -190,7 +234,7 @@ impl SlidesView {
     
     pub fn draw_walk(&mut self, _cx: &mut Cx2d, _walk: Walk) {
         //while self.frame.draw_walk_widget(cx, walk).is_hook() {
-       // }
+        // }
     }
 }
 

@@ -925,6 +925,13 @@ impl Layout {
         }
     }
     
+    pub fn flow_overlay() -> Self {
+        Self {
+            flow: Flow::Overlay,
+            ..Self::default()
+        }
+    }
+
     pub fn with_scroll(mut self, v: DVec2) -> Self {
         self.scroll = v;
         self
