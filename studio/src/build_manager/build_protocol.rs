@@ -8,6 +8,7 @@ use crate::{
 #[derive(PartialEq, Clone, Copy, Debug, SerBin, DeBin)]
 pub struct BuildCmdId(pub u64);
 
+#[cfg(not(target_os="windows"))]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildTarget {
     Release,
@@ -21,6 +22,7 @@ pub enum BuildTarget {
     WebAssembly
 }
 
+#[cfg(not(target_os="windows"))]
 impl BuildTarget {
     pub fn runs_in_studio(&self)->bool{
         match self{
@@ -69,6 +71,60 @@ impl BuildTarget {
     }
 }
 
+#[cfg(target_os="windows")]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BuildTarget {
+    Release,
+    Debug,
+    Profiler,
+    IosSim{org:String, app:String},
+    IosDevice{org:String, app:String},
+    Android,
+    WebAssembly
+}
+
+#[cfg(target_os="windows")]
+impl BuildTarget {
+    pub fn runs_in_studio(&self)->bool{
+        match self{
+            _=>false
+        }
+    }
+    
+    pub const RELEASE:u64 = 0;
+    pub const DEBUG:u64 = 1;
+    pub const PROFILER:u64 = 2;
+    pub const IOS_SIM:u64 = 3;
+    pub const IOS_DEVICE:u64 = 4;
+    pub const ANDROID:u64 = 5;
+    pub const WEBASSEMBLY:u64 = 6;
+    pub fn len() -> u64 {7}
+    pub fn name(idx: u64) -> &'static str {
+        match idx {
+            Self::RELEASE=> "Release",
+            Self::DEBUG=> "Debug",
+            Self::PROFILER=> "Profiler",
+            Self::IOS_SIM=> "iOS Simulator",
+            Self::IOS_DEVICE=> "iOS Device",
+            Self::ANDROID=> "Android",
+            Self::WEBASSEMBLY=> "WebAssembly",
+            _=>"Unknown"
+        }
+    }
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Release=>Self::RELEASE,
+            Self::Debug=>Self::DEBUG,
+            Self::Profiler=>Self::PROFILER,
+            Self::IosSim{..}=>Self::IOS_SIM,
+            Self::IosDevice{..}=>Self::IOS_DEVICE,
+            Self::Android=>Self::ANDROID,
+            Self::WebAssembly=>Self::WEBASSEMBLY
+        }
+    }
+}
+
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BuildProcess{
     pub binary: String,
@@ -104,7 +160,7 @@ pub enum BuildCmd {
     HostToStdin(String)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LogItemWrap {
     pub cmd_id: BuildCmdId,
     pub item: LogItem
@@ -134,9 +190,10 @@ pub struct LogItemBare{
     pub line: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum LogItem {
     Bare(LogItemBare),
     Location(LogItemLocation),
     StdinToHost(String),
+    AuxChanHostEndpointCreated(crate::makepad_platform::cx_stdin::aux_chan::HostEndpoint),
 }

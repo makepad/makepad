@@ -17,18 +17,18 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::Texture,
+        texture::{Texture, TextureDesc, TextureFormat},
         live_traits::LiveNew,
         thread::Signal,
         os::{
             apple_sys::*,
             metal_xpc::{
                 xpc_service_proxy,
-                xpc_service_proxy_poll_run_loop,
+                //xpc_service_proxy_poll_run_loop,
                 fetch_xpc_service_texture,
             },
             metal::{MetalCx, DrawPassMode},
-            cx_stdin::{HostToStdin, StdinToHost, Swapchain, PresentableImageId},
+            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
@@ -38,11 +38,11 @@ use {
 
 impl Cx {
     
-    pub (crate) fn stdin_send_draw_complete(presented_image_id: PresentableImageId) {
-        //log!("image {} presented, sending message to host", presented_image_id.as_u64());
+    pub (crate) fn stdin_send_draw_complete(presentable_draw: PresentableDraw) {
+        //log!("image {} presented, sending message to host", presentable_draw.target_id.as_u64());
 
         // send message
-        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presented_image_id).to_json().as_bytes());
+        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
     }
     
     pub (crate) fn stdin_handle_repaint(
@@ -54,9 +54,9 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(time as f32);
-            match self.passes[*pass_id].parent.clone() {
+        for &pass_id in &passes_todo {
+            self.passes[pass_id].set_time(time as f32);
+            match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     let [current_image] = &swapchain.presentable_images;
                     if let Some(texture) = &current_image.image {
@@ -67,17 +67,25 @@ impl Cx {
                             texture_id: texture.texture_id(),
                         }];
 
+                        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+                        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                        let future_presentable_draw = PresentableDraw {
+                            target_id: current_image.id,
+                            width: (pass_rect.size.x * dpi_factor) as u32,
+                            height: (pass_rect.size.y * dpi_factor) as u32,
+                        };
+
                         // render to swapchain
-                        self.draw_pass(*pass_id, metal_cx, DrawPassMode::StdinMain(current_image.id));
+                        self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw));
 
                         // and then wait for GPU, which calls stdin_send_draw_complete when its done
                     }
                 }
                 CxPassParent::Pass(_) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
@@ -119,128 +127,120 @@ impl Cx {
 
         self.call_event_handler(&Event::Construct);
 
-        let mut messages = std::collections::VecDeque::new();
-        loop {
-            loop {
-                match json_msg_rx.try_recv() {
-                    Ok(msg) => {
-                        messages.push_back(msg);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) if messages.is_empty() => return,
-                    Err(_) => break,
+        while let Ok(msg) =  json_msg_rx.recv(){
+            match msg {
+                HostToStdin::ReloadFile {file, contents} => {
+                    // alright lets reload this file in our DSL system
+                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+                        file_name: file,
+                        content: contents
+                    }]);
                 }
-            }
+                HostToStdin::KeyDown(e) => {
+                    self.call_event_handler(&Event::KeyDown(e));
+                }
+                HostToStdin::KeyUp(e) => {
+                    self.call_event_handler(&Event::KeyUp(e));
+                }
+                HostToStdin::MouseDown(e) => {
+                    self.fingers.process_tap_count(
+                        dvec2(e.x, e.y),
+                        e.time
+                    );
+                    self.fingers.mouse_down(e.button);
+                    
+                    self.call_event_handler(&Event::MouseDown(e.into()));
+                }
+                HostToStdin::MouseMove(e) => {
+                    self.call_event_handler(&Event::MouseMove(e.into()));
+                    self.fingers.cycle_hover_area(live_id!(mouse).into());
+                    self.fingers.switch_captures();
+                }
+                HostToStdin::MouseUp(e) => {
+                    let button = e.button;
+                    self.call_event_handler(&Event::MouseUp(e.into()));
+                    self.fingers.mouse_up(button);
+                    self.fingers.cycle_hover_area(live_id!(mouse).into());
+                }
+                HostToStdin::Scroll(e) => {
+                    self.call_event_handler(&Event::Scroll(e.into()))
+                }
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
+                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                        dpi_factor,
+                        inner_size: dvec2(inner_width, inner_height),
+                        ..Default::default()
+                    };
+                    self.redraw_all();
+                }
+                HostToStdin::Swapchain(new_swapchain) => {
+                    swapchain = Some(new_swapchain.images_map(|_| None));
 
-            for msg in messages.drain(..) {
-                match msg {
-                    HostToStdin::ReloadFile {file, contents} => {
-                        // alright lets reload this file in our DSL system
-                        let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                            file_name: file,
-                            content: contents
-                        }]);
-                    }
-                    HostToStdin::KeyDown(e) => {
-                        self.call_event_handler(&Event::KeyDown(e));
-                    }
-                    HostToStdin::KeyUp(e) => {
-                        self.call_event_handler(&Event::KeyUp(e));
-                    }
-                    HostToStdin::MouseDown(e) => {
-                        self.fingers.process_tap_count(
-                            dvec2(e.x, e.y),
-                            e.time
-                        );
-                        self.fingers.mouse_down(e.button);
-                        
-                        self.call_event_handler(&Event::MouseDown(e.into()));
-                    }
-                    HostToStdin::MouseMove(e) => {
-                        self.call_event_handler(&Event::MouseMove(e.into()));
-                        self.fingers.cycle_hover_area(live_id!(mouse).into());
-                        self.fingers.switch_captures();
-                    }
-                    HostToStdin::MouseUp(e) => {
-                        let button = e.button;
-                        self.call_event_handler(&Event::MouseUp(e.into()));
-                        self.fingers.mouse_up(button);
-                        self.fingers.cycle_hover_area(live_id!(mouse).into());
-                    }
-                    HostToStdin::Scroll(e) => {
-                        self.call_event_handler(&Event::Scroll(e.into()))
-                    }
-                    HostToStdin::WindowSize(ws) => {
+                    self.redraw_all();
+                    self.stdin_handle_platform_ops(metal_cx);
+                }
+                HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(swapchain) = &mut swapchain {
+                    let [presentable_image] = &swapchain.presentable_images;
 
-                        let window = &mut self.windows[CxWindowPool::id_zero()];
-                        window.window_geom = WindowGeom {
-                            dpi_factor: ws.dpi_factor,
-                            inner_size: dvec2(ws.swapchain.width as f64, ws.swapchain.height as f64) / ws.dpi_factor,
-                            ..Default::default()
-                        };
-
-                        self.redraw_all();
-
-                        swapchain = Some(ws.swapchain.images_map(|_, _| None));
-
-                        self.stdin_handle_platform_ops(metal_cx);
-                    }
-                    HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(swapchain) = &mut swapchain {
-                        let [presentable_image] = &swapchain.presentable_images;
-
-                        // lets fetch the framebuffers
-                        if presentable_image.image.is_none() {
-                            let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
-                            fetch_xpc_service_texture(
-                                service_proxy.as_id(),
-                                presentable_image.id,
-                                move |objcid| { let _ = tx_fb.send(objcid); },
-                            ); 
-                            if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(1)) {
-                                let texture = Texture::new(self);
-                                if self.textures[texture.texture_id()].os.update_from_shared_handle(
-                                    metal_cx,
-                                    swapchain,
-                                    fb.as_id(),
-                                ) {
-                                    let [presentable_image] = &mut swapchain.presentable_images;
-                                    presentable_image.image = Some(texture);
-                                }
+                    // lets fetch the framebuffers
+                    if presentable_image.image.is_none() {
+                        let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
+                        fetch_xpc_service_texture(
+                            service_proxy.as_id(),
+                            presentable_image.id,
+                            move |objcid| { let _ = tx_fb.send(objcid); },
+                        ); 
+                        if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(1)) {
+                            let texture = Texture::new(self);
+                            let desc = TextureDesc {
+                                format: TextureFormat::SharedBGRA(presentable_image.id),
+                                width: Some(swapchain.alloc_width as usize),
+                                height: Some(swapchain.alloc_height as usize),
+                            };
+                            texture.set_desc(self, desc);
+                            if self.textures[texture.texture_id()].os.update_from_shared_handle(
+                                metal_cx,
+                                &desc,
+                                fb.as_id(),
+                            ) {
+                                let [presentable_image] = &mut swapchain.presentable_images;
+                                presentable_image.image = Some(texture);
                             }
                         }
+                    }
 
-                        // check signals
-                        if Signal::check_and_clear_ui_signal() {
-                            self.handle_media_signals();
-                            self.call_event_handler(&Event::Signal);
-                        }
-                        if self.handle_live_edit() {
-                            self.call_event_handler(&Event::LiveEdit);
-                            self.redraw_all();
-                        }
-                        self.handle_networking_events();
-                        
-                        // alright a tick.
-                        // we should now run all the stuff.
-                        if self.new_next_frames.len() != 0 {
-                            self.call_next_frame_event(time);
-                        }
-                        
-                        if self.need_redrawing() {
-                            self.call_draw_event();
-                            self.mtl_compile_shaders(metal_cx);
-                        }
+                    // check signals
+                    if Signal::check_and_clear_ui_signal() {
+                        self.handle_media_signals();
+                        self.call_event_handler(&Event::Signal);
+                    }
+                    if self.handle_live_edit() {
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
+                    self.handle_networking_events();
+                    self.stdin_handle_platform_ops(metal_cx);
+                    // alright a tick.
+                    // we should now run all the stuff.
+                    if self.new_next_frames.len() != 0 {
+                        self.call_next_frame_event(time);
+                    }
+                    
+                    if self.need_redrawing() {
+                        self.call_draw_event();
+                        self.mtl_compile_shaders(metal_cx);
+                    }
 
-                        let [presentable_image] = &swapchain.presentable_images;
-                        if presentable_image.image.is_some() {
-                            self.stdin_handle_repaint(metal_cx, swapchain, time as f32);
-                        }
+                    let [presentable_image] = &swapchain.presentable_images;
+                    if presentable_image.image.is_some() {
+                        self.stdin_handle_repaint(metal_cx, swapchain, time as f32);
                     }
                 }
             }
-            // we should poll our runloop
-            self.stdin_handle_platform_ops(metal_cx);
-            xpc_service_proxy_poll_run_loop();
         }
+        // we should poll our runloop
+        
+        //xpc_service_proxy_poll_run_loop();
     }
     
     pub(crate)fn start_xpc_service(&mut self){

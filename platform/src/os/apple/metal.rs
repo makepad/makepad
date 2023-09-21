@@ -21,7 +21,7 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
-            cx_stdin::PresentableImageId,
+            cx_stdin::PresentableDraw,
         },
         draw_list::DrawListId,
         cx::Cx,
@@ -427,6 +427,15 @@ impl Cx {
         if let Some(depth_state) = self.passes[pass_id].os.mtl_depth_state {
             let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
         }
+
+        let () = unsafe {msg_send![encoder, setViewport: MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: dpi_factor * pass_rect.size.x,
+            height: dpi_factor * pass_rect.size.y,
+            znear: 0.0,
+            zfar: 1.0,
+        }]};
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -455,8 +464,8 @@ impl Cx {
             DrawPassMode::Texture => {
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
-            DrawPassMode::StdinMain(swap_buf) => {
-                self.commit_command_buffer(Some(swap_buf), command_buffer, gpu_read_guards);
+            DrawPassMode::StdinMain(stdin_frame) => {
+                self.commit_command_buffer(Some(stdin_frame), command_buffer, gpu_read_guards);
             }
             DrawPassMode::Drawable(drawable) => {
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
@@ -471,7 +480,7 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, stdin_frame: Option<PresentableImageId>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, stdin_frame: Option<PresentableDraw>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
@@ -522,7 +531,7 @@ impl Cx {
     }
     
     #[cfg(target_os="macos")]
-    pub fn get_shared_presentable_image_os_handle(
+    pub fn share_texture_for_presentable_image(
         &mut self,
         texture: &Texture,
     ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
@@ -538,7 +547,7 @@ impl Cx {
     }
     
     #[cfg(target_os="ios")]
-    pub fn get_shared_presentable_image_os_handle(
+    pub fn share_texture_for_presentable_image(
         &mut self,
         _texture: &Texture,
     ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
@@ -551,7 +560,7 @@ impl Cx {
 pub enum DrawPassMode {
     Texture,
     MTKView(ObjcId),
-    StdinMain(PresentableImageId),
+    StdinMain(PresentableDraw),
     Drawable(ObjcId),
     Resizing(ObjcId)
 }
@@ -961,20 +970,24 @@ impl CxOsTexture {
     pub fn update_from_shared_handle(
         &mut self,
         metal_cx: &MetalCx,
-
-        swapchain: &crate::cx_stdin::Swapchain<impl Sized>,
-
+        desc: &TextureDesc,
         shared_handle: ObjcId,
     ) -> bool {
-        let width = swapchain.width as u64;
-        let height = swapchain.height as u64;
-        let [presentable_image] = &swapchain.presentable_images;
+        // we need a width/height for this one.
+        if desc.width.is_none() || desc.height.is_none() {
+            log!("Shared texture width/height is undefined, cannot import it");
+            return false;
+        }
+
+        let width = desc.width.unwrap() as u64;
+        let height = desc.height.unwrap() as u64;
 
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
         }).unwrap());
         let width2: u64 = unsafe{msg_send![texture.as_id(), width]};
         let height2: u64 = unsafe{msg_send![texture.as_id(), height]};
+        // FIXME(eddyb) can these be an assert now?
         if width2 != width || height2 != height{
             return false
         }
@@ -982,7 +995,7 @@ impl CxOsTexture {
             is_initial: true,
             width,
             height,
-            format: TextureFormat::SharedBGRA(presentable_image.id),
+            format: desc.format,
             texture,
         });
         true

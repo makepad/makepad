@@ -50,14 +50,14 @@ extern {
     fn hackily_heapify_block2_obj_u64(data: *const c_void) -> ObjcId;
     fn hackily_heapify_block0(data: *const c_void) -> ObjcId;
 }
-
+/*
 pub fn xpc_service_proxy_poll_run_loop() {
     unsafe {
         let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
         let nsuntil: ObjcId = msg_send![class!(NSDate), distantPast];
         let () = msg_send![nsrunloop, runUntilDate: nsuntil];
     }
-}
+}*/
 
 pub fn xpc_service_proxy() -> RcObjcId {
     unsafe {
