@@ -131,7 +131,7 @@ live_design!{
                 
                 edit_tabs = Tabs {
                     tabs: [edit_first],
-                    selected: 1
+                    selected: 0
                 }
                 
                 log_tabs = Tabs {
@@ -200,7 +200,7 @@ live_design!{
                             <Logo> {}
                         
                         <Label> {
-                            text: "Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                            text: "Welcome to\nMakepad \n\n欢迎来到\nMakepad"
                             width: Fit,
                             margin: {left: 200}
                             draw_text: {
@@ -215,7 +215,7 @@ live_design!{
                     
                 }
                 RunFirst = <RectView> {
-                    draw_bg: {color: #052329}
+                    draw_bg: {color: #4}
                     <View> {
                         width: Fill,
                         height: Fill
@@ -224,7 +224,13 @@ live_design!{
                             y: 0.5
                         }
                         flow: Down
-                            <Logo> {}
+                            <Logo> {
+                                draw_icon: {
+                                    fn get_color(self) -> vec4 {
+                                        return #7
+                                    }
+                                }
+                            }
                     }
                     
                 }
@@ -442,7 +448,7 @@ impl AppMain for App {
                 }
                 else { // external file, we have to create a new tab
                     let tab_id = LiveId::unique();
-                    if let Some(file_id) = self.file_system.path_from_file_id(&path){
+                    if let Some(file_id) = self.file_system.path_to_file_node_id(&path){
                         self.file_system.request_open_file(tab_id, file_id);
                         dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), path.clone(), TabClosable::Yes);
                     }
