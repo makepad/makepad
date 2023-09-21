@@ -174,7 +174,7 @@ impl Cx {
                     self.redraw_all();
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    swapchain = Some(new_swapchain.images_map(|_, _| None));
+                    swapchain = Some(new_swapchain.images_map(|_| None));
 
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx);
