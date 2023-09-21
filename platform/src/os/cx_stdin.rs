@@ -31,7 +31,7 @@ pub const SWAPCHAIN_IMAGE_COUNT: usize = match () {
     // HACK(eddyb) done like this so that we can override each target easily.
     _ if cfg!(target_os = "linux")   => 2,
     _ if cfg!(target_os = "macos")   => 1,
-    _ if cfg!(target_os = "windows") => 2,
+    _ if cfg!(target_os = "windows") => 1,
     _ => 2,
 };
 
