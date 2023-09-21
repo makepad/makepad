@@ -89,6 +89,7 @@ impl BuildConnection {
         let path = shared.read().unwrap().path.clone();
         
         let args: Vec<String> = match &what.target {
+            #[cfg(not(target_os="windows"))]
             BuildTarget::ReleaseStudio => vec![
                 "run".into(),
                 "nightly".into(),
@@ -102,6 +103,7 @@ impl BuildConnection {
                 "--message-format=json".into(),
                 "--stdin-loop".into(),
             ],
+            #[cfg(not(target_os="windows"))]
             BuildTarget::DebugStudio => vec![
                 "run".into(),
                 "nightly".into(),
