@@ -3,7 +3,7 @@ use {
         makepad_derive_widget::*,
         widget::*,
         makepad_draw::*,
-        button::{Button}
+        button::{Button, ButtonAction}
     }
 };
 
@@ -57,4 +57,25 @@ impl Widget for LinkLabel {
 pub struct LinkLabelRef(WidgetRef);
 
 impl LinkLabelRef {
+    pub fn clicked(&self, actions:&WidgetActions) -> bool {
+        if let Some(inner) = self.borrow(){ 
+            if let Some(item) = actions.find_single_action(inner.button.widget_uid()) {
+                if let ButtonAction::Clicked = item.action() {
+                    return true
+                }
+            }
+        }
+        false
+    }
+    
+    pub fn pressed(&self, actions:&WidgetActions) -> bool {
+        if let Some(inner) = self.borrow(){ 
+            if let Some(item) = actions.find_single_action(inner.button.widget_uid()) {
+                if let ButtonAction::Pressed = item.action() {
+                    return true
+                }
+            }
+        }
+        false
+    }
 }
