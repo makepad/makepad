@@ -269,6 +269,7 @@ impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.file_system.init(cx);
         self.build_manager.init(cx);
+        
         //self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
     }
 }
@@ -276,9 +277,20 @@ impl LiveHook for App {
 app_main!(App);
 
 impl App {
+    fn open_code_file_by_path(&mut self, cx:&mut Cx, path:&str){
+        let tab_id = LiveId::unique();
+        if let Some(file_id) = self.file_system.path_to_file_node_id(&path){
+            self.file_system.request_open_file(tab_id, file_id);
+            let dock = self.ui.dock(id!(dock));
+            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
+            self.file_system.ensure_unique_tab_names(cx, &dock)
+        }
+    }
 }
 
 impl AppMain for App {
+
+    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
@@ -341,6 +353,9 @@ impl AppMain for App {
         
         for action in self.file_system.handle_event(cx, event, &self.ui) {
             match action {
+                FileSystemAction::TreeLoaded=>{
+                    self.open_code_file_by_path(cx, "examples/news_feed/src/app.rs");
+                }
                 FileSystemAction::RecompileNeeded => {
                     self.build_manager.start_recompile_timer(cx, &self.ui);
                 }
@@ -451,7 +466,8 @@ impl AppMain for App {
                     let tab_id = LiveId::unique();
                     if let Some(file_id) = self.file_system.path_to_file_node_id(&path){
                         self.file_system.request_open_file(tab_id, file_id);
-                        dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), path.clone(), TabClosable::Yes);
+                        dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
+                        self.file_system.ensure_unique_tab_names(cx, &dock)
                     }
                 }
             }
@@ -467,13 +483,11 @@ impl AppMain for App {
         }
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
-            //let file_path = self.file_system.file_node_path(file_id);
-            let tab_name = self.file_system.file_node_name(file_id);
             // ok lets open the file
             let tab_id = LiveId::unique();
             self.file_system.request_open_file(tab_id, file_id);
             // lets add a file tab 'somewhere'
-            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), tab_name, TabClosable::Yes);
+            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
             // lets scan the entire doc for duplicates
             self.file_system.ensure_unique_tab_names(cx, &dock)
         }
