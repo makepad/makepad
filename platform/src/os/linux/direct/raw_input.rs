@@ -623,11 +623,38 @@ struct InputEvent {
 
 pub struct RawInput {
     pub modifiers: KeyModifiers,
-    receiver: mpsc::Receiver<InputEvent>,
+    receiver: mpsc::Receiver<Vec<InputEvent>>,
     width: f64,
     height: f64,
     dpi_factor: f64,
     abs: DVec2,
+}
+
+trait EventFile { //need a trait to implement helper function on the File type
+    fn read_input_event(&mut self) -> Result<InputEvent, ()>;
+}
+
+impl EventFile for File { //helper function to make event file reading easier
+    fn read_input_event(&mut self) -> Result<InputEvent, ()> {
+        let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
+        loop {
+            match self.read_exact(&mut buf) { //read exact to get rid of the length check that was here
+                Ok(()) => {
+                    let buf: InputEvent = unsafe {std::mem::transmute(buf)};
+                    return Ok(buf)
+                },
+                Err(err) => {
+                    match err.kind() {
+                        std::io::ErrorKind::UnexpectedEof => {
+                            continue;
+                        },
+                        _ => return Err(())
+
+                    }
+                }
+            }
+        }
+    }
 }
 
 
@@ -635,19 +662,46 @@ impl RawInput {
     pub fn new(width: f64, height: f64, dpi_factor: f64) -> Self {
         let (send, receiver) = mpsc::channel();
         for i in 0..12 {
-            let device = format!("/dev/input/event{}", i);
+            let device = format!("/dev/input/event{}", i); //TODO improve event file handling, listen for new devices etc.
             let send = send.clone();
             if let Ok(mut kb) = File::open(&device) {
-                std::thread::spawn(move || loop {
-                    let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
-                    if let Ok(len) = kb.read(&mut buf) {
-                        if len == std::mem::size_of::<InputEvent>() {
-                            let buf = unsafe {std::mem::transmute(buf)};
-                            send.send(buf).unwrap();
+                std::thread::spawn(move || {
+                    loop {
+                        let mut evts: Vec<InputEvent> = Vec::new();
+                        loop {
+                            if let Ok(evt) = kb.read_input_event() {
+                                match evt.ty {
+                                    InputEventType::EV_SYN => {
+                                        let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
+                                        match code {
+                                            EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
+                                                send.send(evts).unwrap();
+                                                break;
+                                            },
+                                            EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
+                                                evts.clear();
+                                                while let Ok(dropped) = kb.read_input_event() {
+                                                    match dropped.ty {
+                                                        InputEventType::EV_SYN => {
+                                                            if dropped.code == EvSynCodes::SYN_REPORT as u16 {
+                                                                break;
+                                                            }
+                                                        },
+                                                        _ => continue
+                                                    }
+                                                }
+                                            },
+                                            _ => evts.push(evt)
+                                        }
+                                    },
+                                    _ => {
+                                        evts.push(evt);
+                                    }
+                                }
+                            } else {
+                                return
+                            }
                         }
-                    }
-                    else{
-                        return
                     }
                 });
             }
@@ -665,56 +719,13 @@ impl RawInput {
     
     pub fn poll_raw_input(&mut self, time: f64, window_id: WindowId) -> Vec<DirectEvent> {
         let mut dir_evts: Vec<DirectEvent> = Vec::new();
-        let mut evts: Vec<InputEvent> = Vec::new();
-        loop {
-            let new = match self.receiver.try_recv() {
-                Ok(new) => new, //new event
-                Err(err) => {
-                    match err {
-                        mpsc::TryRecvError::Empty =>  {
-                            if evts.len()>0 {
-                                continue; //partial message read that hasnt been cleared out, keep reading
-                            } else {
-                                break; //nothing to read
-                            }
-                        },
-                        mpsc::TryRecvError::Disconnected => break //no input devices?
-                    }
-                }
-            };
-            match new.ty {
-                InputEventType::EV_SYN => {
-                    let code: EvSynCodes = unsafe { std::mem::transmute_copy(&new.code) };
-                    match code {
-                        EvSynCodes::SYN_REPORT => { //end of event reached
-                            self.process_event(&mut evts, &mut dir_evts, time, window_id);
-                        },
-                        EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
-                            evts.clear();
-                            while let Ok(dropped) = self.receiver.try_recv() {
-                                match dropped.ty {
-                                    InputEventType::EV_SYN => {
-                                        if dropped.code == EvSynCodes::SYN_REPORT as u16 {
-                                            break;
-                                        }
-                                    },
-                                    _ => continue
-                                }
-                            }
-                            continue;
-                        },
-                        _ => evts.push(new)
-                    }
-                }
-                _ => {
-                    evts.push(new);
-                }
-            }
+        while let Ok(new) = self.receiver.try_recv() {
+            self.process_event(new, &mut dir_evts, time, window_id);
         }
         dir_evts
     }
 
-    fn process_event(&mut self, evts: &mut Vec<InputEvent>, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId) {
+    fn process_event(&mut self, mut evts: Vec<InputEvent>, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId) {
         while let Some(evt) = evts.pop() {
             match evt.ty {
                 InputEventType::EV_REL => { // relative input
