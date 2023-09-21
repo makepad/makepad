@@ -12,7 +12,7 @@ metadata.makepad-auto-version = "NSqqmyZD3GHtsgxEIp2ZNBEXSmc="
 [dependencies]
 makepad-futures = { path = "../libs/futures", version = "0.4.0" }
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.4.0" }
-glob = { version = "0.3.1", default-features = false}
+inotify = { path="../libs/inotify-rs", version = "0.10.2" }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "0.4.0" }
