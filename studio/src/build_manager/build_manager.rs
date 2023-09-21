@@ -321,7 +321,7 @@ impl BuildManager {
                         line_index: loc.start.line_index - 1,
                         byte_index: loc.start.byte_index - 1
                     };
-                    if let Some(file_id) = file_system.path_from_file_id(&loc.file_name){
+                    if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name){
                         file_system.add_decoration(file_id, Decoration::new(
                             0,pos ,pos + loc.length
                         ));
