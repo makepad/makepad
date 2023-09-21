@@ -242,6 +242,8 @@ pub struct CodeEditor {
     #[rust]
     viewport_rect: Rect,
     #[rust]
+    unscrolled_rect: Rect,
+    #[rust]
     line_start: usize,
     #[live(true)]
     word_wrap: bool,
@@ -264,6 +266,7 @@ enum KeepCursorInView {
     Always(DVec2, NextFrame),
     LockStart,
     Locked(DVec2),
+    LockedCenter(DVec2, Position, Affinity),
     FontResize(DVec2),
     Off
 }
@@ -277,7 +280,7 @@ impl KeepCursorInView {
     }
     fn is_locked(&self) -> bool {
         match self {
-            Self::LockStart | Self::Locked(_) => true,
+            Self::LockStart | Self::Locked(_) | Self::LockedCenter(_,_,_)=> true,
             _ => false
         }
     }
@@ -346,16 +349,43 @@ impl CodeEditor {
                     self.keep_cursor_in_view = KeepCursorInView::Off
                 }
             }
-            
             KeepCursorInView::LockStart => {
                 // lets get the on screen position
                 let screen_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
-                self.keep_cursor_in_view = KeepCursorInView::Locked(screen_pos);
+                let rect = Rect{pos:dvec2(0.0,0.0),size:self.viewport_rect.size};
+                 if rect.contains(screen_pos){
+                    self.keep_cursor_in_view = KeepCursorInView::Locked(screen_pos);
+                }
+                else{
+                    let center = rect.size*0.5 + self.unscrolled_rect.pos;
+                    if let Some((pos, aff)) = self.pick(session, center){
+                        let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
+                            pos,
+                            aff,
+                        );
+                        let screen_pos = dvec2(cursor_x, cursor_y)* self.cell_size - self.scroll_bars.get_scroll_pos();
+                        self.keep_cursor_in_view = KeepCursorInView::LockedCenter(screen_pos, pos, aff);
+                    }
+                    else{
+                        self.keep_cursor_in_view = KeepCursorInView::Off
+                    }
+                }
             }
             KeepCursorInView::Locked(pos) => {
                 // ok so we want to keep cursor pos at the same screen position
                 let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 let delta = pos - new_pos;
+                let new_pos = self.scroll_bars.get_scroll_pos() - dvec2(0.0, delta.y);
+                self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
+                //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
+            }
+            KeepCursorInView::LockedCenter(screen_pos, pos, aff) => {
+                let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
+                    pos,
+                    aff,
+                );
+                let new_pos = dvec2(cursor_x, cursor_y)* self.cell_size - self.scroll_bars.get_scroll_pos();
+                let delta = screen_pos - new_pos;
                 let new_pos = self.scroll_bars.get_scroll_pos() - dvec2(0.0, delta.y);
                 self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
                 //self.keep_cursor_in_view = KeepCursorInView::Locked(cursor_pos);
@@ -396,6 +426,7 @@ impl CodeEditor {
             },
         };
         
+        
         let pad_left_top = dvec2(10., 10.);
         self.gutter_rect.pos += pad_left_top;
         self.gutter_rect.size -= pad_left_top;
@@ -414,7 +445,7 @@ impl CodeEditor {
         self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-        
+        self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
         self.draw_gutter(cx, session);
         self.draw_text_layer(cx, session);
@@ -495,7 +526,7 @@ impl CodeEditor {
         session: &mut Session,
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-       self.animator_handle_event(cx, event);
+        self.animator_handle_event(cx, event);
        
         session.handle_changes();
         
