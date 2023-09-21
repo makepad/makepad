@@ -16,7 +16,14 @@ use {
         fs::File,
         io::Read,
         sync::mpsc, 
-    }
+    },
+    inotify::{
+        EventMask,
+        WatchMask,
+        Inotify,
+    },
+    glob,
+
 };
 
 #[allow(unused,non_camel_case_types)]
@@ -621,15 +628,6 @@ struct InputEvent {
     value: i32,
 }
 
-pub struct RawInput {
-    pub modifiers: KeyModifiers,
-    receiver: mpsc::Receiver<Vec<InputEvent>>,
-    width: f64,
-    height: f64,
-    dpi_factor: f64,
-    abs: DVec2,
-}
-
 trait EventFile { //need a trait to implement helper function on the File type
     fn read_input_event(&mut self) -> Result<InputEvent, ()>;
 }
@@ -657,55 +655,133 @@ impl EventFile for File { //helper function to make event file reading easier
     }
 }
 
+pub struct RawInput {
+    pub modifiers: KeyModifiers,
+    receiver: mpsc::Receiver<Vec<InputEvent>>,
+    width: f64,
+    height: f64,
+    dpi_factor: f64,
+    abs: DVec2,
+}
 
 impl RawInput {
     pub fn new(width: f64, height: f64, dpi_factor: f64) -> Self {
         let (send, receiver) = mpsc::channel();
-        for i in 0..12 {
-            let device = format!("/dev/input/event{}", i); //TODO improve event file handling, listen for new devices etc.
-            let send = send.clone();
-            if let Ok(mut kb) = File::open(&device) {
-                std::thread::spawn(move || {
-                    loop {
-                        let mut evts: Vec<InputEvent> = Vec::new();
-                        loop {
-                            if let Ok(evt) = kb.read_input_event() {
-                                match evt.ty {
-                                    InputEventType::EV_SYN => {
-                                        let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
-                                        match code {
-                                            EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
-                                                send.send(evts).unwrap();
-                                                break;
-                                            },
-                                            EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
-                                                evts.clear();
-                                                while let Ok(dropped) = kb.read_input_event() {
-                                                    match dropped.ty {
-                                                        InputEventType::EV_SYN => {
-                                                            if dropped.code == EvSynCodes::SYN_REPORT as u16 {
-                                                                break;
+        let send = send.clone();
+        std::thread::spawn(move || {
+            let mut file_watcher = Inotify::init().unwrap();
+            file_watcher
+                .watches()
+                .add(
+                    "/dev/input/",
+                    WatchMask::CREATE,
+                )
+                .unwrap();
+            for event_file in glob::glob("/dev/input/event*").unwrap() {
+                match event_file {
+                    Ok(path) => {
+                        let send = send.clone();
+                        if let Ok(mut kb) = File::open(&path) {
+                            std::thread::spawn(move || { // 
+                                loop {
+                                    let mut evts: Vec<InputEvent> = Vec::new();
+                                    loop {
+                                        if let Ok(evt) = kb.read_input_event() {
+                                            match evt.ty {
+                                                InputEventType::EV_SYN => {
+                                                    let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
+                                                    match code {
+                                                        EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
+                                                            send.send(evts).unwrap();
+                                                            break;
+                                                        },
+                                                        EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
+                                                            evts.clear();
+                                                            while let Ok(dropped) = kb.read_input_event() {
+                                                                match dropped.ty {
+                                                                    InputEventType::EV_SYN => {
+                                                                        if dropped.code == EvSynCodes::SYN_REPORT as u16 {
+                                                                            break;
+                                                                        }
+                                                                    },
+                                                                    _ => continue
+                                                                }
                                                             }
                                                         },
-                                                        _ => continue
+                                                        _ => evts.push(evt)
                                                     }
+                                                },
+                                                _ => {
+                                                    evts.push(evt);
                                                 }
-                                            },
-                                            _ => evts.push(evt)
+                                            }
+                                        } else {
+                                            return
                                         }
-                                    },
-                                    _ => {
-                                        evts.push(evt);
                                     }
                                 }
-                            } else {
-                                return
+                            });
+                        }
+                    },
+                    Err(_e) => ()
+                }
+            }
+            let mut buffer = [0u8; 4096];
+            loop {
+                let events = file_watcher
+                    .read_events_blocking(&mut buffer)
+                    .expect("Failed to read inotify events");   
+
+                for event in events {
+                    if event.mask.contains(EventMask::CREATE) {
+                        if !event.mask.contains(EventMask::ISDIR) {
+                            let send = send.clone();
+                            if let Ok(mut kb) = File::open(format!("/dev/input/{}",event.name.unwrap().to_str().unwrap())) {
+                                std::thread::spawn(move || {
+                                    loop {
+                                        let mut evts: Vec<InputEvent> = Vec::new();
+                                        loop {
+                                            if let Ok(evt) = kb.read_input_event() {
+                                                match evt.ty {
+                                                    InputEventType::EV_SYN => {
+                                                        let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
+                                                        match code {
+                                                            EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
+                                                                send.send(evts).unwrap();
+                                                                break;
+                                                            },
+                                                            EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
+                                                                evts.clear();
+                                                                while let Ok(dropped) = kb.read_input_event() {
+                                                                    match dropped.ty {
+                                                                        InputEventType::EV_SYN => {
+                                                                            if dropped.code == EvSynCodes::SYN_REPORT as u16 {
+                                                                                break;
+                                                                            }
+                                                                        },
+                                                                        _ => continue
+                                                                    }
+                                                                }
+                                                            },
+                                                            _ => evts.push(evt)
+                                                        }
+                                                    },
+                                                    _ => {
+                                                        evts.push(evt);
+                                                    }
+                                                }
+                                            } else {
+                                                return
+                                            }
+                                        }
+                                    }
+                                });
                             }
                         }
                     }
-                });
+                }
             }
-        }
+        });
         
         Self {
             receiver,
