@@ -144,7 +144,6 @@ impl Widget for SlidesView {
             }
             cx.end_turtle();
             let rect = cx.turtle().rect();
-            log!("{}", rect.size.x * self.current_slide.fract());
             cx.begin_turtle(Walk {
                 abs_pos: None,
                 margin: Default::default(),
