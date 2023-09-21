@@ -93,7 +93,7 @@ impl RunView {
         });
         if self.redraw_countdown>0 {
             self.redraw_countdown -= 1;
-            self.redraw(cx);
+            //self.redraw(cx);
             self.tick = cx.new_next_frame();
         }
         else {
@@ -218,6 +218,7 @@ impl RunView {
                         // what lets us accept draws is their target `Texture`s.
                         try_present_through(&v.last_swapchain_with_completed_draws);
                     }
+                    self.redraw(cx);
                 }
             }
         }
