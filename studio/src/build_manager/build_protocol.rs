@@ -166,7 +166,7 @@ pub struct LogItemWrap {
     pub item: LogItem
 }
 
-#[derive(Clone, Copy, Debug, SerBin, DeBin)]
+#[derive(Clone, PartialEq, Eq, Copy, Debug, SerBin, DeBin)]
 pub enum LogItemLevel{
     Warning,
     Error,
