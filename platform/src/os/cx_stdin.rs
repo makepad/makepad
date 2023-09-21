@@ -171,6 +171,11 @@ pub mod aux_chan {
     use crate::os::linux::ipc::{self as linux_ipc, FixedSizeEncoding};
     use std::{io, os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd}};
 
+    // HACK(eddyb) `io::Error::other` stabilization is too recent.
+    fn io_error_other(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+        io::Error::new(io::ErrorKind::Other, error)
+    }
+
     // Host->Client and Client->Host message types.
     pub type H2C = (PresentableImageId, OwnedFd);
     pub type C2H = linux_ipc::Never;
@@ -199,12 +204,12 @@ pub mod aux_chan {
         pub fn from_process_args_in_client() -> io::Result<Self> {
             for arg in std::env::args() {
                 if let Some(fd) = arg.strip_prefix("--stdin-loop-aux-chan-fd=") {
-                    let raw_fd = fd.parse().map_err(io::Error::other)?;
+                    let raw_fd = fd.parse().map_err(io_error_other)?;
                     let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
                     return Ok(Self::from(owned_fd));
                 }
             }
-            Err(io::Error::other("missing --stdin-loop-aux-chan-fd argument"))
+            Err(io_error_other("missing --stdin-loop-aux-chan-fd argument"))
         }
     }
 
@@ -250,7 +255,7 @@ pub mod aux_chan {
 
                 client_endpoint.recv().and_then(|(recv_id, recv_fd)|
                 if recv_id != id {
-                    Err(io::Error::other(format!(
+                    Err(io_error_other(format!(
                         "recv_fds_from_aux_chan: ID mismatch \
                          (expected {id:?}, got {recv_id:?}",
                     )))
