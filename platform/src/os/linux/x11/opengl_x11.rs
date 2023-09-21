@@ -205,7 +205,14 @@ impl CxOsTexture {
                 ) != 0,
                 "eglExportDMABUFImageMESA failed",
             );
-            // FIXME(eddyb) destroy `egl_image` here
+
+            assert!(
+                (opengl_cx.libegl.eglDestroyImageKHR.unwrap())(
+                    opengl_cx.egl_display,
+                    egl_image,
+                ) != 0,
+                "eglDestroyImageKHR failed",
+            );
 
             self.dma_buf_exported_image = Some(Box::new(dma_buf::Image {
                 drm_format: dma_buf::DrmFormat {
