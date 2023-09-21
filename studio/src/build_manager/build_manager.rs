@@ -321,11 +321,12 @@ impl BuildManager {
                         line_index: loc.start.line_index - 1,
                         byte_index: loc.start.byte_index - 1
                     };
-                        
-                    file_system.add_decoration(&loc.file_name, Decoration::new(
-                        0,pos ,pos + loc.length
-                    ));
-                    file_system.redraw_view_by_path(cx, &loc.file_name, dock);
+                    if let Some(file_id) = file_system.path_from_file_id(&loc.file_name){
+                        file_system.add_decoration(file_id, Decoration::new(
+                            0,pos ,pos + loc.length
+                        ));
+                        file_system.redraw_view_by_file_id(cx, file_id, dock);
+                    }
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Location(loc)));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
