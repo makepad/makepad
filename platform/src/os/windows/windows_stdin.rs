@@ -218,10 +218,10 @@ impl Cx {
                     // check if GPU is ready to flip frames
                     if let Some(presentable_draw) = self.os.new_frame_being_rendered {
                         while !d3d11_cx.is_gpu_done() {
-                            let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
-                            self.os.new_frame_being_rendered = None;
                             std::thread::sleep(std::time::Duration::from_millis(3));
                         }
+                        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
+                        self.os.new_frame_being_rendered = None;
                     }
                     
                 }
