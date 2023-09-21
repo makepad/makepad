@@ -20,7 +20,6 @@ use {
     makepad_code_editor::{text::Position,decoration::{Decoration}},
     makepad_http::server::*,
     std::{
-        cell::Cell,
         collections::HashMap,
         env,
         io::prelude::*,
@@ -49,10 +48,18 @@ pub struct ActiveBuild {
     pub process: BuildProcess,
     pub run_view_id: LiveId,
     pub cmd_id: Option<BuildCmdId>,
-    pub swapchain_history: [Option<cx_stdin::Swapchain<Texture>>;MAX_SWAPCHAIN_HISTORY],
-    //pub swapchain: Option<cx_stdin::Swapchain<Texture>>,
-    pub last_presented_id: Cell<Option<cx_stdin::PresentableImageId>>,
-    pub last_presented_backup_for_resizing: Texture,
+
+    pub swapchain: Option<cx_stdin::Swapchain<Texture>>,
+
+    /// Some previous value of `swapchain`, which holds the image still being
+    /// the most recent to have been presented after a successful client draw,
+    /// and needs to be kept around to avoid deallocating the backing texture.
+    ///
+    /// While not strictly necessary, it can also accept *new* draws to any of
+    /// its images, which allows the client to catch up a frame or two, visually.
+    pub last_swapchain_with_completed_draws: Option<cx_stdin::Swapchain<Texture>>,
+
+    pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -318,14 +325,15 @@ impl BuildManager {
             match wrap.item {
                 LogItem::Location(loc) => {
                     let pos = Position{
-                        line_index: loc.start.line_index - 1,
-                        byte_index: loc.start.byte_index - 1
+                        line_index: loc.start.line_index.max(1) - 1,
+                        byte_index: loc.start.byte_index.max(1) - 1
                     };
-                        
-                    file_system.add_decoration(&loc.file_name, Decoration::new(
-                        0,pos ,pos + loc.length
-                    ));
-                    file_system.redraw_view_by_path(cx, &loc.file_name, dock);
+                    if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name){
+                        file_system.add_decoration(file_id, Decoration::new(
+                            0,pos ,pos + loc.length
+                        ));
+                        file_system.redraw_view_by_file_id(cx, file_id, dock);
+                    }
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Location(loc)));
                         dispatch_event(cx, BuildManagerAction::RedrawLog)
@@ -372,6 +380,15 @@ impl BuildManager {
                                 level: BuildMsgLevel::Log,
                                 line
                             }));*/
+                        }
+                    }
+                }
+                LogItem::AuxChanHostEndpointCreated(aux_chan_host_endpoint) => {
+                    for active_build in active.builds.values_mut() {
+                        if active_build.cmd_id == Some(wrap.cmd_id) {
+                            assert!(active_build.aux_chan_host_endpoint.is_none());
+                            active_build.aux_chan_host_endpoint = Some(aux_chan_host_endpoint);
+                            break;
                         }
                     }
                 }

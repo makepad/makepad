@@ -408,40 +408,45 @@ impl Win32Window {
                 }
             },
             WM_NCHITTEST => {
-                let ycoord = (lparam.0 >> 16) as u16 as i16 as i32;
-                let xcoord = (lparam.0 & 0xffff) as u16 as i16 as i32;
+                //let ycoord = (lparam.0 >> 16) as u16 as i16 as i32;
+                //let xcoord = (lparam.0 & 0xffff) as u16 as i16 as i32;
+                let abs = window.get_mouse_pos_from_lparam(lparam);
                 let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
-                const EDGE: i32 = 8;
+                const EDGE: f64 = 4.0; 
+                let dpi = window.get_dpi_factor();
                 GetWindowRect(hwnd, &mut rect).unwrap();
-                if xcoord < rect.left + EDGE {
-                    if ycoord < rect.top + EDGE {
+                let rect = Rect{pos:dvec2(rect.left as f64 / dpi, rect.top as f64 / dpi),
+                size:dvec2( (rect.right-rect.left) as f64 / dpi,  (rect.bottom-rect.top) as f64/ dpi) 
+                }; 
+                if abs.x < rect.pos.x + EDGE {
+                    if abs.y < rect.pos.y  + EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
                         return LRESULT(HTTOPLEFT as isize);
                     }
-                    if ycoord > rect.bottom - EDGE {
+                    if abs.y > rect.pos.y + rect.size.y - EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
                         return LRESULT(HTBOTTOMLEFT as isize);
                     }
                     get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
                     return LRESULT(HTLEFT as isize);
                 }
-                if xcoord > rect.right - EDGE {
-                    if ycoord < rect.top + EDGE {
+                if abs.x > rect.pos.x+rect.size.x - EDGE {
+                    if abs.y < rect.pos.y  + EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
                         return LRESULT(HTTOPRIGHT as isize);
                     }
-                    if ycoord > rect.bottom - EDGE {
+                    if abs.y > rect.pos.y + rect.size.y - EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
                         return LRESULT(HTBOTTOMRIGHT as isize);
                     }
                     get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
                     return LRESULT(HTRIGHT as isize);
                 }
-                if ycoord < rect.top + EDGE {
+                if abs.y < rect.pos.y + EDGE {
                     get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
                     return LRESULT(HTTOP as isize);
                 }
-                if ycoord > rect.bottom - EDGE {
+                if abs.y > rect.pos.y+rect.size.y - EDGE {
                     get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
                     return LRESULT(HTBOTTOM as isize);
                 }
@@ -449,7 +454,7 @@ impl Win32Window {
                 window.do_callback(
                     Win32Event::WindowDragQuery(WindowDragQueryEvent {
                         window_id: window.window_id,
-                        abs: window.get_mouse_pos_from_lparam(lparam),
+                        abs: window.get_mouse_pos_from_lparam(lparam)- rect.pos,
                         response: response.clone()
                     })
                 );
@@ -466,12 +471,6 @@ impl Win32Window {
                         return LRESULT(HTSYSMENU as isize);
                     }
                     _ => ()
-                }
-                if ycoord < rect.top + 50 && xcoord < rect.left + 50 {
-                    return LRESULT(HTSYSMENU as isize);
-                }
-                if ycoord < rect.top + 50 && xcoord < rect.right - 300 {
-                    return LRESULT(HTCAPTION as isize);
                 }
                 return LRESULT(HTCLIENT as isize);
             },

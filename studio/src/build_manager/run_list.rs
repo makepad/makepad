@@ -8,10 +8,7 @@ use {
         },
         makepad_widgets::*,
     },
-    std::{
-        env,
-        cell::Cell,
-    },
+    std::env,
 };
 
 live_design!{
@@ -204,7 +201,7 @@ impl BuildManager {
                     run_list.redraw(cx);
                     for i in 0..if change{1}else{BuildTarget::len()} {
                         let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
-                        Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0],cx, id, &binary_name, i, change, &mut out);
+                        Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0],id, &binary_name, i, change, &mut out);
                         self.log.clear();
                     }
                 };
@@ -215,7 +212,7 @@ impl BuildManager {
                     if item_id == id{
                         if let Some(change) = item.check_box(id!(check)).changed(actions) {
                             run_list.redraw(cx);
-                            Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], cx, item_id, &binary_name, i, change, &mut out);
+                            Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], item_id, &binary_name, i, change, &mut out);
                             self.log.clear();
                         }
                     }
@@ -229,7 +226,9 @@ impl BuildManager {
         match tgt {
             BuildTarget::RELEASE => BuildTarget::Release,
             BuildTarget::DEBUG => BuildTarget::Debug,
+            #[cfg(not(target_os="windows"))]
             BuildTarget::RELEASE_STUDIO => BuildTarget::ReleaseStudio,
+            #[cfg(not(target_os="windows"))]
             BuildTarget::DEBUG_STUDIO => BuildTarget::DebugStudio,
             BuildTarget::PROFILER => BuildTarget::Profiler,
             BuildTarget::IOS_SIM => BuildTarget::IosSim {
@@ -246,7 +245,7 @@ impl BuildManager {
         }
     }
     
-    pub fn toggle_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient, cx: &mut Cx, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
+    pub fn toggle_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
         let target = Self::target_id_to_target(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
@@ -263,10 +262,9 @@ impl BuildManager {
                     process: process.clone(),
                     run_view_id,
                     cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
-                    //swapchain: None,
-                    swapchain_history: [None,None,None,None],
-                    last_presented_id: Cell::new(None),
-                    last_presented_backup_for_resizing: Texture::new(cx),
+                    swapchain: None,
+                    last_swapchain_with_completed_draws: None,
+                    aux_chan_host_endpoint: None,
                 });
             }
             if process.target.runs_in_studio(){
