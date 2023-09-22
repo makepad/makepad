@@ -62,7 +62,7 @@ pub struct CxIconPathHash(LiveId);
 pub struct CxIconEntryHash(LiveId);
 
 pub struct CxIconAtlas {
-    pub texture_id: TextureId,
+    pub texture: Texture,
     pub clear_buffer: bool,
     svg_deps: HashMap<String, CxIconPathHash>,
     paths: HashMap<CxIconPathHash, CxIconPathCommands>,
@@ -103,9 +103,9 @@ impl CxIconArgs {
 }
 
 impl CxIconAtlas {
-    pub fn new(texture_id: TextureId) -> Self {
+    pub fn new(texture: Texture) -> Self {
         Self {
-            texture_id,
+            texture,
             clear_buffer: false,
             entries: HashMap::new(),
             svg_deps: HashMap::new(),
@@ -278,8 +278,8 @@ impl CxIconAtlas {
         self.clear_buffer = true;
     }
     
-    pub fn get_internal_atlas_texture_id(&self) -> TextureId {
-        self.texture_id
+    pub fn get_internal_atlas_texture(&self) -> &Texture {
+        &self.texture
     }
 }
 
@@ -355,10 +355,10 @@ impl<'a> Cx2d<'a> {
         if !cx.has_global::<CxIconAtlasRc>() {
             
             let draw_atlas = CxDrawIconAtlas::new(cx);
-            let texture_id = draw_atlas.atlas_texture.texture_id();
+            let texture = draw_atlas.atlas_texture.clone();
             cx.set_global(CxDrawIconAtlasRc(Rc::new(RefCell::new(draw_atlas))));
             
-            let atlas = CxIconAtlas::new(texture_id);
+            let atlas = CxIconAtlas::new(texture);
             cx.set_global(CxIconAtlasRc(Rc::new(RefCell::new(atlas))));
         }
     }
