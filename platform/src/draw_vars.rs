@@ -18,7 +18,7 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         cx::Cx,
-        texture::{Texture, TextureId},
+        texture::{Texture},
         makepad_error_log::*,
         geometry::GeometryId,
         area::Area,
@@ -85,7 +85,7 @@ pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
 pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 #[repr(C)]
 pub struct DrawVars {
     pub area: Area,
@@ -95,7 +95,7 @@ pub struct DrawVars {
     pub draw_shader: Option<DrawShader>,
     pub (crate) geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
-    pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
@@ -128,7 +128,7 @@ impl LiveHook for DrawVars {}
 impl DrawVars {
     
     pub fn set_texture(&mut self, slot: usize, texture: &Texture) {
-        self.texture_slots[slot] = Some(texture.texture_id());
+        self.texture_slots[slot] = Some(texture.clone());
     }
     
     pub fn empty_texture(&mut self, slot: usize) {
