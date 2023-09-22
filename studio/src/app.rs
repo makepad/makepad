@@ -26,9 +26,9 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
     
-    import makepad_studio::build_manager::run_view::RunView;
-    import makepad_studio::build_manager::log_list::LogList;
-    import makepad_studio::build_manager::run_list::RunList;
+    import makepad_studio_core::build_manager::run_view::RunView;
+    import makepad_studio_core::build_manager::log_list::LogList;
+    import makepad_studio_core::build_manager::run_list::RunList;
     
     Logo = <Button> {
         draw_icon: {
@@ -272,6 +272,8 @@ impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.file_system.init(cx);
         self.build_manager.init(cx);
+        self.build_manager.discover_external_ip(cx);
+        self.build_manager.start_http_server();
         
         //self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
     }
@@ -389,7 +391,7 @@ impl AppMain for App {
             }
         }
         
-        for action in self.build_manager.handle_event(cx, event, &mut self.file_system, &dock) {
+        for action in self.build_manager.handle_event(cx, event, &mut self.file_system) {
             match action {
                 BuildManagerAction::RedrawLog => {
                     // if the log_list is tailing, set the new len
@@ -400,10 +402,34 @@ impl AppMain for App {
                         run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.build_manager);
                     }
                 }
+                BuildManagerAction::RedrawFile(file_id)=>{
+                    self.file_system.redraw_view_by_file_id(cx, file_id, &dock);
+                }
+                BuildManagerAction::RecompileStarted=>{
+                    
+                    self.build_manager.clear_log(cx, &dock, &mut self.file_system);
+                    
+                    if let Some(mut dock) = dock.borrow_mut() {
+                        for (_id, (_, item)) in dock.items().iter() {
+                            if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                                run_view.resend_framebuffer(cx);
+                            }
+                        }
+                    }
+                }
                 _ => ()
             }
         }
         
+            // process events on all run_views
+        if let Some(mut dock) = dock.borrow_mut() {
+            for (id, (_, item)) in dock.items().iter() {
+                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                    run_view.pump_event_loop(cx, event, *id, &mut self.build_manager);
+                }
+            }
+        }
+
         let actions = self.ui.handle_widget_event(cx, event);
         
         for (item_id, item) in run_list.items_with_actions(&actions) {

@@ -35,6 +35,7 @@ use {
         },
         pass::CxPassParent,
         thread::Signal,
+        cx_stdin::PollTimers,
         window::WindowId,
         event::{
             WindowGeom,
@@ -583,5 +584,7 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) decoding: CxAppleDecoding,
+    pub (crate) stdin_timers: PollTimers,
+
     pub metal_device: Option<ObjcId>,
 }
