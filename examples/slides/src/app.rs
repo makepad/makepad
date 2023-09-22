@@ -1,9 +1,14 @@
-use makepad_widgets::*;
+use crate::{
+    makepad_widgets::*,
+    makepad_studio_core::build_manager::build_manager::*,
+    makepad_studio_core::build_manager::run_view::*,
+    makepad_studio_core::file_system::file_system::*,
+};
 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    
+    import makepad_studio_core::build_manager::run_view::RunView;
     App = {{App}} {
         
         ui: <Window> {
@@ -12,9 +17,23 @@ live_design!{
             height: Fill
             body = {
                 <SlidesView> {
+                    <Slide> {
+                        title = {text: "A long long time ago …"},
+                        news_feed=<RunView> {
+                            width:Fill,
+                            height:Fill
+                        }
+                    }
+                    <Slide> {
+                        title = {text: "A long long time ago …"},
+                        ironfish=<RunView> {
+                            width:Fill,
+                            height:Fill
+                        }
+                    }
                     
                     <SlideChapter> {
-                        title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs For Rust"},
+                        title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
@@ -92,76 +111,79 @@ live_design!{
     }
 }
 
-// This app_main macro generates the code necessary to initialize and run your application.
-//
-// This code is almost always the same between different applications, so it is convenient to use a
-// macro for it. The two main tasks that this code needs to carry out are: initializing both the
-// main application struct (`App`) and the global context object (`Cx`), and setting up event
-// handling. On desktop, this means creating and running our own event loop. On web, this means
-// creating an event handler function that the browser event loop can call into.
 app_main!(App);
 
-// The main application struct.
-//
-// The #[derive(Live, LiveHook)] attribute implements a bunch of traits for this struct that enable
-// it to interact with the Makepad runtime. Among other things, this enables the Makepad runtime to
-// initialize the struct from a DSL object.
 #[derive(Live)]
-// This function is used to register any DSL code that you depend on.
-// called automatically by the code we generated with the call to the macro `main_app` above.
 pub struct App {
-    // A chromeless window for our application. Used to contain our frame widget.
-    // A frame widget. Used to contain our button and label.
     #[live] ui: WidgetRef,
-    
-    // The value for our counter.
-    //
-    // The #[rust] attribute here is used to indicate that this field should *not* be initialized
-    // from a DSL object, even when a corresponding property exists.
-    #[rust] counter: usize,
+    #[live] build_manager: BuildManager,
+    #[rust] file_system: FileSystem,
 }
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
+        crate::makepad_code_editor::live_design(cx);
+        crate::build_manager::build_manager::live_design(cx);
+        crate::build_manager::run_list::live_design(cx);
+        crate::build_manager::log_list::live_design(cx);
+        crate::build_manager::run_view::live_design(cx);
+        //cx.start_stdin_service();
     }
+    
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.file_system.init(cx);
+        self.build_manager.init(cx);
+        self.build_manager.run_app(live_id!(news_feed),"makepad-example-news-feed");
+        self.build_manager.run_app(live_id!(ironfish),"makepad-example-ironfish");
+    }    
 }
 
 impl App {
-    async fn _do_network_request(_cx: CxRef, _ui: WidgetRef, _url: &str) -> String {
-        //let x = fetch(urL).await;
-        //ui.get_label(id!(thing)).set_text(&mut *cx.borrow_mut(), x);
-        "".to_string()
-    }
 }
 
 impl AppMain for App {
-    
-    
-    // This function is used to handle any incoming events from the host system. It is called
-    // automatically by the code we generated with the call to the macro `main_app` above.
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        
+        let apps = [id!(news_feed),id!(ironfish)];
+        
         if let Event::Draw(event) = event {
-            // This is a draw event, so create a draw context and use that to draw our application.
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            //let dt = profile_start();
+            let cx = &mut Cx2d::new(cx, event);
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+                let run_view_id = next.id();
+                if let Some(mut run_view) = next.as_run_view().borrow_mut() {
+                    run_view.draw(cx, run_view_id, &mut self.build_manager);
+                }
+            }
+            //profile_end!(dt);
+            return
+        }
+        if let Event::Destruct = event {
+            self.build_manager.clear_active_builds();
+        }
+        let _actions = self.ui.handle_widget_event(cx, event);
+        
+        //ok i want all runviews... how do i do that
+        for app in apps{
+            if let Some(mut run_view) = self.ui.run_view(app).borrow_mut(){
+                run_view.pump_event_loop(cx, event, app[0], &mut self.build_manager);
+                run_view.handle_event(cx, event, app[0], &mut self.build_manager);
+            }
         }
         
-        // Forward the event to the frame. In this case, handle_event returns a list of actions.
-        // Actions are similar to events, except that events are always forwarded downward to child
-        // widgets, while actions are always returned back upwards to parent widgets.
-        let actions = self.ui.handle_widget_event(cx, event);
-        
-        // Get a reference to our button from the frame, and check if one of the actions returned by
-        // the frame was a notification that the button was clicked.
-        if self.ui.button(id!(button1)).clicked(&actions) {
-            //cx.spawn_async(Self::do_network_request(cx.get_ref(), self.ui.clone()))
-            // Increment the counter.
-            self.counter += 1;
-            
-            // Get a reference to our label from the frame, update its text, and schedule a redraw
-            // for it.
-            let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
+        for _action in self.file_system.handle_event(cx, event, &self.ui) {}
+                
+        for action in self.build_manager.handle_event(cx, event, &mut self.file_system) {
+            match action {
+                BuildManagerAction::StdinToHost {run_view_id, msg} => {
+                    if let Some(mut run_view) = self.ui.run_view(&[run_view_id]).borrow_mut() {
+                        run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.build_manager);
+                    }
+                }
+                _ => ()
+            }
         }
+        
     }
 }

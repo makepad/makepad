@@ -22,6 +22,7 @@ use {
     },
     crate::{
         cx_api::{CxOsOp, CxOsApi},
+        cx_stdin::{PollTimers,PollTimer},
         makepad_math::*,
         makepad_live_id::*,
         makepad_live_compiler::LiveFileChange,
@@ -70,7 +71,9 @@ impl Cx {
         self.start_network_live_file_watcher();
         
         while !self.os.quit {
-            self.handle_timers();
+            for event in self.os.timers.get_dispatch() {
+                self.call_event_handler(&event);
+            }                    
             
             while let Ok(msg) = from_java_rx.try_recv() {
                 match msg {
@@ -119,7 +122,7 @@ impl Cx {
                         self.call_event_handler(&Event::ClearAtlasses);
                     }
                     FromJavaMessage::Touch(mut touches) => {
-                        let time = self.os.time_now();
+                        let time = self.os.timers.time_now();
                         let window = &mut self.windows[CxWindowPool::id_zero()];
                         let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                         for touch in &mut touches {
@@ -192,7 +195,7 @@ impl Cx {
                                         key_code: makepad_keycode,
                                         is_repeat: false,
                                         modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
-                                        time: self.os.time_now()
+                                        time: self.os.timers.time_now()
                                     }
                                 );
                                 self.call_event_handler(&e);
@@ -210,7 +213,7 @@ impl Cx {
                                 key_code: makepad_keycode,
                                 is_repeat: false,
                                 modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
-                                time: self.os.time_now()
+                                time: self.os.timers.time_now()
                             }
                         );
                         self.call_event_handler(&e);
@@ -223,13 +226,13 @@ impl Cx {
                         if is_open {
                             self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidShow {
                                 height: keyboard_height - self.os.keyboard_closed,
-                                time: self.os.time_now()
+                                time: self.os.timers.time_now()
                             }))
                         }
                         else {
                             self.text_ime_was_dismissed();
                             self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidHide {
-                                time: self.os.time_now()
+                                time: self.os.timers.time_now()
                             }))
                         }
                     }
@@ -337,7 +340,7 @@ impl Cx {
             
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(self.os.time_now());
+                    self.call_next_frame_event(self.os.timers.time_now());
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
@@ -613,7 +616,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(self.os.time_now() as f32);
+            self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
@@ -661,10 +664,10 @@ impl Cx {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    self.os.timers.insert(timer_id, Timer::new(interval, repeats));
+                    self.os.timers.timers.insert(timer_id, PollTimer::new(interval, repeats));
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    self.os.timers.remove(&timer_id);
+                    self.os.timers.timers.remove(&timer_id);
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
                     //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
@@ -710,34 +713,6 @@ impl Cx {
         EventFlow::Poll
     }
     
-    fn handle_timers(&mut self) {
-        let mut to_be_dispatched = Vec::with_capacity(self.os.timers.len());
-        let mut to_be_removed = Vec::with_capacity(self.os.timers.len());
-        let now = Instant::now();
-        let time = self.os.time_now();
-        for (id, timer) in self.os.timers.iter_mut() {
-            let elapsed_time = now - timer.start_time;
-            let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
-            
-            if elapsed_time > next_due_time {
-                
-                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time:Some(time)}));
-                if timer.repeats {
-                    timer.step += 1;
-                } else {
-                    to_be_removed.push(*id);
-                }
-            }
-        }
-        
-        for id in to_be_removed {
-            self.os.timers.remove(&id);
-        }
-        for event in to_be_dispatched {
-            self.call_event_handler(&event);
-        }
-        self.os.last_time = now;
-    }
 }
 
 impl CxOsApi for Cx {
@@ -755,11 +730,9 @@ impl CxOsApi for Cx {
 impl Default for CxOs {
     fn default() -> Self {
         Self {
-            last_time: Instant::now(),
             first_after_resize: true,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
-            time_start: Instant::now(),
             keyboard_closed: 0.0,
             //keyboard_visible: false,
             //keyboard_trigger_position: DVec2::default(),
@@ -769,7 +742,7 @@ impl Default for CxOs {
             display: None,
             quit: false,
             fullscreen: false,
-            timers: HashMap::new()
+            timers: Default::default()
         }
     }
 }
@@ -786,11 +759,11 @@ pub struct CxAndroidDisplay {
 
 
 pub struct CxOs {
-    pub last_time: Instant,
+//    pub time_start: Instant,
+//    pub last_time: Instant,
     pub first_after_resize: bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
-    pub time_start: Instant,
     pub keyboard_closed: f64,
     //pub keyboard_visible: bool,
     //pub keyboard_trigger_position: DVec2,
@@ -798,10 +771,10 @@ pub struct CxOs {
     
     pub quit: bool,
     pub fullscreen: bool,
+    pub (crate) timers: PollTimers,
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
     pub (crate) decoding: CxAndroidDecoding,
-    pub (crate) timers: HashMap<u64, Timer>,
 }
 
 impl CxAndroidDisplay {
@@ -842,31 +815,5 @@ impl CxAndroidDisplay {
         );
         
         assert!(res != 0);
-    }
-}
-
-impl CxOs {
-    pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
-    }
-}
-
-pub struct Timer {
-    pub start_time: Instant,
-    pub interval: Duration,
-    pub repeats: bool,
-    pub step: u64,
-}
-
-impl Timer {
-    pub fn new(interval_ms: f64, repeats: bool) -> Timer {
-        let interval_ns = (interval_ms * 1e6) as u64;
-        Timer {
-            start_time: Instant::now(),
-            interval: Duration::from_nanos(interval_ns),
-            repeats,
-            step: 0,
-        }
     }
 }

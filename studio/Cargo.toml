@@ -10,10 +10,5 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ApDRzhyZwrD0ObJySvlMkfrMyZI="
 
 [dependencies]
-makepad-widgets = {path="../widgets" , version="0.6.0"}
-makepad-code-editor = {path="../code_editor", version="0.6.0"}
-makepad-file-protocol = {path="./file_protocol", version="0.5.0"}
-makepad-file-server = {path="./file_server", version="0.5.0"}
-makepad-shell = {path="../libs/shell" , version="0.4.0"}
-makepad-http = { path = "../libs/http", version = "0.4.0" } 
+makepad-studio-core = {path="./studio_core", version="0.5.0"}
 
