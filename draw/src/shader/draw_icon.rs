@@ -197,7 +197,7 @@ impl DrawIcon {
     }
     
     pub fn update_draw_call_vars(&mut self, atlas: &CxIconAtlas) {
-        self.draw_vars.texture_slots[0] = Some(atlas.texture_id);
+        self.draw_vars.texture_slots[0] = Some(atlas.texture.clone());
         self.draw_vars.user_uniforms[0] = self.brightness;
         self.draw_vars.user_uniforms[1] = self.curve;
     }

@@ -495,7 +495,6 @@ live_design!{
                         apply: {draw_check: {selected: 0.0}}
                     }
                     on = {
-                        cursor: Arrow,
                         from: {all: Forward {duration: 0.1}}
                         apply: {draw_check: {selected: 1.0}}
                     }
