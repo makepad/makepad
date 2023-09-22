@@ -31,7 +31,7 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 [target.aarch64-apple-ios.dependencies]
 makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(linux_direct)'.dependencies]
 inotify = { path="../libs/inotify-rs", version = "0.10.2" }
 
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
