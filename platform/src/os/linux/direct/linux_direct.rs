@@ -185,6 +185,13 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(e))
                 }
             }
+            DirectEvent::TouchUpdate(e) => {
+                self.fingers.process_touch_update_start(e.time, &e.touches);
+                let e = Event::TouchUpdate(e);
+                self.call_event_handler(&e);
+                let e = if let Event::TouchUpdate(e) = e{e}else{panic!()};
+                self.fingers.process_touch_update_end(&e.touches);
+            }
         }
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             EventFlow::Poll

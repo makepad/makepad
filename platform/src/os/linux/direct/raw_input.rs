@@ -681,6 +681,9 @@ pub struct RawInput {
     height: f64,
     dpi_factor: f64,
     abs: DVec2,
+    touches: Vec<TouchPoint>,
+    touch_index: usize,
+    num_fingers: u8,
 }
 
 impl RawInput {
@@ -804,6 +807,9 @@ impl RawInput {
             dpi_factor,
             abs: dvec2(0.0, 0.0),
             modifiers: Default::default(),
+            touches: Vec::new(),
+            touch_index: 0usize,
+            num_fingers: 0u8,
         }
     }
     
@@ -816,7 +822,7 @@ impl RawInput {
     }
 
     fn process_event(&mut self, mut evts: Vec<InputEvent>, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId) {
-        while let Some(evt) = evts.pop() {
+        for evt in evts {
             match evt.ty {
                 InputEventType::EV_REL => { // relative input
                     self.process_rel_event(evt, dir_evts, time, window_id)
@@ -829,6 +835,15 @@ impl RawInput {
                 }
                     _ => ()
             }
+        };
+
+        if self.touches.len() > 0 {
+            dir_evts.push(DirectEvent::TouchUpdate(TouchUpdateEvent {
+                time,
+                window_id,
+                modifiers: self.modifiers,
+                touches: self.touches,
+            }))
         }
     }
 
@@ -859,6 +874,8 @@ impl RawInput {
 
     fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId){
         let code: EvAbsCodes = unsafe { std::mem::transmute(evt.code) };
+        static mut FIRST_TOUCH_X: bool = false;
+        static mut FIRST_TOUCH_Y: bool = false;
         match code {
             EvAbsCodes::ABS_X => {
                 self.abs.x = (evt.value as f64 / 32767.0) * self.width;
@@ -867,11 +884,66 @@ impl RawInput {
                 self.abs.y = (evt.value as f64 / 32767.0) * self.height;
             },
             EvAbsCodes::ABS_MT_POSITION_X => {
-                self.abs.x = evt.value as f64 / self.dpi_factor; 
+                self.touches.get_mut(self.touch_index).unwrap().abs.x = evt.value as f64 / self.dpi_factor;
+                if unsafe {!FIRST_TOUCH_X} {
+                    self.touches.get_mut(self.touch_index).unwrap().state = TouchState::Move;
+
+                } else {
+                    unsafe { FIRST_TOUCH_X = false }
+                }
             },
             EvAbsCodes::ABS_MT_POSITION_Y => {
-                self.abs.y = evt.value as f64 / self.dpi_factor;
+                self.touches.get_mut(self.touch_index).unwrap().abs.y = evt.value as f64 / self.dpi_factor;
+                if unsafe {!FIRST_TOUCH_Y} {
+                    self.touches.get_mut(self.touch_index).unwrap().state = TouchState::Move;
+                } else {
+                    unsafe { FIRST_TOUCH_Y = false }
+                }
             },
+            EvAbsCodes::ABS_MT_TRACKING_ID => { //new finger shows up or is removed
+                if evt.value>0 { //new finger id is assigned
+                    unsafe {
+                        FIRST_TOUCH_X = true;
+                        FIRST_TOUCH_Y = true; 
+                    }
+                    if self.num_fingers == self.touches.len() { //new touch is needed
+                        self.num_fingers += 1;
+                        self.touches.push(TouchPoint {
+                            state: TouchState::Start,
+                            abs: DVec2 { x: 0, y: 0 },
+                            uid: evt.value as u64,
+                            rotation_angle: 0,
+                            force: 0,
+                            radius: DVec2 { x: 0, y: 0 },
+                            handled: Cell::new(Area::Empty),
+                            sweep_lock: Cell::new(Area::Empty)
+                        })
+                    } else { //old touch can be reused
+                        if let Some(index) = self.touches.iter().position(|&touch| touch.state == TouchState::Stop) {
+                            self.touches.get_mut(index) = TouchPoint {
+                                state: TouchState::Start,
+                                abs: DVec2 { x: 0, y: 0 },
+                                uid: evt.value as u64,
+                                rotation_angle: 0,
+                                force: 0,
+                                radius: DVec2 { x: 0, y: 0 },
+                                handled: Cell::new(Area::Empty),
+                                sweep_lock: Cell::new(Area::Empty),
+                            };
+                            self.num_fingers += 1;
+                        }
+                    }
+                } else { //finger is removed
+                    if self.num_fingers -= 1 == 0 { //all fingers are gone
+                        self.touches.clear();
+                        self.touch_index == 0;
+                    } else if self.touch_index == self.touches.len() -1 { //last finger placed is removed
+                        self.touches.pop();
+                    } else { //a finger that was placed before the most recent one is removed
+                        self.touches.get_mut(self.touch_index).unwrap().state = TouchState::Stop;
+                    }
+                }
+            }
             _=> return ()
         }
         dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
@@ -1014,16 +1086,6 @@ impl RawInput {
                             handled: Cell::new(Area::Empty),
                         }))
                     },
-                    EvKeyCodes::BTN_TOUCH => {
-                        dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
-                            button: 0usize,
-                            abs: self.abs,
-                            window_id,
-                            modifiers: self.modifiers,
-                            time,
-                            handled: Cell::new(Area::Empty),
-                        }))
-                    },
                     _ => {
                         if !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
                             let uc = self.modifiers.shift;
@@ -1058,15 +1120,6 @@ impl RawInput {
                     EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
                         dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
                             button: (evt.code - EvKeyCodes::BTN_LEFT as u16) as usize,
-                            abs: self.abs,
-                            window_id,
-                            modifiers: self.modifiers,
-                            time,
-                        }))
-                    },
-                    EvKeyCodes::BTN_TOUCH => {
-                        dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
-                            button: 0usize,
                             abs: self.abs,
                             window_id,
                             modifiers: self.modifiers,

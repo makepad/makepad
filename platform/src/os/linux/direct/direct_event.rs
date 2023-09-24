@@ -8,6 +8,7 @@ use {
             KeyEvent,
             TextInputEvent,
             TimerEvent,
+            TouchUpdateEvent,
         },
     }
 };
@@ -23,4 +24,5 @@ pub enum DirectEvent {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     Timer(TimerEvent),
+    TouchUpdate(TouchUpdateEvent),
 }
