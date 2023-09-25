@@ -1,13 +1,9 @@
 use {
-    self::super::super::{
-        libc_sys,
-    },
-    self::super::{
-        direct_event::*,
-    },
+    self::super::super::libc_sys,
+    self::super::direct_event::*,
     crate::{
         makepad_math::*,
-        window::{WindowId},
+        window::WindowId,
         event::*,
         area::Area,
     },
@@ -610,6 +606,8 @@ enum EvRepCodes {
     REP_CNT			=EvRepCodes::REP_PERIOD_MAX as u16 + 1,
 }
 
+const MTSLOTERROR: &str = "MultiTouch slot doesn't exist";
+
 #[allow(unused)]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug)]
@@ -620,12 +618,29 @@ enum KeyAction {
 }
 
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy)]
 struct InputEvent {
     time: libc_sys::timeval,
     ty: InputEventType,
     code: u16,
     value: i32,
+}
+
+impl std::fmt::Debug for InputEvent {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.ty {
+			InputEventType::EV_SYN => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvSynCodes>(self.code) }, self.value),
+			InputEventType::EV_KEY => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvKeyCodes>(self.code) }, self.value),
+			InputEventType::EV_REL => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvRelCodes>(self.code) }, self.value),
+			InputEventType::EV_ABS => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvAbsCodes>(self.code) }, self.value),
+			InputEventType::EV_MSC => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvMscCodes>(self.code) }, self.value),
+			InputEventType::EV_SW  => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvSwCodes>(self.code) }, self.value),
+			InputEventType::EV_LED => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvLedCodes>(self.code) }, self.value),
+			InputEventType::EV_SND => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvSndCodes>(self.code) }, self.value),
+			InputEventType::EV_REP => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvRepCodes>(self.code) }, self.value),
+			_ => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, self.code, self.value),
+		}
+	}
 }
 
 trait EventFile { //need a trait to implement helper function on the File type
@@ -712,7 +727,8 @@ impl RawInput {
                                             let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
                                             match code {
                                                 EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
-                                                    send.send(evts).unwrap();
+                                                    evts.push(evt);
+													send.send(evts).unwrap();
                                                     break;
                                                 },
                                                 EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
@@ -764,7 +780,8 @@ impl RawInput {
                                                         let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
                                                         match code {
                                                             EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
-                                                                send.send(evts).unwrap();
+                                                                evts.push(evt);
+																send.send(evts).unwrap();
                                                                 break;
                                                             },
                                                             EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
@@ -821,31 +838,50 @@ impl RawInput {
         dir_evts
     }
 
-    fn process_event(&mut self, mut evts: Vec<InputEvent>, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId) {
+    fn process_event(&mut self, evts: Vec<InputEvent>, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId) {
         for evt in evts {
             match evt.ty {
                 InputEventType::EV_REL => { // relative input
-                    self.process_rel_event(evt, dir_evts, time, window_id)
+                    self.process_rel_event(evt, dir_evts, time, window_id);
                 }
                 InputEventType::EV_ABS => { // absolute input
-                    self.process_abs_event(evt, dir_evts, time, window_id)
+                    self.process_abs_event(evt, dir_evts, time, window_id);
                 }
                 InputEventType::EV_KEY => { // key press
-                    self.process_key_event(evt, dir_evts, time, window_id)
+                    self.process_key_event(evt, dir_evts, time, window_id);
                 }
+				InputEventType::EV_SYN => {
+					self.process_syn_event(evt, dir_evts, time, window_id);
+				}
                     _ => ()
-            }
+            };
         };
-
-        if self.touches.len() > 0 {
-            dir_evts.push(DirectEvent::TouchUpdate(TouchUpdateEvent {
-                time,
-                window_id,
-                modifiers: self.modifiers,
-                touches: self.touches,
-            }))
-        }
     }
+
+	fn process_syn_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId){
+		let code: EvSynCodes = unsafe { std::mem::transmute(evt.code) };
+		match code {
+			EvSynCodes::SYN_REPORT => { //finish up the event.
+				//if there are any fingers on the screen make a TouchUpdateEvent
+				if self.touches.len() > 0 {
+					dir_evts.push(DirectEvent::TouchUpdate(TouchUpdateEvent {
+						time,
+						window_id,
+						modifiers: self.modifiers,
+						touches: self.touches.clone(), //TODO this is pretty bad and should be fixed but dont know how (yet)
+					}))
+				}
+				//if all fingers left the screen clear the buffer so it doesn't get sent to the event handler
+				if self.num_fingers == 0 {
+					self.touches.clear()
+				};
+			},
+			EvSynCodes::SYN_MT_REPORT => {
+				() // do something for the MultiTouch Type A protocol 
+			},
+			_=> ()
+		};
+	}
 
     fn process_rel_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId){
         let code: EvRelCodes = unsafe { std::mem::transmute(evt.code) };
@@ -869,7 +905,7 @@ impl RawInput {
             modifiers: self.modifiers,
             time,
             handled: Cell::new(Area::Empty),
-        }))
+        }));
     }
 
     fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64, window_id: WindowId){
@@ -884,49 +920,51 @@ impl RawInput {
                 self.abs.y = (evt.value as f64 / 32767.0) * self.height;
             },
             EvAbsCodes::ABS_MT_POSITION_X => {
-                self.touches.get_mut(self.touch_index).unwrap().abs.x = evt.value as f64 / self.dpi_factor;
+				let touch = self.touches.get_mut(self.touch_index).expect(MTSLOTERROR);
+                touch.abs.x = evt.value as f64 / self.dpi_factor;
                 if unsafe {!FIRST_TOUCH_X} {
-                    self.touches.get_mut(self.touch_index).unwrap().state = TouchState::Move;
+                    touch.state = TouchState::Move;
 
                 } else {
                     unsafe { FIRST_TOUCH_X = false }
                 }
             },
             EvAbsCodes::ABS_MT_POSITION_Y => {
-                self.touches.get_mut(self.touch_index).unwrap().abs.y = evt.value as f64 / self.dpi_factor;
+				let touch = self.touches.get_mut(self.touch_index).expect(MTSLOTERROR);
+                touch.abs.y = evt.value as f64 / self.dpi_factor;
                 if unsafe {!FIRST_TOUCH_Y} {
-                    self.touches.get_mut(self.touch_index).unwrap().state = TouchState::Move;
+                    touch.state = TouchState::Move;
                 } else {
                     unsafe { FIRST_TOUCH_Y = false }
                 }
             },
             EvAbsCodes::ABS_MT_TRACKING_ID => { //new finger shows up or is removed
-                if evt.value>0 { //new finger id is assigned
+                if evt.value>=0 { //new finger id is assigned
                     unsafe {
                         FIRST_TOUCH_X = true;
                         FIRST_TOUCH_Y = true; 
                     }
-                    if self.num_fingers == self.touches.len() { //new touch is needed
+                    if self.num_fingers == self.touches.len() as u8 { //new touch is needed
                         self.num_fingers += 1;
                         self.touches.push(TouchPoint {
                             state: TouchState::Start,
-                            abs: DVec2 { x: 0, y: 0 },
+                            abs: DVec2 { x: 0.0, y: 0.0 },
                             uid: evt.value as u64,
-                            rotation_angle: 0,
-                            force: 0,
-                            radius: DVec2 { x: 0, y: 0 },
+                            rotation_angle: 0.0,
+                            force: 0.0,
+                            radius: DVec2 { x: 0.0, y: 0.0 },
                             handled: Cell::new(Area::Empty),
                             sweep_lock: Cell::new(Area::Empty)
                         })
                     } else { //old touch can be reused
-                        if let Some(index) = self.touches.iter().position(|&touch| touch.state == TouchState::Stop) {
-                            self.touches.get_mut(index) = TouchPoint {
+                        if let Some(index) = self.touches.iter().position(|touch| touch.state == TouchState::Stop) {
+							*self.touches.get_mut(index).unwrap() = TouchPoint {
                                 state: TouchState::Start,
-                                abs: DVec2 { x: 0, y: 0 },
+                                abs: DVec2 { x: 0.0, y: 0.0 },
                                 uid: evt.value as u64,
-                                rotation_angle: 0,
-                                force: 0,
-                                radius: DVec2 { x: 0, y: 0 },
+                                rotation_angle: 0.0,
+                                force: 0.0,
+                                radius: DVec2 { x: 0.0, y: 0.0 },
                                 handled: Cell::new(Area::Empty),
                                 sweep_lock: Cell::new(Area::Empty),
                             };
@@ -934,16 +972,16 @@ impl RawInput {
                         }
                     }
                 } else { //finger is removed
-                    if self.num_fingers -= 1 == 0 { //all fingers are gone
-                        self.touches.clear();
-                        self.touch_index == 0;
-                    } else if self.touch_index == self.touches.len() -1 { //last finger placed is removed
-                        self.touches.pop();
-                    } else { //a finger that was placed before the most recent one is removed
-                        self.touches.get_mut(self.touch_index).unwrap().state = TouchState::Stop;
-                    }
+					self.num_fingers -= 1;
+					self.touches.get_mut(self.touch_index).expect(MTSLOTERROR).state = TouchState::Stop;
                 }
             }
+			EvAbsCodes::ABS_MT_SLOT => {
+				self.touch_index = evt.value as usize;
+			}
+			EvAbsCodes::ABS_PRESSURE => {
+				self.touches.get_mut(self.touch_index).expect(MTSLOTERROR).force = evt.value as f64;
+			}
             _=> return ()
         }
         dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
