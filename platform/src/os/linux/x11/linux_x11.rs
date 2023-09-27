@@ -354,6 +354,7 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
+    pub (crate) stdin_timers: PollTimers,
 
     // HACK(eddyb) generalize this to EGL, properly.
     pub(super) opengl_cx: Option<OpenglCx>,

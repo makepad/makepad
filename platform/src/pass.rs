@@ -161,7 +161,15 @@ impl Pass {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.pass_rect = Some(CxPassRect::Size(pass_size));
     }
-    
+
+    pub fn size(&self, cx: &mut Cx)->Option<DVec2> {
+        let cxpass = &mut cx.passes[self.pass_id()];
+        if let Some(CxPassRect::Size(size)) = &cxpass.pass_rect{
+            return Some(*size)
+        } 
+        None
+    }
+        
     pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.clear_color = clear_color;
