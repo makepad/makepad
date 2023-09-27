@@ -1565,6 +1565,7 @@ impl<'a> DrawSelectionLayer<'a> {
         {
             let selection = *self.selections.next().unwrap();
             if selection.cursor.position == position && selection.cursor.affinity == affinity {
+                self.draw_cursor_bg(cx, line, origin_y, row_index, column_index);
                 self.draw_cursor(cx, line, origin_y, row_index, column_index);
             }
             if !selection.is_empty() {
@@ -1610,18 +1611,7 @@ impl<'a> DrawSelectionLayer<'a> {
         column_index: usize,
     ) {
         let (x, y) = line.grid_to_normalized_position(row_index, column_index);
-        
-        self.code_editor.draw_cursor_bg.draw_abs(cx, Rect {
-                pos: DVec2 {
-                    x:self.code_editor.unscrolled_rect.pos.x, 
-                    y: (origin_y + y)*self.code_editor.cell_size.y+ self.code_editor.viewport_rect.pos.y
-                }, 
-                size: DVec2 {
-                    x: self.code_editor.unscrolled_rect.size.x,
-                    y: line.scale() *self.code_editor.cell_size.y,
-                },
-            });
-        
+
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
@@ -1633,6 +1623,28 @@ impl<'a> DrawSelectionLayer<'a> {
                 },
             },
         );
+    }
+    
+    fn draw_cursor_bg(
+        &mut self,
+        cx: &mut Cx2d<'_>,
+        line: Line<'_>,
+        origin_y: f64,
+        row_index: usize,
+        column_index: usize,
+    ) {
+        let (_x, y) = line.grid_to_normalized_position(row_index, column_index);
+        
+        self.code_editor.draw_cursor_bg.draw_abs(cx, Rect {
+                pos: DVec2 {
+                    x:self.code_editor.unscrolled_rect.pos.x, 
+                    y: (origin_y + y)*self.code_editor.cell_size.y+ self.code_editor.viewport_rect.pos.y
+                }, 
+                size: DVec2 {
+                    x: self.code_editor.unscrolled_rect.size.x,
+                    y: line.scale() *self.code_editor.cell_size.y,
+                },
+            });
     }
 }
 
