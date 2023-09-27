@@ -506,6 +506,7 @@ live_design!{
                 instance border_color2: #xFFFFFF0A
                 size: 8.5;
                 fn pixel(self) -> vec4 {
+                    //return 
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     let sz = self.size;
                     let left = sz + 1.;

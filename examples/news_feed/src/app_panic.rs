@@ -17,7 +17,7 @@ live_design!{
     ICO_USER = dep("crate://self/resources/icon_user.svg")
     ICO_ADD = dep("crate://self/resources/icon_add.svg")
     
-    FONT_SIZE_SUB = 9.5
+    FONT_SIZE_SUB = §§.5
     FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
@@ -235,7 +235,7 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    text: "@GOSIM· 13h"
+                    text: "@Hello world· 13h"
                 }
                 text = <Label> {
                     width: Fill,
@@ -347,7 +347,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        /*unsafe{  
+            /*unsafe{  
             let d:*mut f32 = 0 as *mut f32;
             *d = 0.0;
         }
@@ -362,9 +362,10 @@ impl AppMain for App {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
-
+                    // lets set our scroll range so the scrollbar has something
                     list.set_item_range(cx, 0, 1000);
-                    
+                    // next nly returns items that are visible
+                    // this means the performance here is O(visible)
                     while let Some(item_id) = list.next_visible_item(cx) {
                         let template = match item_id {
                             0 => live_id!(TopSpace),
@@ -373,10 +374,10 @@ impl AppMain for App {
                         };
                         let item = list.item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
-                            1 => format!("Hello! {}", item_id),
-                            2 => format!("Hello GOSIM\n With lines {}", item_id),
-                            3 => format!("Random numbers {}", item_id),
-                            _ => format!("Text body 4 id {}", item_id),
+                            1 => format!("The {} Requires recompile", item_id),
+                            2 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
+                            3 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
+                            _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
                         };
                         item.label(id!(content.text)).set_text(&text);
                         item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
@@ -392,7 +393,7 @@ impl AppMain for App {
         
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
-                log!("Test123 {}", item_id);
+                log!("Test {}", item_id);
             }
         }
     }

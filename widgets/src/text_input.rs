@@ -273,6 +273,7 @@ impl TextInput {
         if self.read_only {
             return
         }
+        
         self.replace_text(s);
         dispatch_action(cx, TextInputAction::Change(self.text.clone()));
         self.draw_bg.redraw(cx);

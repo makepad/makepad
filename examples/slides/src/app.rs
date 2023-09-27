@@ -18,92 +18,118 @@ live_design!{
             body = {
                 <SlidesView> {
                     <Slide> {
-                        title = {text: "A long long time ago …"},
-                        news_feed=<RunView> {
-                            width:Fill,
-                            height:Fill
-                        }
-                    }
-                    <Slide> {
-                        title = {text: "A long long time ago …"},
-                        ironfish=<RunView> {
-                            width:Fill,
-                            height:Fill
-                        }
+                        title = {text: "Hello Gosim"},
+                        <SlideBody> {text: ""}
                     }
                     
                     <SlideChapter> {
-                        title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
+                        title = {text: "LIVE APP BUILDING\nWITH MAKEPAD"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
+                        title = {text:"What we lost"},
+                        <SlideBody> {text: "- Visual Basic\n- Delphi\n"}
+                    }                    
+                    <Slide> {
                         title = {text: "A long long time ago …"},
-                        <SlideBody> {text: "… in a galaxy nearby\n   Cloud9 IDE & ACE"}
+                        <SlideBody> {text: "Cloud9 IDE & ACE"}
                     }
                     <Slide> {
                         title = {text: "HTML as an IDE UI?\nMadness!"},
-                        <SlideBody> {text: "- Integrating design and code was hard\n- Could not innovate editing\n- Too slow, too hard to control"}
+                        <SlideBody> {text: "- Integrating design and code was hard\n- Could not innovate editing: folding\n- Too slow, too hard to control"}
                     }
                     <Slide> {
                         title = {text: "Let's start over!"},
-                        <SlideBody> {text: "- JavaScript and WebGL for UI\n- Write shaders to style UI\n- A quick demo"}
+                        <SlideBody> {text: "- JavaScript and WebGL for UI\n- Write shaders to style UI"}
                     }
                     <Slide> {
-                        title = {text: "Maybe JavaScript\nwas the problem?"},
-                        <SlideBody> {text: "- Great livecoding, but …\n- Chrome crashing tabs after 30 minutes\n- Too slow"}
+                        title = {text: "Tried, and tried again."},
+                        <SlideBody> {text: "5 times: 2013-2018"}
+                    }
+                    <Slide> {
+                        title = {text: "Final result"},
+                        <SlideBody> {text: "- makepad.github.io/makepad_js.html"}
+                    }
+                    <Slide> {
+                        title = {text: "The good part"},
+                        <SlideBody> {text: "- Live Coding"}
+                    }
+                    <Slide> {
+                        title = {text: "The bad parts"},
+                        <SlideBody> {text: "- Too slow\n- Cannot scale: no types\n- Chrome crashes"}
+                    }
+                    <Slide> {
+                        title = {text: "Now what"},
+                        <SlideBody> {text: "- 5 years of my life gone"}
                     }
                     <Slide> {
                         title = {text: "Rust appears"},
                         <SlideBody> {text: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
                     }
                     <Slide> {
-                        title = {text: "Rust is fast: SIMD Mandelbrot"},
-                        align: {x: 0.0, y: 0.5} flow: Down,
-                        spacing: 10,
-                        padding: 50
-                        draw_bg: {color: #x1A, radius: 5.0}
+                        title = {text: "Rust"},
+                        <SlideBody> {text: "- Compiled: LLVM\n- Typed\n- Compiles everywhere"}
                     }
-                    
                     <Slide> {
-                        title = {text: "Instanced rendering"},
-                        align: {x: 0.0, y: 0.5} flow: Down,
-                        spacing: 10,
-                        padding: 50
-                        draw_bg: {color: #x1A, radius: 5.0}
+                        title = {text: "Finally we have\nperformance"},
+                    }                                                                                                  
+                    <Slide> {
+                        title = {text: "The slides are a\nMakepad app"},
+                    }                    
+                    <Slide> {
+                        title = {text: "However"},
+                        <SlideBody> {text: "- No more live coding?"}
                     }
-                    
                     <Slide> {
-                        title = {text: "Our goal:\nUnify coding and UI design again."},
-                        <SlideBody> {text: "As it was in Visual Basic.\nNow with modern design."}
+                        title = {text: "Goals"},
+                        <SlideBody> {text: "- Make Rust programming fun:\n- Visual designer\n- Media APIs\n- Live coding"}
                     }
-                    
-                    <Slide> {title = {text: "Ironfish Desktop"},}
-                    
-                    <Slide> {title = {text: "Ironfish Mobile"},}
-                    
-                    <Slide> {title = {text: "Multi modal"},}
-                    
-                    <Slide> {title = {text: "Visual design"},}
-                    
                     <Slide> {
-                        title = {text: "Our UI language: Live."},
-                        <SlideBody> {text: "- Live editable\n- Design tool manipulates text\n- Inheritance structure\n- Rust-like module system"}
+                        title = {text: "Solution for\nlive coding"},
+                        <SlideBody> {text: "- Makepad UI Language: A DSL"}
                     }
-                    
                     <Slide> {
-                        title = {text: "These slides are a Makepad app"},
-                        <SlideBody> {text: "- Show source\n"}
-                        <SlideBody> {text: "- Show Rust API\n"}
+                        title = {text: "Makepad Studio"},
+                        <SlideBody> {text: "- github.com/makepad/makepad\n- cargo run -p makepad-studio --release"}
                     }
-                    
                     <Slide> {
-                        title = {text: "Future"},
-                        <SlideBody> {text: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
+                        title = {text: "A Makepad App"},
+                        <SlideBody> {text: "- Platform layer: OS/GPU\n- UI DSL: Structure+Shaders\n- Rust Code: Logic"}
                     }
-                    
                     <Slide> {
-                        title = {text: "Build for Android"},
-                        <SlideBody> {text: "- SDK installer\n- Cargo makepad android\n"}
+                        title = {text: "Lets look at a\nMakepad app"},
+                        <SlideBody> {text: "- Simple: UI and events\n- News Feed: Virtual viewport"}
+                    }
+                    <Slide> {
+                        title = {text: "Platforms"},
+                        <SlideBody> {text: "- Windows / Mac / Linux\n- iOS / Android\n- WebAssembly"}
+                    }
+                    <Slide> {
+                        title = {text: "Build examples"}, 
+                        <SlideBody> {text: "- Before: fast or multiplatform\n- Demo builds"}
+                    }
+                    <Slide> {
+                        title = {text: "SDXL UI"},
+                        <SlideBody> {text: "- AI Image gen"}
+                    }
+                    <Slide> {
+                        title = {text: "Audio UI"},
+                        <SlideBody> {text: "- Ironfish"}
+                    }
+                    <Slide> {
+                        title = {text: "Live coding shaders"},
+                        <SlideBody> {text: "- Ironfish piano\n - Designer accessible"}
+                    }       
+                    <Slide> {
+                        title = {text: "Why"},
+                        <SlideBody> {text: "- Fast compute needed\n - Run on web and native\n- Tooling UI"}
+                    }       
+                    <Slide> {
+                        title = {text: "Inception"},
+                    }
+                    <Slide> {
+                        title = {text: "Links"}, 
+                        <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl"}
                     }
                 }
             }
@@ -134,9 +160,9 @@ impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.file_system.init(cx);
         self.build_manager.init(cx);
-        self.build_manager.run_app(live_id!(news_feed),"makepad-example-news-feed");
+        self.build_manager.run_app(live_id!(fractal_zoom),"makepad-example-fractal-zoom");
         self.build_manager.run_app(live_id!(ironfish),"makepad-example-ironfish");
-    }    
+    }
 }
 
 impl App {
@@ -145,7 +171,7 @@ impl App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
-        let apps = [id!(news_feed),id!(ironfish)];
+        let apps = [id!(fractal_zoom),id!(ironfish)];
         
         if let Event::Draw(event) = event {
             //let dt = profile_start();
