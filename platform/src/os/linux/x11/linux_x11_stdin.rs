@@ -201,6 +201,9 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    for event in self.os.stdin_timers.get_dispatch() {
+                        self.call_event_handler(&event);
+                    }                    
                     if self.handle_live_edit(){
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
@@ -253,6 +256,12 @@ impl Cx {
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
+                },
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    self.os.stdin_timers.timers.insert(timer_id, PollTimer::new(interval, repeats));
+                },
+                CxOsOp::StopTimer(timer_id) => {
+                    self.os.stdin_timers.timers.remove(&timer_id);
                 },
                 _ => ()
                 /*

@@ -59,8 +59,7 @@ impl LiveHook for SlidesView {
                         WidgetRef::new(cx)
                     }).apply(cx, from, index, nodes);
                 }
-                else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+                else {cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     nodes.skip_node(index)
                 }
             }
@@ -99,12 +98,14 @@ impl Widget for SlidesView {
                 }
             }
         }
+        
         self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
         });
     }
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        
         self.walk
     }
     
@@ -269,4 +270,3 @@ impl SlidesViewSet {
         }
     }
 }
-

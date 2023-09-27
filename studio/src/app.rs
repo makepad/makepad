@@ -274,7 +274,6 @@ impl LiveHook for App {
         self.build_manager.init(cx);
         self.build_manager.discover_external_ip(cx);
         self.build_manager.start_http_server();
-        
         //self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
     }
 }
@@ -297,11 +296,13 @@ impl AppMain for App {
     
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
         let log_list = self.ui.portal_list(id!(log_list));
         let run_list = self.ui.flat_list(id!(run_list));
         if let Event::Draw(event) = event {
+            
             //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
@@ -359,7 +360,7 @@ impl AppMain for App {
         for action in self.file_system.handle_event(cx, event, &self.ui) {
             match action {
                 FileSystemAction::TreeLoaded => {
-                    self.open_code_file_by_path(cx, "examples/news_feed/src/app.rs");
+                    self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
                 }
                 FileSystemAction::RecompileNeeded => {
                     self.build_manager.start_recompile_timer(cx, &self.ui);

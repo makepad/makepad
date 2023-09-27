@@ -183,8 +183,8 @@ impl Cx {
                     
                     // lets set our textures
                     for i in 0..sh.mapping.textures.len() {
-                        let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                            texture_id
+                        let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                            texture.texture_id()
                         }else {
                             continue;
                         };
@@ -200,8 +200,8 @@ impl Cx {
                         }
                     }
                     for i in 0..sh.mapping.textures.len() {
-                        let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                            texture_id
+                        let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                            texture.texture_id()
                         }else {
                             continue;
                         };
@@ -397,6 +397,7 @@ impl Cx {
             }
 
             gl_sys::Viewport(x as i32, y as i32, width as i32, height as i32);
+            
             assert_eq!(gl_sys::GetError(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
         }
 
@@ -1056,4 +1057,3 @@ uniform float view_table[16];
 void main() {
     gl_FragColor = vec4(0.0,0.0,0.0,0.0);
 }";*/
-

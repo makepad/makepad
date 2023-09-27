@@ -24,6 +24,7 @@ pub struct Window {
     #[live] debug_view: DebugView,
     #[live] nav_control: NavControl,
     #[live] window: WindowHandle,
+    #[live] stdin_size: DrawColor,
     #[live] overlay: Overlay,
     #[live] main_draw_list: DrawList2d,
     #[live] pass: Pass,
@@ -196,6 +197,7 @@ impl Window {
                 if self.button(id!(xr_on)).clicked(&actions) {
                     cx.xr_start_presenting();
                 }
+                
                 dispatch_action(cx, WindowAction::ViewActions(actions));
             }
         }
@@ -248,6 +250,24 @@ impl Window {
         }
         
         self.overlay.end(cx);
+        // lets get te pass size
+        fn encode_size(x: f64)->Vec4{
+            let x = x as usize;
+            let r = ((x >> 8)&0xff) as f32 / 255.0;
+            let b = ((x >> 0)&0xff) as f32 / 255.0;
+            vec4(r,0.0,b,1.0)
+        }
+        
+        // if we are running in stdin mode, write a tracking pixel with the pass size
+        if cx.in_makepad_studio(){
+            let df = cx.current_dpi_factor();
+            let size = self.pass.size(cx).unwrap() * df;
+            self.stdin_size.color = encode_size(size.x);
+            self.stdin_size.draw_abs(cx, Rect{pos:dvec2(0.0,0.0),size:dvec2(1.0/df,1.0/df)});
+            self.stdin_size.color = encode_size(size.y);
+            self.stdin_size.draw_abs(cx, Rect{pos:dvec2(1.0/df,0.0),size:dvec2(1.0/df,1.0/df)});
+        }
+        
         cx.end_pass_sized_turtle();
         
         self.main_draw_list.end(cx);
