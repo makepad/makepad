@@ -380,7 +380,7 @@ pub struct SigningArgs {
 pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
     
     if signing.org.is_none() || signing.app.is_none() {
-        return Err("Please set --org=org --app=app on the commandline inbetween ios and run-real, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
+        return Err("Please set --org=org --app=app on the commandline inbetween ios and run-device, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
     }
     let org = signing.org.unwrap();
     let app = signing.app.unwrap();
