@@ -280,6 +280,28 @@ impl Session {
         });
     }
 
+    pub fn move_to_end_of_line(&mut self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection
+                .update_cursor(|cursor| cursor.move_to_end_of_line(layout.as_text().as_lines()))
+        });
+    }
+
+    pub fn move_to_start_of_line(&mut self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |selection, _| {
+            selection.update_cursor(|cursor| cursor.move_to_start_of_line())
+        });
+    }
+
+    pub fn select_all(&mut self) {
+        self.modify_selections(false, |selection, layout| {
+            selection
+                .update_cursor(|cursor| cursor.move_to_file_start())
+                .reset_anchor()
+                .update_cursor(|cursor| cursor.move_to_file_end(layout.as_text().as_lines()))
+        });
+    }
+
     pub fn insert(&mut self, text: Text) {
         let mut edit_kind = EditKind::Insert;
         let mut inject_char = None;
