@@ -4,3 +4,5 @@ pub mod drm_sys;
 pub mod gbm_sys; 
 pub mod egl_drm;
 pub mod raw_input;
+pub mod input_sys;
+pub mod input_device;

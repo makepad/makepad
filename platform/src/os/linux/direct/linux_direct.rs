@@ -57,12 +57,13 @@ impl DirectApp {
         let egl = unsafe {Egl::new(&drm)}.unwrap();
         egl.swap_buffers();
         unsafe {drm.first_mode()};
+		let timers = SelectTimers::new();
         Self {
             dpi_factor,
             egl,
-            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor, dpi_factor),
+            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor, dpi_factor, timers.time_start.clone(), CxWindowPool::id_zero()),
             drm,
-            timers: SelectTimers::new()
+            timers,
         }
     }
 }
@@ -100,10 +101,7 @@ impl Cx {
                     })
                 );
             }
-            let input_events = direct_app.raw_input.poll_raw_input(
-                direct_app.timers.time_now(),
-                CxWindowPool::id_zero()
-            );
+            let input_events = direct_app.raw_input.poll_raw_input();
             for event in input_events {
                 cx.direct_event_callback(
                     &mut direct_app,
