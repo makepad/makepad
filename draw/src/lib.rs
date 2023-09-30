@@ -17,7 +17,6 @@ mod owned_font_face;
 pub use crate::{
     font_atlas::Font,
     turtle::{
-        Axis,
         Layout,
         Walk,
         Align,

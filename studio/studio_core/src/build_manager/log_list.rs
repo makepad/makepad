@@ -251,7 +251,7 @@ impl BuildManager {
                             binary = {text: (&binary)}
                             icon = {active_page: (map_level_to_icon(msg.level))},
                             body = {text: (&msg.msg)}
-                            location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index, msg.start.byte_index))}
+                            location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
                         item.draw_widget_all(cx);
@@ -280,8 +280,8 @@ impl BuildManager {
                         ret.push(LogListAction::JumpToError{
                             file_name:msg.file_name.clone(), 
                             start:Position{
-                                line_index: msg.start.line_index.max(1) - 1,
-                                byte_index: msg.start.byte_index.max(1) - 1,
+                                line_index: msg.start.line_index,
+                                byte_index: msg.start.byte_index,
                             },
                             length:msg.length
                         })
