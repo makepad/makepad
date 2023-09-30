@@ -34,7 +34,8 @@ live_design!{
         other_keyword: #5B9BD3,
         punctuator: #D4D4D4,
         string: #CC917B,
-        typename: #56C9B1;
+        function: #fff38a,
+        typename: #56C9B1,
         whitespace: #6E6E6E,
         delimiter_highlight: #f,
     }
@@ -927,6 +928,7 @@ impl CodeEditor {
                                         TokenKind::OtherKeyword => self.token_colors.other_keyword,
                                         TokenKind::Punctuator => self.token_colors.punctuator,
                                         TokenKind::String => self.token_colors.string,
+                                        TokenKind::Function => self.token_colors.function,
                                         TokenKind::Typename => self.token_colors.typename,
                                         TokenKind::Whitespace => self.token_colors.whitespace,
                                     };
@@ -1675,6 +1677,8 @@ struct TokenColors {
     number: Vec4,
     #[live]
     other_keyword: Vec4,
+    #[live]
+    function: Vec4,
     #[live]
     punctuator: Vec4,
     #[live]

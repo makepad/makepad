@@ -73,8 +73,15 @@ impl FileClientInner {
         let (request_sender, request_receiver) = mpsc::channel();
         let action_signal = Signal::new();
         let (action_sender, action_receiver) = mpsc::channel();
-        
-        let base_path = env::current_dir().unwrap();
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+
+        let base_path = env::current_dir().unwrap().join(root);
         let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
         let mut server = FileServer::new(final_path);
         spawn_local_request_handler(
