@@ -266,12 +266,12 @@ impl ScrollBars {
         }
         
         if self.show_scroll_x {
-            let scroll_pos = self.scroll_bar_x.draw_scroll_bar(cx, Axis::Horizontal, rect_now, view_total);
+            let scroll_pos = self.scroll_bar_x.draw_scroll_bar(cx, ScrollAxis::Horizontal, rect_now, view_total);
             self.set_scroll_x(cx, scroll_pos);
         }
         if self.show_scroll_y {
             //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
-            let scroll_pos = self.scroll_bar_y.draw_scroll_bar(cx, Axis::Vertical, rect_now, view_total);
+            let scroll_pos = self.scroll_bar_y.draw_scroll_bar(cx, ScrollAxis::Vertical, rect_now, view_total);
             self.set_scroll_y(cx, scroll_pos);
         }
     }
