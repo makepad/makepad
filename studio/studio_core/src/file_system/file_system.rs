@@ -307,17 +307,6 @@ impl FileSystem {
     }
     
     pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
-        // alright so. what do we do.
-        // we first connect colliding names
-        // and then add more path elements till they dont
-        for (outer_tab_id, outer_id) in &self.tab_id_to_file_node_id {
-            for (inner_tab_id, inner_id) in &self.tab_id_to_file_node_id {
-                if outer_tab_id != inner_tab_id && outer_id == inner_id {
-                    // here we have multiple views
-                }
-            }
-        }
-        
         let mut min_diff: HashMap<FileNodeId, usize> = HashMap::new();
         let mut outer_path = Vec::new();
         let mut inner_path = Vec::new();
@@ -332,6 +321,9 @@ impl FileSystem {
                 min_diff.insert(*outer_file_id, 0);
             }
             for (_inner_tab_id, inner_file_id) in &self.tab_id_to_file_node_id {
+                if inner_file_id == outer_file_id{
+                    continue; 
+                }
                 let mut inner = &self.file_nodes[*inner_file_id];
                 inner_path.clear();
                 while let Some(edge) = &inner.parent_edge {
@@ -353,6 +345,7 @@ impl FileSystem {
                         else {
                             min_diff.insert(*outer_file_id, i);
                         }
+                        break;
                     }
                 }
             }
@@ -367,7 +360,7 @@ impl FileSystem {
                     inner = &self.file_nodes[edge.file_node_id];
                 }
                 let mut name = String::new();
-                for i in (0..*min + 1).rev() {
+                for i in (0..*min+1).rev() {
                     if name.len()>0 {
                         name.push_str("/");
                     }
