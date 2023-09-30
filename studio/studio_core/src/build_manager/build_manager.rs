@@ -392,7 +392,7 @@ impl BuildManager {
         let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), self.http_port as u16);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
         
-        log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
+        //log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
         start_http_server(HttpServer {
             listen_address: addr,
             post_max_size: 1024 * 1024,
