@@ -279,10 +279,10 @@ impl DrawVars {
                     if std::env::args().find(|v| v == "--message-format=json").is_some(){
                         crate::makepad_error_log::log_with_type(
                             &err.file,
-                            err.span.start.line+1,
-                            err.span.start.column+2,
-                            err.span.end.line+1,
-                            err.span.end.column+2,
+                            err.span.start.line,
+                            err.span.start.column,
+                            err.span.end.line,
+                            err.span.end.column,
                             &err.message,
                             LogType::Error
                         );
@@ -656,4 +656,3 @@ impl DrawVars {
     }
     
 }
-

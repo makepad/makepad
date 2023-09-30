@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use crate::{
+    makepad_micro_serde::*,
     makepad_derive_widget::*,
     widget::*,
     makepad_draw::*,
-    splitter::{SplitterAction, Splitter, SplitterAlign},
+    splitter::{SplitterAction, Splitter, SplitterAlign, SplitterAxis},
     tab::{TabClosable},
     tab_bar::{TabBarAction, TabBar},
 };
@@ -147,7 +148,7 @@ impl DrawStackItem {
 
 #[derive(Clone, WidgetAction)]
 pub enum DockAction {
-    SplitPanelChanged {panel_id: LiveId, axis: Axis, align: SplitterAlign},
+    SplitPanelChanged {panel_id: LiveId, axis: SplitterAxis, align: SplitterAlign},
     TabWasPressed(LiveId),
     TabCloseWasPressed(LiveId),
     ShouldTabStartDrag(LiveId),
@@ -178,9 +179,9 @@ pub enum DropPart {
 #[derive(Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum DockItem {
-    #[live {axis: Axis::Vertical, align: SplitterAlign::Weighted(0.5), a: LiveId(0), b: LiveId(0)}]
+    #[live {axis: SplitterAxis::Vertical, align: SplitterAlign::Weighted(0.5), a: LiveId(0), b: LiveId(0)}]
     Splitter {
-        axis: Axis,
+        axis: SplitterAxis,
         align: SplitterAlign,
         a: LiveId,
         b: LiveId
@@ -196,6 +197,31 @@ pub enum DockItem {
         name: String,
         closable: bool,
         kind: LiveId
+    }
+}
+
+#[derive(Copy, Clone, Debug, SerJson, DeJson)]
+pub enum AxisStore {
+    Horizontal,
+    Vertical
+}
+
+pub enum DockItemStore{
+    Splitter {
+        axis: SplitterAxis,
+        align: SplitterAlign,
+        a: u64,
+        b: u64
+    },
+    Tabs{
+        tabs: Vec<u64>,
+        selected: usize,
+        closable: bool
+    },
+    Tab {
+        name: String,
+        closable: bool,
+        kind: u64
     }
 }
 
@@ -580,25 +606,25 @@ impl Dock {
                     self.set_parent_split(pos.id, new_split);
                     self.dock_items.insert(new_split, match pos.part {
                         DropPart::Left => DockItem::Splitter {
-                            axis: Axis::Horizontal,
+                            axis: SplitterAxis::Horizontal,
                             align: SplitterAlign::Weighted(0.5),
                             a: new_tabs,
                             b: pos.id,
                         },
                         DropPart::Right => DockItem::Splitter {
-                            axis: Axis::Horizontal,
+                            axis: SplitterAxis::Horizontal,
                             align: SplitterAlign::Weighted(0.5),
                             a: pos.id,
                             b: new_tabs
                         },
                         DropPart::Top => DockItem::Splitter {
-                            axis: Axis::Vertical,
+                            axis: SplitterAxis::Vertical,
                             align: SplitterAlign::Weighted(0.5),
                             a: new_tabs,
                             b: pos.id,
                         },
                         DropPart::Bottom => DockItem::Splitter {
-                            axis: Axis::Vertical,
+                            axis: SplitterAxis::Vertical,
                             align: SplitterAlign::Weighted(0.5),
                             a: pos.id,
                             b: new_tabs,
