@@ -75,6 +75,13 @@ impl LiveHook for Window {
                 }
             }
             OsType::Macos => {
+                if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                    self.apply_over(cx, live!{
+                        caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
+                    });
+                }
+                
+                //draw_bg: {color: (THEME_COLOR_BG_APP)}  
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
@@ -322,4 +329,3 @@ impl Widget for Window {
         WidgetDraw::done()
     }
 }
-

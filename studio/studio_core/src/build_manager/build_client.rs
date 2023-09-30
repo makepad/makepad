@@ -98,7 +98,14 @@ impl BuildClient {
         let log_signal = Signal::new();
         let (log_sender, log_receiver) = mpsc::channel();
         
-        let base_path = env::current_dir().unwrap();
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+        let base_path = env::current_dir().unwrap().join(root);
         let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
         
         let mut server = BuildServer::new(final_path);
