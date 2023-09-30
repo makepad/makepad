@@ -319,8 +319,12 @@ impl Cx {
         let home = std::env::var("HOME").unwrap();
         let plist_path = format!("{}/Library/LaunchAgents/dev.makepad.xpc.plist", home);
         let cwd = std::env::current_dir().unwrap();
+        
         if let Ok(old) = fs::read_to_string(Path::new(&plist_path)){
             if old == plist_body{
+                return
+            }
+            if std::env::args().find( | v | v == "--stdin-loop").is_some() {
                 return
             }
         }

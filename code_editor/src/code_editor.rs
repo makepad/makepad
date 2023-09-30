@@ -34,7 +34,7 @@ live_design!{
         other_keyword: #5B9BD3,
         punctuator: #D4D4D4,
         string: #CC917B,
-        function: #fff38a,
+        function: #fffcc9,
         typename: #56C9B1,
         whitespace: #6E6E6E,
         delimiter_highlight: #f,

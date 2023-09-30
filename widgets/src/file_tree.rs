@@ -68,6 +68,7 @@ pub struct FileTreeNode {
     #[animator] animator: Animator,
     
     #[live] indent_width: f64,
+    #[live] indent_shift: f64,
     
     #[live] icon_walk: Walk,
     
@@ -174,7 +175,7 @@ impl FileTreeNode {
     fn indent_walk(&self, depth: usize) -> Walk {
         Walk {
             abs_pos: None,
-            width: Size::Fixed(depth as f64 * self.indent_width),
+            width: Size::Fixed(depth as f64 * self.indent_width + self.indent_shift),
             height: Size::Fixed(0.0),
             margin: Margin {
                 left: depth as f64 * 1.0,

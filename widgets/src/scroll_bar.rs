@@ -5,13 +5,19 @@ live_design!{
     ScrollBarBase= {{ScrollBar}} {}
 }
 
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum ScrollAxis {
+    #[pick] Horizontal,
+    Vertical
+}
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
     #[live] draw_bar: DrawScrollBar,
     #[live] pub bar_size: f64,
     #[live] pub min_handle_size: f64, //minimum size of the handle in pixels
     #[live] bar_side_margin: f64,
-    #[live(Axis::Horizontal)] pub axis: Axis,
+    #[live(ScrollAxis::Horizontal)] pub axis: ScrollAxis,
     
     #[live] use_vertical_finger_scroll: bool,
     #[live] smoothing: Option<f64>,
@@ -221,19 +227,19 @@ impl ScrollBar {
         if let Event::Scroll(e) = event {
             if scroll_area.get_rect(cx).contains(e.abs) {
                 if !match self.axis {
-                    Axis::Horizontal => e.handled_x.get(),
-                    Axis::Vertical => e.handled_y.get()
+                    ScrollAxis::Horizontal => e.handled_x.get(),
+                    ScrollAxis::Vertical => e.handled_y.get()
                 } {
                     let scroll = match self.axis {
-                        Axis::Horizontal => if self.use_vertical_finger_scroll {e.scroll.y}else {e.scroll.x},
-                        Axis::Vertical => e.scroll.y
+                        ScrollAxis::Horizontal => if self.use_vertical_finger_scroll {e.scroll.y}else {e.scroll.x},
+                        ScrollAxis::Vertical => e.scroll.y
                     };
                     if !self.smoothing.is_none() && e.is_mouse {
                         let scroll_pos_target = self.get_scroll_target();
                         if self.set_scroll_target(cx, scroll_pos_target + scroll) {
                             match self.axis {
-                                Axis::Horizontal => e.handled_x.set(true),
-                                Axis::Vertical => e.handled_y.set(true)
+                                ScrollAxis::Horizontal => e.handled_x.set(true),
+                                ScrollAxis::Vertical => e.handled_y.set(true)
                             }
                         };
                         self.move_towards_scroll_target(cx); // take the first step now
@@ -243,8 +249,8 @@ impl ScrollBar {
                         let scroll_pos = self.get_scroll_pos();
                         if self.set_scroll_pos(cx, scroll_pos + scroll) {
                             match self.axis {
-                                Axis::Horizontal => e.handled_x.set(true),
-                                Axis::Vertical => e.handled_y.set(true)
+                                ScrollAxis::Horizontal => e.handled_x.set(true),
+                                ScrollAxis::Vertical => e.handled_y.set(true)
                             }
                         }
                         return dispatch_action(cx, self.make_scroll_action());
@@ -272,8 +278,8 @@ impl ScrollBar {
                     self.animator_play(cx, id!(hover.pressed));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
-                        Axis::Horizontal => rel.x,
-                        Axis::Vertical => rel.y
+                        ScrollAxis::Horizontal => rel.x,
+                        ScrollAxis::Vertical => rel.y
                     };
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     let bar_start = norm_scroll * self.scroll_size;
@@ -313,12 +319,12 @@ impl ScrollBar {
                     }
                     else {
                         match self.axis {
-                            Axis::Horizontal => {
+                            ScrollAxis::Horizontal => {
                                 if self.set_scroll_pos_from_finger(rel.x - self.drag_point.unwrap()){
                                     dispatch_action(cx, self.make_scroll_action());
                                 }
                             },
-                            Axis::Vertical => {
+                            ScrollAxis::Vertical => {
                                 if self.set_scroll_pos_from_finger(rel.y - self.drag_point.unwrap()){
                                     dispatch_action(cx, self.make_scroll_action());
                                 }
@@ -331,12 +337,12 @@ impl ScrollBar {
         }
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis, view_rect: Rect, view_total: DVec2) -> f64 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: ScrollAxis, view_rect: Rect, view_total: DVec2) -> f64 {
         
         self.axis = axis;
         
         match self.axis {
-            Axis::Horizontal => {
+            ScrollAxis::Horizontal => {
                 self.visible = view_total.x > view_rect.size.x + 0.1;
                 self.scroll_size = if view_total.y > view_rect.size.y + 0.1 {
                     view_rect.size.x - self.bar_size
@@ -363,7 +369,7 @@ impl ScrollBar {
                     );
                 }
             },
-            Axis::Vertical => {
+            ScrollAxis::Vertical => {
                 // compute if we need a horizontal one
                 self.visible = view_total.y > view_rect.size.y + 0.1;
                 self.scroll_size = if view_total.x > view_rect.size.x + 0.1 {
