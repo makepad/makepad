@@ -200,12 +200,7 @@ pub enum DockItem {
     }
 }
 
-#[derive(Copy, Clone, Debug, SerJson, DeJson)]
-pub enum AxisStore {
-    Horizontal,
-    Vertical
-}
-
+#[derive(Clone, Debug, SerRon, DeRon)]
 pub enum DockItemStore{
     Splitter {
         axis: SplitterAxis,
@@ -403,6 +398,41 @@ impl Dock {
             }
         }
         None
+    }
+    #[allow(unused)]
+    pub fn to_store_items(&self)->Vec<DockItemStore>{
+        let mut out = Vec::new();
+        for (id, dock_item) in &self.dock_items{
+            match dock_item{
+               DockItem::Splitter {
+                    axis,
+                    align,
+                    a,
+                    b
+                }=>{
+                    
+                }
+                DockItem::Tabs {
+                    tabs,
+                    selected,
+                    closable
+                }=>{
+                                        
+                }
+               DockItem:: Tab {
+                    name,
+                    closable,
+                    kind
+                }=>{
+                                        
+                }
+            }
+        }
+        out
+    }
+    
+    pub fn from_store_item(&mut self, _store:&[DockItemStore]){
+        
     }
     
     pub fn item(&mut self, entry_id: LiveId) -> Option<WidgetRef> {
