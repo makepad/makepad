@@ -1,6 +1,6 @@
 use {
     crate::{
-        decoration::Decoration,
+        decoration::{Decoration,DecorationType},
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
         session::Session,
@@ -38,6 +38,8 @@ live_design!{
         typename: #56C9B1,
         whitespace: #6E6E6E,
         delimiter_highlight: #f,
+        error_decoration: #f00,
+        warning_decoration: #0f0,
     }
     
     DrawIndentGuide = {{DrawIndentGuide}} {
@@ -56,7 +58,7 @@ live_design!{
             let cx = Sdf2d::viewport(transformed_pos * self.rect_size);
             cx.move_to(0.0, self.rect_size.y - 1.0);
             cx.line_to(self.rect_size.x, self.rect_size.y - 1.0);
-            return cx.stroke(vec4(1.0, 0.0, 0.0, 1.0), 0.8);
+            return cx.stroke(self.color, 0.8);
         }
     }
     
@@ -786,6 +788,7 @@ impl CodeEditor {
                 tap_count,
                 ..
             }) => {
+                self.animator_play(cx, id!(focus.on));
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
@@ -1386,10 +1389,14 @@ impl<'a> DrawDecorationLayer<'a> {
         line: Line<'_>,
         origin_y: f64,
         row_index: usize,
-        column_index: usize,
-    ) {
+        column_index: usize) {
         let start_x = mem::take(&mut self.active_decoration.as_mut().unwrap().start_x);
         let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+        self.code_editor.draw_decoration.color = match self.active_decoration.as_mut().unwrap().decoration.ty{
+            DecorationType::Warning=>self.code_editor.token_colors.warning_decoration,
+            DecorationType::Error=>self.code_editor.token_colors.error_decoration
+        };
+        
         self.code_editor.draw_decoration.draw_abs(
             cx,
             Rect {
@@ -1687,6 +1694,10 @@ struct TokenColors {
     typename: Vec4,
     #[live]
     whitespace: Vec4,
+    #[live]
+    error_decoration: Vec4,
+    #[live]
+    warning_decoration: Vec4,
 }
 
 #[derive(Live, LiveHook)]
@@ -1702,6 +1713,7 @@ pub struct DrawIndentGuide {
 struct DrawDecoration {
     #[deref]
     draw_super: DrawQuad,
+    #[live] color: Vec4,
 }
 
 #[derive(Live, LiveHook)]

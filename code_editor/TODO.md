@@ -1,0 +1,7 @@
+- Double click word/string/number select 
+- Shift click to make a selection from existing cursor pos->click
+- Home, End, Pageup Pagedown 
+- Auto deindent of closing } (paste in blabla{ press enter, type }
+- Selection to cursor xpos = 0 creates void selection blob
+- Selecting with mouse to left of text or below text doesnt work properly
+- With wordwrap on, selecting to the 'next virtual line' jumps the cursor to the end of that line, which is unexpected, i expect the begining

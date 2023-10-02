@@ -4,22 +4,31 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DecorationType{
+    Error,
+    Warning
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Decoration {
     pub id: usize,
+    pub ty: DecorationType,
     start: Position,
     end: Position,
 }
 
 impl Decoration {
-    pub fn new(id: usize, start: Position, end: Position) -> Self {
+    pub fn new(id: usize, start: Position, end: Position, ty:DecorationType) -> Self {
         if start > end{
             return Self {
+                ty,
                 id,
                 start:end,
                 end:start,
             }
         }
         Self {
+            ty,
             id,
             start,
             end,

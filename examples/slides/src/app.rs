@@ -75,7 +75,7 @@ live_design!{
                     }                                                                                                  
                     <Slide> {
                         title = {text: "The slides are a\nMakepad app"},
-                    }                    
+                    }
                     <Slide> {
                         title = {text: "However"},
                         <SlideBody> {text: "- No more live coding?"}

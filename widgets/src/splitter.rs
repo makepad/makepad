@@ -1,5 +1,6 @@
 use crate::{
     makepad_derive_widget::*,
+    makepad_micro_serde::*,
     makepad_draw::*,
     widget::*,
 };
@@ -17,7 +18,7 @@ pub struct DrawSplitter {
     #[live] is_vertical: f32,
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live, LiveHook, SerRon, DeRon)]
 #[live_ignore]
 pub enum SplitterAxis {
     #[pick] Horizontal,
@@ -29,6 +30,33 @@ impl Default for SplitterAxis {
         SplitterAxis::Horizontal
     }
 }
+
+
+#[derive(Clone, Copy, Debug, Live, LiveHook, SerRon, DeRon)]
+#[live_ignore]
+pub enum SplitterAlign {
+    #[live(50.0)] FromA(f64),
+    #[live(50.0)] FromB(f64),
+    #[pick(0.5)] Weighted(f64),
+}
+
+impl SplitterAlign {
+    fn to_position(self, axis: SplitterAxis, rect: Rect) -> f64 {
+        match axis {
+            SplitterAxis::Horizontal => match self {
+                Self::FromA(position) => position,
+                Self::FromB(position) => rect.size.x - position,
+                Self::Weighted(weight) => weight * rect.size.x,
+            },
+            SplitterAxis::Vertical => match self {
+                Self::FromA(position) => position,
+                Self::FromB(position) => rect.size.y - position,
+                Self::Weighted(weight) => weight * rect.size.y,
+            },
+        }
+    }
+}
+
 #[derive(Live)]
 pub struct Splitter {
     #[live(SplitterAxis::Horizontal)] pub axis: SplitterAxis,
@@ -278,31 +306,6 @@ fn margin(&self) -> Margin {
         },
     }
 }
-}
-
-#[derive(Clone, Copy, Debug, Live, LiveHook)]
-#[live_ignore]
-pub enum SplitterAlign {
-    #[live(50.0)] FromA(f64),
-    #[live(50.0)] FromB(f64),
-    #[pick(0.5)] Weighted(f64),
-}
-
-impl SplitterAlign {
-    fn to_position(self, axis: SplitterAxis, rect: Rect) -> f64 {
-        match axis {
-            SplitterAxis::Horizontal => match self {
-                Self::FromA(position) => position,
-                Self::FromB(position) => rect.size.x - position,
-                Self::Weighted(weight) => weight * rect.size.x,
-            },
-            SplitterAxis::Vertical => match self {
-                Self::FromA(position) => position,
-                Self::FromB(position) => rect.size.y - position,
-                Self::Weighted(weight) => weight * rect.size.y,
-            },
-        }
-    }
 }
 
 #[derive(Clone, WidgetAction)]
