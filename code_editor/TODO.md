@@ -3,8 +3,7 @@
 - Home, End, Pageup Pagedown 
 - Auto deindent of closing } (paste in blabla{ press enter, type }
 - Selection to cursor xpos = 0 creates void selection blob
-- Selecting with mouse to left of text or below text doesnt work properly
-- Selecting an 'empty line' by having a selection with a x=0 last cursor pos shows a broken selectionblob
+- Selecting with mouse to left or above of text or below text doesnt work properly
 - You cannot start a selection below a document (click below = cursor at end)
 - With wordwrap on, selecting to the 'next virtual line' jumps the cursor to the end of that line, which is unexpected, i expect the begining
 - thread 'main' panicked at 'index out of bounds: the len is 1772 but the index is 1772', code_editor/src/session.rs:831:16
