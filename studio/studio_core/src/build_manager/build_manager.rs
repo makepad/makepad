@@ -18,7 +18,7 @@ use {
         },
         makepad_shell::*,
     },
-    makepad_code_editor::{text::Position, decoration::{Decoration}},
+    makepad_code_editor::{text::Position, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
     std::{
         collections::HashMap,
@@ -315,14 +315,26 @@ impl BuildManager {
                     };
                     //log!("{:?} {:?}", pos, pos + loc.length);
                     if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
-                        if loc.level == LogItemLevel::Warning ||
-                        loc.level == LogItemLevel::Error {
-                            file_system.add_decoration(file_id, Decoration::new(
-                                0,
-                                pos,
-                                pos + loc.length
-                            ));
-                            dispatch_event(cx, BuildManagerAction::RedrawFile(file_id))
+                        match loc.level{
+                            LogItemLevel::Warning=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    pos,
+                                    pos + loc.length,
+                                    DecorationType::Warning
+                                ));
+                                dispatch_event(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            LogItemLevel::Error=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    pos,
+                                    pos + loc.length,
+                                    DecorationType::Error
+                                ));
+                                dispatch_event(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            _=>()
                         }
                     }
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {

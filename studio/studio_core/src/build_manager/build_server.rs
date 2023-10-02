@@ -398,10 +398,9 @@ pub trait MsgSender: Send {
                 }*/
             }
             else {
-                if msg.message.trim().starts_with("aborting due to ") ||
-                msg.message.trim().starts_with("For more information about this error") ||
-                msg.message.trim().ends_with("warning emitted") ||
-                msg.message.trim().ends_with("warnings emitted") {
+                if msg.message.trim().starts_with("Some errors have detailed explanations") ||
+                msg.message.trim().starts_with("For more information about an error") ||
+                msg.message.trim().contains("warnings emitted") {
                 }
                 else {
                     self.send_bare_msg(cmd_id, LogItemLevel::Warning, msg.message);
