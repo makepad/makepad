@@ -132,7 +132,8 @@ impl Session {
             let line = layout.line(line_index);
             let indent_level = line.indent_column_count() / self.settings.tab_column_count;
             drop(layout);
-            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line_index) {
+            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line_index)
+            {
                 self.layout.borrow_mut().fold_column[line_index] =
                     self.settings.fold_level * self.settings.tab_column_count;
                 self.unfolding_lines.remove(&line_index);
@@ -183,7 +184,7 @@ impl Session {
     }
 
     pub fn set_selection(&mut self, position: Position, affinity: Affinity, tap_count: u32) {
-        let mut selection= Selection::from(Cursor {
+        let mut selection = Selection::from(Cursor {
             position,
             affinity,
             preferred_column_index: None,
@@ -191,13 +192,18 @@ impl Session {
         if tap_count == 2 {
             let text = self.document().as_text();
             let lines = text.as_lines();
-            match lines[position.line_index][..position.byte_index].chars().next_back() {
+            match lines[position.line_index][..position.byte_index]
+                .chars()
+                .next_back()
+            {
                 Some(char) if char.is_opening_delimiter() => {
                     let opening_delimiter_position = Position {
                         line_index: position.line_index,
-                        byte_index: position.byte_index - char.len_utf8()
+                        byte_index: position.byte_index - char.len_utf8(),
                     };
-                    if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, char) {
+                    if let Some(closing_delimiter_position) =
+                        find_closing_delimiter(lines, position, char)
+                    {
                         selection = Selection {
                             cursor: Cursor::from(closing_delimiter_position),
                             anchor: opening_delimiter_position,
@@ -209,9 +215,7 @@ impl Session {
             drop(text);
         };
         let mut selection_state = self.selection_state.borrow_mut();
-        selection_state
-            .selections
-            .set_selection(selection);
+        selection_state.selections.set_selection(selection);
         selection_state.last_added_selection_index = Some(0);
         selection_state.injected_char_stack.clear();
         drop(selection_state);
@@ -277,6 +281,18 @@ impl Session {
     pub fn move_down(&mut self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |selection, layout| {
             selection.update_cursor(|cursor| cursor.move_down(layout))
+        });
+    }
+
+    pub fn home(&mut self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| cursor.home(layout.as_text().as_lines()))
+        });
+    }
+
+    pub fn end(&mut self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| cursor.end(layout.as_text().as_lines()))
         });
     }
 
@@ -728,13 +744,19 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.selection_state.borrow_mut().injected_char_stack.clear();
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document
             .undo(self.id, &self.selection_state.borrow().selections)
     }
 
     pub fn redo(&mut self) -> bool {
-        self.selection_state.borrow_mut().injected_char_stack.clear();
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document
             .redo(self.id, &self.selection_state.borrow().selections)
     }
@@ -838,7 +860,10 @@ impl Session {
             selection_state.selections = selections;
         } else {
             for edit in edits {
-                selection_state.selections.apply_edit(edit);
+                let last_added_selection_index = selection_state.last_added_selection_index;
+                selection_state.last_added_selection_index = selection_state
+                    .selections
+                    .apply_edit(edit, last_added_selection_index);
             }
         }
         drop(selection_state);
