@@ -46,7 +46,7 @@ impl ViewOptimize {
 
 #[derive(Live)]
 pub struct View { // draw info per UI element
-    #[live] draw_bg: DrawColor,
+    #[live] pub draw_bg: DrawColor,
     
     #[live(false)] show_bg: bool,
     
@@ -757,4 +757,3 @@ impl View {
         self.draw_order.len()
     }
 }
-

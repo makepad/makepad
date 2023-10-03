@@ -20,9 +20,6 @@ use {
     },
 };
 
-#[cfg(target_os = "linux")]
-use crate::cx_stdin::linux_dma_buf;
-
 impl Cx {
     
     pub (crate) fn render_view(
@@ -186,29 +183,25 @@ impl Cx {
                     
                     // lets set our textures
                     for i in 0..sh.mapping.textures.len() {
-                        let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                            texture_id
+                        let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                            texture.texture_id()
                         }else {
                             continue;
                         };
                         let cxtexture = &mut self.textures[texture_id];
 
-                        if cxtexture.desc.format.is_shared() {
-                            // FIXME(eddyb) there should probably be an unified EGL `OpenglCx`.
-                            #[cfg(not(any(linux_direct, target_os="android")))]
-                            cxtexture.os.update_shared_texture(self.os.opengl_cx.as_ref().unwrap(), &cxtexture.desc);
-                        } else if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
+                        if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
                             cxtexture.update_image = false;
                             cxtexture.os.update_platform_texture_image2d(
                                 cxtexture.desc.width.unwrap() as u32,
                                 cxtexture.desc.height.unwrap() as u32,
                                 &cxtexture.image_u32
                             );
-                        }  
+                        }
                     }
                     for i in 0..sh.mapping.textures.len() {
-                        let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                            texture_id
+                        let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                            texture.texture_id()
                         }else {
                             continue;
                         };
@@ -380,11 +373,34 @@ impl Cx {
                 gl_sys::FramebufferRenderbuffer(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT, gl_sys::RENDERBUFFER, self.passes[pass_id].os.gl_bugfix_depthbuffer.unwrap());
             }*/
         }
-        
+
+        // HACK(eddyb) drain error queue, so that we can check erors below.
+        while unsafe { gl_sys::GetError() } != 0 {}
+
         unsafe {
-            gl_sys::Viewport(0, 0, (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32);
+            let (x, mut y) = (0, 0);
+            let width = (pass_size.x * dpi_factor) as u32;
+            let height = (pass_size.y * dpi_factor) as u32;
+
+            // HACK(eddyb) to try and match DirectX and Metal conventions, we
+            // need the viewport to be placed on the other end of the Y axis.
+            if let [color_texture] = color_textures {
+                let cxtexture = &mut self.textures[color_texture.texture_id];
+                if cxtexture.os.gl_texture.is_some() {
+                    if let Some(alloc_height) = cxtexture.os.alloc_desc.height {
+                        let alloc_height = alloc_height as u32;
+                        if alloc_height > height {
+                            y = alloc_height - height;
+                        }
+                    }
+                }
+            }
+
+            gl_sys::Viewport(x as i32, y as i32, width as i32, height as i32);
+            
+            assert_eq!(gl_sys::GetError(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
         }
-        
+
         if clear_flags != 0 {
             unsafe {
                 if clear_flags & gl_sys::DEPTH_BUFFER_BIT != 0 {
@@ -817,8 +833,6 @@ pub struct CxOsTexture {
     pub height: u64,
     pub gl_texture: Option<u32>,
     pub gl_renderbuffer: Option<u32>,
-    #[cfg(target_os = "linux")]
-    pub dma_buf_exported_image: Option<Box<linux_dma_buf::Image<std::os::fd::OwnedFd>>>,
 }
 
 impl CxOsTexture {
@@ -1043,4 +1057,3 @@ uniform float view_table[16];
 void main() {
     gl_FragColor = vec4(0.0,0.0,0.0,0.0);
 }";*/
-

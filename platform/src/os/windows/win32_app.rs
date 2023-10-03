@@ -198,7 +198,6 @@ impl Win32App {
             IsGUIThread(TRUE);
             
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
-            //CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             OleInitialize(None).unwrap();
         }
         

@@ -28,7 +28,7 @@ pub use {
 pub struct CxFontsAtlas {
     pub fonts: Vec<Option<CxFont >>,
     pub path_to_font_id: HashMap<String, usize>,
-    pub texture_id: TextureId,
+    pub texture: Texture,
     pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc
 }
@@ -44,11 +44,11 @@ pub struct CxFontsAtlasAlloc {
 }
 
 impl CxFontsAtlas {
-    pub fn new(texture_id: TextureId) -> Self {
+    pub fn new(texture: Texture) -> Self {
         Self {
             fonts: Vec::new(),
             path_to_font_id: HashMap::new(),
-            texture_id,
+            texture,
             clear_buffer: false,
             alloc: CxFontsAtlasAlloc {
                 full: false,
@@ -148,8 +148,8 @@ impl CxFontsAtlas {
         self.clear_buffer = true;
     }
     
-    pub fn get_internal_font_atlas_texture_id(&self) -> TextureId {
-        self.texture_id
+    pub fn get_internal_font_atlas_texture_id(&self) -> Texture {
+        self.texture.clone()
     }
 }
 
@@ -257,10 +257,10 @@ impl<'a> Cx2d<'a> {
         if !cx.has_global::<CxFontsAtlasRc>() {
             
             let draw_fonts_atlas = CxDrawFontsAtlas::new(cx);
-            let texture_id = draw_fonts_atlas.atlas_texture.texture_id();
+            let texture = draw_fonts_atlas.atlas_texture.clone();
             cx.set_global(CxDrawFontsAtlasRc(Rc::new(RefCell::new(draw_fonts_atlas))));
             
-            let fonts_atlas = CxFontsAtlas::new(texture_id);
+            let fonts_atlas = CxFontsAtlas::new(texture);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
     }

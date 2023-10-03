@@ -164,7 +164,7 @@ impl ButtonSet{
     }
     pub fn pressed(&self, actions: &WidgetActions)->bool{
         for button in self.iter(){
-            if button.clicked(actions){
+            if button.pressed(actions){
                 return true
             }
         }

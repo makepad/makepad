@@ -38,7 +38,6 @@ live_design!{
             )
             
             let normalized: vec2 = (self.clipped - min_pos) / vec2(self.rect_size.x, -self.rect_size.y)
-            //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
             
             self.tex_coord1 = mix(
                 self.font_t1.xy,
@@ -46,19 +45,6 @@ live_design!{
                 normalized.xy
             )
             self.pos = normalized;
-            /*
-            self.tex_coord2 = mix(
-                self.font_t1.xy,
-                self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.75,
-                normalized.xy
-            )
-            
-            self.tex_coord3 = mix(
-                self.font_t1.xy,
-                self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.6,
-                normalized.xy
-            )
-            */
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 self.clipped.x,
                 self.clipped.y,
@@ -74,37 +60,9 @@ live_design!{
             return incol
         }
         fn pixel(self) -> vec4 {
-            
-            //let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
-            //let dp = 1.0 / 2048.0;
-            
-            // basic hardcoded mipmapping so it stops 'swimming' in VR
-            // mipmaps are stored in red/green/blue channel
-            //let s = 1.0;
-            
-            /*if dx > 7.0 {
-                s = 0.7;
-            }
-            else if dx > 2.75 {
-                s = (
-                    sample2d_rt(self.tex, self.tex_coord3.xy + vec2(0., 0.)).z
-                        + sample2d_rt(self.tex, self.tex_coord3.xy + vec2(dp, 0.)).z
-                        + sample2d_rt(self.tex, self.tex_coord3.xy + vec2(0., dp)).z
-                        + sample2d_rt(self.tex, self.tex_coord3.xy + vec2(dp, dp)).z
-                ) * 0.25;
-            }
-            else if dx > 1.75 {
-                s = sample2d_rt(self.tex, self.tex_coord3.xy).z;
-            }
-            else if dx > 1.3 {
-                s = sample2d_rt(self.tex, self.tex_coord2.xy).y;
-            }
-            else {*/
-                let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
-            /*}*/
-            
+            let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
             s = pow(s, self.curve);
-            let col = self.get_color(); //color!(white);//get_color();
+            let col = self.get_color(); 
             return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
         }
     }
@@ -317,7 +275,7 @@ impl DrawText {
     }
     
     pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontsAtlas) {
-        self.draw_vars.texture_slots[0] = Some(font_atlas.texture_id);
+        self.draw_vars.texture_slots[0] = Some(font_atlas.texture.clone());
         self.draw_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }

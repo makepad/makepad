@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use crate::{
+    makepad_micro_serde::*,
     makepad_derive_widget::*,
     widget::*,
     makepad_draw::*,
-    splitter::{SplitterAction, Splitter, SplitterAlign},
+    splitter::{SplitterAction, Splitter, SplitterAlign, SplitterAxis},
     tab::{TabClosable},
     tab_bar::{TabBarAction, TabBar},
 };
@@ -55,8 +57,8 @@ pub struct Dock {
     #[rust] tab_bars: ComponentMap<LiveId, TabBarWrap>,
     #[rust] splitters: ComponentMap<LiveId, Splitter>,
     
-    #[rust] dock_items: ComponentMap<LiveId, DockItem>,
-    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+    #[rust] dock_items: HashMap<LiveId, DockItem>,
+    #[rust] templates: HashMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
     #[rust] drop_state: Option<DropPosition>,
     #[rust] dock_item_iter_stack: Vec<(LiveId, usize)>,
@@ -64,7 +66,7 @@ pub struct Dock {
 
 pub struct DockVisibleItemIterator<'a> {
     stack: &'a mut Vec<(LiveId, usize)>,
-    dock_items: &'a ComponentMap<LiveId, DockItem>,
+    dock_items: &'a HashMap<LiveId, DockItem>,
     items: &'a ComponentMap<LiveId, (LiveId, WidgetRef)>,
 }
 
@@ -146,7 +148,7 @@ impl DrawStackItem {
 
 #[derive(Clone, WidgetAction)]
 pub enum DockAction {
-    SplitPanelChanged {panel_id: LiveId, axis: Axis, align: SplitterAlign},
+    SplitPanelChanged {panel_id: LiveId, axis: SplitterAxis, align: SplitterAlign},
     TabWasPressed(LiveId),
     TabCloseWasPressed(LiveId),
     ShouldTabStartDrag(LiveId),
@@ -177,9 +179,9 @@ pub enum DropPart {
 #[derive(Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum DockItem {
-    #[live {axis: Axis::Vertical, align: SplitterAlign::Weighted(0.5), a: LiveId(0), b: LiveId(0)}]
+    #[live {axis: SplitterAxis::Vertical, align: SplitterAlign::Weighted(0.5), a: LiveId(0), b: LiveId(0)}]
     Splitter {
-        axis: Axis,
+        axis: SplitterAxis,
         align: SplitterAlign,
         a: LiveId,
         b: LiveId
@@ -195,6 +197,26 @@ pub enum DockItem {
         name: String,
         closable: bool,
         kind: LiveId
+    }
+}
+
+#[derive(Clone, Debug, SerRon, DeRon)]
+pub enum DockItemStore{
+    Splitter {
+        axis: SplitterAxis,
+        align: SplitterAlign,
+        a: u64,
+        b: u64
+    },
+    Tabs{
+        tabs: Vec<u64>,
+        selected: usize,
+        closable: bool
+    },
+    Tab {
+        name: String,
+        closable: bool,
+        kind: u64
     }
 }
 
@@ -377,6 +399,41 @@ impl Dock {
         }
         None
     }
+    #[allow(unused)]
+    pub fn to_store_items(&self)->Vec<DockItemStore>{
+        let mut out = Vec::new();
+        for (id, dock_item) in &self.dock_items{
+            match dock_item{
+               DockItem::Splitter {
+                    axis,
+                    align,
+                    a,
+                    b
+                }=>{
+                    
+                }
+                DockItem::Tabs {
+                    tabs,
+                    selected,
+                    closable
+                }=>{
+                                        
+                }
+               DockItem:: Tab {
+                    name,
+                    closable,
+                    kind
+                }=>{
+                                        
+                }
+            }
+        }
+        out
+    }
+    
+    pub fn from_store_item(&mut self, _store:&[DockItemStore]){
+        
+    }
     
     pub fn item(&mut self, entry_id: LiveId) -> Option<WidgetRef> {
         if let Some(entry) = self.items.get(&entry_id) {
@@ -481,6 +538,14 @@ impl Dock {
         }
     }
     
+    
+    fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name:String) {
+        if let Some(DockItem::Tab{name, ..}) = self.dock_items.get_mut(&tab_id){
+            *name = new_name;
+            self.redraw_tab(cx, tab_id);
+        }
+    }
+    
     fn redraw_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
@@ -571,25 +636,25 @@ impl Dock {
                     self.set_parent_split(pos.id, new_split);
                     self.dock_items.insert(new_split, match pos.part {
                         DropPart::Left => DockItem::Splitter {
-                            axis: Axis::Horizontal,
+                            axis: SplitterAxis::Horizontal,
                             align: SplitterAlign::Weighted(0.5),
                             a: new_tabs,
                             b: pos.id,
                         },
                         DropPart::Right => DockItem::Splitter {
-                            axis: Axis::Horizontal,
+                            axis: SplitterAxis::Horizontal,
                             align: SplitterAlign::Weighted(0.5),
                             a: pos.id,
                             b: new_tabs
                         },
                         DropPart::Top => DockItem::Splitter {
-                            axis: Axis::Vertical,
+                            axis: SplitterAxis::Vertical,
                             align: SplitterAlign::Weighted(0.5),
                             a: new_tabs,
                             b: pos.id,
                         },
                         DropPart::Bottom => DockItem::Splitter {
-                            axis: Axis::Vertical,
+                            axis: SplitterAxis::Vertical,
                             align: SplitterAlign::Weighted(0.5),
                             a: pos.id,
                             b: new_tabs,
@@ -1055,6 +1120,13 @@ impl DockRef {
             dock.create_tab(cx, parent, item, kind, name, closable);
         }
     }
+    
+    pub fn set_tab_title(&self, cx: &mut Cx, tab:LiveId, title:String) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.set_tab_title(cx, tab, title);
+        }
+    }
+    
     
     pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<LiveId> {
         if let Some(mut dock) = self.borrow_mut() {

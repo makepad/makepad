@@ -7,12 +7,14 @@ use std::{
     str,
     path::PathBuf,
 };
+use crate::makepad_platform::cx_stdin::aux_chan;
 
 pub struct ChildProcess {
     pub child: Child,
     pub stdin_sender: Sender<ChildStdIn>,
     pub line_sender: Sender<ChildStdIO>,
     pub line_receiver: Receiver<ChildStdIO>,
+    pub aux_chan_host_endpoint: aux_chan::HostEndpoint,
 }
 
 pub enum ChildStdIO {
@@ -30,10 +32,16 @@ pub enum ChildStdIn {
 impl ChildProcess {
     
     pub fn start(cmd: &str, args: &[String], current_dir: PathBuf, env: &[(&str, &str)]) -> Result<ChildProcess, std::io::Error> {
+        let (aux_chan_host_endpoint, aux_chan_client_endpoint) =
+            aux_chan::make_host_and_client_endpoint_pair()?;
+        
+        let aux_chan_client_endpoint_inheritable =
+            aux_chan_client_endpoint.into_child_process_inheritable()?;
         
         let mut cmd_build = Command::new(cmd);
         
         cmd_build.args(args)
+            .args(aux_chan_client_endpoint_inheritable.extra_args_for_client_spawning())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -44,6 +52,10 @@ impl ChildProcess {
         }
         
         let mut child = cmd_build.spawn()?;
+
+        // In the parent process, an inherited fd doesn't need to exist past
+        // the spawning of the child process (which clones non-`CLOEXEC` fds).
+        drop(aux_chan_client_endpoint_inheritable);
         
         let (line_sender, line_receiver) = mpsc::channel();
         let (stdin_sender, stdin_receiver) = mpsc::channel();
@@ -119,6 +131,7 @@ impl ChildProcess {
             line_sender,
             child,
             line_receiver,
+            aux_chan_host_endpoint,
         })
     }
     

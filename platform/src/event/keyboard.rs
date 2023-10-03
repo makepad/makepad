@@ -2,7 +2,11 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
+        makepad_live_compiler::*,
+        live_traits::*,
+        makepad_derive_live::*,
         makepad_micro_serde::*,
+        cx::Cx, 
         event::{
             finger::KeyModifiers,
         },
@@ -127,9 +131,9 @@ impl Default for KeyCode {
 
 
 // lowest common denominator keymap between desktop and web
-#[derive(Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+#[derive(Live, LiveHook, Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub enum KeyCode {
-    Escape,
+    #[pick] Escape,
     
     Backtick,
     Key0,

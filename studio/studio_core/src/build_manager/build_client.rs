@@ -5,9 +5,9 @@
 use {
     crate::{
         makepad_micro_serde::*,
-        makepad_platform::*,
+        makepad_platform::{*, cx_stdin::aux_chan},
         build_manager::{
-            build_protocol::{BuildCmd, BuildCmdWrap, LogItemWrap, BuildCmdId},
+            build_protocol::{BuildCmd, BuildCmdWrap, LogItemWrap, BuildCmdId, LogItem},
             build_server::{BuildConnection, BuildServer},
         }
     },
@@ -66,7 +66,11 @@ impl BuildClient {
             Event::Signal=>{
                 loop {
                     match self.log_receiver.try_recv() {
-                        Ok(msg) => dispatch_msg(cx, msg),
+                        Ok(msg) => {
+                            
+
+                            dispatch_msg(cx, msg);
+                        }
                         Err(TryRecvError::Empty) => break,
                         _ => panic!(),
                     }
@@ -94,7 +98,14 @@ impl BuildClient {
         let log_signal = Signal::new();
         let (log_sender, log_receiver) = mpsc::channel();
         
-        let base_path = env::current_dir().unwrap();
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+        let base_path = env::current_dir().unwrap().join(root);
         let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
         
         let mut server = BuildServer::new(final_path);
@@ -103,7 +114,7 @@ impl BuildClient {
             server.connect(Box::new({
                 let log_sender = log_sender.clone();
                 let log_signal = log_signal.clone();
-                move | log_item | {
+                move | log_item:LogItemWrap | {
                     log_sender.send(log_item).unwrap();
                     log_signal.set()
                 }

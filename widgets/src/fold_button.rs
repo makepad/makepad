@@ -43,7 +43,7 @@ impl FoldButton {
         if self.animator_handle_event(cx, event).is_animating() {
             if self.animator.is_track_animating(cx, id!(open)) {
                 let mut value = [0.0];
-                self.draw_bg.get_instance(cx, live_id!(open),&mut value);
+                self.draw_bg.get_instance(cx, id!(open),&mut value);
                 dispatch_action(cx, FoldButtonAction::Animating(value[0] as f64))
             }
         };

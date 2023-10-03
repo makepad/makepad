@@ -73,8 +73,8 @@ impl Cx {
                 
                 // update/alloc textures?
                 for i in 0..sh.mapping.textures.len() {
-                    let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                        texture_id
+                    let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                        texture.texture_id()
                     }else {
                         continue
                     };
@@ -157,8 +157,8 @@ impl Cx {
                 
                 let mut textures = [None;DRAW_CALL_TEXTURE_SLOTS];
                 for (index, texture_slot) in draw_call.texture_slots.iter().enumerate(){
-                    if let Some(texture_id) = texture_slot{
-                        textures[index] = Some(texture_id.0)
+                    if let Some(texture) = texture_slot{
+                        textures[index] = Some(texture.texture_id().0)
                     }
                 }
                 self.os.from_wasm(FromWasmDrawCall {

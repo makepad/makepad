@@ -35,10 +35,10 @@ pub enum FileRequest {
     /// Requests the collab server to add the client as a participant to the file with the given id.
     /// If the client is the first participant for the file, this also causes the file to be opened
     /// on the server.
-    OpenFile(String),
+    OpenFile(String, u64),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
-    SaveFile(String, String),
+    SaveFile(String, String, u64),
 
 }
 
@@ -58,10 +58,10 @@ pub enum FileResponse {
     LoadFileTree(Result<FileTreeData, FileError>),
     /// The result of requesting the collab server to add the client as a participant to the file
     /// with the given id.
-    OpenFile(Result<(String, String), FileError>),
+    OpenFile(Result<(String, String, u64), FileError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
-    SaveFile(Result<(String,String,String), FileError>),
+    SaveFile(Result<(String,String,String, u64), FileError>),
 }
 
 /// A type for representing data about a file tree.
@@ -96,9 +96,10 @@ pub struct DirectoryEntry {
 /// A type for representing a notification from the collab server.
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileNotification {
-    /// Notifies the client that another client applied the given delta to the file with the given
-    /// id. This is only sent for files for which the client is a participant.
-    DeltaWasApplied(TextFileId),
+    FileChangedOnDisk,
+    // Notifies the client that another client applied the given delta to the file with the given
+    // id. This is only sent for files for which the client is a participant.
+   // DeltaWasApplied(TextFileId),
 }
 
 /// A type for representing errors from the collab server.
