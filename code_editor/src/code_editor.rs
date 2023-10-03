@@ -8,19 +8,17 @@ use {
         str::StrExt,
         text::Position,
         token::TokenKind,
-        Line,
-        Selection,
-        Token,
+        Line, Selection, Token,
     },
     makepad_widgets::*,
     std::fmt::Write,
     std::{mem, slice::Iter},
 };
 
-live_design!{
+live_design! {
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme_desktop_dark::*;
-    
+
     TokenColors = {{TokenColors}} {
         unknown: #C0C0C0,
         branch_keyword: #C485BE,
@@ -37,7 +35,7 @@ live_design!{
         whitespace: #6E6E6E,
         delimiter_highlight: #f,
     }
-    
+
     DrawIndentGuide = {{DrawIndentGuide}} {
         fn pixel(self) -> vec4 {
             let thickness = 0.8 + self.dpi_dilate * 0.5;
@@ -47,7 +45,7 @@ live_design!{
             return sdf.stroke(self.color, thickness);
         }
     }
-    
+
     DrawDecoration = {{DrawDecoration}} {
         fn pixel(self) -> vec4 {
             let transformed_pos = vec2(self.pos.x, self.pos.y + 0.03 * sin(self.pos.x * self.rect_size.x));
@@ -57,7 +55,7 @@ live_design!{
             return cx.stroke(vec4(1.0, 0.0, 0.0, 1.0), 0.8);
         }
     }
-    
+
     DrawSelection = {{DrawSelection}} {
         uniform gloopiness: 8.0
         uniform border_radius: 2.0
@@ -73,7 +71,7 @@ live_design!{
                 self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
             ));
         }
-        
+
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.rect_pos + self.pos * self.rect_size);
             sdf.box(
@@ -106,10 +104,10 @@ live_design!{
             return sdf.fill(mix(#5558,#08f8,self.focus));
         }
     }
-    
+
     DrawCodeText = {{DrawCodeText}} {
     }
-    
+
     CodeEditor = {{CodeEditor}} {
         width: Fill,
         height: Fill,
@@ -147,7 +145,7 @@ live_design!{
         draw_selection: {
             draw_depth: 3.0,
         }
-        
+
         draw_cursor: {
             draw_depth: 4.0,
             instance blink: 0.0
@@ -158,7 +156,7 @@ live_design!{
             }
             color: #C0C0C0,
         }
-        
+
         animator: {
             blink = {
                 default: off
@@ -194,13 +192,16 @@ live_design!{
             }
         }
     }
-    
+
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook)]
+#[repr(C)]
 struct DrawCodeText {
-    #[deref] draw_super: DrawText,
-    #[live] outline: f32,
+    #[deref]
+    draw_super: DrawText,
+    #[live]
+    outline: f32,
 }
 
 #[derive(Live)]
@@ -213,11 +214,10 @@ pub struct CodeEditor {
     draw_state: DrawStateWrap<Walk>,
     #[live]
     draw_gutter: DrawText,
-    
+
     #[live]
     draw_text: DrawCodeText,
-    
-    
+
     #[live]
     token_colors: TokenColors,
     #[live]
@@ -234,7 +234,7 @@ pub struct CodeEditor {
     keep_cursor_in_view: KeepCursorInView,
     #[rust]
     last_cursor_screen_pos: Option<DVec2>,
-    
+
     #[rust]
     cell_size: DVec2,
     #[rust]
@@ -251,10 +251,10 @@ pub struct CodeEditor {
 
     #[animator]
     animator: Animator,
-    
+
     #[rust]
     blink_timer: Timer,
-    
+
     #[rust]
     line_end: usize,
 }
@@ -265,20 +265,20 @@ enum KeepCursorInView {
     LockStart,
     Locked(DVec2),
     FontResize(DVec2),
-    Off
+    Off,
 }
 
 impl KeepCursorInView {
     fn is_once(&self) -> bool {
         match self {
             Self::Once => true,
-            _ => false
+            _ => false,
         }
     }
     fn is_locked(&self) -> bool {
         match self {
             Self::LockStart | Self::Locked(_) => true,
-            _ => false
+            _ => false,
         }
     }
 }
@@ -293,7 +293,7 @@ impl Widget for CodeEditor {
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }
-    
+
     fn handle_widget_event_with(
         &mut self,
         _cx: &mut Cx,
@@ -301,11 +301,11 @@ impl Widget for CodeEditor {
         _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
     ) {
     }
-    
+
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
-    
+
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, walk) {
             return WidgetDraw::hook_above();
@@ -324,10 +324,10 @@ impl CodeEditor {
         session.handle_changes();
 
         self.cell_size =
-        self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-            
+            self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+
         let last_added_selection =
-        session.selections()[session.last_added_selection_index().unwrap()];
+            session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
             last_added_selection.cursor.position,
             last_added_selection.cursor.affinity,
@@ -339,14 +339,17 @@ impl CodeEditor {
                 // make a cursor bounding box
                 let pad_above = dvec2(self.cell_size.x * 8.0, self.cell_size.y);
                 let pad_below = dvec2(self.cell_size.x * 8.0, self.cell_size.y * 2.0);
-                let rect = Rect {pos: cursor_pos - pad_above, size: pad_above + pad_below};
+                let rect = Rect {
+                    pos: cursor_pos - pad_above,
+                    size: pad_above + pad_below,
+                };
                 // only scroll into
                 self.scroll_bars.scroll_into_view(cx, rect);
                 if self.keep_cursor_in_view.is_once() {
                     self.keep_cursor_in_view = KeepCursorInView::Off
                 }
             }
-            
+
             KeepCursorInView::LockStart => {
                 // lets get the on screen position
                 let screen_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
@@ -367,16 +370,21 @@ impl CodeEditor {
                 self.scroll_bars.set_scroll_pos_no_clip(cx, new_pos);
                 self.keep_cursor_in_view = KeepCursorInView::Off
             }
-            KeepCursorInView::Off => {
-                
-            }
+            KeepCursorInView::Off => {}
         }
-        
+
         let walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
-        
+
         let turtle_rect = cx.turtle().rect();
-        let gutter_width = (session .document() .as_text() .as_lines() .len() .to_string() .column_count() + 3) as f64
+        let gutter_width = (session
+            .document()
+            .as_text()
+            .as_lines()
+            .len()
+            .to_string()
+            .column_count()
+            + 3) as f64
             * self.cell_size.x;
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
@@ -395,51 +403,53 @@ impl CodeEditor {
                 y: turtle_rect.size.y,
             },
         };
-        
+
         let pad_left_top = dvec2(10., 10.);
         self.gutter_rect.pos += pad_left_top;
         self.gutter_rect.size -= pad_left_top;
         self.viewport_rect.pos += pad_left_top;
         self.viewport_rect.size -= pad_left_top;
-        
-        session.set_wrap_column(if self.word_wrap {Some(
-            (self.viewport_rect.size.x / self.cell_size.x) as usize,
-        )} else {None});
-        
+
+        session.set_wrap_column(if self.word_wrap {
+            Some((self.viewport_rect.size.x / self.cell_size.x) as usize)
+        } else {
+            None
+        });
+
         let scroll_pos = self.scroll_bars.get_scroll_pos();
-        
+
         self.line_start = session
             .layout()
             .find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
         self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-        
+
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
         self.draw_gutter(cx, session);
         self.draw_text_layer(cx, session);
         self.draw_indent_guide_layer(cx, session);
         self.draw_decoration_layer(cx, session);
         self.draw_selection_layer(cx, session);
-        
+
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-        
+
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
-            session.layout().height() * self.cell_size.y + (self.viewport_rect.size.y - self.cell_size.y),
+            session.layout().height() * self.cell_size.y
+                + (self.viewport_rect.size.y - self.cell_size.y),
         );
-        
+
         self.scroll_bars.end(cx);
         if session.update_folds() {
             self.scroll_bars.area().redraw(cx);
-        }
-        else if self.keep_cursor_in_view.is_locked() {
+        } else if self.keep_cursor_in_view.is_locked() {
             self.keep_cursor_in_view = KeepCursorInView::Off;
         }
     }
-    
+
     pub fn reset_font_size(&mut self) {
         self.draw_gutter.text_style.font_size = 9.0;
         self.draw_text.text_style.font_size = 9.0;
@@ -447,30 +457,27 @@ impl CodeEditor {
             self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
         }
     }
-    
+
     pub fn decrease_font_size(&mut self) {
         if self.draw_text.text_style.font_size > 3.0 {
             self.draw_text.text_style.font_size -= 1.0;
-            self.draw_gutter.text_style.font_size =
-            self.draw_text.text_style.font_size;
+            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size;
             if let Some(pos) = self.last_cursor_screen_pos {
                 self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
             }
         }
     }
-    
+
     pub fn increase_font_size(&mut self) {
         if self.draw_text.text_style.font_size < 20.0 {
             self.draw_text.text_style.font_size += 1.0;
-            self.draw_gutter.text_style.font_size =
-            self.draw_text.text_style.font_size;
+            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size;
             if let Some(pos) = self.last_cursor_screen_pos {
                 self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
             }
         }
     }
-    
-    
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -478,16 +485,16 @@ impl CodeEditor {
         session: &mut Session,
     ) -> Vec<CodeEditorAction> {
         let mut a = Vec::new();
-        self.handle_event_with(cx, event, session, &mut | _, v | a.push(v));
+        self.handle_event_with(cx, event, session, &mut |_, v| a.push(v));
         a
     }
-    
-    pub fn reset_cursor_blinker(&mut self, cx:&mut Cx){
+
+    pub fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
         self.animator_cut(cx, id!(blink.off));
         cx.stop_timer(self.blink_timer);
         self.blink_timer = cx.start_timeout(self.blink_speed)
     }
-    
+
     pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
@@ -495,18 +502,17 @@ impl CodeEditor {
         session: &mut Session,
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-       self.animator_handle_event(cx, event);
-       
+        self.animator_handle_event(cx, event);
+
         session.handle_changes();
-        
-        self.scroll_bars.handle_event_with(cx, event, &mut | cx, _ | {
+
+        self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
-        if self.blink_timer.is_event(event).is_some(){
-            if self.animator_in_state(cx, id!(blink.off)){
+        if self.blink_timer.is_event(event).is_some() {
+            if self.animator_in_state(cx, id!(blink.off)) {
                 self.animator_play(cx, id!(blink.on));
-            }
-            else{
+            } else {
                 self.animator_play(cx, id!(blink.off));
             }
             self.blink_timer = cx.start_timeout(self.blink_speed)
@@ -542,7 +548,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Minus,
-                modifiers: KeyModifiers {control, logo, ..},
+                modifiers: KeyModifiers { control, logo, .. },
                 ..
             }) => {
                 if control || logo {
@@ -552,7 +558,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Key0,
-                modifiers: KeyModifiers {control, logo, ..},
+                modifiers: KeyModifiers { control, logo, .. },
                 ..
             }) => {
                 if control || logo {
@@ -562,7 +568,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Equals,
-                modifiers: KeyModifiers {control, logo, ..},
+                modifiers: KeyModifiers { control, logo, .. },
                 ..
             }) => {
                 if control || logo {
@@ -570,9 +576,9 @@ impl CodeEditor {
                     self.redraw(cx);
                 }
             }
-             Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyW,
-                modifiers: KeyModifiers {control, logo, ..},
+                modifiers: KeyModifiers { control, logo, .. },
                 ..
             }) => {
                 if control || logo {
@@ -582,7 +588,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
-                modifiers: KeyModifiers {shift, ..},
+                modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
                 session.move_left(!shift);
@@ -591,7 +597,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
-                modifiers: KeyModifiers {shift, ..},
+                modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
                 session.move_right(!shift);
@@ -600,7 +606,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
-                modifiers: KeyModifiers {shift, ..},
+                modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
                 session.move_up(!shift);
@@ -609,14 +615,32 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
-                modifiers: KeyModifiers {shift, ..},
+                modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
                 session.move_down(!shift);
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
-            Hit::TextInput(TextInputEvent {ref input, ..}) if input.len() > 0 => {
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Home,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.home(!shift);
+                keyboard_moved_cursor = true;
+                self.redraw(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::End,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.end(!shift);
+                keyboard_moved_cursor = true;
+                self.redraw(cx);
+            }
+            Hit::TextInput(TextInputEvent { ref input, .. }) if input.len() > 0 => {
                 session.insert(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -633,7 +657,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
-                modifiers: KeyModifiers {shift: false, ..},
+                modifiers: KeyModifiers { shift: false, .. },
                 ..
             }) => {
                 session.indent();
@@ -643,7 +667,7 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
-                modifiers: KeyModifiers {shift: true, ..},
+                modifiers: KeyModifiers { shift: true, .. },
                 ..
             }) => {
                 session.outdent();
@@ -682,11 +706,11 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
                 modifiers:
-                KeyModifiers {
-                    logo: true,
-                    shift: false,
-                    ..
-                },
+                    KeyModifiers {
+                        logo: true,
+                        shift: false,
+                        ..
+                    },
                 ..
             }) => {
                 if session.undo() {
@@ -698,11 +722,11 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
                 modifiers:
-                KeyModifiers {
-                    logo: true,
-                    shift: true,
-                    ..
-                },
+                    KeyModifiers {
+                        logo: true,
+                        shift: true,
+                        ..
+                    },
                 ..
             }) => {
                 if session.redo() {
@@ -713,7 +737,7 @@ impl CodeEditor {
             }
             Hit::FingerDown(FingerDownEvent {
                 abs,
-                modifiers: KeyModifiers {alt, ..},
+                modifiers: KeyModifiers { alt, .. },
                 tap_count,
                 ..
             }) => {
@@ -736,7 +760,7 @@ impl CodeEditor {
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
-            Hit::FingerMove(FingerMoveEvent {abs, ..}) => {
+            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
                 self.reset_cursor_blinker(cx);
                 if let KeepCursorInView::Always(old_abs, _) = &mut self.keep_cursor_in_view {
                     *old_abs = abs;
@@ -750,7 +774,7 @@ impl CodeEditor {
             }
             _ => {}
         }
-        if keyboard_moved_cursor{
+        if keyboard_moved_cursor {
             self.keep_cursor_in_view = KeepCursorInView::Once;
             self.reset_cursor_blinker(cx);
         }
@@ -765,7 +789,7 @@ impl CodeEditor {
             }
         }
     }
-    
+
     fn draw_gutter(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
@@ -775,19 +799,23 @@ impl CodeEditor {
             .block_elements(self.line_start, self.line_end)
         {
             match element {
-                BlockElement::Line {line, ..} => {
+                BlockElement::Line { line, .. } => {
                     self.draw_gutter.font_scale = line.scale();
                     buf.clear();
-                    let _ = write!(buf,"{: >4}", line_index);
+                    let _ = write!(buf, "{: >4}", line_index);
                     self.draw_gutter.draw_abs(
                         cx,
                         DVec2 {
                             x: 0.0,
                             y: origin_y,
-                        } *self.cell_size
-                            + self.gutter_rect.pos 
-                            + dvec2((1.0-line.scale()) * -self.cell_size.x + self.gutter_rect.size.x - line.scale() * self.gutter_rect.size.x,0.0),
-                            &buf
+                        } * self.cell_size
+                            + self.gutter_rect.pos
+                            + dvec2(
+                                (1.0 - line.scale()) * -self.cell_size.x + self.gutter_rect.size.x
+                                    - line.scale() * self.gutter_rect.size.x,
+                                0.0,
+                            ),
+                        &buf,
                     );
                     line_index += 1;
                     origin_y += line.height();
@@ -798,7 +826,7 @@ impl CodeEditor {
             }
         }
     }
-    
+
     fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
         let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
@@ -808,7 +836,7 @@ impl CodeEditor {
             .block_elements(self.line_start, self.line_end)
         {
             match element {
-                BlockElement::Line {line, ..} => {
+                BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = line.scale();
                     let mut token_iter = line.tokens().iter().copied();
                     let mut token_slot = token_iter.next();
@@ -869,7 +897,8 @@ impl CodeEditor {
                                             byte_index,
                                         }) {
                                             self.draw_text.outline = 1.0;
-                                            self.draw_text.color = self.token_colors.delimiter_highlight
+                                            self.draw_text.color =
+                                                self.token_colors.delimiter_highlight
                                         }
                                     }
                                     for grapheme in text_0.graphemes() {
@@ -877,7 +906,7 @@ impl CodeEditor {
                                             .grid_to_normalized_position(row_index, column_index);
                                         self.draw_text.draw_abs(
                                             cx,
-                                            DVec2 {x, y: origin_y + y} *self.cell_size
+                                            DVec2 { x, y: origin_y + y } * self.cell_size
                                                 + self.viewport_rect.pos,
                                             grapheme,
                                         );
@@ -891,10 +920,10 @@ impl CodeEditor {
                                 text,
                             } => {
                                 let (x, y) =
-                                line.grid_to_normalized_position(row_index, column_index);
+                                    line.grid_to_normalized_position(row_index, column_index);
                                 self.draw_text.draw_abs(
                                     cx,
-                                    DVec2 {x, y: origin_y + y} *self.cell_size
+                                    DVec2 { x, y: origin_y + y } * self.cell_size
                                         + self.viewport_rect.pos,
                                     text,
                                 );
@@ -918,7 +947,7 @@ impl CodeEditor {
             }
         }
     }
-    
+
     fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
@@ -926,20 +955,19 @@ impl CodeEditor {
             .block_elements(self.line_start, self.line_end)
         {
             let Settings {
-                tab_column_count,
-                ..
+                tab_column_count, ..
             } = **session.settings();
             match element {
-                BlockElement::Line {line, ..} => {
+                BlockElement::Line { line, .. } => {
                     for row_index in 0..line.row_count() {
                         for column_index in
-                        (0..line.indent_column_count()).step_by(tab_column_count)
+                            (0..line.indent_column_count()).step_by(tab_column_count)
                         {
                             let (x, y) = line.grid_to_normalized_position(row_index, column_index);
                             self.draw_indent_guide.draw_abs(
                                 cx,
                                 Rect {
-                                    pos: DVec2 {x, y: origin_y + y} *self.cell_size
+                                    pos: DVec2 { x, y: origin_y + y } * self.cell_size
                                         + self.viewport_rect.pos,
                                     size: DVec2 {
                                         x: 2.0,
@@ -957,17 +985,17 @@ impl CodeEditor {
             }
         }
     }
-    
+
     fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_decoration = None;
         let decorations = session.document().decorations();
         let mut decorations = decorations.iter();
-        while decorations.as_slice().first().map_or(false, | decoration | {
+        while decorations.as_slice().first().map_or(false, |decoration| {
             decoration.end().line_index < self.line_start
         }) {
             decorations.next().unwrap();
         }
-        if decorations.as_slice().first().map_or(false, | decoration | {
+        if decorations.as_slice().first().map_or(false, |decoration| {
             decoration.start().line_index < self.line_start
         }) {
             active_decoration = Some(ActiveDecoration {
@@ -982,17 +1010,17 @@ impl CodeEditor {
         }
         .draw_decoration_layer(cx, session)
     }
-    
+
     fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
-        while selections.as_slice().first().map_or(false, | selection | {
+        while selections.as_slice().first().map_or(false, |selection| {
             selection.end().line_index < self.line_start
         }) {
             selections.next().unwrap();
         }
-        if selections.as_slice().first().map_or(false, | selection | {
+        if selections.as_slice().first().map_or(false, |selection| {
             selection.start().line_index < self.line_start
         }) {
             active_selection = Some(ActiveSelection {
@@ -1007,7 +1035,7 @@ impl CodeEditor {
         }
         .draw_selection_layer(cx, session)
     }
-    
+
     fn pick(&self, session: &Session, position: DVec2) -> Option<(Position, Affinity)> {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
         let mut line_index = session.layout().find_first_line_ending_after_y(position.y);
@@ -1029,7 +1057,7 @@ impl CodeEditor {
                             } => {
                                 for grapheme in text.graphemes() {
                                     let (start_x, y) =
-                                    line.grid_to_normalized_position(row_index, column_index);
+                                        line.grid_to_normalized_position(row_index, column_index);
                                     let start_y = origin_y + y;
                                     let (end_x, _) = line.grid_to_normalized_position(
                                         row_index,
@@ -1066,7 +1094,7 @@ impl CodeEditor {
                                 text,
                             } => {
                                 let (start_x, y) =
-                                line.grid_to_normalized_position(row_index, column_index);
+                                    line.grid_to_normalized_position(row_index, column_index);
                                 let start_y = origin_y + y;
                                 let (end_x, _) = line.grid_to_normalized_position(
                                     row_index,
@@ -1091,7 +1119,7 @@ impl CodeEditor {
                             }
                             WrappedElement::Wrap => {
                                 let (_, y) =
-                                line.grid_to_normalized_position(row_index, column_index);
+                                    line.grid_to_normalized_position(row_index, column_index);
                                 let start_y = origin_y + y;
                                 let end_y = start_y + line.scale();
                                 if (start_y..=end_y).contains(&position.y) {
@@ -1269,7 +1297,7 @@ impl<'a> DrawDecorationLayer<'a> {
             }
         }
     }
-    
+
     fn handle_event(
         &mut self,
         cx: &mut Cx2d,
@@ -1285,19 +1313,19 @@ impl<'a> DrawDecorationLayer<'a> {
             line_index,
             byte_index,
         };
-        if self.active_decoration.as_ref().map_or(false, | decoration | {
+        if self.active_decoration.as_ref().map_or(false, |decoration| {
             decoration.decoration.end() == position && affinity == Affinity::Before
         }) {
             self.draw_decoration(cx, line, origin_y, row_index, column_index);
             self.active_decoration = None;
         }
         if self
-        .decorations
+            .decorations
             .as_slice()
             .first()
-            .map_or(false, | decoration | {
-            decoration.start() == position && affinity == Affinity::After
-        })
+            .map_or(false, |decoration| {
+                decoration.start() == position && affinity == Affinity::After
+            })
         {
             let decoration = *self.decorations.next().unwrap();
             if !decoration.is_empty() {
@@ -1309,7 +1337,7 @@ impl<'a> DrawDecorationLayer<'a> {
             }
         }
     }
-    
+
     fn draw_decoration(
         &mut self,
         cx: &mut Cx2d,
@@ -1326,12 +1354,12 @@ impl<'a> DrawDecorationLayer<'a> {
                 pos: DVec2 {
                     x: start_x,
                     y: origin_y + y,
-                } *self.code_editor.cell_size
+                } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: x - start_x,
                     y: line.scale(),
-                } *self.code_editor.cell_size,
+                } * self.code_editor.cell_size,
             },
         );
     }
@@ -1461,7 +1489,7 @@ impl<'a> DrawSelectionLayer<'a> {
             self.code_editor.draw_selection.end(cx);
         }
     }
-    
+
     fn handle_event(
         &mut self,
         cx: &mut Cx2d,
@@ -1477,7 +1505,7 @@ impl<'a> DrawSelectionLayer<'a> {
             line_index,
             byte_index,
         };
-        if self.active_selection.as_ref().map_or(false, | selection | {
+        if self.active_selection.as_ref().map_or(false, |selection| {
             selection.selection.end() == position && selection.selection.end_affinity() == affinity
         }) {
             self.draw_selection(cx, line, origin_y, row_index, column_index);
@@ -1488,12 +1516,12 @@ impl<'a> DrawSelectionLayer<'a> {
             }
         }
         if self
-        .selections
+            .selections
             .as_slice()
             .first()
-            .map_or(false, | selection | {
-            selection.start() == position && selection.start_affinity() == affinity
-        })
+            .map_or(false, |selection| {
+                selection.start() == position && selection.start_affinity() == affinity
+            })
         {
             let selection = *self.selections.next().unwrap();
             if selection.cursor.position == position && selection.cursor.affinity == affinity {
@@ -1501,12 +1529,12 @@ impl<'a> DrawSelectionLayer<'a> {
             }
             if !selection.is_empty() {
                 let (start_x, _) = line.grid_to_normalized_position(row_index, column_index);
-                self.active_selection = Some(ActiveSelection {selection, start_x});
+                self.active_selection = Some(ActiveSelection { selection, start_x });
             }
             self.code_editor.draw_selection.begin();
         }
     }
-    
+
     fn draw_selection(
         &mut self,
         cx: &mut Cx2d,
@@ -1523,16 +1551,16 @@ impl<'a> DrawSelectionLayer<'a> {
                 pos: DVec2 {
                     x: start_x,
                     y: origin_y + y,
-                } *self.code_editor.cell_size
+                } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: x - start_x,
                     y: line.scale(),
-                } *self.code_editor.cell_size,
+                } * self.code_editor.cell_size,
             },
         );
     }
-    
+
     fn draw_cursor(
         &mut self,
         cx: &mut Cx2d<'_>,
@@ -1545,7 +1573,7 @@ impl<'a> DrawSelectionLayer<'a> {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {x, y: origin_y + y} *self.code_editor.cell_size
+                pos: DVec2 { x, y: origin_y + y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: 2.0,
@@ -1631,19 +1659,19 @@ impl DrawSelection {
     fn begin(&mut self) {
         debug_assert!(self.prev_rect.is_none());
     }
-    
+
     fn end(&mut self, cx: &mut Cx2d) {
         self.draw_rect_internal(cx, None);
         self.prev_prev_rect = None;
         self.prev_rect = None;
     }
-    
+
     fn draw(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.draw_rect_internal(cx, Some(rect));
         self.prev_prev_rect = self.prev_rect;
         self.prev_rect = Some(rect);
     }
-    
+
     fn draw_rect_internal(&mut self, cx: &mut Cx2d, rect: Option<Rect>) {
         if let Some(prev_rect) = self.prev_rect {
             if let Some(prev_prev_rect) = self.prev_prev_rect {

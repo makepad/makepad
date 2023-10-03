@@ -62,7 +62,9 @@ impl Document {
     }
 
     pub fn decorations(&self) -> Ref<'_, [Decoration]> {
-        Ref::map(self.0.decorations.borrow(), |decorations| decorations.as_decorations())
+        Ref::map(self.0.decorations.borrow(), |decorations| {
+            decorations.as_decorations()
+        })
     }
 
     pub fn edit_selections(
