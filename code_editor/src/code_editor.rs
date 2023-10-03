@@ -264,6 +264,9 @@ pub struct CodeEditor {
     unscrolled_rect: Rect,
     #[rust]
     line_start: usize,
+    #[rust]
+    line_end: usize,
+
     #[live(true)]
     word_wrap: bool,
 
@@ -276,8 +279,6 @@ pub struct CodeEditor {
     #[rust]
     blink_timer: Timer,
 
-    #[rust]
-    line_end: usize,
 }
 
 enum KeepCursorInView {
@@ -712,6 +713,28 @@ impl CodeEditor {
                 ..
             }) => {
                 session.end(!shift);
+                keyboard_moved_cursor = true;
+                self.redraw(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::PageUp,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                for _ in 0..self.line_end - self.line_start - 3 {
+                    session.move_up(!shift);
+                }
+                keyboard_moved_cursor = true;
+                self.redraw(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::PageDown,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                for _ in 0..self.line_end - self.line_start - 3 {
+                    session.move_down(!shift);
+                }
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
