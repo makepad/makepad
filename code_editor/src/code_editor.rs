@@ -521,7 +521,7 @@ impl CodeEditor {
     }
     
     pub fn set_cursor_and_scroll(&mut self, cx:&mut Cx, pos:Position, _lenght:Length, session: &mut Session){
-        session.set_selection(pos, Affinity::Before, 1);
+        session.set_selection(pos, Affinity::Before);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }
@@ -835,22 +835,31 @@ impl CodeEditor {
             }
             Hit::FingerDown(FingerDownEvent {
                 abs,
-                modifiers: KeyModifiers { alt, .. },
-                tap_count,
+                modifiers: KeyModifiers { alt: false, shift: false, .. },
                 ..
             }) => {
                 self.animator_play(cx, id!(focus.on));
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
-                    if alt {
-                        session.add_selection(cursor, affinity, tap_count);
-                    } else {
-                        session.set_selection(cursor, affinity, tap_count);
-                    }
+                    session.set_selection(cursor, affinity);
+                    self.reset_cursor_blinker(cx);
+                    self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
                     self.redraw(cx);
                 }
-                self.reset_cursor_blinker(cx);
-                self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
+            }
+            Hit::FingerDown(FingerDownEvent {
+                abs,
+                modifiers: KeyModifiers { alt: true, shift: false, .. },
+                ..
+            }) => {
+                self.animator_play(cx, id!(focus.on));
+                cx.set_key_focus(self.scroll_bars.area());
+                if let Some((cursor, affinity)) = self.pick(session, abs) {
+                    session.add_selection(cursor, affinity);
+                    self.reset_cursor_blinker(cx);
+                    self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
+                    self.redraw(cx);
+                }
             }
             Hit::FingerUp(_) => {
                 self.reset_cursor_blinker(cx);
@@ -859,7 +868,11 @@ impl CodeEditor {
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
-            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+            Hit::FingerDown(FingerDownEvent {
+                abs,
+                modifiers: KeyModifiers { shift: true, .. },
+                ..
+            }) | Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
                 self.reset_cursor_blinker(cx);
                 if let KeepCursorInView::Always(old_abs, _) = &mut self.keep_cursor_in_view {
                     *old_abs = abs;
