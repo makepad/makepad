@@ -183,37 +183,12 @@ impl Session {
         true
     }
 
-    pub fn set_selection(&mut self, position: Position, affinity: Affinity, tap_count: u32) {
-        let mut selection = Selection::from(Cursor {
+    pub fn set_selection(&mut self, position: Position, affinity: Affinity) {
+        let selection = Selection::from(Cursor {
             position,
             affinity,
             preferred_column_index: None,
         });
-        if tap_count == 2 {
-            let text = self.document().as_text();
-            let lines = text.as_lines();
-            match lines[position.line_index][..position.byte_index]
-                .chars()
-                .next_back()
-            {
-                Some(char) if char.is_opening_delimiter() => {
-                    let opening_delimiter_position = Position {
-                        line_index: position.line_index,
-                        byte_index: position.byte_index - char.len_utf8(),
-                    };
-                    if let Some(closing_delimiter_position) =
-                        find_closing_delimiter(lines, position, char)
-                    {
-                        selection = Selection {
-                            cursor: Cursor::from(closing_delimiter_position),
-                            anchor: opening_delimiter_position,
-                        }
-                    }
-                }
-                _ => {}
-            }
-            drop(text);
-        };
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state.selections.set_selection(selection);
         selection_state.last_added_selection_index = Some(0);
@@ -223,7 +198,7 @@ impl Session {
         self.document.force_new_group();
     }
 
-    pub fn add_selection(&mut self, position: Position, affinity: Affinity, _tap_count: u32) {
+    pub fn add_selection(&mut self, position: Position, affinity: Affinity) {
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state.last_added_selection_index = Some(
             selection_state
