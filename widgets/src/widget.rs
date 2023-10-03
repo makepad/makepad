@@ -199,8 +199,12 @@ impl Clone for Box<dyn WidgetAction> {
     }
 }
 
+pub struct WidgetRefInner{
+    pub widget: Box<dyn Widget >,
+    pub id: LiveId
+}
 #[derive(Clone, Default)]
-pub struct WidgetRef(Rc<RefCell<Option<Box<dyn Widget >> >>);
+pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
 
 impl Debug for WidgetRef {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
@@ -301,7 +305,7 @@ impl WidgetSet {
         for widget in self.iter() {
             if let Some(inner) = widget.0.borrow_mut().as_mut() {
                 for path in paths {
-                    inner.find_widgets(path, WidgetCache::Yes, &mut results);
+                    inner.widget.find_widgets(path, WidgetCache::Yes, &mut results);
                 }
             }
         }
@@ -324,7 +328,7 @@ impl LiveApply for WidgetSet {
         for inner in self.iter() {
             let mut inner = inner.0.borrow_mut();
             if let Some(component) = &mut *inner {
-                return component.apply(cx, from, index, nodes)
+                return component.widget.apply(cx, from, index, nodes)
             }
         }
         nodes.skip_node(index)
@@ -402,40 +406,57 @@ impl WidgetRef {
     pub fn is_empty(&self) -> bool {
         self.0.borrow().as_ref().is_none()
     }
-    pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
-        Self (Rc::new(RefCell::new(Some(widget))))
+
+    pub fn id(&self) -> LiveId {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.id
+        }
+        LiveId(0)
+    }
+    
+    pub fn set_id(&self, id:LiveId) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.id = id
+        }
+    }
+
+    pub fn new_with_inner(widget: Box<dyn Widget>, id:LiveId) -> Self {
+        Self (Rc::new(RefCell::new(Some(WidgetRefInner{
+            widget,
+            id
+        }))))
     }
     
     pub fn handle_widget_event_with(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.handle_widget_event_with(cx, event, dispatch_action)
+            return inner.widget.handle_widget_event_with(cx, event, dispatch_action)
         }
     }
     
     pub fn handle_widget_event(&self, cx: &mut Cx, event: &Event) -> Vec<WidgetActionItem> {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.handle_widget_event(cx, event)
+            return inner.widget.handle_widget_event(cx, event)
         }
         Vec::new()
     }
     
     pub fn widget_uid(&self) -> WidgetUid {
         if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget_uid()
+            return inner.widget.widget_uid()
         }
         WidgetUid(0)
     }
     
     pub fn widget_to_data(&self, cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget_to_data(cx, actions, nodes, path);
+            return inner.widget.widget_to_data(cx, actions, nodes, path);
         }
         false
     }
     
     pub fn data_to_widget(&self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.data_to_widget(cx, nodes, path);
+            inner.widget.data_to_widget(cx, nodes, path);
         }
     }
     
@@ -446,27 +467,27 @@ impl WidgetRef {
         results: &mut WidgetSet
     ) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.find_widgets(path, cached, results)
+            inner.widget.find_widgets(path, cached, results)
         }
     }
     
     pub fn widget(&self, path: &[LiveId]) -> WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget(path);
+            return inner.widget.widget(path);
         }
         WidgetRef::empty()
     }
     
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widgets(paths);
+            return inner.widget.widgets(paths);
         }
         WidgetSet::default()
     }
     
     pub fn draw_walk_widget(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            if let Some(nd) = inner.draw_walk_widget(cx, walk).hook_widget() {
+            if let Some(nd) = inner.widget.draw_walk_widget(cx, walk).hook_widget() {
                 if nd.is_empty() {
                     return WidgetDraw::hook(self.clone())
                 }
@@ -478,7 +499,7 @@ impl WidgetRef {
     
     pub fn walk(&self, cx:&mut Cx) -> Walk {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.walk(cx)
+            return inner.widget.walk(cx)
         }
         Walk::default()
     }
@@ -486,27 +507,27 @@ impl WidgetRef {
     // forwarding Widget trait
     pub fn redraw(&self, cx: &mut Cx) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.redraw(cx)
+            return inner.widget.redraw(cx)
         }
     }
     
     
     pub fn is_visible(&self) -> bool {
         if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.is_visible()
+            return inner.widget.is_visible()
         }
         true
     }
     
     pub fn draw_widget_all(&self, cx: &mut Cx2d) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.draw_widget_all(cx)
+            return inner.widget.draw_widget_all(cx)
         }
     }
     
     pub fn draw_widget(&self, cx: &mut Cx2d) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            if let Some(nd) = inner.draw_widget(cx).hook_widget() {
+            if let Some(nd) = inner.widget.draw_widget(cx).hook_widget() {
                 if nd.is_empty() {
                     return WidgetDraw::hook(self.clone())
                 }
@@ -518,7 +539,7 @@ impl WidgetRef {
     
     pub fn text(&self) -> String {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.text()
+            inner.widget.text()
         }
         else {
             String::new()
@@ -527,20 +548,20 @@ impl WidgetRef {
     
     pub fn set_text(&self, v: &str) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.set_text(v)
+            inner.widget.set_text(v)
         }
     }
     
     pub fn set_text_and_redraw(&self, cx: &mut Cx, v: &str) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.set_text_and_redraw(cx, v);
+            inner.widget.set_text_and_redraw(cx, v);
         }
     }
     
     pub fn borrow_mut<T: 'static + Widget>(&self) -> Option<std::cell::RefMut<'_, T >> {
         if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), | inner | {
             if let Some(inner) = inner.as_mut() {
-                inner.cast_mut::<T>()
+                inner.widget.cast_mut::<T>()
             }
             else {
                 None
@@ -556,7 +577,7 @@ impl WidgetRef {
     pub fn borrow<T: 'static + Widget>(&self) -> Option<std::cell::Ref<'_, T >> {
         if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), | inner | {
             if let Some(inner) = inner.as_ref() {
-                inner.cast::<T>()
+                inner.widget.cast::<T>()
             }
             else {
                 None
@@ -582,12 +603,12 @@ impl WidgetRef {
         let mut inner = self.0.borrow_mut();
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
             if let Some(component) = &mut *inner {
-                if component.type_id() != live_type {
+                if component.widget.type_id() != live_type {
                     *inner = None; // type changed, drop old component
                     log!("TYPECHANGE");
                 }
                 else {
-                    return component.apply(cx, from, index, nodes);
+                    return component.widget.apply(cx, from, index, nodes);
                 }
             }
             if let Some(component) = cx.live_registry.clone().borrow()
@@ -595,9 +616,12 @@ impl WidgetRef {
                     if cx.debug.marker() == 1{
                         panic!()
                     }
-                *inner = Some(component);
+                *inner = Some(WidgetRefInner{
+                    widget: component,
+                    id: nodes[index].id
+                });
                 if let Some(component) = &mut *inner {
-                    return component.apply(cx, from, index, nodes);
+                    return component.widget.apply(cx, from, index, nodes);
                 }
             }
             else {
@@ -605,7 +629,7 @@ impl WidgetRef {
             }
         }
         else if let Some(component) = &mut *inner {
-            return component.apply(cx, from, index, nodes)
+            return component.widget.apply(cx, from, index, nodes)
         }
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
         nodes.skip_node(index)

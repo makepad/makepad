@@ -6,14 +6,14 @@ pub mod error_log_desktop;
 #[macro_export]
 macro_rules!log {
     ( $ ( $ t: tt) *) => {
-        $crate::makepad_error_log::log_with_type(file!(), line!(), column!(), line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::makepad_error_log::LogType::Log)
+        $crate::makepad_error_log::log_with_type(file!(), line!(), column!()+1, line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::makepad_error_log::LogType::Log)
     }
 }
 
 #[macro_export]
 macro_rules!error {
     ( $ ( $ t: tt) *) => {
-        $crate::makepad_error_log::log_with_type(file!(), line!(), column!(), line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::makepad_error_log::LogType::Log)
+        $crate::makepad_error_log::log_with_type(file!(), line!(), column!()+1, line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::makepad_error_log::LogType::Log)
     }
 }
 
@@ -106,4 +106,3 @@ macro_rules!profile_end {
         )
     }
 }
-

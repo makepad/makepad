@@ -124,7 +124,6 @@ use crate::{
                     },
                 },
             },
-            System::Threading::Sleep,
         },
     },
 };
@@ -276,8 +275,7 @@ impl Cx {
                         TextureFormat::SharedBGRA(_) => {
                             cxtexture.os.update_shared_texture(
                                 &d3d11_cx.device,
-                                cxtexture.desc.width.unwrap() as u32,
-                                cxtexture.desc.height.unwrap() as u32,
+                                &cxtexture.desc
                             );
                         },
                         _ => ()
@@ -502,6 +500,15 @@ impl Cx {
         }
         self.draw_shaders.compile_set.clear();
     }
+
+    pub fn share_texture_for_presentable_image(
+        &mut self,
+        texture: &Texture,
+    ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        cxtexture.os.update_shared_texture(self.os.d3d11_device.as_ref().unwrap(), &cxtexture.desc);
+        cxtexture.os.shared_handle.0 as u64
+    }
 }
 
 pub struct D3d11Window {
@@ -664,21 +671,15 @@ impl D3d11Cx {
         }
     }
 
-    pub fn wait_for_gpu(&self) {
+    pub fn start_querying(&self) {
 
         // QUERY_EVENT signals when rendering is complete
         unsafe { self.context.End(&self.query) };
+    }
 
-        // wait for status with GetData
-        // (calling context.GetData doesn't distinguish between S_OK and S_FALSE, so call vtable directly)
-        while unsafe { (Interface::vtable(&self.context).GetData)(Interface::as_raw(&self.context),Interface::as_raw(&self.query),std::ptr::null_mut(),0,0) } == S_FALSE {
-
-            unsafe { Sleep(1) };  // set to 1ms, but in practice probably somewhere around 10 or 15 ms
-            
-            // so let's see if this even works well enough for 60Hz framerate...
-
-            // and otherwise needs shorter waiting API, but please no spinning
-        }
+    pub fn is_gpu_done(&self) -> bool {
+        let hresult = unsafe { (Interface::vtable(&self.context).GetData)(Interface::as_raw(&self.context),Interface::as_raw(&self.query),std::ptr::null_mut(),0,0) };
+        hresult != S_FALSE
     }
 }
 
@@ -963,12 +964,20 @@ impl CxOsTexture {
         self.shader_resource_view = shader_resource_view;
     }
 
-    pub fn update_shared_texture(
+    fn update_shared_texture(
         &mut self,
         d3d11_device: &ID3D11Device,
-        width: u32,
-        height: u32,
+        desc: &TextureDesc,
     ) {
+        // we need a width/height for this one.
+        if desc.width.is_none() || desc.height.is_none() {
+            log!("Shared texture width/height is undefined, cannot allocate it");
+            return
+        }
+
+        let width = desc.width.unwrap() as u32;
+        let height = desc.height.unwrap() as u32;
+
         if (width != self.width) || (height != self.height) {
 
             let texture_desc = D3D11_TEXTURE2D_DESC {

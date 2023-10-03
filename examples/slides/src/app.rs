@@ -1,172 +1,215 @@
-use makepad_widgets::*;
+use crate::{
+    makepad_widgets::*,
+    makepad_studio_core::build_manager::build_manager::*,
+    makepad_studio_core::build_manager::run_view::*,
+    makepad_studio_core::file_system::file_system::*,
+};
 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    
+    import makepad_studio_core::build_manager::run_view::RunView;
     App = {{App}} {
-
-        ui: <Window>{
+        
+        ui: <Window> {
             show_bg: true
             width: Fill,
             height: Fill
             body = {
                 <SlidesView> {
-                    goal_pos: 0.0
+                    <Slide> {
+                        title = {text: "Hello Gosim"},
+                        <SlideBody> {text: ""}
+                    }
                     
                     <SlideChapter> {
-                        title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
+                        title = {text: "LIVE APP BUILDING\nWITH MAKEPAD"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
+                        title = {text:"What we lost"},
+                        <SlideBody> {text: "- Visual Basic\n- Delphi\n"}
+                    }                    
+                    <Slide> {
                         title = {text: "A long long time ago …"},
-                        <SlideBody> {text: "… in a galaxy nearby\n   Cloud9 IDE & ACE"}
+                        <SlideBody> {text: "Cloud9 IDE & ACE"}
                     }
                     <Slide> {
                         title = {text: "HTML as an IDE UI?\nMadness!"},
-                        <SlideBody> {text: "- Integrating design and code was hard\n- Could not innovate editing\n- Too slow, too hard to control"}
+                        <SlideBody> {text: "- Integrating design and code was hard\n- Could not innovate editing: folding\n- Too slow, too hard to control"}
                     }
                     <Slide> {
                         title = {text: "Let's start over!"},
-                        <SlideBody> {text: "- JavaScript and WebGL for UI\n- Write shaders to style UI\n- A quick demo"}
+                        <SlideBody> {text: "- JavaScript and WebGL for UI\n- Write shaders to style UI"}
                     }
                     <Slide> {
-                        title = {text: "Maybe JavaScript\nwas the problem?"},
-                        <SlideBody> {text: "- Great livecoding, but …\n- Chrome crashing tabs after 30 minutes\n- Too slow"}
+                        title = {text: "Tried, and tried again."},
+                        <SlideBody> {text: "5 times: 2013-2018"}
+                    }
+                    <Slide> {
+                        title = {text: "Final result"},
+                        <SlideBody> {text: "- makepad.github.io/makepad_js.html"}
+                    }
+                    <Slide> {
+                        title = {text: "The good part"},
+                        <SlideBody> {text: "- Live Coding"}
+                    }
+                    <Slide> {
+                        title = {text: "The bad parts"},
+                        <SlideBody> {text: "- Too slow\n- Cannot scale: no types\n- Chrome crashes"}
+                    }
+                    <Slide> {
+                        title = {text: "Now what"},
+                        <SlideBody> {text: "- 5 years of my life gone"}
                     }
                     <Slide> {
                         title = {text: "Rust appears"},
                         <SlideBody> {text: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
                     }
-                    <Slide> {title = {text: "Rust is fast: SIMD Mandelbrot"}, 
-                        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
-                        draw_bg: { color: #x1A, radius: 5.0 }
-
-                    }
-    
-                    <Slide> {title = {text: "Instanced rendering"}, 
-                        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
-                        draw_bg: { color: #x1A, radius: 5.0 }
-
-                    }
-                    
                     <Slide> {
-                        title = {text: "Our goal:\nUnify coding and UI design again."},
-                        <SlideBody> {text: "As it was in Visual Basic.\nNow with modern design."}
+                        title = {text: "Rust"},
+                        <SlideBody> {text: "- Compiled: LLVM\n- Typed\n- Compiles everywhere"}
                     }
-    
-                    <Slide> {title = {text: "Ironfish Desktop"}, 
-
-                    }
-                    
-                    <Slide> {title = {text: "Ironfish Mobile"}, 
-
-                    }
-                    
-                    <Slide> {title = {text: "Multi modal"}, 
-
-                    }
-                    
-                    <Slide> {title = {text: "Visual design"}, 
-
-                    }
-                    
                     <Slide> {
-                        title = {text: "Our UI language: Live."},
-                        <SlideBody> {text: "- Live editable\n- Design tool manipulates text\n- Inheritance structure\n- Rust-like module system"}
+                        title = {text: "Finally we have\nperformance"},
+                    }                                                                                                  
+                    <Slide> {
+                        title = {text: "The slides are a\nMakepad app"},
                     }
-                    
                     <Slide> {
-                        title = {text: "These slides are a Makepad app"},
-                        <SlideBody> {text: "- Show source\n"}
-                        <SlideBody> {text: "- Show Rust API\n"}
-                    }                
-                    
+                        title = {text: "However"},
+                        <SlideBody> {text: "- No more live coding?"}
+                    }
                     <Slide> {
-                        title = {text: "Future"},
-                        <SlideBody> {text: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
-                    }                
-                    
+                        title = {text: "Goals"},
+                        <SlideBody> {text: "- Make Rust programming fun:\n- Visual designer\n- Media APIs\n- Live coding"}
+                    }
                     <Slide> {
-                        title = {text: "Build for Android"},
-                        <SlideBody> {text: "- SDK installer\n- Cargo makepad android\n"}
-                    }                
+                        title = {text: "Solution for\nlive coding"},
+                        <SlideBody> {text: "- Makepad UI Language: A DSL"}
+                    }
+                    <Slide> {
+                        title = {text: "Makepad Studio"},
+                        <SlideBody> {text: "- github.com/makepad/makepad\n- cargo run -p makepad-studio --release"}
+                    }
+                    <Slide> {
+                        title = {text: "A Makepad App"},
+                        <SlideBody> {text: "- Platform layer: OS/GPU\n- UI DSL: Structure+Shaders\n- Rust Code: Logic"}
+                    }
+                    <Slide> {
+                        title = {text: "Lets look at a\nMakepad app"},
+                        <SlideBody> {text: "- Simple: UI and events\n- News Feed: Virtual viewport"}
+                    }
+                    <Slide> {
+                        title = {text: "Platforms"},
+                        <SlideBody> {text: "- Windows / Mac / Linux\n- iOS / Android\n- WebAssembly"}
+                    }
+                    <Slide> {
+                        title = {text: "Build examples"}, 
+                        <SlideBody> {text: "- Before: fast or multiplatform\n- Demo builds"}
+                    }
+                    <Slide> {
+                        title = {text: "SDXL UI"},
+                        <SlideBody> {text: "- AI Image gen"}
+                    }
+                    <Slide> {
+                        title = {text: "Audio UI"},
+                        <SlideBody> {text: "- Ironfish"}
+                    }
+                    <Slide> {
+                        title = {text: "Live coding shaders"},
+                        <SlideBody> {text: "- Ironfish piano\n - Designer accessible"}
+                    }       
+                    <Slide> {
+                        title = {text: "Why"},
+                        <SlideBody> {text: "- Fast compute needed\n - Run on web and native\n- Tooling UI"}
+                    }       
+                    <Slide> {
+                        title = {text: "Inception"},
+                    }
+                    <Slide> {
+                        title = {text: "Links"}, 
+                        <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl"}
+                    }
                 }
             }
         }
     }
 }
 
-// This app_main macro generates the code necessary to initialize and run your application.
-//
-// This code is almost always the same between different applications, so it is convenient to use a
-// macro for it. The two main tasks that this code needs to carry out are: initializing both the
-// main application struct (`App`) and the global context object (`Cx`), and setting up event
-// handling. On desktop, this means creating and running our own event loop. On web, this means
-// creating an event handler function that the browser event loop can call into.
 app_main!(App);
 
-// The main application struct.
-//
-// The #[derive(Live, LiveHook)] attribute implements a bunch of traits for this struct that enable
-// it to interact with the Makepad runtime. Among other things, this enables the Makepad runtime to
-// initialize the struct from a DSL object.
 #[derive(Live)]
-// This function is used to register any DSL code that you depend on.
-// called automatically by the code we generated with the call to the macro `main_app` above.
 pub struct App {
-    // A chromeless window for our application. Used to contain our frame widget.
-    // A frame widget. Used to contain our button and label.
     #[live] ui: WidgetRef,
-    
-    // The value for our counter.
-    //
-    // The #[rust] attribute here is used to indicate that this field should *not* be initialized
-    // from a DSL object, even when a corresponding property exists.
-    #[rust] counter: usize,
+    #[live] build_manager: BuildManager,
+    #[rust] file_system: FileSystem,
 }
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
+        crate::makepad_code_editor::live_design(cx);
+        crate::build_manager::build_manager::live_design(cx);
+        crate::build_manager::run_list::live_design(cx);
+        crate::build_manager::log_list::live_design(cx);
+        crate::build_manager::run_view::live_design(cx);
+        //cx.start_stdin_service();
+    }
+    
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.file_system.init(cx);
+        self.build_manager.init(cx);
+        self.build_manager.run_app(live_id!(fractal_zoom),"makepad-example-fractal-zoom");
+        self.build_manager.run_app(live_id!(ironfish),"makepad-example-ironfish");
     }
 }
 
-impl App{
-    async fn _do_network_request(_cx:CxRef, _ui:WidgetRef, _url:&str)->String{
-        //let x = fetch(urL).await;
-        //ui.get_label(id!(thing)).set_text(&mut *cx.borrow_mut(), x);
-        "".to_string()
-    }
+impl App {
 }
 
-impl AppMain for App{
-    
-    
-    // This function is used to handle any incoming events from the host system. It is called
-    // automatically by the code we generated with the call to the macro `main_app` above.
+impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        
+        let apps = [id!(fractal_zoom),id!(ironfish)];
+        
         if let Event::Draw(event) = event {
-            // This is a draw event, so create a draw context and use that to draw our application.
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            //let dt = profile_start();
+            let cx = &mut Cx2d::new(cx, event);
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+                let run_view_id = next.id();
+                if let Some(mut run_view) = next.as_run_view().borrow_mut() {
+                    run_view.draw(cx, run_view_id, &mut self.build_manager);
+                }
+            }
+            //profile_end!(dt);
+            return
+        }
+        if let Event::Destruct = event {
+            self.build_manager.clear_active_builds();
+        }
+        let _actions = self.ui.handle_widget_event(cx, event);
+        
+        //ok i want all runviews... how do i do that
+        for app in apps{
+            if let Some(mut run_view) = self.ui.run_view(app).borrow_mut(){
+                run_view.pump_event_loop(cx, event, app[0], &mut self.build_manager);
+                run_view.handle_event(cx, event, app[0], &mut self.build_manager);
+            }
         }
         
-        // Forward the event to the frame. In this case, handle_event returns a list of actions.
-        // Actions are similar to events, except that events are always forwarded downward to child
-        // widgets, while actions are always returned back upwards to parent widgets.
-        let actions = self.ui.handle_widget_event(cx, event);
-        
-        // Get a reference to our button from the frame, and check if one of the actions returned by
-        // the frame was a notification that the button was clicked.
-        if self.ui.button(id!(button1)).clicked(&actions) {
-            //cx.spawn_async(Self::do_network_request(cx.get_ref(), self.ui.clone()))
-            // Increment the counter.
-            self.counter += 1;
-            
-            // Get a reference to our label from the frame, update its text, and schedule a redraw
-            // for it.
-            let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+        for _action in self.file_system.handle_event(cx, event, &self.ui) {}
+                
+        for action in self.build_manager.handle_event(cx, event, &mut self.file_system) {
+            match action {
+                BuildManagerAction::StdinToHost {run_view_id, msg} => {
+                    if let Some(mut run_view) = self.ui.run_view(&[run_view_id]).borrow_mut() {
+                        run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.build_manager);
+                    }
+                }
+                _ => ()
+            }
         }
+        
     }
 }

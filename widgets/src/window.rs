@@ -4,7 +4,6 @@ use crate::{
     makepad_draw::*,
     nav_control::NavControl,
     button::*,
-    // window_menu::*,
     view::*,
     widget::*,
 };
@@ -15,7 +14,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct Window {
-    #[rust] caption_size: DVec2,
+    //#[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
     #[live] mouse_cursor_size: DVec2,
     #[live] demo: bool,
@@ -25,6 +24,7 @@ pub struct Window {
     #[live] debug_view: DebugView,
     #[live] nav_control: NavControl,
     #[live] window: WindowHandle,
+    #[live] stdin_size: DrawColor,
     #[live] overlay: Overlay,
     #[live] main_draw_list: DrawList2d,
     #[live] pass: Pass,
@@ -75,6 +75,13 @@ impl LiveHook for Window {
                 }
             }
             OsType::Macos => {
+                if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                    self.apply_over(cx, live!{
+                        caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
+                    });
+                }
+                
+                //draw_bg: {color: (THEME_COLOR_BG_APP)}  
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
@@ -149,16 +156,20 @@ impl Window {
             },
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-                    // alright we should query the caption area.
-                    // we should build an api for that
-                    if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
+                    let size = self.window.get_inner_size(cx);
+                    
+                    if dq.abs.y < 25.{
                         if dq.abs.x < 50. {
                             dq.response.set(WindowDragQueryResponse::SysMenu);
                         }
-                        else {
+                        else if dq.abs.x < size.x - 135.0{
                             dq.response.set(WindowDragQueryResponse::Caption);
                         }
+                        cx.set_cursor(MouseCursor::Default);
                     }
+                    /*
+                    if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
+                    }*/
                 }
                 true
             }
@@ -193,6 +204,7 @@ impl Window {
                 if self.button(id!(xr_on)).clicked(&actions) {
                     cx.xr_start_presenting();
                 }
+                
                 dispatch_action(cx, WindowAction::ViewActions(actions));
             }
         }
@@ -245,6 +257,24 @@ impl Window {
         }
         
         self.overlay.end(cx);
+        // lets get te pass size
+        fn encode_size(x: f64)->Vec4{
+            let x = x as usize;
+            let r = ((x >> 8)&0xff) as f32 / 255.0;
+            let b = ((x >> 0)&0xff) as f32 / 255.0;
+            vec4(r,0.0,b,1.0)
+        }
+        
+        // if we are running in stdin mode, write a tracking pixel with the pass size
+        if cx.in_makepad_studio(){
+            let df = cx.current_dpi_factor();
+            let size = self.pass.size(cx).unwrap() * df;
+            self.stdin_size.color = encode_size(size.x);
+            self.stdin_size.draw_abs(cx, Rect{pos:dvec2(0.0,0.0),size:dvec2(1.0/df,1.0/df)});
+            self.stdin_size.color = encode_size(size.y);
+            self.stdin_size.draw_abs(cx, Rect{pos:dvec2(1.0/df,0.0),size:dvec2(1.0/df,1.0/df)});
+        }
+        
         cx.end_pass_sized_turtle();
         
         self.main_draw_list.end(cx);
@@ -299,4 +329,3 @@ impl Widget for Window {
         WidgetDraw::done()
     }
 }
-

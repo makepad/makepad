@@ -13,189 +13,227 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::Texture,
+        texture::{Texture, TextureDesc, TextureFormat},
         live_traits::LiveNew,
         thread::Signal,
         os::{
             d3d11::D3d11Cx,
-            cx_stdin::{HostToStdin, StdinToHost},
+            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
         windows::Win32::Foundation::HANDLE,
-    } 
+    }
 };
 
 impl Cx {
     
-    pub (crate) fn stdin_handle_repaint(&mut self, d3d11_cx: &mut D3d11Cx) {
+    pub (crate) fn stdin_handle_repaint(
+        &mut self,
+        d3d11_cx: &mut D3d11Cx,
+        swapchain: Option<&Swapchain<Texture >>,
+        present_index: &mut usize,
+    ) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
+        for &pass_id in &passes_todo {
+            match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
+                    // only render to swapchain if swapchain exists
+                    if let Some(swapchain) = swapchain {
+                        
+                        // and if GPU is not already rendering something else
+                        if self.os.new_frame_being_rendered.is_none() {
+                            let current_image = &swapchain.presentable_images[*present_index];
+                            *present_index = (*present_index + 1) % swapchain.presentable_images.len();
+                            
+                            // render to swapchain
+                            self.draw_pass_to_texture(pass_id, d3d11_cx, current_image.image.texture_id());
 
-                    // render to swapchain
-                    if self.os.swapchain.is_some() {
-                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
-                        self.draw_pass_to_texture(*pass_id, d3d11_cx, texture_id);
+                            let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+                            let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                            let future_presentable_draw = PresentableDraw {
+                                target_id: current_image.id,
+                                width: (pass_rect.size.x * dpi_factor) as u32,
+                                height: (pass_rect.size.y * dpi_factor) as u32,
+                            };
+                            
+                            // start GPU event query
+                            d3d11_cx.start_querying();
+                            
+                            // and inform event_loop to go poll GPU readiness
+                            self.os.new_frame_being_rendered = Some(future_presentable_draw);
+                        }
                     }
-
-                    // wait for GPU to finish rendering
-                    d3d11_cx.wait_for_gpu();
-
-                    // inform host that a frame is ready
-                    let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(self.os.present_index).to_json().as_bytes());
-
-                    // flip to next one
-                    self.os.present_index = 1 - self.os.present_index;
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(pass_id, d3d11_cx);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id, d3d11_cx);
+                    self.draw_pass_to_magic_texture(pass_id, d3d11_cx);
                 }
             }
         }
     }
     
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
-        let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
 
-        let mut reader = BufReader::new(std::io::stdin());
-        let mut window_size = None;
+        let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
+        {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(std::io::stdin().lock());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if let Ok(0) | Err(_) = reader.read_line(&mut line) {
+                        break;
+                    }
+                    
+                    // alright lets put the line in a json parser
+                    match HostToStdin::deserialize_json(&line) {
+                        Ok(msg) => {
+                            if json_msg_tx.send(msg).is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            // we should output a log string
+                            error!("Cant parse stdin-JSON {} {:?}", line, err)
+                        }
+                    }
+                }
+            });
+        }
+        
+        let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
+        
+        let mut swapchain = None;
+        let mut present_index = 0;
         
         self.call_event_handler(&Event::Construct);
         
-        loop {
-            let mut line = String::new();
-            if let Ok(len) = reader.read_line(&mut line) {
-                if len == 0 {
-                    break
+        while let Ok(msg) = json_msg_rx.recv() {
+            match msg {
+                HostToStdin::ReloadFile {file, contents} => {
+                    // alright lets reload this file in our DSL system
+                    let _ = self.live_file_change_sender.send(vec![LiveFileChange {
+                        file_name: file,
+                        content: contents
+                    }]);
                 }
-                // alright lets put the line in a json parser
-                let parsed: Result<HostToStdin, DeJsonErr> = DeJson::deserialize_json(&line);
-                
-                match parsed {
-                    Ok(msg) => match msg {
-                        HostToStdin::ReloadFile{file, contents}=>{
-                            // alright lets reload this file in our DSL system
-                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                                file_name: file,
-                                content: contents
-                            }]);                            
-                        }
-                        HostToStdin::KeyDown(e) => {
-                            self.call_event_handler(&Event::KeyDown(e));
-                        }
-                        HostToStdin::KeyUp(e) => {
-                            self.call_event_handler(&Event::KeyUp(e));
-                        }
-                        HostToStdin::MouseDown(e) => {
-                            self.fingers.process_tap_count(
-                                dvec2(e.x,e.y),
-                                e.time
-                            );
-                            self.fingers.mouse_down(e.button);
-
-                            self.call_event_handler(&Event::MouseDown(e.into()));
-                        }
-                        HostToStdin::MouseMove(e) => {
-                            self.call_event_handler(&Event::MouseMove(e.into()));
-                            self.fingers.cycle_hover_area(live_id!(mouse).into());
-                            self.fingers.switch_captures();
-                        }
-                        HostToStdin::MouseUp(e) => {
-                            let button = e.button;
-                            self.call_event_handler(&Event::MouseUp(e.into()));
-                            self.fingers.mouse_up(button);
-                            self.fingers.cycle_hover_area(live_id!(mouse).into());
-                        }
-                        HostToStdin::Scroll(e) => {
-                            self.call_event_handler(&Event::Scroll(e.into()))
-                        }
-                        HostToStdin::WindowSize(ws) => {
-
-                            // first update the swapchain
-                            if self.os.swapchain_handles[0].0 as u64 != ws.swapchain_handles[0] {
-
-                                // we got a new texture handles
-                                let textures = [Texture::new(self),Texture::new(self),];
-
-                                let handle = HANDLE(ws.swapchain_handles[0] as isize);
-                                let cxtexture = &mut self.textures[textures[0].texture_id()];
-                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
-                                self.os.swapchain_handles[0] = handle;
-
-                                let handle = HANDLE(ws.swapchain_handles[1] as isize);
-                                let cxtexture = &mut self.textures[textures[1].texture_id()];
-                                cxtexture.os.update_from_shared_handle(d3d11_cx,handle);
-                                self.os.swapchain_handles[1] = handle;
-
-                                self.os.swapchain = Some(textures);
-
-                                // and reset present_index
-                                self.os.present_index = 0;
-                            }
-
-                            // redraw the window if needed
-                            if window_size != Some(ws) {
-                                window_size = Some(ws);
-                                self.redraw_all();
-                                
-                                let window = &mut self.windows[CxWindowPool::id_zero()];
-                                window.window_geom = WindowGeom {
-                                    dpi_factor: ws.dpi_factor,
-                                    inner_size: dvec2(ws.width, ws.height),
-                                    ..Default::default()
-                                };
-
-                                self.stdin_handle_platform_ops(d3d11_cx);
-                            }
-                        }
-                        HostToStdin::Tick {frame: _, time,..} => if let Some(_ws) = window_size {
-                            // poll the service for updates
-                            // check signals
-                            if Signal::check_and_clear_ui_signal(){
-                                //self.handle_media_signals();
-                                self.call_event_handler(&Event::Signal);
-                            }
-                            if self.handle_live_edit(){
-                                self.call_event_handler(&Event::LiveEdit);
-                                self.redraw_all();
-                            }
-                            self.handle_networking_events();
-                            
-                            // alright a tick.
-                            // we should now run all the stuff.
-                            if self.new_next_frames.len() != 0 {
-                                self.call_next_frame_event(time);
-                            }
-                            
-                            if self.need_redrawing() {
-                                self.call_draw_event();
-                                self.hlsl_compile_shaders(d3d11_cx);
-                            }
-                            
-                            // repaint
-                            self.stdin_handle_repaint(d3d11_cx);
-                        }
+                HostToStdin::KeyDown(e) => {
+                    self.call_event_handler(&Event::KeyDown(e));
+                }
+                HostToStdin::KeyUp(e) => {
+                    self.call_event_handler(&Event::KeyUp(e));
+                }
+                HostToStdin::MouseDown(e) => {
+                    self.fingers.process_tap_count(
+                        dvec2(e.x, e.y),
+                        e.time
+                    );
+                    self.fingers.mouse_down(e.button);
+                    
+                    self.call_event_handler(&Event::MouseDown(e.into()));
+                }
+                HostToStdin::MouseMove(e) => {
+                    self.call_event_handler(&Event::MouseMove(e.into()));
+                    self.fingers.cycle_hover_area(live_id!(mouse).into());
+                    self.fingers.switch_captures();
+                }
+                HostToStdin::MouseUp(e) => {
+                    let button = e.button;
+                    self.call_event_handler(&Event::MouseUp(e.into()));
+                    self.fingers.mouse_up(button);
+                    self.fingers.cycle_hover_area(live_id!(mouse).into());
+                }
+                HostToStdin::Scroll(e) => {
+                    self.call_event_handler(&Event::Scroll(e.into()))
+                }
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
+                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                        dpi_factor,
+                        inner_size: dvec2(inner_width, inner_height),
+                        ..Default::default()
+                    };
+                    self.redraw_all();
+                }
+                HostToStdin::Swapchain(new_swapchain) => {
+                    let new_swapchain = new_swapchain.images_map(|pi| {
+                        let handle = HANDLE(pi.image as isize);
+                        
+                        let texture = Texture::new(self);
+                        let desc = TextureDesc {
+                            format: TextureFormat::SharedBGRA(pi.id),
+                            width: Some(new_swapchain.alloc_width as usize),
+                            height: Some(new_swapchain.alloc_height as usize),
+                        };
+                        texture.set_desc(self, desc);
+                        self.textures[texture.texture_id()]
+                            .os.update_from_shared_handle(d3d11_cx, handle);
+                        texture
+                    });
+                    let swapchain = swapchain.insert(new_swapchain);
+                    
+                    // reset present_index
+                    present_index = 0;
+                    
+                    self.redraw_all();
+                    self.stdin_handle_platform_ops(Some(swapchain), present_index);
+                }
+                HostToStdin::Tick {frame: _, time, ..} => if swapchain.is_some() {
+                    
+                    // poll the service for updates
+                    // check signals
+                    if Signal::check_and_clear_ui_signal() {
+                        self.handle_media_signals();
+                        self.call_event_handler(&Event::Signal);
                     }
-                    Err(err) => { // we should output a log string
-                        error!("Cant parse stdin-JSON {} {:?}", line, err);
+                    if self.handle_live_edit() {
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
                     }
+                    self.handle_networking_events();
+                    // we should poll our runloop
+                    self.stdin_handle_platform_ops(swapchain.as_ref(), present_index);
+                    
+                    // alright a tick.
+                    // we should now run all the stuff.
+                    if self.new_next_frames.len() != 0 {
+                        self.call_next_frame_event(time);
+                    }
+                    
+                    if self.need_redrawing() {
+                        self.call_draw_event();
+                        self.hlsl_compile_shaders(d3d11_cx);
+                    }
+                    
+                    // repaint
+                    self.stdin_handle_repaint(d3d11_cx, swapchain.as_ref(), &mut present_index);
+                    
+                    
+                    // check if GPU is ready to flip frames
+                    if let Some(presentable_draw) = self.os.new_frame_being_rendered {
+                        while !d3d11_cx.is_gpu_done() {
+                            std::thread::sleep(std::time::Duration::from_millis(3));
+                        }
+                        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
+                        self.os.new_frame_being_rendered = None;
+                    }
+                    
                 }
             }
-            // we should poll our runloop
-            self.stdin_handle_platform_ops(d3d11_cx);
         }
     }
-        
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &D3d11Cx) {
+    
+    fn stdin_handle_platform_ops(
+        &mut self,
+        swapchain: Option<&Swapchain<Texture >>,
+        present_index: usize,
+    ) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -206,12 +244,11 @@ impl Cx {
                     window.is_created = true;
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    if self.os.swapchain.is_some() {
-                        let texture_id = self.os.swapchain.as_ref().unwrap()[self.os.present_index].texture_id();
+                    if let Some(swapchain) = swapchain {
                         pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                            clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id,
+                            texture_id: swapchain.presentable_images[present_index].image.texture_id(),
                         }];
                     }
                 },

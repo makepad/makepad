@@ -7,6 +7,7 @@ use {
         os::raw::{c_void},
     },
     crate::{
+        makepad_live_id::*,
         makepad_objc_sys::runtime::{ObjcId, nil},
         makepad_math::{
             DVec2,
@@ -27,9 +28,9 @@ use {
             },
             cx_native::EventFlow,
         },
-        menu::{
-            CxCommandSetting
-        },
+        //macos_menu::{
+        //    CxCommandSetting
+        //},
         //turtle::{
         //    Rect
         //},
@@ -42,9 +43,8 @@ use {
             KeyModifiers,
         },
         cursor::MouseCursor,
-        menu::{
-            Menu,
-            MenuCommand
+        macos_menu::{
+            MacosMenu,
         },
     }
 };
@@ -143,6 +143,7 @@ impl MacosApp {
             let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
             
+            
             // Construct the bits that are shared between windows
             MacosApp {
                 startup_focus_hack_ran: false,
@@ -164,24 +165,39 @@ impl MacosApp {
         }
     }
     
+    pub fn init_quit_menu(&mut self){
+        self.update_macos_menu(
+            &MacosMenu::Main{items:vec![MacosMenu::Sub{
+                name:"Makepad".to_string(),
+                items:vec![MacosMenu::Item{
+                    command:live_id!(quit),
+                    key:KeyCode::KeyQ,
+                    shift: false,
+                    enabled: true,
+                    name:"Quit Example".to_string()
+                }]
+            }]}
+        );
+    }
     
-    pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<MenuCommand, CxCommandSetting>,) {
+    
+    pub fn update_macos_menu(&mut self, menu: &MacosMenu) {
         unsafe fn make_menu(
             parent_menu: ObjcId,
             delegate: ObjcId,
             menu_target_class: *const Class,
-            menu: &Menu,
-            command_settings: &HashMap<MenuCommand, CxCommandSetting>
+            menu: &MacosMenu,
         ) {
+            
             match menu {
-                Menu::Main {items} => {
+                MacosMenu::Main {items} => {
                     let main_menu: ObjcId = msg_send![class!(NSMenu), new];
                     let () = msg_send![main_menu, setTitle: str_to_nsstring("MainMenu")];
                     let () = msg_send![main_menu, setAutoenablesItems: NO];
                     let () = msg_send![main_menu, setDelegate: delegate];
                     
                     for item in items {
-                        make_menu(main_menu, delegate, menu_target_class, item, command_settings);
+                        make_menu(main_menu, delegate, menu_target_class, item);
                     }
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![
@@ -189,7 +205,7 @@ impl MacosApp {
                         setMainMenu: main_menu
                     ];
                 },
-                Menu::Sub {name, items} => {
+                MacosMenu::Sub {name, items} => {
                     let sub_menu: ObjcId = msg_send![class!(NSMenu), new];
                     let () = msg_send![sub_menu, setTitle: str_to_nsstring(name)];
                     let () = msg_send![sub_menu, setAutoenablesItems: NO];
@@ -204,25 +220,20 @@ impl MacosApp {
                     // connect submenu
                     let () = msg_send![parent_menu, setSubmenu: sub_menu forItem: sub_item];
                     for item in items {
-                        make_menu(sub_menu, delegate, menu_target_class, item, command_settings);
+                        make_menu(sub_menu, delegate, menu_target_class, item);
                     }
                 },
-                Menu::Item {name, command} => {
-                    let settings = if let Some(settings) = command_settings.get(command) {
-                        *settings
-                    }
-                    else {
-                        CxCommandSetting::default()
-                    };
+                MacosMenu::Item {name, command, shift, key, enabled} => {
+                    
                     let sub_item: ObjcId = msg_send![
                         parent_menu,
                         addItemWithTitle: str_to_nsstring(name)
                         action: sel!(menuAction:)
-                        keyEquivalent: str_to_nsstring(keycode_to_menu_key(settings.key_code, settings.shift))
+                        keyEquivalent: str_to_nsstring(keycode_to_menu_key(*key, *shift))
                     ];
                     let target: ObjcId = msg_send![menu_target_class, new];
                     let () = msg_send![sub_item, setTarget: target];
-                    let () = msg_send![sub_item, setEnabled: if settings.enabled {YES}else {NO}];
+                    let () = msg_send![sub_item, setEnabled: if *enabled {YES}else {NO}];
                     /*
                     let command_usize = if let Ok(mut status_map) = status_map.lock() {
                         if let Some(id) = status_map.command_to_usize.get(&command) {
@@ -240,9 +251,9 @@ impl MacosApp {
                     };*/
                     
                     //(*target).set_ivar("macos_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
-                    (*target).set_ivar("command_usize", command.0.0);
+                    (*target).set_ivar("command_u64", command.0);
                 },
-                Menu::Line => {
+                MacosMenu::Line => {
                     let sep_item: ObjcId = msg_send![class!(NSMenuItem), separatorItem];
                     let () = msg_send![
                         parent_menu,
@@ -252,7 +263,7 @@ impl MacosApp {
             }
         }
         unsafe {
-            make_menu(nil, self.menu_delegate_instance, get_macos_class_global().menu_target, menu, command_settings);
+            make_menu(nil, self.menu_delegate_instance, get_macos_class_global().menu_target, menu);
         }
     }
     /*
@@ -297,6 +308,7 @@ impl MacosApp {
         }
     }*/
     pub fn startup_focus_hack(&mut self) {
+        
         unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
@@ -508,8 +520,11 @@ impl MacosApp {
     pub fn event_loop() {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            //let () = msg_send![ns_app, activateIgnoringOtherApps:YES];
             let () = msg_send![ns_app, finishLaunching];
-            
+           // get_macos_app_global().init_quit_menu();
+           // get_macos_app_global().startup_focus_hack();
+           
             loop {
                 let event_flow = get_macos_app_global().event_flow;
                 match event_flow {
@@ -700,9 +715,9 @@ impl MacosApp {
         self.do_callback(vec![MacosEvent::Paint]);
     }*/
     
-    pub fn send_command_event(command: MenuCommand) {
+    pub fn send_command_event(command: LiveId) {
         MacosApp::do_callback(
-            MacosEvent::MenuCommand(command)
+            MacosEvent::MacosMenuCommand(command)
         );
         MacosApp::do_callback(MacosEvent::Paint);
     }

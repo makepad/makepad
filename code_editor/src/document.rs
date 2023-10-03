@@ -28,7 +28,7 @@ use {
 pub struct Document(Rc<DocumentInner>);
 
 impl Document {
-    pub fn new(text: Text) -> Self {
+    pub fn new(text: Text, decorations:DecorationSet) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
             .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
@@ -42,7 +42,7 @@ impl Document {
                 block_inlays: Vec::new(),
             }),
             tokenizer: RefCell::new(Tokenizer::new(line_count)),
-            decorations: RefCell::new(DecorationSet::new()),
+            decorations: RefCell::new(decorations),
             edit_senders: RefCell::new(HashMap::new()),
         }));
         inner.update_indent_state();

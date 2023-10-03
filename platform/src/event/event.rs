@@ -22,7 +22,6 @@ use {
         midi::MidiPortsEvent,
         video::VideoInputsEvent,
         draw_list::DrawListId,
-        menu::MenuCommand,
     },
 };
 
@@ -59,7 +58,7 @@ pub enum Event {
     
     Signal,
     Trigger(TriggerEvent),
-    MenuCommand(MenuCommand),
+    MacosMenuCommand(LiveId),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
@@ -80,6 +79,7 @@ pub enum Event {
     VideoStream(VideoStreamEvent),
     VideoDecodingInitialized(VideoDecodingInitializedEvent),
     VideoChunkDecoded(LiveId),
+    VideoDecodingError(VideoDecodingErrorEvent),
  
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),

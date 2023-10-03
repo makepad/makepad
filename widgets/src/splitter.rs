@@ -1,5 +1,6 @@
 use crate::{
     makepad_derive_widget::*,
+    makepad_micro_serde::*,
     makepad_draw::*,
     widget::*,
 };
@@ -17,9 +18,48 @@ pub struct DrawSplitter {
     #[live] is_vertical: f32,
 }
 
+#[derive(Copy, Clone, Debug, Live, LiveHook, SerRon, DeRon)]
+#[live_ignore]
+pub enum SplitterAxis {
+    #[pick] Horizontal,
+    Vertical
+}
+
+impl Default for SplitterAxis {
+    fn default() -> Self {
+        SplitterAxis::Horizontal
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, Live, LiveHook, SerRon, DeRon)]
+#[live_ignore]
+pub enum SplitterAlign {
+    #[live(50.0)] FromA(f64),
+    #[live(50.0)] FromB(f64),
+    #[pick(0.5)] Weighted(f64),
+}
+
+impl SplitterAlign {
+    fn to_position(self, axis: SplitterAxis, rect: Rect) -> f64 {
+        match axis {
+            SplitterAxis::Horizontal => match self {
+                Self::FromA(position) => position,
+                Self::FromB(position) => rect.size.x - position,
+                Self::Weighted(weight) => weight * rect.size.x,
+            },
+            SplitterAxis::Vertical => match self {
+                Self::FromA(position) => position,
+                Self::FromB(position) => rect.size.y - position,
+                Self::Weighted(weight) => weight * rect.size.y,
+            },
+        }
+    }
+}
+
 #[derive(Live)]
 pub struct Splitter {
-    #[live(Axis::Horizontal)] pub axis: Axis,
+    #[live(SplitterAxis::Horizontal)] pub axis: SplitterAxis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
     #[rust] rect: Rect,
     #[rust] position: f64,
@@ -115,10 +155,10 @@ impl Splitter {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         // we should start a fill turtle in the layout direction of choice
         match self.axis {
-            Axis::Horizontal => {
+            SplitterAxis::Horizontal => {
                 cx.begin_turtle(walk, Layout::flow_right());
             }
-            Axis::Vertical => {
+            SplitterAxis::Vertical => {
                 cx.begin_turtle(walk, Layout::flow_down());
             }
         }
@@ -127,8 +167,8 @@ impl Splitter {
         self.position = self.align.to_position(self.axis, self.rect);
         
         let walk = match self.axis {
-            Axis::Horizontal => Walk::size(Size::Fixed(self.position), Size::Fill),
-            Axis::Vertical => Walk::size(Size::Fill, Size::Fixed(self.position)),
+            SplitterAxis::Horizontal => Walk::size(Size::Fixed(self.position), Size::Fill),
+            SplitterAxis::Vertical => Walk::size(Size::Fill, Size::Fixed(self.position)),
         };
         cx.begin_turtle(walk, Layout::flow_down());
     }
@@ -136,11 +176,11 @@ impl Splitter {
     pub fn middle(&mut self, cx: &mut Cx2d) {
         cx.end_turtle_with_area(&mut self.area_a);
         match self.axis {
-            Axis::Horizontal => {
+            SplitterAxis::Horizontal => {
                 self.draw_splitter.is_vertical = 1.0;
                 self.draw_splitter.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
             }
-            Axis::Vertical => {
+            SplitterAxis::Vertical => {
                 self.draw_splitter.is_vertical = 0.0;
                 self.draw_splitter.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
             }
@@ -153,7 +193,7 @@ impl Splitter {
         cx.end_turtle();
     }
     
-    pub fn axis(&self) -> Axis {
+    pub fn axis(&self) -> SplitterAxis {
         self.axis
     }
 
@@ -165,7 +205,7 @@ impl Splitter {
         self.area_b
     }
     
-    pub fn set_axis(&mut self, axis: Axis) {
+    pub fn set_axis(&mut self, axis: SplitterAxis) {
         self.axis = axis;
     }
     
@@ -187,8 +227,8 @@ impl Splitter {
         match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
         Hit::FingerHoverIn(_) => {
             match self.axis {
-                Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
-                Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
+                SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
+                SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
             self.animator_play(cx, id!(hover.on));
         }
@@ -197,8 +237,8 @@ impl Splitter {
         },
         Hit::FingerDown(_) => {
             match self.axis {
-                Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
-                Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
+                SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
+                SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
             self.animator_play(cx, id!(hover.pressed));
             self.drag_start_align = Some(self.align);
@@ -215,13 +255,13 @@ impl Splitter {
         Hit::FingerMove(f) => {
             if let Some(drag_start_align) = self.drag_start_align {
                 let delta = match self.axis {
-                    Axis::Horizontal => f.abs.x - f.abs_start.x,
-                    Axis::Vertical => f.abs.y - f.abs_start.y,
+                    SplitterAxis::Horizontal => f.abs.x - f.abs_start.x,
+                    SplitterAxis::Vertical => f.abs.y - f.abs_start.y,
                 };
                 let new_position =
                 drag_start_align.to_position(self.axis, self.rect) + delta;
                 self.align = match self.axis {
-                    Axis::Horizontal => {
+                    SplitterAxis::Horizontal => {
                         let center = self.rect.size.x / 2.0;
                         if new_position < center - 30.0 {
                             SplitterAlign::FromA(new_position.max(self.min_vertical))
@@ -231,7 +271,7 @@ impl Splitter {
                             SplitterAlign::Weighted(new_position / self.rect.size.x)
                         }
                     }
-                    Axis::Vertical => {
+                    SplitterAxis::Vertical => {
                         let center = self.rect.size.y / 2.0;
                         if new_position < center - 30.0 {
                             SplitterAlign::FromA(new_position.max(self.min_horizontal))
@@ -252,13 +292,13 @@ impl Splitter {
 
 fn margin(&self) -> Margin {
     match self.axis {
-        Axis::Horizontal => Margin {
+        SplitterAxis::Horizontal => Margin {
             left: 3.0,
             top: 0.0,
             right: 3.0,
             bottom: 0.0,
         },
-        Axis::Vertical => Margin {
+        SplitterAxis::Vertical => Margin {
             left: 0.0,
             top: 3.0,
             right: 0.0,
@@ -268,33 +308,8 @@ fn margin(&self) -> Margin {
 }
 }
 
-#[derive(Clone, Copy, Debug, Live, LiveHook)]
-#[live_ignore]
-pub enum SplitterAlign {
-    #[live(50.0)] FromA(f64),
-    #[live(50.0)] FromB(f64),
-    #[pick(0.5)] Weighted(f64),
-}
-
-impl SplitterAlign {
-    fn to_position(self, axis: Axis, rect: Rect) -> f64 {
-        match axis {
-            Axis::Horizontal => match self {
-                Self::FromA(position) => position,
-                Self::FromB(position) => rect.size.x - position,
-                Self::Weighted(weight) => weight * rect.size.x,
-            },
-            Axis::Vertical => match self {
-                Self::FromA(position) => position,
-                Self::FromB(position) => rect.size.y - position,
-                Self::Weighted(weight) => weight * rect.size.y,
-            },
-        }
-    }
-}
-
 #[derive(Clone, WidgetAction)]
 pub enum SplitterAction {
     None,
-    Changed {axis: Axis, align: SplitterAlign},
+    Changed {axis: SplitterAxis, align: SplitterAlign},
 }

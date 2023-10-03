@@ -1,6 +1,6 @@
 [package]
 name = "cargo-makepad"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad cargo extension"
@@ -10,9 +10,9 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 
 [dependencies]
-makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
-makepad-networking = { path = "../../libs/networking", version = "0.3.0" }
-makepad-shell = { path = "../../libs/shell", version = "0.3.0" }
+makepad-miniz = { path = "../../libs/miniz", version = "0.4.0" }
+#makepad-networking = { path = "../../libs/networking", version = "0.4.0" }
+makepad-shell = { path = "../../libs/shell", version = "0.4.0" }
 
 [features]
 nightly=[]
