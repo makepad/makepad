@@ -13,11 +13,7 @@ pub struct Decoration {
 impl Decoration {
     pub fn new(id: usize, start: Position, end: Position) -> Self {
         assert!(start <= end);
-        Self {
-            id,
-            start,
-            end,
-        }
+        Self { id, start, end }
     }
 
     pub fn is_empty(self) -> bool {
@@ -51,7 +47,7 @@ impl Decoration {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DecorationSet {
-    decorations: Vec<Decoration>
+    decorations: Vec<Decoration>,
 }
 
 impl DecorationSet {
@@ -123,7 +119,7 @@ impl Default for DecorationSet {
                     line_index: 3,
                     byte_index: 8,
                 },
-            )]
+            )],
         }
     }
 }
