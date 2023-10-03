@@ -1,12 +1,11 @@
 [package]
 name = "makepad-example-slides"
-version = "0.3.0"
+version = "0.6.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad slide example"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "5POKajmZt90sjG2MIw5C9dizbBo="
+metadata.makepad-auto-version = "_Cje-i05FmRoF8Bp-FtTHnJ3-fA="
 
 [dependencies]
-makepad-code-editor = { path = "../../code_editor", version = "0.3.0" }
-makepad-widgets = { path = "../../widgets", version = "0.3.0" }
+makepad-studio-core = { path = "../../studio/studio_core", version = "0.5.0" }

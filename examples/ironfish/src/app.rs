@@ -21,10 +21,6 @@ live_design!{
     import makepad_synth_ironfish::ironfish::IronFish;
     import makepad_widgets::designer::Designer;
 
-    //import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
-    //import makepad_example_numbers::number_grid::NumberGrid;
-    // APP
-    //ui: <AppMobile> {}
     App = {{App}} {
         
         audio_graph: {
@@ -40,171 +36,7 @@ live_design!{
             block_signal_event: true; 
             body = <AppDesktop> {}
         }
-        
-        /*
-        ui= <MultiWindow> {
-            mobile =<DesktopWindow> {
-                window: {inner_size: vec2(1280, 1000), dpi_override:2},
-                pass: {clear_color: #2A}
-                block_signal_event: true; 
-                <AppDesktop> {}
-            }
-            <DesktopWindow> {
-                window: {position: vec2(0, 400), inner_size: vec2(800, 800)},
-                pass: {clear_color: #2A}
-                block_signal_event: true;
-                padding: {top: 30},
-                <Designer> {}
-            }
-            <DesktopWindow> {
-                window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
-                pass: {clear_color: #2A}
-                block_signal_event: true; 
-                <AppMobile> {}
-            }
-        }*/
-/*
-        ui=<DesktopWindow> {
-            window: {inner_size: vec2(1920, 1080)},
-            
-            pass: {clear_color: #2A}
-            block_signal_event: true; 
-            <SlidesView> {
-                goal_pos: 0.0
-                
-                <SlideChapter> {
-                    title = {text: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
-                    <SlideBody> {text: "Rik Arends\n"}
-                }
-                <Slide> {
-                    title = {text: "A long long time ago …"},
-                    <SlideBody> {text: "… in a galaxy nearby\n   Cloud9 IDE & ACE"}
-                }
-                <Slide> {
-                    title = {text: "HTML as an IDE UI?\nMadness!"},
-                    <SlideBody> {text: "- Integrating design and code was hard\n- Could not innovate editing\n- Too slow, too hard to control"}
-                }
-                <Slide> {
-                    title = {text: "Let's start over!"},
-                    <SlideBody> {text: "- JavaScript and WebGL for UI\n- Write shaders to style UI\n- A quick demo"}
-                }
-                <Slide> {
-                    title = {text: "Maybe JavaScript\nwas the problem?"},
-                    <SlideBody> {text: "- Great livecoding, but …\n- Chrome crashing tabs after 30 minutes\n- Too slow"}
-                }
-                <Slide> {
-                    title = {text: "Rust appears"},
-                    <SlideBody> {text: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
-                }
-                <Slide> {title = {text: "Rust is fast: SIMD Mandelbrot"}, 
-                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
-                    draw_bg: { color: #x1A, radius: 5.0 }
-                    <View>{
-                        padding: 0, align:{x:0.5 spacing: 20}
-                        <RoundedView>{
-                            draw_bg: { color: #x2A } 
-                             margin: 0.0
-                             padding: 0.0 
-                            <Mandelbrot> {width:Fill, height:Fill}
-                        }
-                    }
-                }
-
-                <Slide> {title = {text: "Instanced rendering"}, 
-                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
-                    draw_bg: { color: #x1A, radius: 5.0 }
-                    <View>{
-                        padding: 0, align:{x:0.5 spacing: 20}
-                        <RoundedView>{
-                            draw_bg: { color: #x2A }
-                             margin: 0.0
-                             padding: 0.0 
-                            <NumberGrid> {width:Fill, height:Fill}
-                        }
-                    }
-                }
-                
-                <Slide> {
-                    title = {text: "Our goal:\nUnify coding and UI design again."},
-                    <SlideBody> {text: "As it was in Visual Basic.\nNow with modern design."}
-                }
-
-                <Slide> {title = {text: "Ironfish Desktop"}, 
-                    <RoundedView>{
-                        draw_bg: { color: #x2A }
-                         margin: 10.0, width: 1600 
-                         padding: 0.0 
-                        <AppDesktop> {}
-                    }
-                }
-                
-                <Slide> {title = {text: "Ironfish Mobile"}, 
-                    <View>{
-                        padding: 0, align:{x:0.5}
-                         margin: { top: 0 }
-                        <AppMobile> {width:400, height: Fill}
-                    }
-                }
-                
-                <Slide> {title = {text: "Multi modal"}, 
-                    <View>{
-                        padding: 0, align:{x:0.5 spacing: 20}
-
-                        <AppMobile> {width:400, height: Fill}
-
-                        <RoundedView>{
-                            draw_bg: { color: #x2A }
-                             margin: 0.0
-                             padding: 0.0 
-                            <AppDesktop> {
-                                width: Fill, height: Fill
-                            }
-                        }
-                    }
-                }
-                
-                <Slide> {title = {text: "Visual design"}, 
-                    align: {x: 0.0, y: 0.5 flow: Down, spacing: 10, padding: 50}
-                    <View>{
-                        padding: 0, align:{x:0.5 spacing: 20}
-                        <RoundedView>{
-                            draw_bg: { color: #x2A }
-                             margin: 0.0
-                             padding: 0.0 
-                            <AppDesktop> {width:900}
-                        }
-
-                        <RoundedView>{
-                            draw_bg: { color: #x2A }
-                             margin: 0.0
-                             padding: 0.0 
-                            <Designer> {width:900}
-                        } 
-                    }
-                }
-                
-                <Slide> {
-                    title = {text: "Our UI language: Live."},
-                    <SlideBody> {text: "- Live editable\n- Design tool manipulates text\n- Inheritance structure\n- Rust-like module system"}
-                }
-                
-                <Slide> {
-                    title = {text: "These slides are a Makepad app"},
-                    <SlideBody> {text: "- Show source\n"}
-                    <SlideBody> {text: "- Show Rust API\n"}
-                }                
-                
-                <Slide> {
-                    title = {text: "Future"},
-                    <SlideBody> {text: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
-                }                
-                
-                <Slide> {
-                    title = {text: "Build for Android"},
-                    <SlideBody> {text: "- SDK installer\n- Cargo makepad android\n"}
-                }                
-            }
-        }*/
+       
     }
 }
 app_main!(App);
@@ -462,6 +294,7 @@ impl AppMain for App {
         }
         
         if ui.button_set(ids!(panic)).clicked(&actions) {
+            //log!("hello world"); 
             cx.midi_reset();
             self.audio_graph.all_notes_off();
         }

@@ -7,6 +7,7 @@ use {
             build_protocol::*,
         },
         makepad_widgets::*,
+        makepad_code_editor::text::{Position, Length},
         makepad_widgets::portal_list::PortalList,
     },
     std::{
@@ -186,22 +187,26 @@ live_design!{
         flow: Down
         Location = <LogItem> {
             icon = <LogIcon> {},
-            binary = <Label> {draw_text:{color:#5}, width: Fit, margin: {right:4}, padding: 0, draw_text: {wrap: Word}}
+            binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
             location = <LinkLabel> {margin: 0, text: ""}
             body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
         }
         Bare = <LogItem> {
             icon = <LogIcon> {},
-            binary = <Label> {draw_text:{color:#5}, width: Fit, margin: {right:4}, padding: 0, draw_text: {wrap: Word}}
+            binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
             body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
         }
-        Empty =  <LogItem> {
+        Empty = <LogItem> {
             cursor: Default
             height: 24,
             width: Fill
         }
     }
     
+}
+pub enum LogListAction {
+    JumpToError{file_name:String, start:Position, length:Length},
+    None
 }
 
 impl BuildManager {
@@ -221,12 +226,12 @@ impl BuildManager {
                 }
             }
             if let Some((build_id, log_item)) = self.log.get(item_id as usize) {
-                let binary = if self.active.builds.len()>1{
+                let binary = if self.active.builds.len()>1 {
                     if let Some(build) = self.active.builds.get(&build_id) {
                         &build.log_index
                     }
-                    else{""}
-                }else{""};
+                    else {""}
+                }else {""};
                 
                 match log_item {
                     LogItem::Bare(msg) => {
@@ -246,7 +251,7 @@ impl BuildManager {
                             binary = {text: (&binary)}
                             icon = {active_page: (map_level_to_icon(msg.level))},
                             body = {text: (&msg.msg)}
-                            location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index, msg.start.byte_index))}
+                            location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
                         item.draw_widget_all(cx);
@@ -261,5 +266,30 @@ impl BuildManager {
             item.draw_widget_all(cx);
         }
         //profile_end!(dt);
+    }
+    
+    pub fn handle_log_list(&mut self, _cx: &mut Cx, _log_list: &PortalListRef, item_id: u64, item: WidgetRef, actions: &WidgetActions) -> Vec<LogListAction> {
+        // ok lets see if someone clicked our jump to error
+        let mut ret = Vec::new();
+        if item.link_label(id!(location)).pressed(actions) {
+            if let Some((_build_id, log_item)) = self.log.get(item_id as usize) {
+                // alright lets select a file tab or open the file
+                // and lets jump to the location
+                match log_item {
+                    LogItem::Location(msg) => {
+                        ret.push(LogListAction::JumpToError{
+                            file_name:msg.file_name.clone(), 
+                            start:Position{
+                                line_index: msg.start.line_index,
+                                byte_index: msg.start.byte_index,
+                            },
+                            length:msg.length
+                        })
+                    }
+                    _ => ()
+                }
+            }
+        }
+        ret    
     }
 }

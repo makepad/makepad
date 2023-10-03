@@ -1906,6 +1906,14 @@ impl LiveHook for IronFish{
     fn before_live_design(cx:&mut Cx){
         register_audio_component!(cx, IronFish)
     }
+    fn skip_apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
+        if let ApplyFrom::UpdateFromDoc{..} = apply_from{
+            log!("NOT HERE");
+            return Some(nodes.skip_node(index))
+        }
+        None
+    }
+
 }
 
 impl AudioGraphNode for IronFishState {

@@ -25,7 +25,7 @@ live_design!{
             let dx = self.height_map(self.pos + vec2(delta, 0))
             let normal = normalize(cross(vec3(delta, 0, dx - d), vec3(0, delta, dy - d)))
             //let light = normalize(vec3(1.5, 0.5, 1.1))
-            let light = normalize(vec3(0.75, 0.5, 0.5))
+            let light = normalize(vec3(0.65, 0.5, 0.5))
             let light_hover = normalize(vec3(0.75, 0.5, 1.5))
             let diff = pow(max(dot(mix(light, light_hover, self.hover * (1 - self.pressed)), normal), 0), 3)
             return mix(#181818, #bc, diff)
@@ -48,6 +48,7 @@ live_design!{
         }
         
         fn pixel(self) -> vec4 {
+            //return #f00
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             if self.is_black > 0.5 {
                 sdf.box(0., -4, self.rect_size.x, self.rect_size.y + 4, 1);
