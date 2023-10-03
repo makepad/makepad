@@ -47,16 +47,22 @@ pub struct RawInput {
 impl RawInput {
     pub fn new(width: f64, height: f64, dpi_factor: f64, time_start: Instant, window_id: WindowId) -> Self {
         let (send, receiver) = mpsc::channel();
-        let send = send.clone();
 		let abs_position = Arc::new(Mutex::new(dvec2(0.0, 0.0)));
 		let window = Arc::new(dvec2(width, height));
 		let modifiers = Arc::new(Mutex::new(KeyModifiers::default()));
 		let dpi = Arc::new(dpi_factor);
         std::thread::spawn(move || { //main input thread that scans for changes in the input devices (new devices)
+			println!("input devices:");
             for event_file in get_event_files() {
-                let send = send.clone();
                 if let Ok(kb) = File::open(event_file) {
-					InputDevice::new(kb, send, time_start.clone(), abs_position.clone(), window.clone(), modifiers.clone(), dpi.clone(), window_id);
+					InputDevice::new(kb,
+						send.clone(),
+						time_start.clone(),
+						abs_position.clone(),
+						window.clone(),
+						modifiers.clone(),
+						dpi.clone(),
+						window_id);
                 }
             }
 
@@ -77,9 +83,15 @@ impl RawInput {
                 for event in events {
                     if event.mask.contains(EventMask::CREATE) {
                         if !event.mask.contains(EventMask::ISDIR) {
-                            let send = send.clone();
                             if let Ok(kb) = File::open(format!("/dev/input/{}",event.name.unwrap().to_str().unwrap())) {
-								InputDevice::new(kb, send, time_start.clone(), abs_position.clone(), window.clone(), modifiers.clone(), dpi.clone(), window_id);
+								InputDevice::new(kb,
+									send.clone(),
+									time_start.clone(),
+									abs_position.clone(),
+									window.clone(),
+									modifiers.clone(),
+									dpi.clone(),
+									window_id);
                             }
                         }
                     }

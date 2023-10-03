@@ -5,13 +5,21 @@ use self::super::input_device::InputAbsInfo;
 
 #[repr(u16)]
 #[derive(Clone,Copy, Debug)]
+///Input device properties and quirks
 pub enum InputProperty {
+	///needs a pointer
 	Pointer 		=0x00,
+	///direct input devices
 	Direct 			=0x01,
+	///has button(s) under (touch)pad
 	ButtonPad 		=0x02,
+	///touch rectangle only
 	SemiMultiTouch 	=0x03,
+	///softbuttons at top of pad
 	TopButtonPad 	=0x04,
+	///is a pointing stick
 	PointingStick 	=0x05,
+	///has accelerometer
 	Accelerometer 	=0x06,
 	Max 			=0x1f,
 	Count 			=InputProperty::Max as u16 + 1,
@@ -46,6 +54,7 @@ impl Default for InputEventType {
 #[allow(unused,non_camel_case_types)]
 #[repr(u16)]
 #[derive(Clone, Copy, Debug)]
+///Synchronisation events
 pub enum EvSynCodes {
     SYN_REPORT          =0x00,
     SYN_CONFIG          =0x01,
@@ -450,7 +459,222 @@ pub enum EvKeyCodes {
     KEY_LOGOFF		        =0x1b1,
     KEY_DOLLAR		        =0x1b2,
     KEY_EURO		        =0x1b3,
-
+	KEY_FRAMEBACK			=0x1b4,	/* Consumer - transport controls */
+	KEY_FRAMEFORWARD		=0x1b5,
+	KEY_CONTEXT_MENU		=0x1b6,	/* GenDesc - system context menu */
+	KEY_MEDIA_REPEAT		=0x1b7,	/* Consumer - transport control */
+	KEY_10CHANNELSUP		=0x1b8,	/* 10 channels up (10+) */
+	KEY_10CHANNELSDOWN		=0x1b9,	/* 10 channels down (10-) */
+	KEY_IMAGES				=0x1ba,	/* AL Image Browser */
+	KEY_NOTIFICATION_CENTER	=0x1bc,	/* Show/hide the notification center */
+	KEY_PICKUP_PHONE		=0x1bd,	/* Answer incoming call */
+	KEY_HANGUP_PHONE		=0x1be,	/* Decline incoming call */
+	KEY_DEL_EOL				=0x1c0,
+	KEY_DEL_EOS				=0x1c1,
+	KEY_INS_LINE			=0x1c2,
+	KEY_DEL_LINE			=0x1c3,
+	KEY_FN					=0x1d0,
+	KEY_FN_ESC				=0x1d1,
+	KEY_FN_F1				=0x1d2,
+	KEY_FN_F2				=0x1d3,
+	KEY_FN_F3				=0x1d4,
+	KEY_FN_F4				=0x1d5,
+	KEY_FN_F5				=0x1d6,
+	KEY_FN_F6				=0x1d7,
+	KEY_FN_F7				=0x1d8,
+	KEY_FN_F8				=0x1d9,
+	KEY_FN_F9				=0x1da,
+	KEY_FN_F10				=0x1db,
+	KEY_FN_F11				=0x1dc,
+	KEY_FN_F12				=0x1dd,
+	KEY_FN_1				=0x1de,
+	KEY_FN_2				=0x1df,
+	KEY_FN_D				=0x1e0,
+	KEY_FN_E				=0x1e1,
+	KEY_FN_F				=0x1e2,
+	KEY_FN_S				=0x1e3,
+	KEY_FN_B				=0x1e4,
+	KEY_FN_RIGHT_SHIFT		=0x1e5,
+	KEY_BRL_DOT1			=0x1f1,
+	KEY_BRL_DOT2			=0x1f2,
+	KEY_BRL_DOT3			=0x1f3,
+	KEY_BRL_DOT4			=0x1f4,
+	KEY_BRL_DOT5			=0x1f5,
+	KEY_BRL_DOT6			=0x1f6,
+	KEY_BRL_DOT7			=0x1f7,
+	KEY_BRL_DOT8			=0x1f8,
+	KEY_BRL_DOT9			=0x1f9,
+	KEY_BRL_DOT10			=0x1fa,
+	KEY_NUMERIC_0			=0x200,	/* used by phones, remote controls, */
+	KEY_NUMERIC_1			=0x201,	/* and other keypads */
+	KEY_NUMERIC_2			=0x202,
+	KEY_NUMERIC_3			=0x203,
+	KEY_NUMERIC_4			=0x204,
+	KEY_NUMERIC_5			=0x205,
+	KEY_NUMERIC_6			=0x206,
+	KEY_NUMERIC_7			=0x207,
+	KEY_NUMERIC_8			=0x208,
+	KEY_NUMERIC_9			=0x209,
+	KEY_NUMERIC_STAR		=0x20a,
+	KEY_NUMERIC_POUND		=0x20b,
+	KEY_NUMERIC_A			=0x20c,	/* Phone key A - HUT Telephony 0xb9 */
+	KEY_NUMERIC_B			=0x20d,
+	KEY_NUMERIC_C			=0x20e,
+	KEY_NUMERIC_D			=0x20f,
+	KEY_CAMERA_FOCUS		=0x210,
+	KEY_WPS_BUTTON			=0x211,	/* WiFi Protected Setup key */
+	KEY_TOUCHPAD_TOGGLE		=0x212,	/* Request switch touchpad on or off */
+	KEY_TOUCHPAD_ON			=0x213,
+	KEY_TOUCHPAD_OFF		=0x214,
+	KEY_CAMERA_ZOOMIN		=0x215,
+	KEY_CAMERA_ZOOMOUT		=0x216,
+	KEY_CAMERA_UP			=0x217,
+	KEY_CAMERA_DOWN			=0x218,
+	KEY_CAMERA_LEFT			=0x219,
+	KEY_CAMERA_RIGHT		=0x21a,
+	KEY_ATTENDANT_ON		=0x21b,
+	KEY_ATTENDANT_OFF		=0x21c,
+	KEY_ATTENDANT_TOGGLE	=0x21d,	/* Attendant call on or off */
+	KEY_LIGHTS_TOGGLE		=0x21e,	/* Reading light on or off */
+	BTN_DPAD_UP				=0x220,
+	BTN_DPAD_DOWN			=0x221,
+	BTN_DPAD_LEFT			=0x222,
+	BTN_DPAD_RIGHT			=0x223,
+	KEY_ALS_TOGGLE			=0x230,	/* Ambient light sensor */
+	KEY_ROTATE_LOCK_TOGGLE	=0x231,	/* Display rotation lock */
+	KEY_BUTTONCONFIG		=0x240,	/* AL Button Configuration */
+	KEY_TASKMANAGER			=0x241,	/* AL Task/Project Manager */
+	KEY_JOURNAL				=0x242,	/* AL Log/Journal/Timecard */
+	KEY_CONTROLPANEL		=0x243,	/* AL Control Panel */
+	KEY_APPSELECT			=0x244,	/* AL Select Task/Application */
+	KEY_SCREENSAVER			=0x245,	/* AL Screen Saver */
+	KEY_VOICECOMMAND		=0x246,	/* Listening Voice Command */
+	KEY_ASSISTANT			=0x247,	/* AL Context-aware desktop assistant */
+	KEY_KBD_LAYOUT_NEXT		=0x248,	/* AC Next Keyboard Layout Select */
+	KEY_EMOJI_PICKER		=0x249,	/* Show/hide emoji picker (HUTRR101) */
+	KEY_DICTATE				=0x24a,	/* Start or Stop Voice Dictation Session (HUTRR99) */
+	KEY_CAMERA_ACCESS_ENABLE	=0x24b,	/* Enables programmatic access to camera devices. (HUTRR72) */
+	KEY_CAMERA_ACCESS_DISABLE	=0x24c,	/* Disables programmatic access to camera devices. (HUTRR72) */
+	KEY_CAMERA_ACCESS_TOGGLE	=0x24d,	/* Toggles the current state of the camera access control. (HUTRR72) */
+	KEY_BRIGHTNESS_MIN		=0x250,	/* Set Brightness to Minimum */
+	KEY_BRIGHTNESS_MAX		=0x251,	/* Set Brightness to Maximum */
+	KEY_KBDINPUTASSIST_PREV			=0x260,
+	KEY_KBDINPUTASSIST_NEXT			=0x261,
+	KEY_KBDINPUTASSIST_PREVGROUP	=0x262,
+	KEY_KBDINPUTASSIST_NEXTGROUP	=0x263,
+	KEY_KBDINPUTASSIST_ACCEPT		=0x264,
+	KEY_KBDINPUTASSIST_CANCEL		=0x265,
+	KEY_RIGHT_UP			=0x266,
+	KEY_RIGHT_DOWN			=0x267,
+	KEY_LEFT_UP				=0x268,
+	KEY_LEFT_DOWN			=0x269,
+	KEY_ROOT_MENU			=0x26a, /* Show Device's Root Menu */
+	KEY_MEDIA_TOP_MENU		=0x26b,
+	KEY_NUMERIC_11			=0x26c,
+	KEY_NUMERIC_12			=0x26d,
+	KEY_AUDIO_DESC			=0x26e,
+	KEY_3D_MODE				=0x26f,
+	KEY_NEXT_FAVORITE		=0x270,
+	KEY_STOP_RECORD			=0x271,
+	KEY_PAUSE_RECORD		=0x272,
+	KEY_VOD					=0x273, /* Video on Demand */
+	KEY_UNMUTE				=0x274,
+	KEY_FASTREVERSE			=0x275,
+	KEY_SLOWREVERSE			=0x276,
+	KEY_DATA				=0x277,
+	KEY_ONSCREEN_KEYBOARD		=0x278,
+	KEY_PRIVACY_SCREEN_TOGGLE	=0x279,
+	KEY_SELECTIVE_SCREENSHOT	=0x27a,
+	KEY_NEXT_ELEMENT               =0x27b,
+	KEY_PREVIOUS_ELEMENT           =0x27c,
+	KEY_AUTOPILOT_ENGAGE_TOGGLE    =0x27d,
+	KEY_MARK_WAYPOINT     	=0x27e,
+	KEY_SOS               	=0x27f,
+	KEY_NAV_CHART         	=0x280,
+	KEY_FISHING_CHART     	=0x281,
+	KEY_SINGLE_RANGE_RADAR	=0x282,
+	KEY_DUAL_RANGE_RADAR  	=0x283,
+	KEY_RADAR_OVERLAY     	=0x284,
+	KEY_TRADITIONAL_SONAR 	=0x285,
+	KEY_CLEARVU_SONAR     	=0x286,
+	KEY_SIDEVU_SONAR      	=0x287,
+	KEY_NAV_INFO          	=0x288,
+	KEY_BRIGHTNESS_MENU   	=0x289,
+	KEY_MACRO1				=0x290,
+	KEY_MACRO2				=0x291,
+	KEY_MACRO3				=0x292,
+	KEY_MACRO4				=0x293,
+	KEY_MACRO5				=0x294,
+	KEY_MACRO6				=0x295,
+	KEY_MACRO7				=0x296,
+	KEY_MACRO8				=0x297,
+	KEY_MACRO9				=0x298,
+	KEY_MACRO10				=0x299,
+	KEY_MACRO11				=0x29a,
+	KEY_MACRO12				=0x29b,
+	KEY_MACRO13				=0x29c,
+	KEY_MACRO14				=0x29d,
+	KEY_MACRO15				=0x29e,
+	KEY_MACRO16				=0x29f,
+	KEY_MACRO17				=0x2a0,
+	KEY_MACRO18				=0x2a1,
+	KEY_MACRO19				=0x2a2,
+	KEY_MACRO20				=0x2a3,
+	KEY_MACRO21				=0x2a4,
+	KEY_MACRO22				=0x2a5,
+	KEY_MACRO23				=0x2a6,
+	KEY_MACRO24				=0x2a7,
+	KEY_MACRO25				=0x2a8,
+	KEY_MACRO26				=0x2a9,
+	KEY_MACRO27				=0x2aa,
+	KEY_MACRO28				=0x2ab,
+	KEY_MACRO29				=0x2ac,
+	KEY_MACRO30				=0x2ad,
+	KEY_KBD_LCD_MENU1		=0x2b8,
+	KEY_KBD_LCD_MENU2		=0x2b9,
+	KEY_KBD_LCD_MENU3		=0x2ba,
+	KEY_KBD_LCD_MENU4		=0x2bb,
+	KEY_KBD_LCD_MENU5		=0x2bc,
+	BTN_TRIGGER_HAPPY1		=0x2c0,
+	BTN_TRIGGER_HAPPY2		=0x2c1,
+	BTN_TRIGGER_HAPPY3		=0x2c2,
+	BTN_TRIGGER_HAPPY4		=0x2c3,
+	BTN_TRIGGER_HAPPY5		=0x2c4,
+	BTN_TRIGGER_HAPPY6		=0x2c5,
+	BTN_TRIGGER_HAPPY7		=0x2c6,
+	BTN_TRIGGER_HAPPY8		=0x2c7,
+	BTN_TRIGGER_HAPPY9		=0x2c8,
+	BTN_TRIGGER_HAPPY10		=0x2c9,
+	BTN_TRIGGER_HAPPY11		=0x2ca,
+	BTN_TRIGGER_HAPPY12		=0x2cb,
+	BTN_TRIGGER_HAPPY13		=0x2cc,
+	BTN_TRIGGER_HAPPY14		=0x2cd,
+	BTN_TRIGGER_HAPPY15		=0x2ce,
+	BTN_TRIGGER_HAPPY16		=0x2cf,
+	BTN_TRIGGER_HAPPY17		=0x2d0,
+	BTN_TRIGGER_HAPPY18		=0x2d1,
+	BTN_TRIGGER_HAPPY19		=0x2d2,
+	BTN_TRIGGER_HAPPY20		=0x2d3,
+	BTN_TRIGGER_HAPPY21		=0x2d4,
+	BTN_TRIGGER_HAPPY22		=0x2d5,
+	BTN_TRIGGER_HAPPY23		=0x2d6,
+	BTN_TRIGGER_HAPPY24		=0x2d7,
+	BTN_TRIGGER_HAPPY25		=0x2d8,
+	BTN_TRIGGER_HAPPY26		=0x2d9,
+	BTN_TRIGGER_HAPPY27		=0x2da,
+	BTN_TRIGGER_HAPPY28		=0x2db,
+	BTN_TRIGGER_HAPPY29		=0x2dc,
+	BTN_TRIGGER_HAPPY30		=0x2dd,
+	BTN_TRIGGER_HAPPY31		=0x2de,
+	BTN_TRIGGER_HAPPY32		=0x2df,
+	BTN_TRIGGER_HAPPY33		=0x2e0,
+	BTN_TRIGGER_HAPPY34		=0x2e1,
+	BTN_TRIGGER_HAPPY35		=0x2e2,
+	BTN_TRIGGER_HAPPY36		=0x2e3,
+	BTN_TRIGGER_HAPPY37		=0x2e4,
+	BTN_TRIGGER_HAPPY38		=0x2e5,
+	BTN_TRIGGER_HAPPY39		=0x2e6,
+	BTN_TRIGGER_HAPPY40		=0x2e7,
 	KEY_MAX					=0x2ff,
 	KEY_CNT					=EvKeyCodes::KEY_MAX as u16 + 1,
 }
@@ -545,23 +769,40 @@ pub enum EvMscCodes {
 #[repr(u16)]
 #[derive(Clone, Copy, Debug)]
 pub enum EvSwCodes {
-    SW_LID			        =0x00,  /* set = lid shut */
-    SW_TABLET_MODE		    =0x01,  /* set = tablet mode */
-    SW_HEADPHONE_INSERT	    =0x02,  /* set = inserted */
-    SW_RFKILL_ALL_RADIO	    =0x03,  /* rfkill master switch, type "any" set = radio enabled */
-    SW_MICROPHONE_INSERT	=0x04,  /* set = inserted */
-    SW_DOCK			        =0x05,  /* set = plugged into dock */
-    SW_LINEOUT_INSERT	    =0x06,  /* set = inserted */
-    SW_JACK_PHYSICAL_INSERT =0x07,  /* set = mechanical switch set */
-    SW_VIDEOOUT_INSERT	    =0x08,  /* set = inserted */
-    SW_CAMERA_LENS_COVER	=0x09,  /* set = lens covered */
-    SW_KEYPAD_SLIDE		    =0x0a,  /* set = keypad slide out */
-    SW_FRONT_PROXIMITY	    =0x0b,  /* set = front proximity sensor active */
-    SW_ROTATE_LOCK		    =0x0c,  /* set = rotate locked/disabled */
-    SW_LINEIN_INSERT	    =0x0d,  /* set = inserted */
-    SW_MUTE_DEVICE		    =0x0e,  /* set = device disabled */
-    SW_PEN_INSERTED		    =0x0f,  /* set = pen inserted */
-    SW_MACHINE_COVER	    =0x10,  /* set = cover closed */
+	///set = lid shut
+    SW_LID			        =0x00,
+	///set = tablet mode
+    SW_TABLET_MODE		    =0x01,
+	///set = inserted
+    SW_HEADPHONE_INSERT	    =0x02,
+	///rfkill master switch, type "any" set = radio enabled
+    SW_RFKILL_ALL_RADIO	    =0x03,
+	///set = inserted
+    SW_MICROPHONE_INSERT	=0x04,
+	///set = plugged into dock
+    SW_DOCK			        =0x05,
+	///set = inserted
+    SW_LINEOUT_INSERT	    =0x06,
+	///set = mechanical switch set
+    SW_JACK_PHYSICAL_INSERT =0x07,
+	///set = inserted
+    SW_VIDEOOUT_INSERT	    =0x08,
+	///set = lens covered
+    SW_CAMERA_LENS_COVER	=0x09,
+	///set = keypad slide out
+    SW_KEYPAD_SLIDE		    =0x0a,
+	///set = front proximity sensor active
+    SW_FRONT_PROXIMITY	    =0x0b,
+	///set = rotate locked/disabled
+    SW_ROTATE_LOCK		    =0x0c,
+	///set = inserted
+    SW_LINEIN_INSERT	    =0x0d,
+	///set = device disabled
+    SW_MUTE_DEVICE		    =0x0e,
+	///set = pen inserted
+    SW_PEN_INSERTED		    =0x0f,
+	///set = cover closed
+    SW_MACHINE_COVER	    =0x10,
     SW_CNT			        =EvSwCodes::SW_MACHINE_COVER as u16 + 1,
 }
 
@@ -679,4 +920,8 @@ pub const fn EVIOCPROP(len: usize) -> u64 {
 #[allow(non_snake_case)]
 pub const fn EVIOCGABS(code:u16) -> u64 {
 	IOR(69u32, (0x40 + code) as u32, size_of::<InputAbsInfo>() as u32)
+}
+#[allow(non_snake_case)]
+pub const fn EVIOCGNAME(buff_size: usize) -> u64 {
+	IOC(IOC_READ, 69u32, 0x06, buff_size as u32)
 }

@@ -7,9 +7,7 @@ use {
         makepad_derive_live::*,
         makepad_micro_serde::*,
         cx::Cx, 
-        event::{
-            finger::KeyModifiers,
-        },
+        event::finger::KeyModifiers,
         area::Area,
     },
 };

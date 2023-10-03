@@ -10,6 +10,7 @@ use std::{
 	io::Read,
 	time::Instant,
 	cell::Cell,
+	ffi::CStr,
 };
 
 use crate::{event::*,
@@ -26,6 +27,7 @@ use super::{input_sys::*,
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
+///One linux InputEvent, a larger event group consists of multiple of these, ending in one with ty: EV_SYN and code SYN_REPORT
 pub struct InputEvent {
     pub time: libc_sys::timeval,
     pub ty: InputEventType,
@@ -52,6 +54,7 @@ impl std::fmt::Debug for InputEvent {
 
 #[repr(C)]
 #[derive(Debug,Default,Clone)]
+///Information about an EV_ABS code
 pub struct InputAbsInfo {
 	value: i32,
 	minimum: i32,
@@ -143,6 +146,7 @@ impl InputDevice {
 			dpi_factor,
 			window_id,
 		};
+		let mut name_buff = [0u8;256];
 		unsafe {
 			//get available event types, it seems that it is impossible to get the available sync codes, it gives the event types instead.
 			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGBIT(InputEventType::EV_SYN, dev.event_bits.len()), dev.event_bits.as_mut_ptr());
@@ -164,7 +168,10 @@ impl InputDevice {
 			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGBIT(InputEventType::EV_FF, dev.ff_bits.len()), dev.ff_bits.as_mut_ptr());
 			//get the available sound codes
 			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGBIT(InputEventType::EV_SND, dev.snd_bits.len()), dev.snd_bits.as_mut_ptr());
-			//get al the abs info fields
+			//get the name of the device
+			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGNAME(name_buff.len() - 1), name_buff.as_mut_ptr());
+			dev.name = CStr::from_bytes_until_nul(&name_buff).unwrap().to_str().unwrap().to_string();
+			//get all the abs info fields
 			if dev.has_event_type(InputEventType::EV_ABS)	{
 				dev.abs_info = vec![InputAbsInfo::default();EvAbsCodes::ABS_CNT as usize];
 				for abs_code in 0..EvAbsCodes::ABS_MAX as usize {
@@ -174,7 +181,8 @@ impl InputDevice {
 				}
 			}
 		}
-		thread::spawn(move || { // 
+		println!("{} connected",dev.name);
+		thread::spawn(move || {
 			loop {
 				let mut evts: Vec<InputEvent> = Vec::new();
 				loop {
@@ -210,6 +218,7 @@ impl InputDevice {
 							}
 						}
 					} else {
+						println!("{} disconnected",dev.name);
 						return
 					}
 				}
@@ -231,11 +240,11 @@ impl InputDevice {
 				InputEventType::EV_REL => Self::is_bit_set(&self.rel_bits, evt_code),
 				InputEventType::EV_ABS => Self::is_bit_set(&self.abs_bits, evt_code),
 				InputEventType::EV_MSC => Self::is_bit_set(&self.misc_bits, evt_code),
-				InputEventType::EV_SW => Self::is_bit_set(&self.sw_bits, evt_code),
+				InputEventType::EV_SW  => Self::is_bit_set(&self.sw_bits, evt_code),
 				InputEventType::EV_LED => Self::is_bit_set(&self.led_bits, evt_code),
 				InputEventType::EV_SND => Self::is_bit_set(&self.snd_bits, evt_code),
 				InputEventType::EV_REP => Self::is_bit_set(&self.rep_bits, evt_code),
-				InputEventType::EV_FF => Self::is_bit_set(&self.ff_bits, evt_code),
+				InputEventType::EV_FF  => Self::is_bit_set(&self.ff_bits, evt_code),
 				_ => return false,
 			}
 		} else {
@@ -268,10 +277,10 @@ impl InputDevice {
 		self.has_property(InputProperty::Pointer)
 	}
 
-	///Check what the time is since the start of the application
+	///Check what the time is since the start of the application in seconds
 	fn time_now(&self) -> f64 {
 		let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+        (time_now.duration_since(self.time_start)).as_secs_f64()
 	}
 
 	///Read one InputEvent from the event file
@@ -298,8 +307,8 @@ impl InputDevice {
 
 	///Process a group of InputEvents ending in an EV_SYN:SYN_REPORT
 	fn process_event_group(&mut self, evts: Vec<InputEvent>) -> Vec<DirectEvent> {
+		let time = self.time_now(); //Cant use the event timeval_t unfortunately because it seems to use system time, while rust Instant seems to use time since boot.
 		let mut dir_evts = Vec::new();
-		let time = self.time_now();
 		for evt in evts {
             match evt.ty {
                 InputEventType::EV_REL => { // relative input
@@ -391,7 +400,7 @@ impl InputDevice {
         }));
     }
 
-	///Process an absolute input event
+	///Process an absolute input event TODO implement touchpad using the self.is_pointer() property.
     fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
         let code: EvAbsCodes = unsafe { std::mem::transmute(evt.code) };
         static mut FIRST_TOUCH_X: bool = false;
