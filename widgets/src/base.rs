@@ -41,6 +41,7 @@ live_design!{
     import crate::scroll_shadow::DrawScrollShadowBase;
     import crate::page_flip::PageFlipBase;
     import crate::keyboard_view::KeyboardViewBase;
+    import crate::window_menu::WindowMenuBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
@@ -609,4 +610,5 @@ live_design!{
     TabCloseButtonBase = <TabCloseButtonBase>{}
     TextInputBase = <TextInputBase>{}
     DrawScrollShadowBase = <DrawScrollShadowBase>{}
+    WindowMenuBase = <WindowMenuBase>{}
 }

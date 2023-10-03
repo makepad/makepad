@@ -3,7 +3,7 @@ use crate::{
     widget::*,
     makepad_derive_widget::*,
     makepad_draw::*,
-    scroll_bar::{ScrollBar, ScrollBarAction}
+    scroll_bar::{ScrollBar, ScrollAxis, ScrollBarAction}
 };
 
 live_design!{
@@ -295,7 +295,7 @@ impl PortalList {
             }
         }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
-        self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
+        self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
         if !self.keep_invisible{
             self.items.retain_visible();
         }
@@ -674,11 +674,13 @@ impl Widget for PortalList {
                             // we have a certain distance per time
                             let mut last = None;
                             let mut scaled_delta = 0.0;
+                            let mut total_delta = 0.0;
                             for sample in samples.iter().rev(){
                                 if last.is_none(){
                                     last = Some(sample);
                                 }
                                 else{
+                                    total_delta += last.unwrap().abs - sample.abs;
                                     scaled_delta += (last.unwrap().abs - sample.abs)/ (last.unwrap().time - sample.time)
                                 }
                             }
@@ -686,7 +688,7 @@ impl Widget for PortalList {
                             if self.first_id == self.range_start && self.first_scroll > 0.0 {
                                 self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
                             }
-                            else if scaled_delta.abs() > self.flick_scroll_minimum{
+                            else if total_delta.abs() > 10.0 && scaled_delta.abs() > self.flick_scroll_minimum{
                                 
                                 self.scroll_state = ScrollState::Flick {
                                     delta: scaled_delta.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum),

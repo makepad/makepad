@@ -72,8 +72,8 @@ impl FileServerConnection {
         
         match request {
             FileRequest::LoadFileTree {with_data} => FileResponse::LoadFileTree(self.load_file_tree(with_data)),
-            FileRequest::OpenFile(path) => FileResponse::OpenFile(self.open_file(path)),
-            FileRequest::SaveFile(path, delta) => FileResponse::SaveFile(self.save_file(path, delta)),
+            FileRequest::OpenFile(path,id) => FileResponse::OpenFile(self.open_file(path, id)),
+            FileRequest::SaveFile(path, delta, id) => FileResponse::SaveFile(self.save_file(path, delta, id)),
         }
     }
     
@@ -165,7 +165,7 @@ impl FileServerConnection {
     }
     
     // Handles an `OpenFile` request.
-    fn open_file(&self, child_path: String) -> Result<(String, String), FileError> {
+    fn open_file(&self, child_path: String, id:u64) -> Result<(String, String, u64), FileError> {
         let path = self.make_full_path(&child_path);
         
         let bytes = fs::read(&path).map_err(
@@ -180,7 +180,7 @@ impl FileServerConnection {
             .collect::<Vec<_ >>());*/
         
         let text = String::from_utf8_lossy(&bytes);
-        Ok((child_path, text.to_string()))
+        Ok((child_path, text.to_string(), id))
     }
     
     // Handles an `ApplyDelta` request.
@@ -188,7 +188,8 @@ impl FileServerConnection {
         &self,
         child_path: String,
         new_content: String,
-    ) -> Result<(String, String, String), FileError> {
+        id: u64
+    ) -> Result<(String, String, String, u64), FileError> {
         let path = self.make_full_path(&child_path);
         
         let old_content = String::from_utf8_lossy(&fs::read(&path).map_err(
@@ -199,7 +200,7 @@ impl FileServerConnection {
             | error | FileError::Unknown(error.to_string())
         ) ?;
         
-        Ok((child_path, old_content, new_content))
+        Ok((child_path, old_content, new_content, id))
     }
 }
 

@@ -13900,6 +13900,7 @@ pub mod Com{
 pub const STGM_READ: STGM = STGM(0u32);
 
 pub const COINIT_MULTITHREADED: COINIT = COINIT(0i32);
+pub const COINIT_APARTMENTTHREADED: COINIT = COINIT(2i32);
 
 pub unsafe fn CoInitializeEx(pvreserved: ::core::option::Option<*const ::core::ffi::c_void>, dwcoinit: COINIT) -> ::windows_core::Result<()> {
     ::windows_targets::link!("ole32.dll" "system" fn CoInitializeEx(pvreserved : *const ::core::ffi::c_void, dwcoinit : u32) -> ::windows_core::HRESULT);

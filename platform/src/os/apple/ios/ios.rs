@@ -257,9 +257,6 @@ impl Cx {
             IosEvent::Timer(e) => if e.timer_id != 0 {
                 self.call_event_handler(&Event::Timer(e))
             }
-            IosEvent::MenuCommand(e) => {
-                self.call_event_handler(&Event::MenuCommand(e))
-            }
         }
         
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
@@ -277,6 +274,7 @@ impl Cx {
                     window.window_geom = get_ios_app_global().last_window_geom.clone();
                     window.is_created = true;
                 },
+                CxOsOp::Quit=>{}
                 CxOsOp::CloseWindow(_window_id) => {
                 },
                 CxOsOp::MinimizeWindow(_window_id) => {
@@ -314,7 +312,7 @@ impl Cx {
                 },
                 CxOsOp::StartDragging(_) => {
                 }
-                CxOsOp::UpdateMenu(_menu) => {
+                CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest{request_id, request} => {
                     make_http_request(request_id, request, self.os.network_response.sender.clone());

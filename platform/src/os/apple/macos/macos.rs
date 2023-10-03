@@ -1,10 +1,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{
-            Cell,
-            RefCell,
-        },
+        cell::RefCell,
     },
     makepad_objc_sys::{
         msg_send,
@@ -30,7 +27,7 @@ use {
                 },
                 apple_classes::init_apple_classes_global,
                 ns_url_session::{make_http_request, web_socket_open},
-            }, 
+            },
             metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,
             apple_decoding::CxAppleDecoding,
@@ -38,6 +35,7 @@ use {
         },
         pass::CxPassParent,
         thread::Signal,
+        cx_stdin::PollTimers,
         window::WindowId,
         event::{
             WindowGeom,
@@ -140,17 +138,18 @@ const KEEP_ALIVE_COUNT: usize = 5;
 
 impl Cx {
     
-    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+    pub fn event_loop(cx: Rc<RefCell<Cx >>) {
         init_apple_classes_global();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
-
+        
+        
         // store device object ID for double buffering
-        cx.borrow_mut().os.metal_device = Cell::new(Some(metal_cx.borrow().device));
-
+        cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
+        
         //let cx = Rc::new(RefCell::new(self));
-        if std::env::args().find(|v| v == "--stdin-loop").is_some(){
+        if std::env::args().find( | v | v == "--stdin-loop").is_some() {
             let mut cx = cx.borrow_mut();
             cx.in_makepad_studio = true;
             let mut metal_cx = metal_cx.borrow_mut();
@@ -174,7 +173,6 @@ impl Cx {
             }
         }));
         // lets set our signal poll timer
-        
         // final bit of initflow
         get_macos_app_global().start_timer(0, 0.008, true);
         cx.borrow_mut().call_event_handler(&Event::Construct);
@@ -217,13 +215,13 @@ impl Cx {
             }
         }
     }
-
-    pub(crate) fn handle_networking_events(&mut self) {
+    
+    pub (crate) fn handle_networking_events(&mut self) {
         let mut out = Vec::new();
-        while let Ok(event) = self.os.network_response.receiver.try_recv(){
+        while let Ok(event) = self.os.network_response.receiver.try_recv() {
             out.push(event);
         }
-        if out.len()>0{
+        if out.len()>0 {
             self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
@@ -235,8 +233,11 @@ impl Cx {
         metal_windows: &mut Vec<MetalWindow>
     ) -> EventFlow {
         
-        self.handle_platform_ops(metal_windows, metal_cx);
-         
+        if let  EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx){
+            self.call_event_handler(&Event::Destruct);
+            return EventFlow::Exit
+        }
+        
         // send a mouse up when dragging starts
         
         let mut paint_dirty = false;
@@ -256,18 +257,18 @@ impl Cx {
                         self.os.keep_alive_counter -= 1;
                         self.repaint_windows();
                     }
-
+                    
                     // check signals
-                    if Signal::check_and_clear_ui_signal(){
+                    if Signal::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    if self.handle_live_edit(){
+                    if self.handle_live_edit() {
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
                     }
                     self.handle_networking_events();
-
+                    
                     return EventFlow::Poll;
                 }
             }
@@ -300,7 +301,7 @@ impl Cx {
             }
             MacosEvent::WindowGeomChange(mut re) => { // do this here because mac
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
-                    if let Some(dpi_override) = self.windows[re.window_id].dpi_override{
+                    if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
                         re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
                         re.new_geom.dpi_factor = dpi_override;
                     }
@@ -386,8 +387,8 @@ impl Cx {
             MacosEvent::DragEnd => {
                 // lets send mousebutton ups to fix missing it.
                 // TODO! make this more resilient
-                self.call_event_handler(&Event::MouseUp(MouseUpEvent{
-                    abs: dvec2(-100000.0,-100000.0),
+                self.call_event_handler(&Event::MouseUp(MouseUpEvent {
+                    abs: dvec2(-100000.0, -100000.0),
                     button: 0,
                     window_id: CxWindowPool::id_zero(),
                     modifiers: Default::default(),
@@ -416,8 +417,8 @@ impl Cx {
             MacosEvent::Timer(e) => {
                 self.call_event_handler(&Event::Timer(e))
             }
-            MacosEvent::MenuCommand(e) => {
-                self.call_event_handler(&Event::MenuCommand(e))
+            MacosEvent::MacosMenuCommand(e) => {
+                self.call_event_handler(&Event::MacosMenuCommand(e))
             }
         }
         
@@ -428,7 +429,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx){
+    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx)->EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -450,6 +451,9 @@ impl Cx {
                         metal_window.cocoa_window.close_window();
                         break;
                     }
+                },
+                CxOsOp::Quit => {
+                    return EventFlow::Exit;
                 },
                 CxOsOp::MinimizeWindow(window_id) => {
                     if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
@@ -506,22 +510,22 @@ impl Cx {
                         break;
                     }
                 }
-                CxOsOp::UpdateMenu(menu) => {
-                    get_macos_app_global().update_app_menu(&menu, &self.command_settings)
+                CxOsOp::UpdateMacosMenu(menu) => {
+                    get_macos_app_global().update_macos_menu(&menu)
                 },
-                CxOsOp::HttpRequest{request_id, request} => {
+                CxOsOp::HttpRequest {request_id, request} => {
                     make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::WebSocketOpen{request_id, request}=>{
+                CxOsOp::WebSocketOpen {request_id, request} => {
                     web_socket_open(request_id, request, self.os.network_response.sender.clone());
                 }
-                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
+                CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
                     todo!()
                 }
-                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
+                CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     todo!()
                 }
                 CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
@@ -530,11 +534,12 @@ impl Cx {
                 CxOsOp::CleanupVideoDecoding(_) => todo!(),
             }
         }
+        EventFlow::Poll
     }
 }
 
 impl CxOsApi for Cx {
-    fn pre_start()->bool{
+    fn pre_start() -> bool {
         for arg in std::env::args() {
             if arg == "--metal-xpc" {
                 start_xpc_service();
@@ -543,10 +548,10 @@ impl CxOsApi for Cx {
         }
         false
     }
-
+    
     fn init_cx_os(&mut self) {
         self.live_expand();
-        if std::env::args().find(|v| v == "--stdin-loop").is_none(){
+        if std::env::args().find( | v | v == "--stdin-loop").is_none() {
             self.start_disk_live_file_watcher(100);
         }
         self.live_scan_dependencies();
@@ -556,8 +561,8 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
-
-    fn start_stdin_service(&mut self){
+    
+    fn start_stdin_service(&mut self) {
         self.start_xpc_service()
     }
     /*
@@ -579,5 +584,7 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) decoding: CxAppleDecoding,
-    pub metal_device: Cell<Option<ObjcId>>,
+    pub (crate) stdin_timers: PollTimers,
+
+    pub metal_device: Option<ObjcId>,
 }

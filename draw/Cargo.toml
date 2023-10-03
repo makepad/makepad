@@ -1,18 +1,18 @@
 [package]
 name = "makepad-draw"
-version = "0.3.0"
+version = "0.6.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad 2d drawing API"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "7NALupLM0-i77IS85n9Q24oxdlU="
+metadata.makepad-auto-version = "xymcZ5A4_Czic6RxtCULqorg9uU="
 
 [dependencies]
-makepad-platform = { path = "../platform", version = "0.3.0" }
+makepad-platform = { path = "../platform", version = "0.6.0" }
 #makepad-image-formats = { path = "./image_formats", version = "0.3.0" }
-makepad-vector = { path = "./vector", version = "0.3.0" }
+makepad-vector = { path = "./vector", version = "0.4.0" }
 # HACK(eddyb) only a git dep until https://github.com/RazrFalcon/rustybuzz/pull/71
 # ends up being published in a release (only affects build times, not behavior).
 rustybuzz = { version = "0.8.0", git = "https://github.com/RazrFalcon/rustybuzz", rev = "a0b8aa3" }

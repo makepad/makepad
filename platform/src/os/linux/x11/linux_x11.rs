@@ -21,7 +21,6 @@ use {
         cx::{Cx, OsType,LinuxWindowParams}, 
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
-        Texture,
     }
 };
 
@@ -264,6 +263,9 @@ impl Cx {
                         }
                     }
                 },
+                CxOsOp::Quit=>{
+                    ret = EventFlow::Exit
+                }
                 CxOsOp::MinimizeWindow(window_id) => {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         window.xlib_window.minimize();
@@ -313,7 +315,7 @@ impl Cx {
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
                 },
-                CxOsOp::UpdateMenu(_menu) => {
+                CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
@@ -351,12 +353,10 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) media: CxLinuxMedia,
+    pub(crate) media: CxLinuxMedia,
+    pub (crate) stdin_timers: PollTimers,
 
     // HACK(eddyb) generalize this to EGL, properly.
-    pub opengl_cx: Option<OpenglCx>,
-
-    pub swapchain: Option<[Texture; 2]>,
-    pub present_index: usize,
+    pub(super) opengl_cx: Option<OpenglCx>,
 }
 

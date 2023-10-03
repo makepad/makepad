@@ -16,15 +16,13 @@ use {
             },
             Win32::System::Com::{
                 STGM_READ,
-                COINIT_MULTITHREADED,
+                COINIT_APARTMENTTHREADED,
                 CoInitializeEx,
                 CoCreateInstance,
                 CLSCTX_ALL,
                 //STGM_READ,
             },
-            Win32::System::Variant::{
-                VT_LPWSTR
-            },
+            Win32::System::Variant::VT_LPWSTR,
             Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
             Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
             Win32::Media::Multimedia::{
@@ -84,7 +82,7 @@ pub struct WasapiAccess {
 impl WasapiAccess {
     pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
         unsafe {
-            //CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
             let change_listener: IMMNotificationClient = WasapiChangeListener {change_signal:change_signal.clone()}.into();
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
@@ -357,7 +355,7 @@ impl WasapiBase {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self,()> {
         unsafe {
             
-            CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
             
             let device = WasapiAccess::find_device_by_id(device_id).unwrap();
             let client: IAudioClient = if let Ok(client) = device.Activate(CLSCTX_ALL, None){
