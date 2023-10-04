@@ -1157,9 +1157,29 @@ impl CodeEditor {
 
     fn pick(&self, session: &Session, position: DVec2) -> Option<(Position, Affinity)> {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
-        let mut line_index = session.layout().find_first_line_ending_after_y(position.y);
-        let mut origin_y = session.layout().line(line_index).y();
-        for block in session.layout().block_elements(line_index, line_index + 1) {
+        if position.y < 0.0 {
+            return Some((
+                Position {
+                    line_index: 0,
+                    byte_index: 0,
+                },
+                Affinity::Before
+            ));
+        }
+        let layout = session.layout();
+        if position.y > session.layout().height() {
+            let lines = layout.as_text().as_lines();
+            return Some((
+                Position {
+                    line_index: lines.len() - 1,
+                    byte_index: lines[lines.len() - 1].len(),
+                },
+                Affinity::After
+            ));
+        }
+        let mut line_index = layout.find_first_line_ending_after_y(position.y);
+        let mut origin_y = layout.line(line_index).y();
+        for block in layout.block_elements(line_index, line_index + 1) {
             match block {
                 BlockElement::Line {
                     is_inlay: false,
@@ -1243,11 +1263,18 @@ impl CodeEditor {
                                 let end_y = start_y + line.scale();
                                 if (start_y..=end_y).contains(&position.y) {
                                     return Some((
-                                        Position {
-                                            line_index,
-                                            byte_index,
+                                        if position.x < 0.0 {
+                                            Position {
+                                                line_index,
+                                                byte_index: 0,
+                                            }
+                                        } else {
+                                            Position {
+                                                line_index,
+                                                byte_index,
+                                            }
                                         },
-                                        Affinity::Before,
+                                        Affinity::Before
                                     ));
                                 }
                                 column_index = line.wrap_indent_column_count();
@@ -1260,11 +1287,18 @@ impl CodeEditor {
                     let end_y = start_y + line.scale();
                     if (start_y..=end_y).contains(&position.y) {
                         return Some((
-                            Position {
-                                line_index,
-                                byte_index,
+                            if position.x < 0.0 {
+                                Position {
+                                    line_index,
+                                    byte_index: 0,
+                                }
+                            } else {
+                                Position {
+                                    line_index,
+                                    byte_index,
+                                }
                             },
-                            Affinity::After,
+                            Affinity::Before
                         ));
                     }
                     line_index += 1;
