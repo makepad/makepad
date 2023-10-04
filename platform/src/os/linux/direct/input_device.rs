@@ -3,7 +3,7 @@ use std::{
 	os::fd::AsRawFd,
 	sync::{mpsc::Sender,
 		Arc,
-		Mutex,
+		Mutex, atomic::AtomicBool,
 	},
 	thread::JoinHandle,
 	thread,
@@ -38,15 +38,15 @@ pub struct InputEvent {
 impl std::fmt::Debug for InputEvent {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self.ty {
-			InputEventType::EV_SYN => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvSynCodes>(self.code) }, self.value),
-			InputEventType::EV_KEY => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvKeyCodes>(self.code) }, self.value),
-			InputEventType::EV_REL => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvRelCodes>(self.code) }, self.value),
-			InputEventType::EV_ABS => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvAbsCodes>(self.code) }, self.value),
-			InputEventType::EV_MSC => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvMscCodes>(self.code) }, self.value),
-			InputEventType::EV_SW  => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvSwCodes>(self.code) }, self.value),
-			InputEventType::EV_LED => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvLedCodes>(self.code) }, self.value),
-			InputEventType::EV_SND => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvSndCodes>(self.code) }, self.value),
-			InputEventType::EV_REP => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, unsafe{ std::mem::transmute::<u16, EvRepCodes>(self.code) }, self.value),
+			InputEventType::EV_SYN => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvSynCodes(self.code), self.value),
+			InputEventType::EV_KEY => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvKeyCodes(self.code), self.value),
+			InputEventType::EV_REL => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvRelCodes(self.code), self.value),
+			InputEventType::EV_ABS => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvAbsCodes(self.code), self.value),
+			InputEventType::EV_MSC => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvMscCodes(self.code), self.value),
+			InputEventType::EV_SW  => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvSwCodes(self.code), self.value),
+			InputEventType::EV_LED => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvLedCodes(self.code), self.value),
+			InputEventType::EV_SND => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvSndCodes(self.code), self.value),
+			InputEventType::EV_REP => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, EvRepCodes(self.code), self.value),
 			_ => write!(f, "time: {:?}\ntype: {:?}\ncode: {:?}\nvalue: {:?}", self.time, self.ty, self.code, self.value),
 		}
 	}
@@ -74,27 +74,29 @@ pub struct InputDevice {
 	///Name of the device (unused right now)
 	name: String,
 	///Holds the bitfields for the device properties see input-event-codes.h
-	property_bits: [u8;number_of_bytes(InputProperty::Count as u16)],
+	property_bits: [u8;number_of_bytes(InputProperty::CNT.0)],
 	///Holds the bitfields for the devices possible event types see input-event-codes.h
-	event_bits: [u8;number_of_bytes(InputEventType::EV_CNT as u16)],
+	event_bits: [u8;number_of_bytes(InputEventType::EV_CNT.0)],
 	///Holds the bitfields for the devices possible key event codes see input-event-codes.h
-	key_bits: [u8;number_of_bytes(EvKeyCodes::KEY_CNT as u16)],
+	key_bits: [u8;number_of_bytes(EvKeyCodes::KEY_CNT.0)],
 	///Holds the bitfields for the devices possible rel event codes see input-event-codes.h
-	rel_bits: [u8;number_of_bytes(EvRelCodes::REL_CNT as u16)],
+	rel_bits: [u8;number_of_bytes(EvRelCodes::REL_CNT.0)],
 	///Holds the bitfields for the devices possible abs event codes see input-event-codes.h
-	abs_bits: [u8;number_of_bytes(EvAbsCodes::ABS_CNT as u16)],
+	abs_bits: [u8;number_of_bytes(EvAbsCodes::ABS_CNT.0)],
 	///Holds the bitfields for the devices possible led event codes see input-event-codes.h
-	led_bits: [u8;number_of_bytes(EvLedCodes::LED_CNT as u16)],
+	led_bits: [u8;number_of_bytes(EvLedCodes::LED_CNT.0)],
 	///Holds the bitfields for the devices possible misc event codes see input-event-codes.h
-	misc_bits: [u8;number_of_bytes(EvMscCodes::MSC_CNT as u16)],
+	misc_bits: [u8;number_of_bytes(EvMscCodes::MSC_CNT.0)],
 	///Holds the bitfields for the devices possible switch event codes see input-event-codes.h
-	sw_bits: [u8;number_of_bytes(EvSwCodes::SW_CNT as u16)],
+	sw_bits: [u8;number_of_bytes(EvSwCodes::SW_CNT.0)],
 	///Holds the bitfields for the devices possible rep event codes see input-event-codes.h
-	rep_bits: [u8;number_of_bytes(EvRepCodes::REP_CNT as u16)],
+	rep_bits: [u8;number_of_bytes(EvRepCodes::REP_CNT.0)],
 	///Holds the bitfields for the devices possible ff event codes see input-event-codes.h
-	ff_bits: [u8;number_of_bytes(EvFfCodes::FF_CNT as u16)],
+	ff_bits: [u8;number_of_bytes(EvFfCodes::FF_CNT.0)],
 	///Holds the bitfields for the devices possible snd event codes see input-event-codes.h
-	snd_bits: [u8;number_of_bytes(EvSndCodes::SND_CNT as u16)],
+	snd_bits: [u8;number_of_bytes(EvSndCodes::SND_CNT.0)],
+	///Holds the starting values of the LED codes
+	led_values: [u8;number_of_bytes(EvLedCodes::LED_CNT.0)],
 	///Holds the info for every abs event code see input-event-codes.h
 	abs_info: Vec<InputAbsInfo>,
 	///Info about the current touches on this device
@@ -111,6 +113,8 @@ pub struct InputDevice {
 	window: Arc<DVec2>,
 	///Shared between event threads, holds the key modifiers
 	modifiers: Arc<Mutex<KeyModifiers>>,
+	///Shared between event threads, whether caps lock is active
+	caps_lock: Arc<AtomicBool>,
 	///The screen dpi factor
 	dpi_factor: Arc<f64>,
 	///The makepad window id
@@ -119,22 +123,23 @@ pub struct InputDevice {
 
 impl InputDevice {
 	///Spawn a new InputDevice and start running a thread to read events from it.
-	pub fn new(file: File, sender: Sender<Vec<DirectEvent>>, time_start: Instant, abs: Arc<Mutex<DVec2>>, window: Arc<DVec2>, modifiers: Arc<Mutex<KeyModifiers>>, dpi_factor: Arc<f64>, window_id: WindowId) -> JoinHandle<()>{
+	pub fn new(file: File, sender: Sender<Vec<DirectEvent>>, time_start: Instant, abs: Arc<Mutex<DVec2>>, window: Arc<DVec2>, modifiers: Arc<Mutex<KeyModifiers>>,caps_lock: Arc<AtomicBool>, dpi_factor: Arc<f64>, window_id: WindowId) -> JoinHandle<()>{
 		let mut dev = InputDevice { 
 			fd: file,
 			time_start,
 			name: String::default(),
-			property_bits: [0u8;number_of_bytes(InputProperty::Count as u16)],
-			event_bits: [0u8;number_of_bytes(InputEventType::EV_CNT as u16)],
-			key_bits: [0u8;number_of_bytes(EvKeyCodes::KEY_CNT as u16)],
-			rel_bits: [0u8;number_of_bytes(EvRelCodes::REL_CNT as u16)],
-			abs_bits: [0u8;number_of_bytes(EvAbsCodes::ABS_CNT as u16)],
-			led_bits: [0u8;number_of_bytes(EvLedCodes::LED_CNT as u16)],
-			misc_bits: [0u8;number_of_bytes(EvMscCodes::MSC_CNT as u16)],
-			sw_bits: [0u8;number_of_bytes(EvSwCodes::SW_CNT as u16)],
-			rep_bits: [0u8;number_of_bytes(EvRepCodes::REP_CNT as u16)],
-			ff_bits: [0u8;number_of_bytes(EvFfCodes::FF_CNT as u16)],
-			snd_bits: [0u8;number_of_bytes(EvSndCodes::SND_CNT as u16)],
+			property_bits: [0u8;number_of_bytes(InputProperty::CNT.0)],
+			event_bits: [0u8;number_of_bytes(InputEventType::EV_CNT.0)],
+			key_bits: [0u8;number_of_bytes(EvKeyCodes::KEY_CNT.0)],
+			rel_bits: [0u8;number_of_bytes(EvRelCodes::REL_CNT.0)],
+			abs_bits: [0u8;number_of_bytes(EvAbsCodes::ABS_CNT.0)],
+			led_bits: [0u8;number_of_bytes(EvLedCodes::LED_CNT.0)],
+			misc_bits: [0u8;number_of_bytes(EvMscCodes::MSC_CNT.0)],
+			sw_bits: [0u8;number_of_bytes(EvSwCodes::SW_CNT.0)],
+			rep_bits: [0u8;number_of_bytes(EvRepCodes::REP_CNT.0)],
+			ff_bits: [0u8;number_of_bytes(EvFfCodes::FF_CNT.0)],
+			snd_bits: [0u8;number_of_bytes(EvSndCodes::SND_CNT.0)],
+			led_values: [0u8;number_of_bytes(EvLedCodes::LED_CNT.0)],
 			abs_info: Vec::new(),
 			touches: Vec::new(),
 			num_fingers: 0,
@@ -143,6 +148,7 @@ impl InputDevice {
 			abs,
 			window,
 			modifiers,
+			caps_lock,
 			dpi_factor,
 			window_id,
 		};
@@ -168,18 +174,23 @@ impl InputDevice {
 			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGBIT(InputEventType::EV_FF, dev.ff_bits.len()), dev.ff_bits.as_mut_ptr());
 			//get the available sound codes
 			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGBIT(InputEventType::EV_SND, dev.snd_bits.len()), dev.snd_bits.as_mut_ptr());
+			//get the led values
+			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGLED(dev.led_values.len()), dev.led_values.as_mut_ptr());
 			//get the name of the device
 			let _ = ioctl(dev.fd.as_raw_fd(), EVIOCGNAME(name_buff.len() - 1), name_buff.as_mut_ptr());
 			dev.name = CStr::from_bytes_until_nul(&name_buff).unwrap().to_str().unwrap().to_string();
 			//get all the abs info fields
 			if dev.has_event_type(InputEventType::EV_ABS)	{
-				dev.abs_info = vec![InputAbsInfo::default();EvAbsCodes::ABS_CNT as usize];
-				for abs_code in 0..EvAbsCodes::ABS_MAX as usize {
+				dev.abs_info = vec![InputAbsInfo::default();EvAbsCodes::ABS_CNT.0 as usize];
+				for abs_code in 0..EvAbsCodes::ABS_MAX.0 as usize {
 					if Self::is_bit_set(&dev.abs_bits, abs_code as u16) {
 						ioctl(dev.fd.as_raw_fd(), EVIOCGABS(abs_code as u16), dev.abs_info.get_mut(abs_code).unwrap());
 					}
 				}
 			}
+		}
+		if Self::is_bit_set(&dev.led_values, EvLedCodes::LED_CAPSL.0) {
+			dev.caps_lock.store(true, std::sync::atomic::Ordering::Relaxed);
 		}
 		println!("{} connected",dev.name);
 		thread::spawn(move || {
@@ -187,6 +198,7 @@ impl InputDevice {
 				let mut evts: Vec<InputEvent> = Vec::new();
 				loop {
 					if let Ok(evt) = dev.read_input_event() {
+						// dbg!(&evt);
 						match evt.ty {
 							InputEventType::EV_SYN => {
 								let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
@@ -202,7 +214,7 @@ impl InputDevice {
 										while let Ok(dropped) = dev.read_input_event() {
 											match dropped.ty {
 												InputEventType::EV_SYN => {
-													if dropped.code == EvSynCodes::SYN_REPORT as u16 {
+													if dropped.code == EvSynCodes::SYN_REPORT.0 {
 														break;
 													}
 												},
@@ -254,27 +266,27 @@ impl InputDevice {
 
 	///Check if the device is capable of receiving a certain event type
 	fn has_event_type(&self, evt_type: InputEventType) -> bool {
-		Self::is_bit_set(&self.event_bits, evt_type as u16)
+		Self::is_bit_set(&self.event_bits, evt_type.0)
 	}
 
 	///Check if the device has a certain property
 	fn has_property(&self, prop: InputProperty) -> bool {
-		Self::is_bit_set(&self.property_bits, prop as u16)
+		Self::is_bit_set(&self.property_bits, prop.0)
 	}
 
 	///Check if the device is a multitouch type B device
 	fn is_mt_type_b(&self) -> bool {
-		self.has_event_code(InputEventType::EV_ABS, EvAbsCodes::ABS_MT_SLOT as u16)
+		self.has_event_code(InputEventType::EV_ABS, EvAbsCodes::ABS_MT_SLOT.0)
 	}
 
 	///Check if the absolute input is directly related to position of the screen (touchscreen for example)
 	fn is_direct(&self) -> bool {
-		self.has_property(InputProperty::Direct)
+		self.has_property(InputProperty::DIRECT)
 	}
 
 	///Check if the absolute input is relatively related to the position of the pointer on the screen (touchpad for example)
 	fn is_pointer(&self) -> bool {
-		self.has_property(InputProperty::Pointer)
+		self.has_property(InputProperty::POINTER)
 	}
 
 	///Check what the time is since the start of the application in seconds
@@ -313,16 +325,19 @@ impl InputDevice {
             match evt.ty {
                 InputEventType::EV_REL => { // relative input
                     self.process_rel_event(evt, &mut dir_evts, time);
-                }
+                },
                 InputEventType::EV_ABS => { // absolute input
                     self.process_abs_event(evt, &mut dir_evts, time);
-                }
+                },
                 InputEventType::EV_KEY => { // key press
                     self.process_key_event(evt, &mut dir_evts, time);
-                }
+                },
+				InputEventType::EV_LED => { // led event
+					self.process_led_event(evt);
+				},
 				InputEventType::EV_SYN => {
 					self.process_syn_event(evt, &mut dir_evts, time);
-				}
+				},
                     _ => ()
             };
         };
@@ -331,7 +346,7 @@ impl InputDevice {
 
 	///Process a synchronisation event
 	fn process_syn_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
-		let code: EvSynCodes = unsafe { std::mem::transmute(evt.code) };
+		let code: EvSynCodes = EvSynCodes(evt.code);
 		match code {
 			EvSynCodes::SYN_REPORT => { //finish up the event.
 				if !self.is_mt_type_b() { //received empty touch event of type A all fingers are gone
@@ -372,9 +387,19 @@ impl InputDevice {
 		};
 	}
 
+	fn process_led_event(&mut self, evt: InputEvent) {
+		let code: EvLedCodes = EvLedCodes(evt.code);
+		match code {
+			EvLedCodes::LED_CAPSL => {
+				self.caps_lock.store(evt.value > 0, std::sync::atomic::Ordering::Relaxed)
+			},
+			_ => ()
+		}
+	}
+
 	///Process a relative input event
     fn process_rel_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
-        let code: EvRelCodes = unsafe { std::mem::transmute(evt.code) };
+        let code: EvRelCodes = EvRelCodes(evt.code);
         match code {
             EvRelCodes::REL_X => {
 				let mut abs = self.abs.lock().unwrap();
@@ -402,7 +427,7 @@ impl InputDevice {
 
 	///Process an absolute input event TODO implement touchpad using the self.is_pointer() property.
     fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
-        let code: EvAbsCodes = unsafe { std::mem::transmute(evt.code) };
+        let code: EvAbsCodes = EvAbsCodes(evt.code);
         static mut FIRST_TOUCH_X: bool = false;
         static mut FIRST_TOUCH_Y: bool = false;
         match code {
@@ -525,8 +550,8 @@ impl InputDevice {
     }
 
 	fn process_key_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
-        let code: EvKeyCodes = unsafe { std::mem::transmute(evt.code) };
-        let key_action: KeyAction = unsafe {std::mem::transmute(evt.value) };
+        let code: EvKeyCodes = EvKeyCodes(evt.code);
+        let key_action: KeyAction = KeyAction(evt.value);
         let key_code = match code {
             EvKeyCodes::KEY_ESC => KeyCode::Escape,
             EvKeyCodes::KEY_1 => KeyCode::Key1,
@@ -636,7 +661,7 @@ impl InputDevice {
             _ => KeyCode::Unknown,
         };
         match key_action {
-            KeyAction::KeyDown => {
+            KeyAction::KEY_DOWN => {
                 match key_code {
                     KeyCode::Shift => self.modifiers.lock().unwrap().shift = true,
                     KeyCode::Control => self.modifiers.lock().unwrap().control = true,
@@ -647,7 +672,7 @@ impl InputDevice {
                 match code {
                     EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
                         dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
-                            button: (evt.code - EvKeyCodes::BTN_LEFT as u16) as usize,
+                            button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
                             abs: self.abs.lock().unwrap().clone(),
                             window_id: self.window_id,
                             modifiers: self.modifiers.lock().unwrap().clone(),
@@ -659,7 +684,7 @@ impl InputDevice {
 						let modifiers = self.modifiers.lock().unwrap();
                         if !modifiers.control && !modifiers.alt && !modifiers.logo {
                             let uc = modifiers.shift;
-                            let inp = key_code.to_char(uc);
+                            let inp = key_code.to_char_linux_direct(uc, self.caps_lock.load(std::sync::atomic::Ordering::Relaxed));
                             if let Some(inp) = inp {
                                 dir_evts.push(DirectEvent::TextInput(TextInputEvent {
                                     input: format!("{}", inp),
@@ -678,7 +703,7 @@ impl InputDevice {
                 }
                 
             },
-            KeyAction::KeyUp => {
+            KeyAction::KEY_UP => {
                 match key_code {
                     KeyCode::Shift => self.modifiers.lock().unwrap().shift = false,
                     KeyCode::Control => self.modifiers.lock().unwrap().control = false,
@@ -689,7 +714,7 @@ impl InputDevice {
                 match code {
                     EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
                         dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
-                            button: (evt.code - EvKeyCodes::BTN_LEFT as u16) as usize,
+                            button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
                             abs: self.abs.lock().unwrap().clone(),
                             window_id: self.window_id,
                             modifiers: self.modifiers.lock().unwrap().clone(),
@@ -710,14 +735,15 @@ impl InputDevice {
                     }
                 }
             },
-            KeyAction::KeyRepeat => {
+            KeyAction::KEY_REPEAT => {
                 dir_evts.push(DirectEvent::KeyDown(KeyEvent {
                     key_code,
                     is_repeat: false,
                     modifiers: self.modifiers.lock().unwrap().clone(),
                     time
                 }))
-            }
+            },
+			_=> ()
         }
     }
 }
@@ -728,5 +754,78 @@ const fn number_of_bytes(value: u16) -> usize {
 		return (value / 8 + 1) as usize;
 	} else {
 		return (value / 8) as usize;
+	}
+}
+
+impl KeyCode {
+	fn to_char_linux_direct(&self, uc: bool, caps_lock: bool) -> Option<char> {
+		match self{
+			KeyCode::KeyA => if (uc && !caps_lock) || (!uc && caps_lock) {Some('A')} else {Some('a')},
+            KeyCode::KeyB => if (uc && !caps_lock) || (!uc && caps_lock) {Some('B')}else {Some('b')},
+            KeyCode::KeyC => if (uc && !caps_lock) || (!uc && caps_lock) {Some('C')}else {Some('c')},
+            KeyCode::KeyD => if (uc && !caps_lock) || (!uc && caps_lock) {Some('D')}else {Some('d')},
+            KeyCode::KeyE => if (uc && !caps_lock) || (!uc && caps_lock) {Some('E')}else {Some('e')},
+            KeyCode::KeyF => if (uc && !caps_lock) || (!uc && caps_lock) {Some('F')}else {Some('f')},
+            KeyCode::KeyG => if (uc && !caps_lock) || (!uc && caps_lock) {Some('G')}else {Some('g')},
+            KeyCode::KeyH => if (uc && !caps_lock) || (!uc && caps_lock) {Some('H')}else {Some('h')},
+            KeyCode::KeyI => if (uc && !caps_lock) || (!uc && caps_lock) {Some('I')}else {Some('i')},
+            KeyCode::KeyJ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('J')}else {Some('j')},
+            KeyCode::KeyK => if (uc && !caps_lock) || (!uc && caps_lock) {Some('K')}else {Some('k')},
+            KeyCode::KeyL => if (uc && !caps_lock) || (!uc && caps_lock) {Some('L')}else {Some('l')},
+            KeyCode::KeyM => if (uc && !caps_lock) || (!uc && caps_lock) {Some('M')}else {Some('m')},
+            KeyCode::KeyN => if (uc && !caps_lock) || (!uc && caps_lock) {Some('N')}else {Some('n')},
+            KeyCode::KeyO => if (uc && !caps_lock) || (!uc && caps_lock) {Some('O')}else {Some('o')},
+            KeyCode::KeyP => if (uc && !caps_lock) || (!uc && caps_lock) {Some('P')}else {Some('p')},
+            KeyCode::KeyQ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Q')}else {Some('q')},
+            KeyCode::KeyR => if (uc && !caps_lock) || (!uc && caps_lock) {Some('R')}else {Some('r')},
+            KeyCode::KeyS => if (uc && !caps_lock) || (!uc && caps_lock) {Some('S')}else {Some('s')},
+            KeyCode::KeyT => if (uc && !caps_lock) || (!uc && caps_lock) {Some('T')}else {Some('t')},
+            KeyCode::KeyU => if (uc && !caps_lock) || (!uc && caps_lock) {Some('U')}else {Some('u')},
+            KeyCode::KeyV => if (uc && !caps_lock) || (!uc && caps_lock) {Some('V')}else {Some('v')},
+            KeyCode::KeyW => if (uc && !caps_lock) || (!uc && caps_lock) {Some('W')}else {Some('w')},
+            KeyCode::KeyX => if (uc && !caps_lock) || (!uc && caps_lock) {Some('X')}else {Some('x')},
+            KeyCode::KeyY => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Y')}else {Some('y')},
+            KeyCode::KeyZ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Z')}else {Some('z')},
+            KeyCode::Key0 => if uc {Some(')')}else {Some('0')},
+            KeyCode::Key1 => if uc {Some('!')}else {Some('1')},
+            KeyCode::Key2 => if uc {Some('@')}else {Some('2')},
+            KeyCode::Key3 => if uc {Some('#')}else {Some('3')},
+            KeyCode::Key4 => if uc {Some('$')}else {Some('4')},
+            KeyCode::Key5 => if uc {Some('%')}else {Some('5')},
+            KeyCode::Key6 => if uc {Some('^')}else {Some('6')},
+            KeyCode::Key7 => if uc {Some('&')}else {Some('7')},
+            KeyCode::Key8 => if uc {Some('*')}else {Some('8')},
+            KeyCode::Key9 => if uc {Some('(')}else {Some('9')},
+            KeyCode::Equals => if uc {Some('+')}else {Some('=')},
+            KeyCode::Minus => if uc {Some('_')}else {Some('-')},
+            KeyCode::RBracket => if uc {Some('{')}else {Some('[')},
+            KeyCode::LBracket => if uc {Some('}')}else {Some(']')},
+            KeyCode::ReturnKey => Some('\n'),
+            KeyCode::Backtick => if uc {Some('~')}else {Some('`')},
+            KeyCode::Semicolon => if uc {Some(':')}else {Some(';')},
+            KeyCode::Backslash => if uc {Some('|')}else {Some('\\')},
+            KeyCode::Comma => if uc {Some('<')}else {Some(',')},
+            KeyCode::Slash => if uc {Some('?')}else {Some('/')},
+            KeyCode::Period => if uc {Some('>')}else {Some('.')},
+            KeyCode::Tab => Some('\t'),
+            KeyCode::Space => Some(' '),
+            KeyCode::NumpadDecimal => Some('.'),
+            KeyCode::NumpadMultiply => Some('*'),
+            KeyCode::NumpadAdd => Some('+'),
+            KeyCode::NumpadDivide => Some('/'),
+            KeyCode::NumpadEnter => Some('\n'),
+            KeyCode::NumpadSubtract => Some('-'),
+            KeyCode::Numpad0 => Some('0'),
+            KeyCode::Numpad1 => Some('1'),
+            KeyCode::Numpad2 => Some('2'),
+            KeyCode::Numpad3 => Some('3'),
+            KeyCode::Numpad4 => Some('4'),
+            KeyCode::Numpad5 => Some('5'),
+            KeyCode::Numpad6 => Some('6'),
+            KeyCode::Numpad7 => Some('7'),
+            KeyCode::Numpad8 => Some('8'),
+            KeyCode::Numpad9 => Some('9'),
+            _ => None
+		}
 	}
 }

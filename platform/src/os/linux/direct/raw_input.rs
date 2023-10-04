@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use {
     self::super::{direct_event::*,
 		input_device::InputDevice,
@@ -51,6 +53,7 @@ impl RawInput {
 		let window = Arc::new(dvec2(width, height));
 		let modifiers = Arc::new(Mutex::new(KeyModifiers::default()));
 		let dpi = Arc::new(dpi_factor);
+		let caps_lock: Arc<AtomicBool> = Arc::new(false.into());
         std::thread::spawn(move || { //main input thread that scans for changes in the input devices (new devices)
 			println!("input devices:");
             for event_file in get_event_files() {
@@ -61,6 +64,7 @@ impl RawInput {
 						abs_position.clone(),
 						window.clone(),
 						modifiers.clone(),
+						caps_lock.clone(),
 						dpi.clone(),
 						window_id);
                 }
@@ -90,6 +94,7 @@ impl RawInput {
 									abs_position.clone(),
 									window.clone(),
 									modifiers.clone(),
+									caps_lock.clone(),
 									dpi.clone(),
 									window_id);
                             }
