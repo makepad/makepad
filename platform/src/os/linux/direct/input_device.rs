@@ -29,10 +29,10 @@ use super::{input_sys::*,
 #[derive(Default, Clone, Copy)]
 ///One linux InputEvent, a larger event group consists of multiple of these, ending in one with ty: EV_SYN and code SYN_REPORT
 pub struct InputEvent {
-    pub time: libc_sys::timeval,
-    pub ty: InputEventType,
-    pub code: u16,
-    pub value: i32,
+	pub time: libc_sys::timeval,
+	pub ty: InputEventType,
+	pub code: u16,
+	pub value: i32,
 }
 
 impl std::fmt::Debug for InputEvent {
@@ -292,55 +292,55 @@ impl InputDevice {
 	///Check what the time is since the start of the application in seconds
 	fn time_now(&self) -> f64 {
 		let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_secs_f64()
+		(time_now.duration_since(self.time_start)).as_secs_f64()
 	}
 
 	///Read one InputEvent from the event file
 	fn read_input_event(&mut self) -> Result<InputEvent, ()> {
-        let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
-        loop {
-            match self.fd.read_exact(&mut buf) { //read exact to get rid of the length check that was here
-                Ok(()) => {
-                    let buf: InputEvent = unsafe {std::mem::transmute(buf)};
-                    return Ok(buf)
-                },
-                Err(err) => {
-                    match err.kind() {
-                        std::io::ErrorKind::UnexpectedEof => {
-                            continue;
-                        },
-                        _ => return Err(())
+		let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
+		loop {
+			match self.fd.read_exact(&mut buf) { //read exact to get rid of the length check that was here
+				Ok(()) => {
+					let buf: InputEvent = unsafe {std::mem::transmute(buf)};
+					return Ok(buf)
+				},
+				Err(err) => {
+					match err.kind() {
+						std::io::ErrorKind::UnexpectedEof => {
+							continue;
+						},
+						_ => return Err(())
 
-                    }
-                }
-            }
-        }
-    }
+					}
+				}
+			}
+		}
+	}
 
 	///Process a group of InputEvents ending in an EV_SYN:SYN_REPORT
 	fn process_event_group(&mut self, evts: Vec<InputEvent>) -> Vec<DirectEvent> {
 		let time = self.time_now(); //Cant use the event timeval_t unfortunately because it seems to use system time, while rust Instant seems to use time since boot.
 		let mut dir_evts = Vec::new();
 		for evt in evts {
-            match evt.ty {
-                InputEventType::EV_REL => { // relative input
-                    self.process_rel_event(evt, &mut dir_evts, time);
-                },
-                InputEventType::EV_ABS => { // absolute input
-                    self.process_abs_event(evt, &mut dir_evts, time);
-                },
-                InputEventType::EV_KEY => { // key press
-                    self.process_key_event(evt, &mut dir_evts, time);
-                },
+			match evt.ty {
+				InputEventType::EV_REL => { // relative input
+					self.process_rel_event(evt, &mut dir_evts, time);
+				},
+				InputEventType::EV_ABS => { // absolute input
+					self.process_abs_event(evt, &mut dir_evts, time);
+				},
+				InputEventType::EV_KEY => { // key press
+					self.process_key_event(evt, &mut dir_evts, time);
+				},
 				InputEventType::EV_LED => { // led event
 					self.process_led_event(evt);
 				},
 				InputEventType::EV_SYN => {
 					self.process_syn_event(evt, &mut dir_evts, time);
 				},
-                    _ => ()
-            };
-        };
+				_ => ()
+			};
+		};
 		dir_evts
 	}
 
@@ -398,50 +398,50 @@ impl InputDevice {
 	}
 
 	///Process a relative input event
-    fn process_rel_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
-        let code: EvRelCodes = EvRelCodes(evt.code);
-        match code {
-            EvRelCodes::REL_X => {
+	fn process_rel_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
+		let code: EvRelCodes = EvRelCodes(evt.code);
+		match code {
+			EvRelCodes::REL_X => {
 				let mut abs = self.abs.lock().unwrap();
-                abs.x += evt.value as f64;
-                if abs.x < 0.0{ abs.x = 0.0}
-                if abs.x > self.window.x{ abs.x = self.window.x}
-                
-            },
-            EvRelCodes::REL_Y => {
-            	let mut abs = self.abs.lock().unwrap();
+				abs.x += evt.value as f64;
+				if abs.x < 0.0{ abs.x = 0.0}
+				if abs.x > self.window.x{ abs.x = self.window.x}
+				
+			},
+			EvRelCodes::REL_Y => {
+				let mut abs = self.abs.lock().unwrap();
 				abs.y += evt.value as f64;
-                if abs.y < 0.0{ abs.y = 0.0}
-                if abs.y > self.window.y{ abs.y = self.window.y}
-            },
-            _ => return ()
-        }
-        dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
-            abs: self.abs.lock().unwrap().clone(),
-            window_id: self.window_id,
-            modifiers: self.modifiers.lock().unwrap().clone(),
-            time,
-            handled: Cell::new(Area::Empty),
-        }));
-    }
+				if abs.y < 0.0{ abs.y = 0.0}
+				if abs.y > self.window.y{ abs.y = self.window.y}
+			},
+			_ => return ()
+		}
+		dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+			abs: self.abs.lock().unwrap().clone(),
+			window_id: self.window_id,
+			modifiers: self.modifiers.lock().unwrap().clone(),
+			time,
+			handled: Cell::new(Area::Empty),
+		}));
+	}
 
 	///Process an absolute input event TODO implement touchpad using the self.is_pointer() property.
-    fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
-        let code: EvAbsCodes = EvAbsCodes(evt.code);
-        static mut FIRST_TOUCH_X: bool = false;
-        static mut FIRST_TOUCH_Y: bool = false;
-        match code {
-            EvAbsCodes::ABS_X => {
+	fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
+		let code: EvAbsCodes = EvAbsCodes(evt.code);
+		static mut FIRST_TOUCH_X: bool = false;
+		static mut FIRST_TOUCH_Y: bool = false;
+		match code {
+			EvAbsCodes::ABS_X => {
 				let mut abs = self.abs.lock().unwrap();
-                abs.x = (evt.value as f64 / 32767.0) * self.window.x;
-            },
+				abs.x = (evt.value as f64 / 32767.0) * self.window.x;
+			},
 
-            EvAbsCodes::ABS_Y => {
+			EvAbsCodes::ABS_Y => {
 				let mut abs = self.abs.lock().unwrap();
-                abs.y = (evt.value as f64 / 32767.0) * self.window.y;
-            },
+				abs.y = (evt.value as f64 / 32767.0) * self.window.y;
+			},
 
-            EvAbsCodes::ABS_MT_POSITION_X => {
+			EvAbsCodes::ABS_MT_POSITION_X => {
 				if !self.is_mt_type_b() {
 					self.num_fingers +=1; //Type A will always send X and Y, but we only need to increment num fingers once, so we do it on X
 				}
@@ -466,9 +466,9 @@ impl InputDevice {
 					});
 					unsafe { FIRST_TOUCH_Y = true }
 				}
-            },
+			},
 
-            EvAbsCodes::ABS_MT_POSITION_Y => {
+			EvAbsCodes::ABS_MT_POSITION_Y => {
 				if let Some(touch) = self.touches.get_mut(self.current_slot) {
 					touch.abs.y = evt.value as f64 / self.dpi_factor.as_ref();
 					if unsafe {!FIRST_TOUCH_Y} {
@@ -489,9 +489,9 @@ impl InputDevice {
 					});
 					unsafe { FIRST_TOUCH_X = true }
 				}
-            },
+			},
 
-            EvAbsCodes::ABS_MT_TRACKING_ID => { //new finger shows up or is removed
+			EvAbsCodes::ABS_MT_TRACKING_ID => { //new finger shows up or is removed
 				if self.is_mt_type_b() {
 					if evt.value>=0 { //new finger id is assigned
 						unsafe {
@@ -528,8 +528,8 @@ impl InputDevice {
 						self.num_fingers -= 1;
 						self.touches.get_mut(self.current_slot).expect(MTSLOTERROR).state = TouchState::Stop;
 					}
-				}	
-            },
+				}
+			},
 
 			EvAbsCodes::ABS_MT_SLOT => { //change touch index to track
 				self.current_slot = evt.value as usize;
@@ -538,214 +538,214 @@ impl InputDevice {
 			EvAbsCodes::ABS_PRESSURE => {
 				self.touches.get_mut(self.current_slot).expect(MTSLOTERROR).force = evt.value as f64;
 			}
-            _=> return ()
-        }
-        dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
-            abs: self.abs.lock().unwrap().clone(),
-            window_id: self.window_id,
-            modifiers: self.modifiers.lock().unwrap().clone(),
-            time,
-            handled: Cell::new(Area::Empty),
-        }))
-    }
+			_=> return ()
+		}
+		dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+			abs: self.abs.lock().unwrap().clone(),
+			window_id: self.window_id,
+			modifiers: self.modifiers.lock().unwrap().clone(),
+			time,
+			handled: Cell::new(Area::Empty),
+		}))
+	}
 
 	fn process_key_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
-        let code: EvKeyCodes = EvKeyCodes(evt.code);
-        let key_action: KeyAction = KeyAction(evt.value);
-        let key_code = match code {
-            EvKeyCodes::KEY_ESC => KeyCode::Escape,
-            EvKeyCodes::KEY_1 => KeyCode::Key1,
-            EvKeyCodes::KEY_2 => KeyCode::Key2,
-            EvKeyCodes::KEY_3 => KeyCode::Key3,
-            EvKeyCodes::KEY_4 => KeyCode::Key4,
-            EvKeyCodes::KEY_5 => KeyCode::Key5,
-            EvKeyCodes::KEY_6 => KeyCode::Key6,
-            EvKeyCodes::KEY_7 => KeyCode::Key7,
-            EvKeyCodes::KEY_8 => KeyCode::Key8,
-            EvKeyCodes::KEY_9 => KeyCode::Key9,
-            EvKeyCodes::KEY_0 => KeyCode::Key0,
-            EvKeyCodes::KEY_MINUS => KeyCode::Minus,
-            EvKeyCodes::KEY_EQUAL => KeyCode::Equals,
-            EvKeyCodes::KEY_BACKSPACE => KeyCode::Backspace,
-            EvKeyCodes::KEY_TAB => KeyCode::Tab,
-            EvKeyCodes::KEY_Q => KeyCode::KeyQ,
-            EvKeyCodes::KEY_W => KeyCode::KeyW,
-            EvKeyCodes::KEY_E => KeyCode::KeyE,
-            EvKeyCodes::KEY_R => KeyCode::KeyR,
-            EvKeyCodes::KEY_T => KeyCode::KeyT,
-            EvKeyCodes::KEY_Y => KeyCode::KeyY,
-            EvKeyCodes::KEY_U => KeyCode::KeyU,
-            EvKeyCodes::KEY_I => KeyCode::KeyI,
-            EvKeyCodes::KEY_O => KeyCode::KeyO,
-            EvKeyCodes::KEY_P => KeyCode::KeyP,
-            EvKeyCodes::KEY_LEFTBRACE => KeyCode::LBracket,
-            EvKeyCodes::KEY_RIGHTBRACE => KeyCode::RBracket,
-            EvKeyCodes::KEY_ENTER => KeyCode::ReturnKey,
-            EvKeyCodes::KEY_LEFTCTRL => KeyCode::Control,
-            EvKeyCodes::KEY_A => KeyCode::KeyA,
-            EvKeyCodes::KEY_S => KeyCode::KeyS,
-            EvKeyCodes::KEY_D => KeyCode::KeyD,
-            EvKeyCodes::KEY_F => KeyCode::KeyF,
-            EvKeyCodes::KEY_G => KeyCode::KeyG,
-            EvKeyCodes::KEY_H => KeyCode::KeyH,
-            EvKeyCodes::KEY_J => KeyCode::KeyJ,
-            EvKeyCodes::KEY_K => KeyCode::KeyK,
-            EvKeyCodes::KEY_L => KeyCode::KeyL,
-            EvKeyCodes::KEY_SEMICOLON => KeyCode::Semicolon,
-            EvKeyCodes::KEY_APOSTROPHE => KeyCode::Quote,
-            EvKeyCodes::KEY_GRAVE => KeyCode::Backtick,
-            EvKeyCodes::KEY_LEFTSHIFT => KeyCode::Shift,
-            EvKeyCodes::KEY_BACKSLASH => KeyCode::Backslash,
-            EvKeyCodes::KEY_Z => KeyCode::KeyZ,
-            EvKeyCodes::KEY_X => KeyCode::KeyX,
-            EvKeyCodes::KEY_C => KeyCode::KeyC,
-            EvKeyCodes::KEY_V => KeyCode::KeyV,
-            EvKeyCodes::KEY_B => KeyCode::KeyB,
-            EvKeyCodes::KEY_N => KeyCode::KeyN,
-            EvKeyCodes::KEY_M => KeyCode::KeyM,
-            EvKeyCodes::KEY_COMMA => KeyCode::Comma,
-            EvKeyCodes::KEY_DOT => KeyCode::Period,
-            EvKeyCodes::KEY_SLASH => KeyCode::Slash,
-            EvKeyCodes::KEY_RIGHTSHIFT => KeyCode::Shift,
-            EvKeyCodes::KEY_KPASTERISK => KeyCode::NumpadMultiply,
-            EvKeyCodes::KEY_LEFTALT => KeyCode::Alt,
-            EvKeyCodes::KEY_SPACE => KeyCode::Space,
-            EvKeyCodes::KEY_CAPSLOCK => KeyCode::Capslock,
-            EvKeyCodes::KEY_F1 => KeyCode::F1,
-            EvKeyCodes::KEY_F2 => KeyCode::F2,
-            EvKeyCodes::KEY_F3 => KeyCode::F3,
-            EvKeyCodes::KEY_F4 => KeyCode::F4,
-            EvKeyCodes::KEY_F5 => KeyCode::F5,
-            EvKeyCodes::KEY_F6 => KeyCode::F6,
-            EvKeyCodes::KEY_F7 => KeyCode::F7,
-            EvKeyCodes::KEY_F8 => KeyCode::F8,
-            EvKeyCodes::KEY_F9 => KeyCode::F9,
-            EvKeyCodes::KEY_F10 => KeyCode::F10,
-            EvKeyCodes::KEY_NUMLOCK => KeyCode::Numlock,
-            EvKeyCodes::KEY_SCROLLLOCK => KeyCode::ScrollLock,
-            EvKeyCodes::KEY_KP7 => KeyCode::Numpad7,
-            EvKeyCodes::KEY_KP8 => KeyCode::Numpad8,
-            EvKeyCodes::KEY_KP9 => KeyCode::Numpad9,
-            EvKeyCodes::KEY_KPMINUS => KeyCode::NumpadSubtract,
-            EvKeyCodes::KEY_KP4 => KeyCode::Numpad4,
-            EvKeyCodes::KEY_KP5 => KeyCode::Numpad5,
-            EvKeyCodes::KEY_KP6 => KeyCode::Numpad6,
-            EvKeyCodes::KEY_KPPLUS => KeyCode::NumpadAdd,
-            EvKeyCodes::KEY_KP1 => KeyCode::Numpad1,
-            EvKeyCodes::KEY_KP2 => KeyCode::Numpad2,
-            EvKeyCodes::KEY_KP3 => KeyCode::Numpad3,
-            EvKeyCodes::KEY_KP0 => KeyCode::Numpad0,
-            EvKeyCodes::KEY_KPDOT => KeyCode::NumpadDecimal,
-            EvKeyCodes::KEY_ZENKAKUHANKAKU => KeyCode::Unknown,
-            EvKeyCodes::KEY_102ND => KeyCode::Backtick, //Seems odd but this was in the code this replaced
-            EvKeyCodes::KEY_F11 => KeyCode::F11,
-            EvKeyCodes::KEY_F12 => KeyCode::F12,
-            EvKeyCodes::KEY_RO => KeyCode::NumpadDivide, //Seems odd but this was in the code this replaced
-            EvKeyCodes::KEY_KPENTER => KeyCode::NumpadEnter,
-            EvKeyCodes::KEY_RIGHTCTRL => KeyCode::Control,
-            EvKeyCodes::KEY_KPSLASH => KeyCode::NumpadDivide,
-            EvKeyCodes::KEY_SYSRQ => KeyCode::PrintScreen,
-            EvKeyCodes::KEY_RIGHTALT => KeyCode::Alt,
-            EvKeyCodes::KEY_HOME => KeyCode::Home,
-            EvKeyCodes::KEY_UP => KeyCode::ArrowUp,
-            EvKeyCodes::KEY_PAGEUP => KeyCode::PageUp,
-            EvKeyCodes::KEY_LEFT => KeyCode::ArrowLeft,
-            EvKeyCodes::KEY_RIGHT => KeyCode::ArrowRight,
-            EvKeyCodes::KEY_END => KeyCode::End,
-            EvKeyCodes::KEY_DOWN => KeyCode::ArrowDown,
-            EvKeyCodes::KEY_PAGEDOWN => KeyCode::PageDown,
-            EvKeyCodes::KEY_INSERT => KeyCode::Insert,
-            EvKeyCodes::KEY_DELETE => KeyCode::Delete,
-            EvKeyCodes::KEY_LEFTMETA => KeyCode::Logo,
-            EvKeyCodes::KEY_RIGHTMETA => KeyCode::Logo,
-            _ => KeyCode::Unknown,
-        };
-        match key_action {
-            KeyAction::KEY_DOWN => {
-                match key_code {
-                    KeyCode::Shift => self.modifiers.lock().unwrap().shift = true,
-                    KeyCode::Control => self.modifiers.lock().unwrap().control = true,
-                    KeyCode::Logo => self.modifiers.lock().unwrap().logo = true,
-                    KeyCode::Alt => self.modifiers.lock().unwrap().alt = true,
-                    _ => ()
-                };
-                match code {
-                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
-                        dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
-                            button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
-                            abs: self.abs.lock().unwrap().clone(),
-                            window_id: self.window_id,
-                            modifiers: self.modifiers.lock().unwrap().clone(),
-                            time,
-                            handled: Cell::new(Area::Empty),
-                        }))
-                    },
-                    _ => {
+		let code: EvKeyCodes = EvKeyCodes(evt.code);
+		let key_action: KeyAction = KeyAction(evt.value);
+		let key_code = match code {
+			EvKeyCodes::KEY_ESC => KeyCode::Escape,
+			EvKeyCodes::KEY_1 => KeyCode::Key1,
+			EvKeyCodes::KEY_2 => KeyCode::Key2,
+			EvKeyCodes::KEY_3 => KeyCode::Key3,
+			EvKeyCodes::KEY_4 => KeyCode::Key4,
+			EvKeyCodes::KEY_5 => KeyCode::Key5,
+			EvKeyCodes::KEY_6 => KeyCode::Key6,
+			EvKeyCodes::KEY_7 => KeyCode::Key7,
+			EvKeyCodes::KEY_8 => KeyCode::Key8,
+			EvKeyCodes::KEY_9 => KeyCode::Key9,
+			EvKeyCodes::KEY_0 => KeyCode::Key0,
+			EvKeyCodes::KEY_MINUS => KeyCode::Minus,
+			EvKeyCodes::KEY_EQUAL => KeyCode::Equals,
+			EvKeyCodes::KEY_BACKSPACE => KeyCode::Backspace,
+			EvKeyCodes::KEY_TAB => KeyCode::Tab,
+			EvKeyCodes::KEY_Q => KeyCode::KeyQ,
+			EvKeyCodes::KEY_W => KeyCode::KeyW,
+			EvKeyCodes::KEY_E => KeyCode::KeyE,
+			EvKeyCodes::KEY_R => KeyCode::KeyR,
+			EvKeyCodes::KEY_T => KeyCode::KeyT,
+			EvKeyCodes::KEY_Y => KeyCode::KeyY,
+			EvKeyCodes::KEY_U => KeyCode::KeyU,
+			EvKeyCodes::KEY_I => KeyCode::KeyI,
+			EvKeyCodes::KEY_O => KeyCode::KeyO,
+			EvKeyCodes::KEY_P => KeyCode::KeyP,
+			EvKeyCodes::KEY_LEFTBRACE => KeyCode::LBracket,
+			EvKeyCodes::KEY_RIGHTBRACE => KeyCode::RBracket,
+			EvKeyCodes::KEY_ENTER => KeyCode::ReturnKey,
+			EvKeyCodes::KEY_LEFTCTRL => KeyCode::Control,
+			EvKeyCodes::KEY_A => KeyCode::KeyA,
+			EvKeyCodes::KEY_S => KeyCode::KeyS,
+			EvKeyCodes::KEY_D => KeyCode::KeyD,
+			EvKeyCodes::KEY_F => KeyCode::KeyF,
+			EvKeyCodes::KEY_G => KeyCode::KeyG,
+			EvKeyCodes::KEY_H => KeyCode::KeyH,
+			EvKeyCodes::KEY_J => KeyCode::KeyJ,
+			EvKeyCodes::KEY_K => KeyCode::KeyK,
+			EvKeyCodes::KEY_L => KeyCode::KeyL,
+			EvKeyCodes::KEY_SEMICOLON => KeyCode::Semicolon,
+			EvKeyCodes::KEY_APOSTROPHE => KeyCode::Quote,
+			EvKeyCodes::KEY_GRAVE => KeyCode::Backtick,
+			EvKeyCodes::KEY_LEFTSHIFT => KeyCode::Shift,
+			EvKeyCodes::KEY_BACKSLASH => KeyCode::Backslash,
+			EvKeyCodes::KEY_Z => KeyCode::KeyZ,
+			EvKeyCodes::KEY_X => KeyCode::KeyX,
+			EvKeyCodes::KEY_C => KeyCode::KeyC,
+			EvKeyCodes::KEY_V => KeyCode::KeyV,
+			EvKeyCodes::KEY_B => KeyCode::KeyB,
+			EvKeyCodes::KEY_N => KeyCode::KeyN,
+			EvKeyCodes::KEY_M => KeyCode::KeyM,
+			EvKeyCodes::KEY_COMMA => KeyCode::Comma,
+			EvKeyCodes::KEY_DOT => KeyCode::Period,
+			EvKeyCodes::KEY_SLASH => KeyCode::Slash,
+			EvKeyCodes::KEY_RIGHTSHIFT => KeyCode::Shift,
+			EvKeyCodes::KEY_KPASTERISK => KeyCode::NumpadMultiply,
+			EvKeyCodes::KEY_LEFTALT => KeyCode::Alt,
+			EvKeyCodes::KEY_SPACE => KeyCode::Space,
+			EvKeyCodes::KEY_CAPSLOCK => KeyCode::Capslock,
+			EvKeyCodes::KEY_F1 => KeyCode::F1,
+			EvKeyCodes::KEY_F2 => KeyCode::F2,
+			EvKeyCodes::KEY_F3 => KeyCode::F3,
+			EvKeyCodes::KEY_F4 => KeyCode::F4,
+			EvKeyCodes::KEY_F5 => KeyCode::F5,
+			EvKeyCodes::KEY_F6 => KeyCode::F6,
+			EvKeyCodes::KEY_F7 => KeyCode::F7,
+			EvKeyCodes::KEY_F8 => KeyCode::F8,
+			EvKeyCodes::KEY_F9 => KeyCode::F9,
+			EvKeyCodes::KEY_F10 => KeyCode::F10,
+			EvKeyCodes::KEY_NUMLOCK => KeyCode::Numlock,
+			EvKeyCodes::KEY_SCROLLLOCK => KeyCode::ScrollLock,
+			EvKeyCodes::KEY_KP7 => KeyCode::Numpad7,
+			EvKeyCodes::KEY_KP8 => KeyCode::Numpad8,
+			EvKeyCodes::KEY_KP9 => KeyCode::Numpad9,
+			EvKeyCodes::KEY_KPMINUS => KeyCode::NumpadSubtract,
+			EvKeyCodes::KEY_KP4 => KeyCode::Numpad4,
+			EvKeyCodes::KEY_KP5 => KeyCode::Numpad5,
+			EvKeyCodes::KEY_KP6 => KeyCode::Numpad6,
+			EvKeyCodes::KEY_KPPLUS => KeyCode::NumpadAdd,
+			EvKeyCodes::KEY_KP1 => KeyCode::Numpad1,
+			EvKeyCodes::KEY_KP2 => KeyCode::Numpad2,
+			EvKeyCodes::KEY_KP3 => KeyCode::Numpad3,
+			EvKeyCodes::KEY_KP0 => KeyCode::Numpad0,
+			EvKeyCodes::KEY_KPDOT => KeyCode::NumpadDecimal,
+			EvKeyCodes::KEY_ZENKAKUHANKAKU => KeyCode::Unknown,
+			EvKeyCodes::KEY_102ND => KeyCode::Backtick, //Seems odd but this was in the code this replaced
+			EvKeyCodes::KEY_F11 => KeyCode::F11,
+			EvKeyCodes::KEY_F12 => KeyCode::F12,
+			EvKeyCodes::KEY_RO => KeyCode::NumpadDivide, //Seems odd but this was in the code this replaced
+			EvKeyCodes::KEY_KPENTER => KeyCode::NumpadEnter,
+			EvKeyCodes::KEY_RIGHTCTRL => KeyCode::Control,
+			EvKeyCodes::KEY_KPSLASH => KeyCode::NumpadDivide,
+			EvKeyCodes::KEY_SYSRQ => KeyCode::PrintScreen,
+			EvKeyCodes::KEY_RIGHTALT => KeyCode::Alt,
+			EvKeyCodes::KEY_HOME => KeyCode::Home,
+			EvKeyCodes::KEY_UP => KeyCode::ArrowUp,
+			EvKeyCodes::KEY_PAGEUP => KeyCode::PageUp,
+			EvKeyCodes::KEY_LEFT => KeyCode::ArrowLeft,
+			EvKeyCodes::KEY_RIGHT => KeyCode::ArrowRight,
+			EvKeyCodes::KEY_END => KeyCode::End,
+			EvKeyCodes::KEY_DOWN => KeyCode::ArrowDown,
+			EvKeyCodes::KEY_PAGEDOWN => KeyCode::PageDown,
+			EvKeyCodes::KEY_INSERT => KeyCode::Insert,
+			EvKeyCodes::KEY_DELETE => KeyCode::Delete,
+			EvKeyCodes::KEY_LEFTMETA => KeyCode::Logo,
+			EvKeyCodes::KEY_RIGHTMETA => KeyCode::Logo,
+			_ => KeyCode::Unknown,
+		};
+		match key_action {
+			KeyAction::KEY_DOWN => {
+				match key_code {
+					KeyCode::Shift => self.modifiers.lock().unwrap().shift = true,
+					KeyCode::Control => self.modifiers.lock().unwrap().control = true,
+					KeyCode::Logo => self.modifiers.lock().unwrap().logo = true,
+					KeyCode::Alt => self.modifiers.lock().unwrap().alt = true,
+					_ => ()
+				};
+				match code {
+					EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
+						dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
+							button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
+							abs: self.abs.lock().unwrap().clone(),
+							window_id: self.window_id,
+							modifiers: self.modifiers.lock().unwrap().clone(),
+							time,
+							handled: Cell::new(Area::Empty),
+						}))
+					},
+					_ => {
 						let modifiers = self.modifiers.lock().unwrap();
-                        if !modifiers.control && !modifiers.alt && !modifiers.logo {
-                            let uc = modifiers.shift;
-                            let inp = key_code.to_char_linux_direct(uc, self.caps_lock.load(std::sync::atomic::Ordering::Relaxed));
-                            if let Some(inp) = inp {
-                                dir_evts.push(DirectEvent::TextInput(TextInputEvent {
-                                    input: format!("{}", inp),
-                                    was_paste: false,
-                                    replace_last: false
-                                }));
-                            }
-                        }
-                        dir_evts.push(DirectEvent::KeyDown(KeyEvent {
-                            key_code,
-                            is_repeat: false,
-                            modifiers: modifiers.clone(),
-                            time,
-                        }))
-                    }
-                }
-                
-            },
-            KeyAction::KEY_UP => {
-                match key_code {
-                    KeyCode::Shift => self.modifiers.lock().unwrap().shift = false,
-                    KeyCode::Control => self.modifiers.lock().unwrap().control = false,
-                    KeyCode::Logo => self.modifiers.lock().unwrap().logo = false,
-                    KeyCode::Alt => self.modifiers.lock().unwrap().alt = false,
-                    _ => ()
-                };
-                match code {
-                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
-                        dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
-                            button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
-                            abs: self.abs.lock().unwrap().clone(),
-                            window_id: self.window_id,
-                            modifiers: self.modifiers.lock().unwrap().clone(),
-                            time,
-                        }))
-                    },
+						if !modifiers.control && !modifiers.alt && !modifiers.logo {
+							let uc = modifiers.shift;
+							let inp = key_code.to_char_linux_direct(uc, self.caps_lock.load(std::sync::atomic::Ordering::Relaxed));
+							if let Some(inp) = inp {
+								dir_evts.push(DirectEvent::TextInput(TextInputEvent {
+									input: format!("{}", inp),
+									was_paste: false,
+									replace_last: false
+								}));
+							}
+						}
+						dir_evts.push(DirectEvent::KeyDown(KeyEvent {
+							key_code,
+							is_repeat: false,
+							modifiers: modifiers.clone(),
+							time,
+						}))
+					}
+				}
+				
+			},
+			KeyAction::KEY_UP => {
+				match key_code {
+					KeyCode::Shift => self.modifiers.lock().unwrap().shift = false,
+					KeyCode::Control => self.modifiers.lock().unwrap().control = false,
+					KeyCode::Logo => self.modifiers.lock().unwrap().logo = false,
+					KeyCode::Alt => self.modifiers.lock().unwrap().alt = false,
+					_ => ()
+				};
+				match code {
+					EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
+						dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
+							button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
+							abs: self.abs.lock().unwrap().clone(),
+							window_id: self.window_id,
+							modifiers: self.modifiers.lock().unwrap().clone(),
+							time,
+						}))
+					},
 					EvKeyCodes::BTN_TOUCH => {
 						self.touches.get_mut(self.current_slot).unwrap().state = TouchState::Stop;
 						
 					},
-                    _ => {
-                        dir_evts.push(DirectEvent::KeyUp(KeyEvent {
-                            key_code,
-                            is_repeat: false,
-                            modifiers: self.modifiers.lock().unwrap().clone(),
-                            time
-                        }))
-                    }
-                }
-            },
-            KeyAction::KEY_REPEAT => {
-                dir_evts.push(DirectEvent::KeyDown(KeyEvent {
-                    key_code,
-                    is_repeat: false,
-                    modifiers: self.modifiers.lock().unwrap().clone(),
-                    time
-                }))
-            },
+					_ => {
+						dir_evts.push(DirectEvent::KeyUp(KeyEvent {
+							key_code,
+							is_repeat: false,
+							modifiers: self.modifiers.lock().unwrap().clone(),
+							time
+						}))
+					}
+				}
+			},
+			KeyAction::KEY_REPEAT => {
+				dir_evts.push(DirectEvent::KeyDown(KeyEvent {
+					key_code,
+					is_repeat: false,
+					modifiers: self.modifiers.lock().unwrap().clone(),
+					time
+				}))
+			},
 			_=> ()
-        }
-    }
+		}
+	}
 }
 
 ///Check the number of bytes needed to hold the number of bits
@@ -761,71 +761,71 @@ impl KeyCode {
 	fn to_char_linux_direct(&self, uc: bool, caps_lock: bool) -> Option<char> {
 		match self{
 			KeyCode::KeyA => if (uc && !caps_lock) || (!uc && caps_lock) {Some('A')} else {Some('a')},
-            KeyCode::KeyB => if (uc && !caps_lock) || (!uc && caps_lock) {Some('B')}else {Some('b')},
-            KeyCode::KeyC => if (uc && !caps_lock) || (!uc && caps_lock) {Some('C')}else {Some('c')},
-            KeyCode::KeyD => if (uc && !caps_lock) || (!uc && caps_lock) {Some('D')}else {Some('d')},
-            KeyCode::KeyE => if (uc && !caps_lock) || (!uc && caps_lock) {Some('E')}else {Some('e')},
-            KeyCode::KeyF => if (uc && !caps_lock) || (!uc && caps_lock) {Some('F')}else {Some('f')},
-            KeyCode::KeyG => if (uc && !caps_lock) || (!uc && caps_lock) {Some('G')}else {Some('g')},
-            KeyCode::KeyH => if (uc && !caps_lock) || (!uc && caps_lock) {Some('H')}else {Some('h')},
-            KeyCode::KeyI => if (uc && !caps_lock) || (!uc && caps_lock) {Some('I')}else {Some('i')},
-            KeyCode::KeyJ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('J')}else {Some('j')},
-            KeyCode::KeyK => if (uc && !caps_lock) || (!uc && caps_lock) {Some('K')}else {Some('k')},
-            KeyCode::KeyL => if (uc && !caps_lock) || (!uc && caps_lock) {Some('L')}else {Some('l')},
-            KeyCode::KeyM => if (uc && !caps_lock) || (!uc && caps_lock) {Some('M')}else {Some('m')},
-            KeyCode::KeyN => if (uc && !caps_lock) || (!uc && caps_lock) {Some('N')}else {Some('n')},
-            KeyCode::KeyO => if (uc && !caps_lock) || (!uc && caps_lock) {Some('O')}else {Some('o')},
-            KeyCode::KeyP => if (uc && !caps_lock) || (!uc && caps_lock) {Some('P')}else {Some('p')},
-            KeyCode::KeyQ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Q')}else {Some('q')},
-            KeyCode::KeyR => if (uc && !caps_lock) || (!uc && caps_lock) {Some('R')}else {Some('r')},
-            KeyCode::KeyS => if (uc && !caps_lock) || (!uc && caps_lock) {Some('S')}else {Some('s')},
-            KeyCode::KeyT => if (uc && !caps_lock) || (!uc && caps_lock) {Some('T')}else {Some('t')},
-            KeyCode::KeyU => if (uc && !caps_lock) || (!uc && caps_lock) {Some('U')}else {Some('u')},
-            KeyCode::KeyV => if (uc && !caps_lock) || (!uc && caps_lock) {Some('V')}else {Some('v')},
-            KeyCode::KeyW => if (uc && !caps_lock) || (!uc && caps_lock) {Some('W')}else {Some('w')},
-            KeyCode::KeyX => if (uc && !caps_lock) || (!uc && caps_lock) {Some('X')}else {Some('x')},
-            KeyCode::KeyY => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Y')}else {Some('y')},
-            KeyCode::KeyZ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Z')}else {Some('z')},
-            KeyCode::Key0 => if uc {Some(')')}else {Some('0')},
-            KeyCode::Key1 => if uc {Some('!')}else {Some('1')},
-            KeyCode::Key2 => if uc {Some('@')}else {Some('2')},
-            KeyCode::Key3 => if uc {Some('#')}else {Some('3')},
-            KeyCode::Key4 => if uc {Some('$')}else {Some('4')},
-            KeyCode::Key5 => if uc {Some('%')}else {Some('5')},
-            KeyCode::Key6 => if uc {Some('^')}else {Some('6')},
-            KeyCode::Key7 => if uc {Some('&')}else {Some('7')},
-            KeyCode::Key8 => if uc {Some('*')}else {Some('8')},
-            KeyCode::Key9 => if uc {Some('(')}else {Some('9')},
-            KeyCode::Equals => if uc {Some('+')}else {Some('=')},
-            KeyCode::Minus => if uc {Some('_')}else {Some('-')},
-            KeyCode::RBracket => if uc {Some('{')}else {Some('[')},
-            KeyCode::LBracket => if uc {Some('}')}else {Some(']')},
-            KeyCode::ReturnKey => Some('\n'),
-            KeyCode::Backtick => if uc {Some('~')}else {Some('`')},
-            KeyCode::Semicolon => if uc {Some(':')}else {Some(';')},
-            KeyCode::Backslash => if uc {Some('|')}else {Some('\\')},
-            KeyCode::Comma => if uc {Some('<')}else {Some(',')},
-            KeyCode::Slash => if uc {Some('?')}else {Some('/')},
-            KeyCode::Period => if uc {Some('>')}else {Some('.')},
-            KeyCode::Tab => Some('\t'),
-            KeyCode::Space => Some(' '),
-            KeyCode::NumpadDecimal => Some('.'),
-            KeyCode::NumpadMultiply => Some('*'),
-            KeyCode::NumpadAdd => Some('+'),
-            KeyCode::NumpadDivide => Some('/'),
-            KeyCode::NumpadEnter => Some('\n'),
-            KeyCode::NumpadSubtract => Some('-'),
-            KeyCode::Numpad0 => Some('0'),
-            KeyCode::Numpad1 => Some('1'),
-            KeyCode::Numpad2 => Some('2'),
-            KeyCode::Numpad3 => Some('3'),
-            KeyCode::Numpad4 => Some('4'),
-            KeyCode::Numpad5 => Some('5'),
-            KeyCode::Numpad6 => Some('6'),
-            KeyCode::Numpad7 => Some('7'),
-            KeyCode::Numpad8 => Some('8'),
-            KeyCode::Numpad9 => Some('9'),
-            _ => None
+			KeyCode::KeyB => if (uc && !caps_lock) || (!uc && caps_lock) {Some('B')}else {Some('b')},
+			KeyCode::KeyC => if (uc && !caps_lock) || (!uc && caps_lock) {Some('C')}else {Some('c')},
+			KeyCode::KeyD => if (uc && !caps_lock) || (!uc && caps_lock) {Some('D')}else {Some('d')},
+			KeyCode::KeyE => if (uc && !caps_lock) || (!uc && caps_lock) {Some('E')}else {Some('e')},
+			KeyCode::KeyF => if (uc && !caps_lock) || (!uc && caps_lock) {Some('F')}else {Some('f')},
+			KeyCode::KeyG => if (uc && !caps_lock) || (!uc && caps_lock) {Some('G')}else {Some('g')},
+			KeyCode::KeyH => if (uc && !caps_lock) || (!uc && caps_lock) {Some('H')}else {Some('h')},
+			KeyCode::KeyI => if (uc && !caps_lock) || (!uc && caps_lock) {Some('I')}else {Some('i')},
+			KeyCode::KeyJ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('J')}else {Some('j')},
+			KeyCode::KeyK => if (uc && !caps_lock) || (!uc && caps_lock) {Some('K')}else {Some('k')},
+			KeyCode::KeyL => if (uc && !caps_lock) || (!uc && caps_lock) {Some('L')}else {Some('l')},
+			KeyCode::KeyM => if (uc && !caps_lock) || (!uc && caps_lock) {Some('M')}else {Some('m')},
+			KeyCode::KeyN => if (uc && !caps_lock) || (!uc && caps_lock) {Some('N')}else {Some('n')},
+			KeyCode::KeyO => if (uc && !caps_lock) || (!uc && caps_lock) {Some('O')}else {Some('o')},
+			KeyCode::KeyP => if (uc && !caps_lock) || (!uc && caps_lock) {Some('P')}else {Some('p')},
+			KeyCode::KeyQ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Q')}else {Some('q')},
+			KeyCode::KeyR => if (uc && !caps_lock) || (!uc && caps_lock) {Some('R')}else {Some('r')},
+			KeyCode::KeyS => if (uc && !caps_lock) || (!uc && caps_lock) {Some('S')}else {Some('s')},
+			KeyCode::KeyT => if (uc && !caps_lock) || (!uc && caps_lock) {Some('T')}else {Some('t')},
+			KeyCode::KeyU => if (uc && !caps_lock) || (!uc && caps_lock) {Some('U')}else {Some('u')},
+			KeyCode::KeyV => if (uc && !caps_lock) || (!uc && caps_lock) {Some('V')}else {Some('v')},
+			KeyCode::KeyW => if (uc && !caps_lock) || (!uc && caps_lock) {Some('W')}else {Some('w')},
+			KeyCode::KeyX => if (uc && !caps_lock) || (!uc && caps_lock) {Some('X')}else {Some('x')},
+			KeyCode::KeyY => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Y')}else {Some('y')},
+			KeyCode::KeyZ => if (uc && !caps_lock) || (!uc && caps_lock) {Some('Z')}else {Some('z')},
+			KeyCode::Key0 => if uc {Some(')')}else {Some('0')},
+			KeyCode::Key1 => if uc {Some('!')}else {Some('1')},
+			KeyCode::Key2 => if uc {Some('@')}else {Some('2')},
+			KeyCode::Key3 => if uc {Some('#')}else {Some('3')},
+			KeyCode::Key4 => if uc {Some('$')}else {Some('4')},
+			KeyCode::Key5 => if uc {Some('%')}else {Some('5')},
+			KeyCode::Key6 => if uc {Some('^')}else {Some('6')},
+			KeyCode::Key7 => if uc {Some('&')}else {Some('7')},
+			KeyCode::Key8 => if uc {Some('*')}else {Some('8')},
+			KeyCode::Key9 => if uc {Some('(')}else {Some('9')},
+			KeyCode::Equals => if uc {Some('+')}else {Some('=')},
+			KeyCode::Minus => if uc {Some('_')}else {Some('-')},
+			KeyCode::RBracket => if uc {Some('{')}else {Some('[')},
+			KeyCode::LBracket => if uc {Some('}')}else {Some(']')},
+			KeyCode::ReturnKey => Some('\n'),
+			KeyCode::Backtick => if uc {Some('~')}else {Some('`')},
+			KeyCode::Semicolon => if uc {Some(':')}else {Some(';')},
+			KeyCode::Backslash => if uc {Some('|')}else {Some('\\')},
+			KeyCode::Comma => if uc {Some('<')}else {Some(',')},
+			KeyCode::Slash => if uc {Some('?')}else {Some('/')},
+			KeyCode::Period => if uc {Some('>')}else {Some('.')},
+			KeyCode::Tab => Some('\t'),
+			KeyCode::Space => Some(' '),
+			KeyCode::NumpadDecimal => Some('.'),
+			KeyCode::NumpadMultiply => Some('*'),
+			KeyCode::NumpadAdd => Some('+'),
+			KeyCode::NumpadDivide => Some('/'),
+			KeyCode::NumpadEnter => Some('\n'),
+			KeyCode::NumpadSubtract => Some('-'),
+			KeyCode::Numpad0 => Some('0'),
+			KeyCode::Numpad1 => Some('1'),
+			KeyCode::Numpad2 => Some('2'),
+			KeyCode::Numpad3 => Some('3'),
+			KeyCode::Numpad4 => Some('4'),
+			KeyCode::Numpad5 => Some('5'),
+			KeyCode::Numpad6 => Some('6'),
+			KeyCode::Numpad7 => Some('7'),
+			KeyCode::Numpad8 => Some('8'),
+			KeyCode::Numpad9 => Some('9'),
+			_ => None
 		}
 	}
 }

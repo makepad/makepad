@@ -908,8 +908,8 @@ const fn IOR(io_type: u32, nr: u32, size: u32) -> u64 {
 }
 
 extern "C" {
-    #[doc(hidden)]
-    pub fn ioctl(fd: c_int, req: c_ulong, ...) -> c_int;
+	#[doc(hidden)]
+	pub fn ioctl(fd: c_int, req: c_ulong, ...) -> c_int;
 }
 
 #[allow(non_snake_case)]
