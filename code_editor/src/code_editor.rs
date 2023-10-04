@@ -738,8 +738,14 @@ impl CodeEditor {
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
-            Hit::TextInput(TextInputEvent { ref input, .. }) if input.len() > 0 => {
+            Hit::TextInput(TextInputEvent { ref input, was_paste: false, .. }) if input.len() > 0 => {
                 session.insert(input.into());
+                self.redraw(cx);
+                keyboard_moved_cursor = true;
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
+            }
+            Hit::TextInput(TextInputEvent { ref input, was_paste: true, .. }) if input.len() > 0 => {
+                session.paste(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
