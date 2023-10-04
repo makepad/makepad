@@ -275,7 +275,6 @@ impl Session {
         let mut edit_kind = EditKind::Insert;
         let mut inject_char = None;
         let mut uninject_char = None;
-        {}
         if let Some(char) = text.to_single_char() {
             let mut selection_state = self.selection_state.borrow_mut();
             if char == ' ' {
@@ -372,6 +371,25 @@ impl Session {
                     })
                 }
             },
+        );
+    }
+
+    pub fn paste(&mut self, text: Text) {
+        self.document.edit_selections(
+            self.id,
+            EditKind::Other,
+            &self.selection_state.borrow().selections,
+            &self.settings,
+            |mut editor, position, length| {
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                editor.apply_edit(Edit {
+                    change: Change::Insert(position, text.clone()),
+                    drift: Drift::Before
+                });
+            }
         );
     }
 
