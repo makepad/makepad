@@ -1669,6 +1669,9 @@ impl<'a> DrawSelectionLayer<'a> {
     ) {
         let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
         let (x, y) = line.grid_to_normalized_position(row_index, column_index);
+        if start_x == x {
+            return;
+        }
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
