@@ -66,7 +66,7 @@ impl Decoration {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DecorationSet {
-    decorations: Vec<Decoration>
+    decorations: Vec<Decoration>,
 }
 
 impl DecorationSet {
