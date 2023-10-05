@@ -869,7 +869,8 @@ impl CodeEditor {
                         match tap_count {
                             1 => SelectionMode::Simple,
                             2 => SelectionMode::Word,
-                            _ => SelectionMode::Line,
+                            3 => SelectionMode::Line,
+                            _ => SelectionMode::All,
                         },
                     );
                     self.reset_cursor_blinker(cx);
@@ -897,7 +898,8 @@ impl CodeEditor {
                         match tap_count {
                             1 => SelectionMode::Simple,
                             2 => SelectionMode::Word,
-                            _ => SelectionMode::Line,
+                            3 => SelectionMode::Line,
+                            _ => SelectionMode::All,
                         },
                     );
                     self.reset_cursor_blinker(cx);
