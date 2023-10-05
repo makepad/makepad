@@ -193,10 +193,7 @@ impl Session {
             }),
             self.document().as_text().as_lines(),
             mode,
-            &[
-                ' ', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '=', '+',
-                '[', '{', ']', '}', '\\', '|', ';', ':', '\'', '"', '.', '<', '>', '/', '?',
-            ],
+            &self.settings.word_separators,
         );
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state.mode = mode;
@@ -217,10 +214,7 @@ impl Session {
             }),
             self.document().as_text().as_lines(),
             mode,
-            &[
-                ' ', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '=', '+',
-                '[', '{', ']', '}', '\\', '|', ';', ':', '\'', '"', '.', '<', '>', '/', '?',
-            ],
+            &self.settings.word_separators,
         );
         let mut selection_state = self.selection_state.borrow_mut();
         selection_state.mode = mode;
@@ -248,11 +242,7 @@ impl Session {
                         }),
                         self.document.as_text().as_lines(),
                         mode,
-                        &[
-                            ' ', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-',
-                            '=', '+', '[', '{', ']', '}', '\\', '|', ';', ':', '\'', '"', '.', '<',
-                            '>', '/', '?',
-                        ],
+                        &self.settings.word_separators,
                     )
                 }),
         );
@@ -1003,6 +993,8 @@ pub struct SessionLayout {
 pub enum SelectionMode {
     Simple,
     Word,
+    Line,
+    All,
 }
 
 #[derive(Debug)]
@@ -1080,6 +1072,71 @@ fn grow_selection(
                         byte_index: start_byte_index,
                     },
                 }
+            }
+        }
+        SelectionMode::Line => {
+            let position = selection.cursor.position;
+            if selection.anchor < selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: lines[position.line_index].len(),
+                        },
+                        affinity: Affinity::Before,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: selection.anchor.line_index,
+                        byte_index: 0,
+                    },
+                }
+            } else if selection.anchor > selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: 0,
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: selection.anchor.line_index,
+                        byte_index: lines[selection.anchor.line_index].len(),
+                    },
+                }
+            } else {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: lines[position.line_index].len(),
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: position.line_index,
+                        byte_index: 0,
+                    },
+                }
+            }
+        }
+        SelectionMode::All => {
+            Selection {
+                cursor: Cursor {
+                    position: Position {
+                        line_index: lines.len() - 1,
+                        byte_index: lines[lines.len() - 1].len(),
+                    },
+                    affinity: Affinity::After,
+                    preferred_column_index: None,
+                },
+                anchor: Position {
+                    line_index: 0,
+                    byte_index: 0,
+                },
             }
         }
     }
