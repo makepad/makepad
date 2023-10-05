@@ -53,6 +53,7 @@ impl Session {
                 wrap_data: (0..line_count).map(|_| None).collect(),
             }),
             selection_state: RefCell::new(SelectionState {
+                mode: SelectionMode::Simple,
                 selections: SelectionSet::new(),
                 last_added_selection_index: Some(0),
                 injected_char_stack: Vec::new(),
@@ -183,13 +184,22 @@ impl Session {
         true
     }
 
-    pub fn set_selection(&mut self, position: Position, affinity: Affinity) {
-        let selection = Selection::from(Cursor {
-            position,
-            affinity,
-            preferred_column_index: None,
-        });
+    pub fn set_selection(&mut self, position: Position, affinity: Affinity, mode: SelectionMode) {
+        let selection = grow_selection(
+            Selection::from(Cursor {
+                position,
+                affinity,
+                preferred_column_index: None,
+            }),
+            self.document().as_text().as_lines(),
+            mode,
+            &[
+                ' ', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '=', '+',
+                '[', '{', ']', '}', '\\', '|', ';', ':', '\'', '"', '.', '<', '>', '/', '?',
+            ],
+        );
         let mut selection_state = self.selection_state.borrow_mut();
+        selection_state.mode = mode;
         selection_state.selections.set_selection(selection);
         selection_state.last_added_selection_index = Some(0);
         selection_state.injected_char_stack.clear();
@@ -198,17 +208,24 @@ impl Session {
         self.document.force_new_group();
     }
 
-    pub fn add_selection(&mut self, position: Position, affinity: Affinity) {
-        let mut selection_state = self.selection_state.borrow_mut();
-        selection_state.last_added_selection_index = Some(
-            selection_state
-                .selections
-                .add_selection(Selection::from(Cursor {
-                    position,
-                    affinity,
-                    preferred_column_index: None,
-                })),
+    pub fn add_selection(&mut self, position: Position, affinity: Affinity, mode: SelectionMode) {
+        let selection = grow_selection(
+            Selection::from(Cursor {
+                position,
+                affinity,
+                preferred_column_index: None,
+            }),
+            self.document().as_text().as_lines(),
+            mode,
+            &[
+                ' ', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '=', '+',
+                '[', '{', ']', '}', '\\', '|', ';', ':', '\'', '"', '.', '<', '>', '/', '?',
+            ],
         );
+        let mut selection_state = self.selection_state.borrow_mut();
+        selection_state.mode = mode;
+        selection_state.last_added_selection_index =
+            Some(selection_state.selections.add_selection(selection));
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
@@ -218,15 +235,25 @@ impl Session {
     pub fn move_to(&mut self, position: Position, affinity: Affinity) {
         let mut selection_state = self.selection_state.borrow_mut();
         let last_added_selection_index = selection_state.last_added_selection_index.unwrap();
+        let mode = selection_state.mode;
         selection_state.last_added_selection_index = Some(
             selection_state
                 .selections
                 .update_selection(last_added_selection_index, |selection| {
-                    selection.update_cursor(|_| Cursor {
-                        position,
-                        affinity,
-                        preferred_column_index: None,
-                    })
+                    grow_selection(
+                        selection.update_cursor(|_| Cursor {
+                            position,
+                            affinity,
+                            preferred_column_index: None,
+                        }),
+                        self.document.as_text().as_lines(),
+                        mode,
+                        &[
+                            ' ', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-',
+                            '=', '+', '[', '{', ']', '}', '\\', '|', ';', ':', '\'', '"', '.', '<',
+                            '>', '/', '?',
+                        ],
+                    )
                 }),
         );
         selection_state.injected_char_stack.clear();
@@ -387,9 +414,9 @@ impl Session {
                 });
                 editor.apply_edit(Edit {
                     change: Change::Insert(position, text.clone()),
-                    drift: Drift::Before
+                    drift: Drift::Before,
                 });
-            }
+            },
         );
     }
 
@@ -972,8 +999,15 @@ pub struct SessionLayout {
     pub wrap_data: Vec<Option<WrapData>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SelectionMode {
+    Simple,
+    Word,
+}
+
 #[derive(Debug)]
 struct SelectionState {
+    mode: SelectionMode,
     selections: SelectionSet,
     last_added_selection_index: Option<usize>,
     injected_char_stack: Vec<char>,
@@ -991,6 +1025,64 @@ pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, 
         indentation.len() - len.min(indentation.len()),
         new_indentation[len..].to_owned(),
     )
+}
+
+fn grow_selection(
+    selection: Selection,
+    lines: &[String],
+    mode: SelectionMode,
+    word_separators: &[char],
+) -> Selection {
+    match mode {
+        SelectionMode::Simple => selection,
+        SelectionMode::Word => {
+            let position = selection.cursor.position;
+            let start_byte_index = lines[position.line_index]
+                .find_prev_word_boundary(position.byte_index, word_separators);
+            let end_byte_index = lines[position.line_index]
+                .find_next_word_boundary(position.byte_index, word_separators);
+            if selection.anchor < selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: end_byte_index,
+                        },
+                        affinity: Affinity::Before,
+                        preferred_column_index: None,
+                    },
+                    anchor: selection.anchor,
+                }
+            } else if selection.anchor > selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: start_byte_index,
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: selection.anchor,
+                }
+            } else {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: end_byte_index,
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: position.line_index,
+                        byte_index: start_byte_index,
+                    },
+                }
+            }
+        }
+    }
 }
 
 fn new_indentation(column_count: usize) -> String {

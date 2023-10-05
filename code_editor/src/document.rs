@@ -28,7 +28,7 @@ use {
 pub struct Document(Rc<DocumentInner>);
 
 impl Document {
-    pub fn new(text: Text, decorations:DecorationSet) -> Self {
+    pub fn new(text: Text, decorations: DecorationSet) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
             .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
