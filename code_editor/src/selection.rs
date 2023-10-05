@@ -341,7 +341,6 @@ impl Cursor {
         self
     }
 
-
     pub fn end(self, lines: &[String]) -> Self {
         if !self.is_at_end_of_line(lines) {
             let indent_len = lines[self.position.line_index].indent().unwrap_or("").len();
