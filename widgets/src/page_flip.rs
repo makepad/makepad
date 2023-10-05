@@ -14,7 +14,7 @@ pub struct PageFlip {
     #[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
-    #[live(true)] on_demand: bool,
+    #[live(false)] lazy_init: bool,
     #[live] active_page: LiveId,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[rust] pointers: ComponentMap<LiveId, LivePtr>,
@@ -31,6 +31,22 @@ impl LiveHook for PageFlip {
             self.pointers.clear();
         }
     }
+    
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        match from {
+            ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
+                if !self.lazy_init{
+                    for (page_id, ptr) in self.pointers.iter(){
+                        self.pages.get_or_insert(cx, *page_id, | cx | {
+                            WidgetRef::new_from_ptr(cx, Some(*ptr))
+                        });
+                    }
+                }
+            }
+            _=>()
+        }
+    }
+        
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
