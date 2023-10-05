@@ -5,6 +5,7 @@ workspace.members = [
     "examples/web_cam", 
     "examples/ironfish",
     "examples/simple",
+    "examples/simple_shader",
     "examples/chatgpt",
     "examples/sdxl",
     "examples/slides",
