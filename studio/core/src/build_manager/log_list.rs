@@ -28,6 +28,7 @@ live_design!{
     
     LogIcon = <PageFlip> {
         active_page: log
+        lazy_init: true,
         width: Fit,
         height: Fit,
         margin: {top: 1, left: 5, right: 5}
