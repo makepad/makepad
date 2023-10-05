@@ -56,15 +56,11 @@ impl Scent{
             <plist version="1.0">
                 <dict>
                     <key>application-identifier</key>
-                    <string>{0}</string>
+                    <string>{1}.{0}</string>
                     <key>com.apple.developer.team-identifier</key>
                     <string>{1}</string>
                     <key>get-task-allow</key>
                     <true/>
-                    <key>keychain-access-groups</key>
-                    <array>
-                        <string>{0}</string>
-                    </array>
                 </dict>
             </plist>
         "#, self.app_id, self.team_id)
