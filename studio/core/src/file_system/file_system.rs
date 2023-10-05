@@ -381,7 +381,7 @@ impl FileSystem {
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
         ) -> FileNodeId {
-            let file_node_id = file_node_id.unwrap_or(LiveId::unique().into());
+            let file_node_id = file_node_id.unwrap_or(LiveId::from_str(&node_path).into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 | edge | edge.name.clone(),

@@ -10,5 +10,4 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ApDRzhyZwrD0ObJySvlMkfrMyZI="
 
 [dependencies]
-makepad-studio-core = {path="./studio_core", version="0.5.0"}
-
+makepad-studio-core = {path="./core", version="0.5.0"}
