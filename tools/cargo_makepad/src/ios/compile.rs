@@ -374,6 +374,7 @@ pub struct SigningArgs {
     pub provisioning_profile: Option<String>,
     pub device_uuid: Option<String>,
     pub org: Option<String>,
+    pub org_id: Option<String>,
     pub app: Option<String>
 }
 
@@ -421,7 +422,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
         if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{app}")) {
             found_profiles.push(prov);
         }
-        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", org)) {
+        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", signing.org_id.clone().unwrap())) {
             found_profiles.push(prov);
         }
     }

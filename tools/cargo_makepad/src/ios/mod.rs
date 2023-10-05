@@ -28,6 +28,7 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
     let mut device_uuid = None;
     let mut app = None;
     let mut org = None;
+    let mut org_id = None;
     let mut ios_version = None;
     for i in 0..args.len() {
         let v = &args[i];
@@ -45,7 +46,10 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
         } 
         else if let Some(opt) = v.strip_prefix("--org=") {
             org = Some(opt.to_string());
-        } 
+        }
+        else if let Some(opt) = v.strip_prefix("--org-id=") {
+            org_id = Some(opt.to_string());
+        }  
         else if let Some(opt) = v.strip_prefix("--ios-version=") {
             ios_version = Some(opt.to_string());
         } 
@@ -70,6 +74,7 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
                 device_uuid, 
                 app,
                 org,
+                org_id,
                 ios_version
             },&args[1..], IosTarget::aarch64)?;
             Ok(())
@@ -85,7 +90,8 @@ pub fn handle_ios(mut args: &[String]) -> Result<(), String> {
                 provisioning_profile, 
                 device_uuid, 
                 app,
-                org
+                org,
+                org_id,
             },
             &args[1..], toolchain)?;
             Ok(())
