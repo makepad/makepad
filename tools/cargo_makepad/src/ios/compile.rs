@@ -296,6 +296,9 @@ impl ProvisionData {
                                 "ProvisionedDevices" => if stack.last().unwrap() == "string" {
                                     devices.push(data);
                                 }
+                                "com.apple.developer.team-identifier" => if stack.last().unwrap() == "string" {
+                                    team_ident = Some(data);
+                                }
                                 "TeamIdentifier" => if stack.last().unwrap() == "string" {
                                     team_ident = Some(data);
                                 }
