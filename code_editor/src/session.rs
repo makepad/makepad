@@ -993,7 +993,8 @@ pub struct SessionLayout {
 pub enum SelectionMode {
     Simple,
     Word,
-    Line
+    Line,
+    All,
 }
 
 #[derive(Debug)]
@@ -1120,6 +1121,22 @@ fn grow_selection(
                         byte_index: 0,
                     },
                 }
+            }
+        }
+        SelectionMode::All => {
+            Selection {
+                cursor: Cursor {
+                    position: Position {
+                        line_index: lines.len() - 1,
+                        byte_index: lines[lines.len() - 1].len(),
+                    },
+                    affinity: Affinity::After,
+                    preferred_column_index: None,
+                },
+                anchor: Position {
+                    line_index: 0,
+                    byte_index: 0,
+                },
             }
         }
     }
