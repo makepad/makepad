@@ -868,7 +868,8 @@ impl CodeEditor {
                         affinity,
                         match tap_count {
                             1 => SelectionMode::Simple,
-                            _ => SelectionMode::Word,
+                            2 => SelectionMode::Word,
+                            _ => SelectionMode::Line,
                         },
                     );
                     self.reset_cursor_blinker(cx);
@@ -895,7 +896,8 @@ impl CodeEditor {
                         affinity,
                         match tap_count {
                             1 => SelectionMode::Simple,
-                            _ => SelectionMode::Word,
+                            2 => SelectionMode::Word,
+                            _ => SelectionMode::Line,
                         },
                     );
                     self.reset_cursor_blinker(cx);
