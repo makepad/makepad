@@ -295,8 +295,17 @@ impl App {
     }
 }
 
+struct StudioScope{
+    ops: Vec<StudioOp>,
+    dock: DockRef,
+    file_tree: FileTreeRef,
+    log_list: PortalListRef
+    run_list: FlatListRef,
+    file_system: &'a mut FileSystem,
+    build_manager: &'a mut BuildManager,
+}
+
 impl AppMain for App {
-    
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
@@ -304,6 +313,7 @@ impl AppMain for App {
         let file_tree = self.ui.file_tree(id!(file_tree));
         let log_list = self.ui.portal_list(id!(log_list));
         let run_list = self.ui.flat_list(id!(run_list));
+        
         if let Event::Draw(event) = event {
             
             //let dt = profile_start();
@@ -359,7 +369,7 @@ impl AppMain for App {
                 }
             }
         }
-        
+                
         for action in self.file_system.handle_event(cx, event, &self.ui) {
             match action {
                 FileSystemAction::TreeLoaded => {
@@ -394,6 +404,9 @@ impl AppMain for App {
                 }
             }
         }
+        
+        let actions = self.ui.handle_widget_event(cx, event);
+        
         
         for action in self.build_manager.handle_event(cx, event, &mut self.file_system) {
             match action {
@@ -433,8 +446,6 @@ impl AppMain for App {
                 }
             }
         }
-
-        let actions = self.ui.handle_widget_event(cx, event);
         
         for (item_id, item) in run_list.items_with_actions(&actions) {
             for action in self.build_manager.handle_run_list(cx, &run_list, item_id, item, &actions) {
@@ -576,8 +587,14 @@ impl AppMain for App {
             let mut f = File::create("makepad_state.ron").expect("Unable to create file");
             f.write_all(saved.as_bytes()).expect("Unable to write data");
         }
+        
+        for op in ops{
+             match op{
+             }
+        }
     }
 }
+
 #[derive(Clone, Debug, SerRon, DeRon)]
 struct PersistentState{
     dock_items: Vec<DockItemStore>
