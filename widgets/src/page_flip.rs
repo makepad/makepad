@@ -79,13 +79,11 @@ impl PageFlip {
 
 impl Widget for PageFlip {
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(page) = self.pages.get_mut(&self.active_page) {
-            page.find_widgets(path, cached, results);
+        if let Some(page) = self.pages.get_mut(&path[0]) {
+            page.find_widgets(&path[1..], cached, results);
         }
-        for (key,page) in self.pages.iter_mut(){
-            if *key != self.active_page{
-                page.find_widgets(path, cached, results);
-            }
+        for page in self.pages.values_mut(){
+            page.find_widgets(path, cached, results);
         }
     }
     
