@@ -56,7 +56,7 @@ impl Scent{
             <plist version="1.0">
                 <dict>
                     <key>application-identifier</key>
-                    <string>{1}.{0}</string>
+                    <string>{0}</string>
                     <key>com.apple.developer.team-identifier</key>
                     <string>{1}</string>
                     <key>get-task-allow</key>
