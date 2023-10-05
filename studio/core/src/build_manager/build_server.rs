@@ -400,7 +400,8 @@ pub trait MsgSender: Send {
             else {
                 if msg.message.trim().starts_with("Some errors have detailed explanations") ||
                 msg.message.trim().starts_with("For more information about an error") ||
-                msg.message.trim().contains("warnings emitted") {
+                msg.message.trim().contains("warnings emitted") ||
+                msg.message.trim().contains("warning emitted") {
                 }
                 else {
                     self.send_bare_msg(cmd_id, LogItemLevel::Warning, msg.message);

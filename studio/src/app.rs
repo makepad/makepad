@@ -3,6 +3,7 @@ use crate::{
     makepad_platform::*,
     makepad_draw::*,
     makepad_widgets::*,
+    makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
     file_system::file_system::*,
     build_manager::{
@@ -19,6 +20,8 @@ use crate::{
         },
     }
 };
+use std::fs::File;
+use std::io::Write;
 
 live_design!{
     import makepad_draw::shader::std::*;
@@ -282,10 +285,10 @@ app_main!(App);
 
 impl App {
     fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
-        let tab_id = LiveId::unique();
         if let Some(file_id) = self.file_system.path_to_file_node_id(&path) {
+            let dock = self.ui.dock(id!(dock));            
+            let tab_id = dock.unique_tab_id(file_id.0.0);
             self.file_system.request_open_file(tab_id, file_id);
-            let dock = self.ui.dock(id!(dock));
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
             self.file_system.ensure_unique_tab_names(cx, &dock)
         }
@@ -469,7 +472,7 @@ impl AppMain for App {
                             }
                             else{
                                 // lets open the editor
-                                let tab_id = LiveId::unique();
+                                let tab_id = dock.unique_tab_id(file_id.0.0);
                                 self.file_system.request_open_file(tab_id, file_id);
                                 // lets add a file tab 'somewhere'
                                 dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
@@ -518,7 +521,8 @@ impl AppMain for App {
             if let DragItem::FilePath {path, internal_id} = &drop.items[0] {
                 if let Some(internal_id) = internal_id { // from inside the dock
                     if drop.modifiers.logo {
-                        dock.drop_clone(cx, drop.abs, *internal_id, LiveId::unique());
+                        let tab_id = dock.unique_tab_id(internal_id.0);
+                        dock.drop_clone(cx, drop.abs, *internal_id, tab_id);
                     }
                     else {
                         dock.drop_move(cx, drop.abs, *internal_id);
@@ -526,8 +530,8 @@ impl AppMain for App {
                     self.file_system.ensure_unique_tab_names(cx, &dock);
                 }
                 else { // external file, we have to create a new tab
-                    let tab_id = LiveId::unique();
                     if let Some(file_id) = self.file_system.path_to_file_node_id(&path) {
+                        let tab_id = dock.unique_tab_id(file_id.0.0);
                         self.file_system.request_open_file(tab_id, file_id);
                         dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
                         self.file_system.ensure_unique_tab_names(cx, &dock)
@@ -547,12 +551,34 @@ impl AppMain for App {
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
             // ok lets open the file
-            let tab_id = LiveId::unique();
+            let tab_id = dock.unique_tab_id(file_id.0.0);
             self.file_system.request_open_file(tab_id, file_id);
             // lets add a file tab 'somewhere'
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
             // lets scan the entire doc for duplicates
             self.file_system.ensure_unique_tab_names(cx, &dock)
         }
+        
+        if let Some(mut dock_items) = dock.needs_save(){
+            dock_items.retain(|di| {
+                if let DockItemStore::Tab{kind,..} = di{
+                    if kind.0 == live_id!(RunView){
+                        return false
+                    }
+                }
+                true 
+            });
+            let state = PersistentState{
+                dock_items
+            };
+            // alright lets save it to disk
+            let saved = state.serialize_ron();
+            let mut f = File::create("makepad_state.ron").expect("Unable to create file");
+            f.write_all(saved.as_bytes()).expect("Unable to write data");
+        }
     }
+}
+#[derive(Clone, Debug, SerRon, DeRon)]
+struct PersistentState{
+    dock_items: Vec<DockItemStore>
 }

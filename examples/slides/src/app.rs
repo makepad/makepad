@@ -210,6 +210,8 @@ impl AppMain for App {
                 _ => ()
             }
         }
-        
+        if let Some(nodes) = dock.need_save(){
+            
+        }
     }
 }
