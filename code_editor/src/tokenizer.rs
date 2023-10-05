@@ -227,10 +227,9 @@ impl InitialState {
                 "Self" | "as" | "async" | "await" | "const" | "crate" | "dyn" | "enum"
                 | "extern" | "false" | "fn" | "impl" | "in" | "let" | "mod" | "move" | "mut"
                 | "pub" | "ref" | "self" | "static" | "struct" | "super" | "trait" | "true"
-                | "type" | "unsafe" | "use" | "where" 
-                | "usize" | "isize" | "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" 
-                | "vec2" | "vec3" | "vec4" | "bool" | "f32" | "f64"  => TokenKind::OtherKeyword,
-                |
+                | "type" | "unsafe" | "use" | "where" | "usize" | "isize" | "u8" | "u16"
+                | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "vec2" | "vec3" | "vec4"
+                | "bool" | "f32" | "f64" => TokenKind::OtherKeyword,
                 _ => {
                     let mut chars = string.chars();
                     if chars.next().unwrap().is_uppercase() {
@@ -238,10 +237,9 @@ impl InitialState {
                             Some(char) if char.is_uppercase() => TokenKind::Constant,
                             _ => TokenKind::Typename,
                         }
-                    } else if cursor.peek(0) == '('{
+                    } else if cursor.peek(0) == '(' {
                         TokenKind::Function
-                    }
-                    else{
+                    } else {
                         TokenKind::Identifier
                     }
                 }
