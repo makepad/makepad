@@ -279,7 +279,7 @@ impl BuildManager {
         let _ = self.send_file_change.send(live_file_change);
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dispatch_action: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if let Event::Signal = event {
             if let Ok(mut addr) = self.recv_external_ip.try_recv() {
                 addr.set_port(self.http_port as u16);
@@ -289,7 +289,7 @@ impl BuildManager {
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            dispatch_event(cx, BuildManagerAction::RecompileStarted)
+            dispatch_action(cx, BuildManagerAction::RecompileStarted)
         }
         
         
@@ -323,7 +323,7 @@ impl BuildManager {
                                     pos + loc.length,
                                     DecorationType::Warning
                                 ));
-                                dispatch_event(cx, BuildManagerAction::RedrawFile(file_id))
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
                             }
                             LogItemLevel::Error=>{
                                 file_system.add_decoration(file_id, Decoration::new(
@@ -332,14 +332,14 @@ impl BuildManager {
                                     pos + loc.length,
                                     DecorationType::Error
                                 ));
-                                dispatch_event(cx, BuildManagerAction::RedrawFile(file_id))
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
                             }
                             _=>()
                         }
                     }
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Location(loc)));
-                        dispatch_event(cx, BuildManagerAction::RedrawLog)
+                        dispatch_action(cx, BuildManagerAction::RedrawLog)
                     }
                     //if let Some(doc) = file_system.open_documents.get(&path){
                     
@@ -359,7 +359,7 @@ impl BuildManager {
                     //log!("{:?}", bare);
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Bare(bare)));
-                        dispatch_event(cx, BuildManagerAction::RedrawLog)
+                        dispatch_action(cx, BuildManagerAction::RedrawLog)
                     }
                     //editor_state.messages.push(wrap.msg);
                 }
@@ -367,7 +367,7 @@ impl BuildManager {
                     let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
                     match msg {
                         Ok(msg) => {
-                            dispatch_event(cx, BuildManagerAction::StdinToHost {
+                            dispatch_action(cx, BuildManagerAction::StdinToHost {
                                 run_view_id: active.run_view_id_from_cmd_id(wrap.cmd_id).unwrap_or(LiveId(0)),
                                 msg
                             });
@@ -378,7 +378,7 @@ impl BuildManager {
                                     level: LogItemLevel::Log,
                                     line: line.trim().to_string()
                                 })));
-                                dispatch_event(cx, BuildManagerAction::RedrawLog)
+                                dispatch_action(cx, BuildManagerAction::RedrawLog)
                             }
                             /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                 level: BuildMsgLevel::Log,
