@@ -295,16 +295,6 @@ impl App {
     }
 }
 
-struct StudioScope{
-    ops: Vec<StudioOp>,
-    dock: DockRef,
-    file_tree: FileTreeRef,
-    log_list: PortalListRef
-    run_list: FlatListRef,
-    file_system: &'a mut FileSystem,
-    build_manager: &'a mut BuildManager,
-}
-
 impl AppMain for App {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -588,10 +578,6 @@ impl AppMain for App {
             f.write_all(saved.as_bytes()).expect("Unable to write data");
         }
         
-        for op in ops{
-             match op{
-             }
-        }
     }
 }
 
