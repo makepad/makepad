@@ -1338,7 +1338,7 @@ impl CodeEditor {
                                 ((Position {
                                     line_index,
                                     byte_index,
-                                }, Affinity::Before), true)
+                                }, Affinity::Before), false)
                             }
                     }
                     line_index += 1;
