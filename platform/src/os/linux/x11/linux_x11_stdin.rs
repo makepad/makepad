@@ -16,7 +16,7 @@ use {
         texture::{Texture, TextureDesc, TextureFormat},
         live_traits::LiveNew,
         thread::Signal,
-        os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain},
+        os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain, PollTimer},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
