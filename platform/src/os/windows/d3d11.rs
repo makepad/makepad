@@ -252,8 +252,8 @@ impl Cx {
                 
                 for i in 0..sh.mapping.textures.len() {
                     
-                    let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                        texture_id
+                    let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                        texture.texture_id()
                     } else {
                         continue;
                     };
