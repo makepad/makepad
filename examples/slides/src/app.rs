@@ -21,7 +21,6 @@ live_design!{
                         title = {text: "Hello Gosim"},
                         <SlideBody> {text: ""}
                     }
-                    
                     <SlideChapter> {
                         title = {text: "LIVE APP BUILDING\nWITH MAKEPAD"},
                         <SlideBody> {text: "Rik Arends\n"}
@@ -209,9 +208,6 @@ impl AppMain for App {
                 }
                 _ => ()
             }
-        }
-        if let Some(nodes) = dock.need_save(){
-            
         }
     }
 }
