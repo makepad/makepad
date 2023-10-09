@@ -35,10 +35,6 @@ impl StrExt for str {
         if index == 0 {
             return index;
         }
-        let prev_char = self[..index].chars().next_back().unwrap();
-        if word_separators.contains(&prev_char) {
-            return index;
-        }
         let start = index;
         self[index..]
             .char_indices()
@@ -49,10 +45,6 @@ impl StrExt for str {
 
     fn find_prev_word_boundary(&self, index: usize, word_separators: &[char]) -> usize {
         if index == self.len() {
-            return index;
-        }
-        let next_char = self[index..].chars().next().unwrap();
-        if word_separators.contains(&next_char) {
             return index;
         }
         self[..index]
