@@ -421,7 +421,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
         if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{app}")) {
             found_profiles.push(prov);
         }
-        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", signing.org_id.clone().unwrap())) {
+        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", signing.org_id.clone().expect("Please set --org-id=<ID> to assist in finding the profile\nYou can lookt it up in the files in ~/Library/MobileDevice/Provisioning Profiles/"))) {
             found_profiles.push(prov);
         }
     }
