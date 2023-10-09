@@ -241,9 +241,7 @@ impl BuildManager {
         match tgt {
             BuildTarget::RELEASE => BuildTarget::Release,
             BuildTarget::DEBUG => BuildTarget::Debug,
-            #[cfg(not(target_os="windows"))]
             BuildTarget::RELEASE_STUDIO => BuildTarget::ReleaseStudio,
-            #[cfg(not(target_os="windows"))]
             BuildTarget::DEBUG_STUDIO => BuildTarget::DebugStudio,
             BuildTarget::PROFILER => BuildTarget::Profiler,
             BuildTarget::IOS_SIM => BuildTarget::IosSim {
@@ -256,6 +254,7 @@ impl BuildManager {
             },
             BuildTarget::ANDROID => BuildTarget::Android,
             BuildTarget::WEBASSEMBLY => BuildTarget::WebAssembly,
+            BuildTarget::CHECK_ALL => BuildTarget::CheckAll,
             _ => panic!()
         }
     }

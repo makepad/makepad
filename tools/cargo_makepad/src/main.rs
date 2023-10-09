@@ -2,9 +2,11 @@ mod android;
 mod wasm;
 mod utils;
 mod ios;
+mod check;
 use android::*;
 use wasm::*;
 use ios::*;
+use check::*;
 pub use makepad_shell;
 
 fn show_help(err: &str){
@@ -97,6 +99,9 @@ fn main() {
             println!("Got error: {}", e);
         }
         "ios" => if let Err(e) = handle_ios(&args[1..]){
+            println!("Got error: {}", e);
+        }
+        "check" => if let Err(e) = handle_check(&args[1..]){
             println!("Got error: {}", e);
         }
         _=> show_help("not implemented yet")

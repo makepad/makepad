@@ -19,6 +19,7 @@ use {
         event::Event,
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
+        os::cx_stdin::{PollTimers},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
     }
