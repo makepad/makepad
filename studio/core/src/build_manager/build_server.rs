@@ -282,6 +282,9 @@ impl BuildConnection {
                         else if line.trim().starts_with("Compiling ") {
                             //msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
                         }
+                        else if line.trim().starts_with("Blocking waiting for file lock on package cache") {
+                            //msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
+                        }
                         else if line.trim().starts_with("Checking ") {
                             //msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
                         }

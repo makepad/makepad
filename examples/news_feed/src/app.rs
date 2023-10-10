@@ -392,7 +392,7 @@ impl AppMain for App {
         
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
-                log!("Test123 {}", item_id);
+                log!("hel {}", item_id);
             }
         }
     }

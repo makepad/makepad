@@ -457,11 +457,18 @@ impl BuildManager {
             // TODO fix this proper:
             let makepad_path = "./".to_string();
             let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
+            let mut root = "./".to_string();
+            for arg in std::env::args(){
+                if let Some(prefix) = arg.strip_prefix("--root="){
+                    root = prefix.to_string();
+                    break;
+                }
+            }
             let remaps = [
                 (format!("/makepad/{}/", abs_makepad_path), makepad_path.clone()),
                 (format!("/makepad/{}/", std::env::current_dir().unwrap().display()), "".to_string()),
-                ("/makepad//".to_string(), makepad_path.clone()),
-                ("/makepad/".to_string(), makepad_path.clone()),
+                ("/makepad//".to_string(), format!("{}/{}",root,makepad_path.clone())),
+                ("/makepad/".to_string(), format!("{}/{}",root,makepad_path.clone())),
                 ("/".to_string(), "".to_string())
             ];
             
