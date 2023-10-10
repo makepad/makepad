@@ -310,6 +310,9 @@ impl ProvisionData {
                 }
             }
         }
+        if team_ident.is_none(){
+            return None
+        }
         Some(ProvisionData {
             devices,
             team_ident: team_ident.unwrap(),
