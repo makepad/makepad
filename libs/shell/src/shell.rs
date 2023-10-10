@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     fs::File,
-    io::{Write,Read},
+    io::{Write},
     fs,
     io::prelude::*,
     io::BufReader,
@@ -21,7 +21,7 @@ pub fn shell(cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
         return Err(format!("Process {} in dir {:?} returned error exit code ", cmd, cwd));
     }
     Ok(())
-}
+} 
 
 pub fn shell_env(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
     let mut cmd_build = Command::new(cmd);
@@ -41,7 +41,6 @@ pub fn shell_env(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> 
     Ok(())
 }
 
-
 pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd_build = Command::new(cmd);
     
@@ -53,17 +52,42 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     for (key, value) in env {
         cmd_build.env(key, value);
     }
-    let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
-    
-    let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
-    if !r.success() {
-        let mut out = String::new();
-        let _ = child.stderr.unwrap().read_to_string(&mut out);
-        return Err(format!("Process {} in dir {:?} returned error exit code {} ", cmd, cwd, out));
+    let child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
+    let r = child.wait_with_output().map_err( | e | {
+        println!("ERR");
+        format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)
+    }) ?;
+    let stderr = std::str::from_utf8(&r.stderr).unwrap_or("could not decode utf8");
+    let stdout = std::str::from_utf8(&r.stdout).unwrap_or("could not decode utf8");
+    if !r.status.success() {
+        return Err(format!("Process {} in dir {:?} returned error exit code\n{}\n{}", cmd, cwd, stderr, stdout));
     }
-    let mut out = String::new();
-    let _ = child.stdout.unwrap().read_to_string(&mut out);
-    Ok(out)
+    Ok(format!("{}{}", stdout, stderr))
+}
+
+pub fn shell_env_cap_split(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> (String, String, bool) {
+    let mut cmd_build = Command::new(cmd);
+        
+    cmd_build.args(args)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .current_dir(cwd);
+            
+    for (key, value) in env {
+        cmd_build.env(key, value);
+    }
+    let child = cmd_build.spawn(); 
+    if let Err(e) = child{
+        return ("".to_string(),format!("Cannot start process {}", e), false);
+    }
+    let r = child.unwrap().wait_with_output();
+    if let Err(e) = r{
+        return ("".to_string(),format!("Wait with output failewd for process {}", e), false);
+    }
+    let r = r.unwrap();
+    let stderr = std::str::from_utf8(&r.stderr).unwrap_or("could not decode utf8").to_string();
+    let stdout = std::str::from_utf8(&r.stdout).unwrap_or("could not decode utf8").to_string();
+    (stdout, stderr, r.status.success())
 }
 
 pub fn shell_env_filter(start:&str, minus:Vec<String>, env: &[(&str, &str)], cwd: &Path, cmd: &str,  args: &[&str]) -> Result<(), String> {

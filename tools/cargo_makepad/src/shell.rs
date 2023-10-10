@@ -53,9 +53,11 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     for (key, value) in env {
         cmd_build.env(key, value);
     }
+     println("WAIITNG FOR {:?}",args);
     let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
-    
+    println("WAIITNG FOR {:?}",args);
     let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
+    println("done {:?}",args);
     if !r.success() {
         let mut out = String::new();
         let _ = child.stderr.unwrap().read_to_string(&mut out);
@@ -65,6 +67,54 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     let _ = child.stdout.unwrap().read_to_string(&mut out);
     Ok(out)
 }
+
+pub fn shell_env_route(env: &[(&str, &str)], cwd: &Path, cmd: &str,  args: &[&str]) -> Result<(), String> {
+
+    let mut cmd_build = Command::new(cmd);
+    
+    cmd_build.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .current_dir(cwd);
+    
+    for (key, value) in env {
+        cmd_build.env(key, value);
+    }
+    
+    let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
+    
+    let stdout = child.stdout.take().expect("stdout cannot be taken!");
+    let start = start.to_string();
+    let _stdout_thread = {
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut output = false;
+            'a: loop{
+                let mut line = String::new();
+                if let Ok(_) = reader.read_line(&mut line){
+                    if line.contains(&start){
+                        output = true;
+                    }
+                    if output{
+                        for min in &minus{
+                            if line.contains(min){
+                                continue 'a;
+                            }
+                        }
+                        println!("{}",line);
+                    }
+                }
+            }
+        })
+    };
+
+    let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
+    if !r.success() {
+        return Err(format!("Process {} in dir {:?} returned error exit code {} ", cmd, cwd, r));
+    }
+    Ok(())
+}
+
 
 pub fn shell_env_filter(start:&str, minus:Vec<String>, env: &[(&str, &str)], cwd: &Path, cmd: &str,  args: &[&str]) -> Result<(), String> {
 
@@ -112,6 +162,8 @@ pub fn shell_env_filter(start:&str, minus:Vec<String>, env: &[(&str, &str)], cwd
     }
     Ok(())
 }
+
+
 
 pub fn write_text(path: &Path, data:&str) -> Result<(), String> {
     mkdir(path.parent().unwrap()) ?;

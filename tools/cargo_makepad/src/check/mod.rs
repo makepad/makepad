@@ -31,11 +31,34 @@ pub fn handle_check(args: &[String]) -> Result<(), String> {
             rustup_toolchain_install()
         }
         "all" =>{
-            for (index,(toolchain, ty)) in TOOLCHAINS.iter().enumerate(){
-                println!("Running check [{}/{}] on {} stable {:?} ", index*2+1, TOOLCHAINS.len()*2, toolchain, ty);
-                check(toolchain, "stable", *ty, &args[1..])?;
-                println!("Running check [{}/{}] on {} nightly {:?}", index*2+2, TOOLCHAINS.len()*2, toolchain, ty);
-                check(toolchain, "nightly", *ty, &args[1..])?;
+            println!("Check all on {} builds", TOOLCHAINS.len()*2);
+            let mut handles = Vec::new();
+            let (sender, reciever) = std::sync::mpsc::channel();
+            for (index,(toolchain, ty)) in TOOLCHAINS.into_iter().enumerate(){
+                let toolchain = toolchain.to_string();
+                let args = args.to_vec();
+                let sender = sender.clone();
+                let thread = std::thread::spawn(move || {
+                    let result = check(&toolchain, "stable", ty, &args[1..], index);
+                    let _ = sender.send(("stable",toolchain.clone(),ty, result));
+                    let result = check(&toolchain, "nightly", ty, &args[1..], index);
+                    let _ = sender.send(("nightly",toolchain.clone(),ty, result));
+                });
+                handles.push(thread);
+            }
+            for handle in handles{
+                let _ = handle.join();
+            } 
+            while let Ok((branch,toolchain, ty, (stdout, stderr, success))) = reciever.try_recv(){
+                if !success{
+                    eprintln!("Errors found in build {} {} {:?}", toolchain, branch, ty)
+                }
+                if stdout.len()>0{
+                    print!("{}", stdout);
+                }
+                if stderr.len()>0{
+                    eprint!("{}", stderr)
+                }
             }
             println!("All checks completed");                
             Ok(())
@@ -46,7 +69,7 @@ pub fn handle_check(args: &[String]) -> Result<(), String> {
     }
 }
 
-fn check(toolchain:&str, branch:&str, ty:BuildTy, args: &[String]) -> Result<(), String> {
+fn check(toolchain:&str, branch:&str, ty:BuildTy, args: &[String], par:usize) -> (String, String, bool) {
     
     let toolchain = format!("--target={}", toolchain);
     
@@ -64,28 +87,28 @@ fn check(toolchain:&str, branch:&str, ty:BuildTy, args: &[String]) -> Result<(),
     for arg in args {
         args_out.push(arg);
     }
-
+    let target_dir = format!("--target-dir=target/check_all/check{}", par);
+    args_out.push(&target_dir);
     if let BuildTy::Lib = ty{
         args_out.push("--lib");
     }
     if let BuildTy::LinuxDirect= ty{
 
         if branch == "stable"{
-            shell_env(&[("MAKEPAD", "linux_direct")], &cwd, "rustup", &args_out)?;
+            return shell_env_cap_split(&[("MAKEPAD", "linux_direct")], &cwd, "rustup", &args_out);
         }
-        else if branch == "nightly"{
-            shell_env(&[("MAKEPAD", "lines,linux_direct")], &cwd, "rustup", &args_out)?;
+        else{
+            return shell_env_cap_split(&[("MAKEPAD", "lines,linux_direct")], &cwd, "rustup", &args_out);
         }
     }
     else{
         if branch == "stable"{
-            shell_env(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out)?;
+            return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
         }
-        else if branch == "nightly"{
-            shell_env(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out)?;
+        else {
+            return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
         }
     }
-    Ok(())
 }
 
 fn rustup_toolchain_install() -> Result<(), String> {
