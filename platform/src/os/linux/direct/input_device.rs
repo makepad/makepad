@@ -192,6 +192,7 @@ impl InputDevice {
 		if Self::is_bit_set(&dev.led_values, EvLedCodes::LED_CAPSL.0) {
 			dev.caps_lock.store(true, std::sync::atomic::Ordering::Relaxed);
 		}
+		
 		println!("{} connected",dev.name);
 		thread::spawn(move || {
 			loop {

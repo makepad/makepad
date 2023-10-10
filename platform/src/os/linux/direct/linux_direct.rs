@@ -39,10 +39,27 @@ pub struct DirectApp {
     dpi_factor: f64,
 }
 
+///Optional compile time default screen settings
+const MODE: Option<&str> = option_env!("DISPLAY_MODE");
+const DPI: Option<&str> = option_env!("SCALE");
+
 impl DirectApp {
     fn new() -> Self {
-        let mut mode = "1280x720-60".to_string();
-        let mut dpi_factor = 1.0;
+		let mut mode = if MODE.is_some() {
+			MODE.unwrap().to_string()
+		} else {
+			"1280x720-60".to_string()
+		};
+        let mut dpi_factor: f64 = if DPI.is_some() {
+			if let Ok(scale) = DPI.unwrap().parse() {
+				scale
+			} else {
+				println!("Manualy entered SCALE: '{}' could not be parsed as a float", DPI.unwrap());
+				1.0f64
+			}
+		} else {
+			1.0f64
+		};
         for arg in std::env::args() {
             if arg.starts_with("-mode=") {
                 mode = arg.trim_start_matches("-mode=").to_string();
@@ -53,7 +70,7 @@ impl DirectApp {
         }
         
         // ok so. lets do some drm devices things
-        let mut drm = unsafe {Drm::new(&mode)}.unwrap();
+        let mut drm = unsafe {Drm::new(&mode)}.expect("Could not get a DRM connection");
         let egl = unsafe {Egl::new(&drm)}.unwrap();
         egl.swap_buffers();
         unsafe {drm.first_mode()};
