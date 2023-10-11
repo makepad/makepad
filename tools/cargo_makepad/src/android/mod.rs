@@ -47,7 +47,7 @@ impl AndroidTarget {
     fn unwind_dir(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64",
-            Self::x86_64 => "i386",
+            Self::x86_64 => "x86_64",
             Self::armv7 => "arm",
             Self::i686 => "i386",
         }
