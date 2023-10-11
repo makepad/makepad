@@ -272,12 +272,11 @@ impl BuildConnection {
                                 //eprintln!("GOT ERROR {:?}", err);
                                 msg_sender.send_stdin_to_host_msg(cmd_id, line);
                             }
-                        }
+                        }                        
                     }
                     ChildStdIO::StdErr(line) => {
-                        // attempt to clean up stderr of cargo
                         if line.trim().starts_with("Running ") {
-                            msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
+                        // attg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
                         }
                         else if line.trim().starts_with("Compiling ") {
                             //msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
