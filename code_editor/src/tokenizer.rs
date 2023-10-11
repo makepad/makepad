@@ -434,7 +434,7 @@ impl DoubleQuotedStringTailState {
                         TokenKind::String,
                     );
                 }
-                ('\\', '"') => cursor.skip(2),
+                ('\\', '"') | ('\\', '\\') => cursor.skip(2),
                 _ => cursor.skip(1),
             }
         }
