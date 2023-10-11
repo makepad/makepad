@@ -224,10 +224,10 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
             for target in targets{
                 let sys_dir = target.sys_dir();
                 let clang = target.clang();
-                
+                let unwind_dir = target.unwind_dir();
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                let UNWIND_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/lib64/clang/14.0.7/lib/linux/aarch64"); 
+                let UNWIND_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
                 
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), false),
@@ -331,9 +331,10 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
             for target in targets{
                 let sys_dir = target.sys_dir();
                 let clang = target.clang();
+                let unwind_dir = target.unwind_dir();
                 let SYS_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                let UNWIND_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/aarch64"); 
+                let UNWIND_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
                     (copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
@@ -411,9 +412,10 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
             for target in targets{
                 let sys_dir = target.sys_dir();
                 let clang = target.clang();
+                let unwind_dir = target.unwind_dir();
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                let UNWIND_IN = &format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/aarch64"); 
+                let UNWIND_IN = &format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
                     (copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
