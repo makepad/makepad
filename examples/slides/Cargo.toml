@@ -6,6 +6,7 @@ edition = "2021"
 description = "Makepad slide example"
 license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "_Cje-i05FmRoF8Bp-FtTHnJ3-fA="
+metadata.makepad-check-platform = "desktop"
 
 [dependencies]
 makepad-studio-core = { path = "../../studio/core", version = "0.5.0" }

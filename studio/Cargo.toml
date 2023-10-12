@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ApDRzhyZwrD0ObJySvlMkfrMyZI="
+metadata.makepad-check-platform = "desktop"
 
 [dependencies]
 makepad-studio-core = {path="./core", version="0.5.0"}
