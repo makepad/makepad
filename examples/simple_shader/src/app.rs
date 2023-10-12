@@ -1,5 +1,12 @@
 use makepad_widgets::*;
 
+/*
+TODO:
+    * [ ] properly center and aspect-adjust the shader coordinate system
+    * [ ] figure out how to make the for loop work
+    * [ ] clean comments
+ */
+
 // The live_design macro generates a function that registers a DSL code block with the global
 // context object (`Cx`).
 //
@@ -11,6 +18,9 @@ use makepad_widgets::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
+    import makepad_draw::shader::std::*;
+    //import crate::my_widget::MyWidget;
+    import makepad_example_simple_shader::my_widget::MyWidget;
     
     // The `{{App}}` syntax is used to inherit a DSL object from a Rust struct. This tells the
     // Makepad runtime that our DSL object corresponds to a Rust struct named `App`. Whenever an
@@ -27,8 +37,6 @@ live_design!{
             height: Fill
             
             draw_bg: {
-                
-                
                 // The `fn pixel(self) -> vec4` syntax is used to define a property named `pixel`,
                 // the value of which is a shader. We use our own custom DSL to define shaders. It's
                 // syntax is *mostly* compatible with GLSL, although there are some differences as
@@ -37,7 +45,7 @@ live_design!{
                     // Within a shader, the `self.pos` syntax is used to access the `pos` varying.
                     // this is a clipped version of geom_pos that ranges from 0,0..1,1 top-left..bottom-right 
                     // over the quad
-                    return mix(#7, #3, self.pos.y);
+                    return mix(#7,#4,self.pos.x + self.pos.y);
                 }
             }
             
@@ -69,30 +77,72 @@ live_design!{
                  
                 flow: Down,
                 spacing: 20,
+                padding: 30,
                 align: {
                     x: 0.5,
                     y: 0.5
                 },
-                button1 = <Button> {
-                    draw_icon:{
-                        //svg_file: dep("crate://self/resources/Icon_Redo.svg")
-                        svg_path:"M7399.39,1614.16C7357.53,1615.77 7324.04,1650.26 7324.04,1692.51C7324.04,1702.28 7316.11,1710.22 7306.33,1710.22C7296.56,1710.22 7288.62,1702.28 7288.62,1692.51C7288.62,1630.8 7337.85,1580.49 7399.14,1578.74L7389.04,1569.44C7381,1562.04 7380.49,1549.51 7387.88,1541.47C7395.28,1533.44 7407.81,1532.92 7415.85,1540.32L7461.76,1582.58C7465.88,1586.37 7468.2,1591.73 7468.15,1597.32C7468.1,1602.91 7465.68,1608.23 7461.5,1611.94L7415.59,1652.71C7407.42,1659.97 7394.9,1659.23 7387.65,1651.06C7380.39,1642.89 7381.14,1630.37 7389.3,1623.12L7399.39,1614.16Z"
-                        //path:"M0,0 L20.0,0.0 L20.0,20.0 Z"
+
+                quad = <MyWidget> {
+                    draw: {
+                        //uniform time: float
+                        fn pixel(self) -> vec4 {
+                            //let s = abs(self.pos.x * self.pos.x + self.pos.y * self.pos.y);
+                            //return vec4(Pal::iq2(7) * s ,1);
+
+                            let uv = self.pos;
+                            let uv0 = uv;
+                            let finalColor = vec3(0.0);
+                            //let t = 0.0;
+
+                            let i = 3;
+                            //for i in 0..4 {
+                                uv = fract(uv * 1.5) - 0.5;
+                                let d = length(uv) * exp(-length(uv0));
+                                let col = Pal::iq2(length(uv0) + float(i) * .4 + self.time * .4);
+                                d = sin(d*8. + self.time) / 8.;
+                                d = abs(d);
+                                d = pow(0.01 / d, 1.2);
+                                finalColor += col * d;
+                            //}
+
+                            return vec4(finalColor ,1);
+
+                            // let uv = self.pos;
+                            // let uv0 = uv;
+                            // let finalColor = vec3(0.0);
+                            // let t = 0.0;
+                            // let i = 3;
+                            //
+                            //     uv = fract(uv * 1.5) - 0.5;
+                            //     let d = length(uv) * exp(-length(uv0));
+                            //     let col = Pal::iq2(length(uv0) + float(i) * .4 + t * .4);
+                            //     d = sin(d*8. + t) / 8.;
+                            //     d = abs(d);
+                            //     d = pow(0.01 / d, 1.2);
+                            //     finalColor += col * d;
+                            //
+                            // return vec4(finalColor ,1);
+
+                            //    var uv: vec2<f32> = 2.0 * (in.uv - vec2<f32>(0.5,0.5));
+                            //    let uv0: vec2<f32> = uv;
+                            //    var finalColor: vec3<f32> = vec3<f32>(0.0);
+                            //    let t: f32 = time.elapsed_time_s;
+                            //    var i: i32;
+                            //
+                            //    for (i = 0; i < 4; i++) {
+                            //        uv = fract(uv * 1.5) - 0.5;
+                            //        var d: f32 = length(uv) * exp(-length(uv0));
+                            //        let col: vec3<f32> = palette(length(uv0) + f32(i) *.4 + t * .4);
+                            //        d = sin(d*8. + t) / 8.;
+                            //        d = abs(d);
+                            //        d = pow(0.01 / d, 1.2);
+                            //        finalColor += col * d;
+                            //    }
+                            //
+                            //    return vec4<f32>(finalColor, 1.0);
+                        }
                     }
-                    icon_walk:{margin:{left:10}, width:16,height:Fit}
-                    text: "Click to count"
-                }
-                input1 = <TextInput> {
-                    width: 100, height: 30
-                    text: "Click to count"
-                }
-                
-                // A label to display the counter.
-                label1 = <Label> {
-                    draw_text: {
-                        color: #f
-                    },
-                    text: "Counter: 0"
                 }
             }
         }
@@ -131,6 +181,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
+        crate::my_widget::live_design(cx);
     }
 }
 
