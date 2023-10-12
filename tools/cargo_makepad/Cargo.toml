@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
+metadata.makepad-check-platform = "desktop"
 
 [dependencies]
 makepad-miniz = { path = "../../libs/miniz", version = "0.4.0" }
