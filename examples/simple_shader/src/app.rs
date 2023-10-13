@@ -2,9 +2,11 @@ use makepad_widgets::*;
 
 /*
 TODO:
-    * [ ] properly center and aspect-adjust the shader coordinate system
-    * [ ] figure out how to make the for loop work
+    * [x] properly center and aspect-adjust the shader coordinate system
+    * [x] figure out how to make the for loop work
     * [ ] clean comments
+WONTFIX:
+    * aspect ratio
  */
 
 // The live_design macro generates a function that registers a DSL code block with the global
@@ -90,13 +92,17 @@ live_design!{
                             //let s = abs(self.pos.x * self.pos.x + self.pos.y * self.pos.y);
                             //return vec4(Pal::iq2(7) * s ,1);
 
-                            let uv = self.pos;
+                            let uv = self.pos - 0.5;
+                            //let uv = (2.0 * self.pos - self.rect_size) / self.rect_size.y;
+                            //let uv = (2.0 * self.rect_pos - self.rect_size) / self.rect_size.y;
+                            //let uv = self.rect_pos * 0.1;
+                            //let uv = (2.0 * self.pos - self.rect_size) * 100;
                             let uv0 = uv;
                             let finalColor = vec3(0.0);
                             //let t = 0.0;
 
-                            let i = 3;
-                            //for i in 0..4 {
+                            let i = 0;
+                            for _i in 0..4 { // you cannot refer to _i inside the for loop
                                 uv = fract(uv * 1.5) - 0.5;
                                 let d = length(uv) * exp(-length(uv0));
                                 let col = Pal::iq2(length(uv0) + float(i) * .4 + self.time * .4);
@@ -104,7 +110,8 @@ live_design!{
                                 d = abs(d);
                                 d = pow(0.01 / d, 1.2);
                                 finalColor += col * d;
-                            //}
+                                i = i+1;
+                            }
 
                             return vec4(finalColor ,1);
 
