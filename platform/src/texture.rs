@@ -64,6 +64,8 @@ impl std::ops::IndexMut<TextureId> for CxTexturePool {
 pub enum TextureFormat {
     Default,
     ImageBGRA,
+    ImageR8,
+    ImageRG8,
     Depth32Stencil8,
     RenderBGRA,
     RenderBGRAf16,
@@ -85,11 +87,13 @@ impl TextureFormat{
          }
     }
 }
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TextureDesc {
     pub format: TextureFormat,
     pub width: Option<usize>,
     pub height: Option<usize>,
+    pub mipmapping: bool,
+    pub unpack_row_length: Option<usize>
 }
 
 impl Default for TextureDesc {
@@ -98,6 +102,8 @@ impl Default for TextureDesc {
             format: TextureFormat::Default,
             width: None,
             height: None,
+            mipmapping: true,
+            unpack_row_length: None
         }
     }
 }
@@ -157,19 +163,59 @@ impl Texture {
         cx.textures[self.texture_id()].desc.clone()
     }
     
+    pub fn swap_image_u8(&self, cx: &mut Cx, image_u8: &mut Vec<u8>) {
+        let cxtexture = &mut cx.textures[self.texture_id()];
+        match &mut cxtexture.pixel_data {
+            PixelData::U8(old_image) => {
+                std::mem::swap(old_image, image_u8);
+            },
+            PixelData::U32(_) => {
+                cxtexture.pixel_data = PixelData::U8(image_u8.clone());
+                *image_u8 = Vec::new();
+            },
+        }
+        cxtexture.update_image = true;
+    }
+    
     pub fn swap_image_u32(&self, cx: &mut Cx, image_u32: &mut Vec<u32>) {
         let cxtexture = &mut cx.textures[self.texture_id()];
-        std::mem::swap(&mut cxtexture.image_u32, image_u32);
+        match &mut cxtexture.pixel_data {
+            PixelData::U32(old_image) => {
+                std::mem::swap(old_image, image_u32);
+            },
+            PixelData::U8(_) => {
+                cxtexture.pixel_data = PixelData::U32(image_u32.clone());
+                *image_u32 = Vec::new();
+            },
+        }
         cxtexture.update_image = true;
     }
 }
 
-
 #[derive(Default)]
 pub struct CxTexture {
     pub (crate) desc: TextureDesc,
-    pub (crate) image_u32: Vec<u32>,
-    //pub(crate) _image_f32: Vec<f32>,
+    pub (crate) pixel_data: PixelData,
     pub (crate) update_image: bool,
     pub os: CxOsTexture
+}
+
+pub enum PixelData {
+    U32(Vec<u32>),
+    U8(Vec<u8>),
+}
+
+impl Default for PixelData {
+    fn default() -> Self {
+        PixelData::U32(Vec::new())
+    }
+}
+
+impl PixelData {
+    pub fn len(&self) -> usize {
+        match self {
+            PixelData::U32(v) => v.len(),
+            PixelData::U8(v) => v.len(),
+        }
+    }
 }
