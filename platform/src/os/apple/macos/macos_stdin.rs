@@ -192,6 +192,7 @@ impl Cx {
                                 format: TextureFormat::SharedBGRA(presentable_image.id),
                                 width: Some(swapchain.alloc_width as usize),
                                 height: Some(swapchain.alloc_height as usize),
+                                ..Default::default()
                             };
                             texture.set_desc(self, desc);
                             if self.textures[texture.texture_id()].os.update_from_shared_handle(

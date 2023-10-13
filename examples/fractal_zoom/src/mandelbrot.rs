@@ -152,6 +152,7 @@ impl TileCache {
                 format: TextureFormat::ImageBGRA,
                 width: Some(TILE_SIZE_X),
                 height: Some(TILE_SIZE_Y),
+                ..Default::default()
             });
             textures.push(texture);
         }

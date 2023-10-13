@@ -83,7 +83,8 @@ impl AppMain for App {
                     self.video_input[id].set_desc(cx, TextureDesc {
                         format: TextureFormat::ImageBGRA,
                         width: Some(vfb.format.width / 2),
-                        height: Some(vfb.format.height)
+                        height: Some(vfb.format.height),
+                        ..Default::default()
                     });
                     if let Some(buf) = vfb.as_vec_u32() {
                         self.video_input[id].swap_image_u32(cx, buf);

@@ -68,6 +68,7 @@ impl ImageBuffer {
                 format: TextureFormat::ImageBGRA,
                 width: Some(self.width),
                 height: Some(self.height),
+                ..Default::default()
             },
         );
         texture.swap_image_u32(cx, &mut self.data);

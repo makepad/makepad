@@ -12,7 +12,7 @@ use {
         makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
         cx::Cx,
-        texture::{TextureId, TextureDesc, TextureFormat},
+        texture::{TextureId, TextureDesc, TextureFormat, PixelData},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
@@ -190,12 +190,11 @@ impl Cx {
                         };
                         let cxtexture = &mut self.textures[texture_id];
 
-                        if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
+                        if cxtexture.update_image || cxtexture.pixel_data.len() != 0 && cxtexture.os.gl_texture.is_none(){
                             cxtexture.update_image = false;
                             cxtexture.os.update_platform_texture_image2d(
-                                cxtexture.desc.width.unwrap() as u32,
-                                cxtexture.desc.height.unwrap() as u32,
-                                &cxtexture.image_u32
+                                cxtexture.desc,
+                                &cxtexture.pixel_data
                             );
                         }
                     }
@@ -835,43 +834,66 @@ pub struct CxOsTexture {
     pub gl_renderbuffer: Option<u32>,
 }
 
-impl CxOsTexture {
-    
-    pub fn update_platform_texture_image2d(&mut self, width: u32, height: u32, image_u32: &Vec<u32>) {
-        
-        if image_u32.len() != (width * height) as usize {
-            log!("update_platform_texture_image2d with wrong buffer_u32 size! {} {} {}", image_u32.len(), width, height);
-            return;
-        }
-        
+impl CxOsTexture {    
+    pub fn update_platform_texture_image2d(&mut self, texture_params: TextureDesc, pixel_data: &PixelData) {
+        // hack to drain the error queue so we can check for our own errors at the end
+        while unsafe { gl_sys::GetError() } != 0 {}
+
         if self.gl_texture.is_none() {
             unsafe {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
                 gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
                 self.gl_texture = Some(gl_texture.assume_init());
+                assert!(self.gl_texture.unwrap() != 0, "Invalid texture handle!");
             }
         }
+
+        let (data_ptr, alignment) = match pixel_data {
+            PixelData::U8(data) => (data.as_ptr() as *const _, 1),
+            PixelData::U32(data) => (data.as_ptr() as *const _, 4),
+        };
+
+        let unpack_row_length = texture_params.unpack_row_length.unwrap_or(0);
+
+        let format = match texture_params.format {
+            TextureFormat::ImageBGRA => gl_sys::RGBA,
+            TextureFormat::ImageRG8 => gl_sys::RG,
+            TextureFormat::ImageR8 => gl_sys::R,
+            _ => gl_sys::RGBA,
+        };
+
+        let (min_filter, max_level) = match texture_params.mipmapping {
+            true => (gl_sys::LINEAR_MIPMAP_LINEAR as i32, 3),
+            false => (gl_sys::NEAREST as i32, 0),            
+        };
+
         unsafe {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);            
+            gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, alignment);
+            gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, unpack_row_length as i32);
+            
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, min_filter);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+    
+            // todo: use glTexSubImage2D instead for updates
             gl_sys::TexImage2D(
                 gl_sys::TEXTURE_2D,
                 0,
-                gl_sys::RGBA as i32,
-                width as i32,
-                height as i32,
+                format as i32, // Internal format
+                texture_params.width.unwrap() as i32,
+                texture_params.height.unwrap() as i32,
                 0,
-                gl_sys::RGBA,
+                format, // Format
                 gl_sys::UNSIGNED_BYTE,
-                image_u32.as_ptr() as *const _
+                data_ptr
             );
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, 3);
-            gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
+            
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level);
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+            gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, 0);
+            assert_eq!(gl_sys::GetError(), 0, "update_platform_texture_image2d failed with params: {:?}", texture_params);
         }
     }
     
