@@ -30,6 +30,7 @@ use {
             Texture,
             TextureFormat,
             TextureDesc,
+            PixelData,
         },
     },
     std::sync::{
@@ -214,7 +215,7 @@ impl Cx {
                         cxtexture.os.update_normal_texture(
                             metal_cx,
                             &cxtexture.desc,
-                            &cxtexture.image_u32
+                            &cxtexture.pixel_data
                         );
                     }
                     
@@ -813,7 +814,7 @@ impl CxOsTexture {
         &mut self,
         metal_cx: &MetalCx,
         desc: &TextureDesc,
-        data: &[u32],
+        pixel_data: &PixelData,
     ) {
         // we need a width/height for this one.
         if desc.width.is_none() || desc.height.is_none() {
@@ -826,9 +827,9 @@ impl CxOsTexture {
         
         match desc.format {
             TextureFormat::ImageBGRA | TextureFormat::Default => {
-                if (width * height)as usize != data.len() {
-                    if data.len() != 0 {
-                        error!("Texture buffer not correct size {}*{} != {}", width, height, data.len());
+                if (width * height)as usize != pixel_data.len() {
+                    if pixel_data.len() != 0 {
+                        error!("Texture buffer not correct size {}*{} != {}", width, height, pixel_data.len());
                     }
                     return
                 }
@@ -901,12 +902,17 @@ impl CxOsTexture {
             origin: MTLOrigin {x: 0, y: 0, z: 0},
             size: MTLSize {width: width as u64, height: height as u64, depth: 1}
         };
+
+        let (data_ptr, _alignment) = match pixel_data {
+            PixelData::U8(data) => (data.as_ptr() as *const _, 1),
+            PixelData::U32(data) => (data.as_ptr() as *const _, 4),
+        };
         
         let () = unsafe {msg_send![
             inner.texture.as_id(),
             replaceRegion: region
             mipmapLevel: 0
-            withBytes: data.as_ptr() as *const std::ffi::c_void
+            withBytes: data_ptr
             bytesPerRow: (width * std::mem::size_of::<u32>() as u64)
         ]};
     }

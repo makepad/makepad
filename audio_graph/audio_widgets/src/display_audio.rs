@@ -113,6 +113,7 @@ impl LiveHook for DisplayAudio {
             format: TextureFormat::ImageBGRA,
             width: Some(WAVE_SIZE_X),
             height: Some(WAVE_SIZE_Y),
+            ..Default::default()
         });
         let mut wave_buf = Vec::new();
         self.wave_texture.swap_image_u32(cx, &mut wave_buf);
