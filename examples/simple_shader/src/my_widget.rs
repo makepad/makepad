@@ -3,10 +3,11 @@ use {
         makepad_widgets::makepad_derive_widget::*,
         makepad_widgets::makepad_draw::*,
         makepad_widgets::widget::*,
-        makepad_widgets::*,
     }
 };
 
+// the "MyWidget" on the *left* hand side of the below is the name we will refer to the
+// widget in the app's live_design block
 live_design!{
     MyWidget = {{MyWidget}} {}
 }
@@ -65,20 +66,17 @@ impl Widget for MyWidget{
 
 impl MyWidget {
 
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, MyWidgetAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, MyWidgetAction)) {
         if let Some(ne) = self.next_frame.is_event(event) {
-            // animate color cycle
+            // update time to use for animation
             self.time = (ne.time * 0.001).fract() as f32;
+            // force updates, so that we can animate in the absence of user-generated events
             self.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        //dbg!(self.draw.geometry.x1);
-        //dbg!(self.draw.geometry.y1);
-        //dbg!(self.draw.geometry.x2);
-        //dbg!(self.draw.geometry.y2);
         self.draw.begin(cx, walk, self.layout);
         self.draw.end(cx);
     }
