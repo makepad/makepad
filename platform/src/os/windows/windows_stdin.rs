@@ -175,6 +175,7 @@ impl Cx {
                             format: TextureFormat::SharedBGRA(pi.id),
                             width: Some(new_swapchain.alloc_width as usize),
                             height: Some(new_swapchain.alloc_height as usize),
+                            ..Default::default()
                         };
                         texture.set_desc(self, desc);
                         self.textures[texture.texture_id()]

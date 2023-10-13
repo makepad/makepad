@@ -1,21 +1,14 @@
-use {
-    crate::{
-        makepad_error_log::*,
-        makepad_shader_compiler::{
-            generate_glsl,
-        },
-        makepad_wasm_bridge::*,
-        makepad_math::*,
-        os::{
-            web::{
-                from_wasm::*
-            }
-        },
-        draw_vars::DRAW_CALL_TEXTURE_SLOTS,
-        cx::Cx,
-        draw_list::DrawListId,
-        pass::{PassId, PassClearColor, PassClearDepth},
-    },
+use crate::{
+    makepad_error_log::*,
+    makepad_shader_compiler::generate_glsl,
+    makepad_wasm_bridge::*,
+    makepad_math::*,
+    os::web::from_wasm::*,
+    draw_vars::DRAW_CALL_TEXTURE_SLOTS,
+    cx::Cx,
+    draw_list::DrawListId,
+    pass::{PassId, PassClearColor, PassClearDepth},
+    texture::PixelData,
 };
 
 impl Cx {
@@ -82,12 +75,18 @@ impl Cx {
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.update_image {
                         cxtexture.update_image = false;
-                        self.os.from_wasm(FromWasmAllocTextureImage2D {
-                            texture_id: texture_id.0,
-                            width: cxtexture.desc.width.unwrap(),
-                            height: cxtexture.desc.height.unwrap(),
-                            data: WasmDataU32::new(&cxtexture.image_u32)
-                        });
+
+                        match &cxtexture.pixel_data {
+                            PixelData::U32(image_u32) => {
+                                self.os.from_wasm(FromWasmAllocTextureImage2D {
+                                    texture_id: texture_id.0,
+                                    width: cxtexture.desc.width.unwrap(),
+                                    height: cxtexture.desc.height.unwrap(),
+                                    data: WasmDataU32::new(image_u32)
+                                });
+                            },
+                            _ => todo!("Support for non-u32 image data not yet implemented for webgl")
+                        }                        
                     }
                 }
                 
