@@ -272,10 +272,10 @@ public class VideoDecoder {
                 if (buffer.capacity() == size) {
                     return buffer;
                 } else {
-                    return ByteBuffer.allocate(size);
+                    return ByteBuffer.allocateDirect(size);
                 }
             } else {
-                return ByteBuffer.allocate(size);
+                return ByteBuffer.allocateDirect(size);
             }
         }
     }
