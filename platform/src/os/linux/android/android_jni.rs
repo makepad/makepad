@@ -473,31 +473,28 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
     out_bytes
 }
 
+// TODO: cache method ids
 unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sys::jobject) -> Vec<u8> {
     let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
+    let position_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, c_str("position"), c_str("()I"));
+    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, c_str("remaining"), c_str("()I"));
+    let position = (**env).CallIntMethod.unwrap()(env, byte_buffer, position_method_id) as isize;
+    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id) as usize;
 
-    // call 'remaining' method to find out how many elements are remaining between the current position and the limit
-    let method_name = CString::new("remaining").unwrap();
-    let method_sig = CString::new("()I").unwrap();
-    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
-    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id);
+    let direct_buffer_ptr = (**env).GetDirectBufferAddress.unwrap()(env, byte_buffer) as *const u8;
 
-    // call 'array()' to get the backing byte array (works only for non-direct byte buffers)
-    let method_name = CString::new("array").unwrap();
-    let method_sig = CString::new("()[B").unwrap();
-    let array_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
-    let byte_array = (**env).CallObjectMethod.unwrap()(env, byte_buffer, array_method_id);
+    let slice = std::slice::from_raw_parts(direct_buffer_ptr.offset(position), remaining);
 
-    // extract elements from byte array
-    let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
-    let mut out_bytes = Vec::new();
-    let slice = std::slice::from_raw_parts(bytes as *const u8, remaining as usize);
-    out_bytes.extend_from_slice(slice);
-
-    (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, jni_sys::JNI_ABORT);
+    let out_bytes = slice.to_vec();
 
     out_bytes
 }
+
+fn c_str(s: &str) -> *const u8 {
+    // into_raw() to prevent CString from being deallocated
+    CString::new(s).unwrap().into_raw()
+}
+
 
 pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: bool) {
     ndk_utils::call_void_method!(env, ACTIVITY, "setFullScreen", "(Z)V", fullscreen as i32);
