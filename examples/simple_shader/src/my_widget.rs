@@ -75,6 +75,10 @@ impl MyWidget {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        //dbg!(self.draw.geometry.x1);
+        //dbg!(self.draw.geometry.y1);
+        //dbg!(self.draw.geometry.x2);
+        //dbg!(self.draw.geometry.y2);
         self.draw.begin(cx, walk, self.layout);
         self.draw.end(cx);
     }
