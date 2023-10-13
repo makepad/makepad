@@ -1,12 +1,9 @@
 use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    makepad_platform::{event::video_decoding::*},
-    widget::*,
-    VideoColorFormat,
+    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_decoding::*,
+    widget::*, VideoColorFormat,
 };
 use std::{
-    collections::VecDeque,
+    ops::Range,
     sync::mpsc::channel,
     sync::{Arc, Mutex},
     thread,
@@ -27,20 +24,15 @@ live_design! {
 
 // TODO:
 
+// - Add audio playback
 // - Add support for SemiPlanar nv21, currently we assume that SemiPlanar is nv12
 // - Add function to restart playback manually when not looping.
 
 // - Optimizations:
-//      - we could offload work by moving the YUV interleaving to the GPU. however this either requires to either add support for textures as vec<u8> in makeapd
-//        or convert to vec<u32> more directly and having the GPU do the interleaving. currently since we're already iterating over the data when converting to vec<u32>,
-//        we're also packing it into YUV in way that's simple to grab in the shader.
-//      - lower memory usage by avoiding copying on frame chunk deserialization
 //      - determine frame chunk size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
 //      - we're allocating new vec and copying data from java into rust when decoding, if we need to we could have a shared memory buffer between them, but that
 //        introduces a lot of complexity.
 
-// Future:
-//  - Add audio playback
 
 #[derive(Live)]
 pub struct Video {
@@ -54,10 +46,11 @@ pub struct Video {
     #[live]
     scale: f64,
 
+    // Source and textures
     #[live]
     source: LiveDependency,
     #[rust]
-    texture: Option<Texture>,
+    textures: [Option<Texture>; 3],
 
     // Playback
     #[live(false)]
@@ -87,7 +80,9 @@ pub struct Video {
 
     // Buffering
     #[rust]
-    frames_buffer: SharedRingBuffer,
+    frames_buffer: SharedFrameBuffer,
+    #[rust]
+    tmp_recycled_vec: Vec<u8>,
 
     // Frame
     #[rust]
@@ -106,8 +101,8 @@ pub struct Video {
     decoding_receiver: ToUIReceiver<Vec<u8>>,
     #[rust]
     decoding_state: DecodingState,
-    #[rust]
-    vec_pool: SharedVecPool,
+    // #[rust]
+    // vec_pool: SharedVecPool,
     #[rust]
     available_to_fetch: bool,
 
@@ -204,14 +199,6 @@ pub enum VideoAction {
 
 impl Widget for Video {
     fn redraw(&mut self, cx: &mut Cx) {
-        if self.texture.is_none() {
-            return;
-        }
-
-        self.draw_bg
-            .draw_vars
-            .set_texture(0, self.texture.as_ref().unwrap());
-
         self.draw_bg.redraw(cx);
     }
 
@@ -257,7 +244,7 @@ impl Video {
             }
         }
 
-        if self.tick.is_event(event).is_some() {            
+        if self.tick.is_event(event).is_some() {
             self.maybe_show_preview(cx);
             self.maybe_advance_playback(cx);
 
@@ -284,11 +271,15 @@ impl Video {
         if self.decoding_state == DecodingState::NotStarted {
             match cx.get_dependency(self.source.as_str()) {
                 Ok(data) => {
-                    cx.initialize_video_decoding(self.id, data, 100);
+                    cx.initialize_video_decoding(self.id, data, 60);
                     self.decoding_state = DecodingState::Initializing;
                 }
                 Err(e) => {
-                    error!("initialize_decoding: resource not found {} {}", self.source.as_str(), e);
+                    error!(
+                        "initialize_decoding: resource not found {} {}",
+                        self.source.as_str(),
+                        e
+                    );
                 }
             }
         }
@@ -302,6 +293,17 @@ impl Video {
         self.total_duration = event.duration;
         self.color_format = event.color_format;
         self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
+
+        let is_plannar = if self.color_format == VideoColorFormat::YUV420Planar {
+            1.0
+        } else {
+            0.0
+        };
+        self.draw_bg.set_uniform(cx, id!(is_plannar), &[is_plannar]);
+        self.draw_bg
+            .set_uniform(cx, id!(video_height), &[self.video_height as f32]);
+        self.draw_bg
+            .set_uniform(cx, id!(video_width), &[self.video_width as f32]);
 
         // Debug
         // makepad_error_log::log!(
@@ -328,43 +330,26 @@ impl Video {
         });
 
         let frames_buffer = Arc::clone(&self.frames_buffer);
-        let vec_pool = Arc::clone(&self.vec_pool);
-
-        let video_width = self.video_width.clone();
-        let video_height = self.video_height.clone();
-        let color_format = self.color_format.clone();
 
         let (_new_sender, new_receiver) = channel();
         let old_receiver = std::mem::replace(&mut self.decoding_receiver.receiver, new_receiver);
 
         thread::spawn(move || loop {
-            let frame_group = old_receiver.recv().unwrap();
-            deserialize_chunk(
-                Arc::clone(&frames_buffer),
-                Arc::clone(&vec_pool),
-                &frame_group,
-                video_width,
-                video_height,
-                color_format,
-            );
+            let mut frame_group = old_receiver.recv().unwrap();
+            let mut buffer = frames_buffer.lock().unwrap();
+            buffer.append(&mut frame_group);
         });
     }
 
     fn maybe_show_preview(&mut self, cx: &mut Cx) {
-        if self.playback_state == PlaybackState::Previewing {
-            if !self.is_current_texture_preview {
-                let current_frame = { self.frames_buffer.lock().unwrap().get() };
-                match current_frame {
-                    Some(current_frame) => {
-                        self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
-                        self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
-                        self.update_texture(cx, current_frame.pixel_data);
-                        self.is_current_texture_preview = true;
-                        self.redraw(cx);
-                    }
-                    None => {}
-                }
-            }
+        if self.playback_state == PlaybackState::Previewing && !self.is_current_texture_preview {
+            let frame_metadata = self.parse_next_frame_metadata();
+            self.update_textures(cx, &frame_metadata);
+            self.is_current_texture_preview = true;
+
+            self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
+            self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
+            self.redraw(cx);
         }
     }
 
@@ -377,64 +362,157 @@ impl Video {
             };
 
             if video_time_us >= self.next_frame_ts || self.start_time.is_none() {
-                let maybe_current_frame = { self.frames_buffer.lock().unwrap().get() };
+                if self.frames_buffer.lock().unwrap().is_empty() {
+                    return;
+                }
 
-                match maybe_current_frame {
-                    Some(current_frame) => {
-                        if self.start_time.is_none() {
-                            self.start_time = Some(now);
-                            self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
-                            self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
-                        }
+                let frame_metadata = self.parse_next_frame_metadata();
+                self.update_textures(cx, &frame_metadata);
 
-                        self.update_texture(cx, current_frame.pixel_data);
-                        self.redraw(cx);
+                if self.start_time.is_none() {
+                    self.start_time = Some(now);
+                    self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
+                    self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
+                }
+                self.redraw(cx);
 
-                        // if at the last frame, loop or stop
-                        if current_frame.is_eos {
-                            self.next_frame_ts = 0;
-                            self.start_time = None;
-                            if !self.is_looping {
-                                self.draw_bg.set_uniform(cx, id!(is_last_frame), &[1.0]);
-                                self.playback_state = PlaybackState::Finished;
-                            }
-                        } else {
-                            self.next_frame_ts =
-                                current_frame.timestamp_us + self.frame_ts_interval.ceil() as u128;
-                        }
+                // if at the last frame, loop or stop
+                if frame_metadata.is_eos {
+                    self.next_frame_ts = 0;
+                    self.start_time = None;
+                    if !self.is_looping {
+                        self.draw_bg.set_uniform(cx, id!(is_last_frame), &[1.0]);
+                        self.playback_state = PlaybackState::Finished;
                     }
-                    // empty buffer, decoder is falling behind
-                    None => {}
+                } else {
+                    self.next_frame_ts =
+                        frame_metadata.timestamp + self.frame_ts_interval.ceil() as u128;
                 }
             }
         }
     }
 
-    fn update_texture(&mut self, cx: &mut Cx, pixel_data: Arc<Mutex<Vec<u32>>>) {
-        if self.texture.is_none() {
-            let texture = Texture::new(cx);
-            texture.set_desc(
+    fn parse_next_frame_metadata(&self) -> FrameMetadata {
+        let mut frame_buffer = self.frames_buffer.lock().unwrap();
+        // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | isEoS (1B) | Pixel data length (4b) | Pixel Data |
+
+        if frame_buffer.len() < 25 {
+            panic!("Insufficient data to parse frame metadata");
+        }
+
+        // might have to update for different endianness depending of the platform
+        let timestamp = u64::from_be_bytes(frame_buffer[0..8].try_into().unwrap()) as u128;
+
+        let y_stride = u32::from_be_bytes(frame_buffer[8..12].try_into().unwrap()) as usize;
+        let u_stride = u32::from_be_bytes(frame_buffer[12..16].try_into().unwrap()) as usize;
+        let v_stride = u32::from_be_bytes(frame_buffer[16..20].try_into().unwrap()) as usize;
+
+        let is_eos = frame_buffer[20] != 0;
+
+        let frame_length = u32::from_be_bytes(frame_buffer[21..25].try_into().unwrap()) as usize;
+        let frame_range = 0..frame_length;
+
+        // Drain the metadata from the buffer
+        frame_buffer.drain(0..25);
+
+        FrameMetadata {
+            timestamp,
+            y_stride,
+            u_stride,
+            v_stride,
+            frame_range,
+            is_eos,
+        }
+    }
+
+    fn update_textures(&mut self, cx: &mut Cx, frame_metadata: &FrameMetadata) {
+        let range = &frame_metadata.frame_range;
+        let y_stride = frame_metadata.y_stride;
+        let u_stride = frame_metadata.u_stride;
+        let v_stride = frame_metadata.v_stride;
+
+        self.draw_bg
+            .set_uniform(cx, id!(y_stride), &[y_stride as f32]);
+        self.draw_bg
+            .set_uniform(cx, id!(u_stride), &[u_stride as f32]);
+        self.draw_bg
+            .set_uniform(cx, id!(v_stride), &[v_stride as f32]);
+
+        match self.color_format {
+            VideoColorFormat::YUV420Planar => {
+                // y
+                let y_plane_range = range.start..range.start + y_stride * self.video_height;
+                self.drain_frame_buffer(y_plane_range);
+                self.update_texture(cx, 0, TextureFormat::ImageR8, y_stride);
+
+                // u
+                let u_plane_start = range.start; // + y_stride * self.video_height;
+                let u_plane_range =
+                    u_plane_start..u_plane_start + u_stride * (self.video_height / 2);
+                self.drain_frame_buffer(u_plane_range);
+                self.update_texture(cx, 1, TextureFormat::ImageR8, u_stride);
+
+                // v
+                let v_plane_start = u_plane_start; //+ u_stride * (self.video_height / 2);
+                let v_plane_range =
+                    v_plane_start..v_plane_start + v_stride * (self.video_height / 2);
+                self.drain_frame_buffer(v_plane_range);
+                self.update_texture(cx, 2, TextureFormat::ImageR8, v_stride);
+            }
+            VideoColorFormat::YUV420SemiPlanar => {
+                // y
+                let y_plane_range = range.start..range.start + y_stride * self.video_height;
+                self.drain_frame_buffer(y_plane_range);
+                self.update_texture(cx, 0, TextureFormat::ImageR8, y_stride);
+
+                // uv
+                let uv_plane_size = y_stride * self.video_height / 2;
+                let uv_plane_range = 0..uv_plane_size;
+                self.drain_frame_buffer(uv_plane_range);
+                self.update_texture(cx, 1, TextureFormat::ImageRG8, u_stride);
+            }
+            _ => todo!(),
+        }
+    }
+
+    fn drain_frame_buffer(&mut self, range: Range<usize>) {
+        let mut frame_buffer = self.frames_buffer.lock().unwrap();
+        self.tmp_recycled_vec.clear();
+        self.tmp_recycled_vec.extend(frame_buffer.drain(range));
+    }
+
+    fn update_texture(&mut self, cx: &mut Cx, slot: usize, format: TextureFormat, stride: usize) {
+        if self.textures[slot].is_none() {
+            let new_texture = Texture::new(cx);
+            let (width, height) = match (self.color_format, slot) {
+                (VideoColorFormat::YUV420Planar, 0) | (VideoColorFormat::YUV420SemiPlanar, 0) => {
+                    (self.video_width, self.video_height)
+                }
+                (VideoColorFormat::YUV420Planar, _) => {
+                    (self.video_width / 2, self.video_height / 2)
+                }
+                (VideoColorFormat::YUV420SemiPlanar, 1) => {
+                    (self.video_width, self.video_height / 2)
+                }
+                _ => panic!("Unsupported color format or slot"),
+            };
+            new_texture.set_desc(
                 cx,
                 TextureDesc {
-                    format: TextureFormat::ImageBGRA,
-                    width: Some(self.video_width),
-                    height: Some(self.video_height),
+                    format,
+                    width: Some(width),
+                    height: Some(height),
+                    mipmapping: false,
+                    unpack_row_length: Some(stride),
                 },
             );
-            self.texture = Some(texture);
+            self.textures[slot] = Some(new_texture);
         }
 
-        let texture = self.texture.as_mut().unwrap();
+        let texture = self.textures[slot].as_mut().unwrap();
+        texture.swap_image_u8(cx, &mut self.tmp_recycled_vec);
 
-        {
-            let mut data_locked = pixel_data.lock().unwrap();
-            texture.swap_image_u32(cx, &mut *data_locked);
-        }
-
-        self.vec_pool
-            .lock()
-            .unwrap()
-            .release(pixel_data.lock().unwrap().to_vec());
+        self.draw_bg.draw_vars.set_texture(slot, &texture);
     }
 
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
@@ -464,7 +542,10 @@ impl Video {
     fn handle_errors(&mut self, event: &Event) {
         if let Event::VideoDecodingError(event) = event {
             if event.video_id == self.id {
-                error!("Error decoding video with id {} : {}", self.id.0, event.error);
+                error!(
+                    "Error decoding video with id {} : {}",
+                    self.id.0, event.error
+                );
             }
         }
     }
@@ -489,7 +570,7 @@ impl Video {
         if self.playback_state != PlaybackState::Paused {
             self.pause_time = Some(Instant::now());
             self.playback_state = PlaybackState::Paused;
-       }
+        }
     }
 
     fn resume_playback(&mut self) {
@@ -522,225 +603,26 @@ impl Video {
     }
 
     fn is_buffer_running_low(&self) -> bool {
-        self.frames_buffer.lock().unwrap().data.len() < FRAME_BUFFER_LOW_WATER_MARK
+        self.frames_buffer.lock().unwrap().len() < FRAME_BUFFER_LOW_WATER_MARK
     }
 
     fn cleanup_decoding(&mut self, cx: &mut Cx) {
         if self.decoding_state != DecodingState::NotStarted {
             cx.cleanup_video_decoding(self.id);
             self.frames_buffer.lock().unwrap().clear();
-            self.vec_pool.lock().unwrap().clear();
             self.decoding_state = DecodingState::NotStarted;
         }
     }
 }
 
-type SharedRingBuffer = Arc<Mutex<RingBuffer>>;
-#[derive(Clone)]
-struct RingBuffer {
-    data: VecDeque<VideoFrame>,
-    last_added_index: Option<usize>,
-}
-
-impl RingBuffer {
-    fn get(&mut self) -> Option<VideoFrame> {
-        self.data.pop_front()
-    }
-
-    fn push(&mut self, frame: VideoFrame) {
-        self.data.push_back(frame);
-
-        match self.last_added_index {
-            None => {
-                self.last_added_index = Some(0);
-            }
-            Some(index) => {
-                self.last_added_index = Some(index + 1);
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.data.clear();
-        self.last_added_index = None;
-    }
-}
-
-impl Default for RingBuffer {
-    fn default() -> Self {
-        Self {
-            data: VecDeque::new(),
-            last_added_index: None,
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct VideoFrame {
-    pixel_data: Arc<Mutex<Vec<u32>>>,
-    timestamp_us: u128,
-    is_eos: bool,
-}
-
-type SharedVecPool = Arc<Mutex<VecPool>>;
-#[derive(Default, Clone)]
-pub struct VecPool {
-    pool: Vec<Vec<u32>>,
-}
-
-impl VecPool {
-    pub fn acquire(&mut self, capacity: usize) -> Vec<u32> {
-        match self.pool.pop() {
-            Some(mut vec) => {
-                if vec.capacity() < capacity {
-                    vec.resize(capacity, 0);
-                }
-                vec
-            }
-            None => vec![0u32; capacity],
-        }
-    }
-
-    pub fn release(&mut self, vec: Vec<u32>) {
-        self.pool.push(vec);
-    }
-
-    pub fn clear(&mut self) {
-        self.pool.clear();
-    }
-}
-
-fn deserialize_chunk(
-    frames_buffer: SharedRingBuffer,
-    vec_pool: SharedVecPool,
-    frame_group: &[u8],
-    video_width: usize,
-    video_height: usize,
-    color_format: VideoColorFormat,
-) {
-    let mut cursor = 0;
-
-    // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | isEoS (1B) | Frame data length (4b) | Pixel Data |
-    while cursor < frame_group.len() {
-        // might have to update for different endinaess on other platforms
-        let timestamp =
-            u64::from_be_bytes(frame_group[cursor..cursor + 8].try_into().unwrap()) as u128;
-        cursor += 8;
-        let y_stride =
-            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
-        let u_stride =
-            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
-        let v_stride =
-            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
-        let is_eos = u8::from_be_bytes(frame_group[cursor..cursor + 1].try_into().unwrap()) != 0;
-        cursor += 1;
-        let frame_length =
-            u32::from_be_bytes(frame_group[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
-
-        let frame_data_end = cursor + frame_length;
-        let pixel_data = &frame_group[cursor..frame_data_end];
-
-        let mut pixel_data_u32 = vec_pool
-            .lock()
-            .unwrap()
-            .acquire(video_width as usize * video_height as usize);
-
-        match color_format {
-            VideoColorFormat::YUV420Planar => planar_to_u32(
-                pixel_data,
-                video_width,
-                video_height,
-                y_stride,
-                u_stride,
-                v_stride,
-                &mut pixel_data_u32,
-            ),
-            VideoColorFormat::YUV420SemiPlanar => semi_planar_to_u32(
-                pixel_data,
-                video_width,
-                video_height,
-                y_stride,
-                u_stride,
-                &mut pixel_data_u32,
-            ),
-            VideoColorFormat::YUV420Flexible => todo!(),
-            VideoColorFormat::Unknown => todo!(),
-        };
-
-        frames_buffer.lock().unwrap().push(VideoFrame {
-            pixel_data: Arc::new(Mutex::new(pixel_data_u32)),
-            timestamp_us: timestamp,
-            is_eos,
-        });
-
-        cursor = frame_data_end;
-    }
-}
-
-fn planar_to_u32(
-    data: &[u8],
-    width: usize,
-    height: usize,
+#[derive(Debug)]
+struct FrameMetadata {
+    timestamp: u128,
     y_stride: usize,
     u_stride: usize,
     v_stride: usize,
-    packed_data: &mut [u32],
-) {
-    let mut y_idx = 0;
-
-    let y_start = 0;
-    let u_start = y_stride * height;
-    let v_start = u_start + u_stride * (height / 2);
-
-    for row in 0..height {
-        let y_row_start = y_start + row * y_stride;
-        let u_row_start = u_start + (row / 2) * u_stride;
-        let v_row_start = v_start + (row / 2) * v_stride;
-
-        for x in 0..width {
-            let y = data[y_row_start + x];
-            let u = data[u_row_start + x / 2];
-            let v = data[v_row_start + x / 2];
-
-            // Pack Y, U, and V into u32: Y in Blue channel, U in Green, V in Red
-            packed_data[y_idx] = (v as u32) << 16 | (u as u32) << 8 | (y as u32);
-
-            y_idx += 1;
-        }
-    }
+    frame_range: Range<usize>,
+    is_eos: bool,
 }
 
-fn semi_planar_to_u32(
-    data: &[u8],
-    width: usize,
-    height: usize,
-    y_stride: usize,
-    uv_stride: usize,
-    packed_data: &mut [u32],
-) {
-    let mut y_idx = 0;
-    let uv_start = y_stride * height;
-
-    for row in 0..height {
-        let y_start = row * y_stride;
-        let uv_row_start = uv_start + (row / 2) * uv_stride;
-
-        for x in 0..width {
-            let y = data[y_start + x];
-
-            // calculate index for UV data
-            let uv_idx = uv_row_start + (x / 2) * 2;
-            let u = data[uv_idx];
-            let v = data[uv_idx + 1];
-
-            // pack Y, U, and V into u32: Y in Blue channel, U in Green, V in Red
-            packed_data[y_idx] = (v as u32) << 16 | (u as u32) << 8 | (y as u32);
-
-            y_idx += 1;
-        }
-    }
-}
+type SharedFrameBuffer = Arc<Mutex<Vec<u8>>>;

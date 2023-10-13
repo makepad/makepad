@@ -315,6 +315,7 @@ impl RunView {
                         format: TextureFormat::SharedBGRA(pi.id),
                         width: Some(swapchain.alloc_width as usize),
                         height: Some(swapchain.alloc_height as usize),
+                        ..Default::default()
                     });
                     cx.share_texture_for_presentable_image(&pi.image)
                 });

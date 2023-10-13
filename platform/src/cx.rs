@@ -35,7 +35,7 @@ use {
         window::CxWindowPool,
         draw_list::CxDrawListPool,
         pass::CxPassPool,
-        texture::{CxTexturePool,TextureDesc,TextureFormat,Texture},
+        texture::{CxTexturePool,TextureDesc,TextureFormat,Texture, PixelData},
         geometry::{
             Geometry,
             CxGeometryPool,
@@ -195,8 +195,9 @@ impl Cx {
             format: TextureFormat::ImageBGRA,
             width: Some(4),
             height: Some(4),
+            ..Default::default()
         };
-        texture.image_u32 = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        texture.pixel_data = PixelData::U32(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         texture.update_image =  true;
         
         let (executor, spawner) = executor::new_executor_and_spawner();
