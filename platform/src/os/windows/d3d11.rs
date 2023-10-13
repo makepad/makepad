@@ -17,6 +17,7 @@ use crate::{
         TextureFormat,
         TextureDesc,
         TextureId,
+        PixelData,
     },  
     windows::{
         core::{
@@ -264,12 +265,18 @@ impl Cx {
                         TextureFormat::Default | TextureFormat::ImageBGRA => {
                             if cxtexture.update_image {
                                 cxtexture.update_image = false;
-                                cxtexture.os.update_platform_texture_image_bgra(
-                                    d3d11_cx,
-                                    cxtexture.desc.width.unwrap() as u32,
-                                    cxtexture.desc.height.unwrap() as u32,
-                                    &cxtexture.image_u32,
-                                );
+
+                                match &cxtexture.pixel_data {
+                                    PixelData::U32(image_u32) => {
+                                        cxtexture.os.update_platform_texture_image_bgra(
+                                            d3d11_cx,
+                                            cxtexture.desc.width.unwrap() as u32,
+                                            cxtexture.desc.height.unwrap() as u32,
+                                            image_u32,
+                                        );
+                                    },
+                                    _ => todo!("Support for non-u32 image data not yet implemented for webgl")
+                                }  
                             }
                         },
                         TextureFormat::SharedBGRA(_) => {
