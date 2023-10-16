@@ -301,11 +301,11 @@ impl Document {
         }
     }
 
-    pub fn force_new_group(&mut self) {
+    pub fn force_new_group(&self) {
         self.0.history.borrow_mut().force_new_group()
     }
 
-    pub fn undo(&mut self, origin_id: SessionId, selections: &SelectionSet) -> bool {
+    pub fn undo(&self, origin_id: SessionId, selections: &SelectionSet) -> bool {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().undo(selections, &mut changes);
         if let Some(selections) = selections {
@@ -316,7 +316,7 @@ impl Document {
         }
     }
 
-    pub fn redo(&mut self, origin_id: SessionId, selections: &SelectionSet) -> bool {
+    pub fn redo(&self, origin_id: SessionId, selections: &SelectionSet) -> bool {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().redo(selections, &mut changes);
         if let Some(selections) = selections {
