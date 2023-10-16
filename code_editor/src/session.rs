@@ -133,7 +133,8 @@ impl Session {
             let line = layout.line(line_index);
             let indent_level = line.indent_column_count() / self.settings.tab_column_count;
             drop(layout);
-            if indent_level >= self.settings.fold_level && !fold_state.folded_lines.contains(&line_index)
+            if indent_level >= self.settings.fold_level
+                && !fold_state.folded_lines.contains(&line_index)
             {
                 self.layout.borrow_mut().fold_column[line_index] =
                     self.settings.fold_level * self.settings.tab_column_count;
@@ -1136,22 +1137,20 @@ fn grow_selection(
                 }
             }
         }
-        SelectionMode::All => {
-            Selection {
-                cursor: Cursor {
-                    position: Position {
-                        line_index: lines.len() - 1,
-                        byte_index: lines[lines.len() - 1].len(),
-                    },
-                    affinity: Affinity::After,
-                    preferred_column_index: None,
+        SelectionMode::All => Selection {
+            cursor: Cursor {
+                position: Position {
+                    line_index: lines.len() - 1,
+                    byte_index: lines[lines.len() - 1].len(),
                 },
-                anchor: Position {
-                    line_index: 0,
-                    byte_index: 0,
-                },
-            }
-        }
+                affinity: Affinity::After,
+                preferred_column_index: None,
+            },
+            anchor: Position {
+                line_index: 0,
+                byte_index: 0,
+            },
+        },
     }
 }
 

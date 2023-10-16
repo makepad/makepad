@@ -386,8 +386,7 @@ impl CodeEditor {
                         session.layout().logical_to_normalized_position(pos, aff);
                     let screen_pos = dvec2(cursor_x, cursor_y) * self.cell_size
                         - self.scroll_bars.get_scroll_pos();
-                    self.keep_cursor_in_view =
-                        KeepCursorInView::LockedCenter(screen_pos, pos, aff);
+                    self.keep_cursor_in_view = KeepCursorInView::LockedCenter(screen_pos, pos, aff);
                 }
             }
             KeepCursorInView::Locked(pos) => {
@@ -872,7 +871,7 @@ impl CodeEditor {
                             3 => SelectionMode::Line,
                             _ => SelectionMode::All,
                         }
-                    }
+                    },
                 );
                 self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
@@ -904,7 +903,7 @@ impl CodeEditor {
                             3 => SelectionMode::Line,
                             _ => SelectionMode::All,
                         }
-                    }
+                    },
                 );
                 self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
@@ -1200,24 +1199,30 @@ impl CodeEditor {
     fn pick(&self, session: &Session, position: DVec2) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
         if position.y < 0.0 {
-            return ((
-                Position {
-                    line_index: 0,
-                    byte_index: 0,
-                },
-                Affinity::Before,
-            ), false);
+            return (
+                (
+                    Position {
+                        line_index: 0,
+                        byte_index: 0,
+                    },
+                    Affinity::Before,
+                ),
+                false,
+            );
         }
         let layout = session.layout();
         if position.y > session.layout().height() {
             let lines = layout.as_text().as_lines();
-            return ((
-                Position {
-                    line_index: lines.len() - 1,
-                    byte_index: lines[lines.len() - 1].len(),
-                },
-                Affinity::After,
-            ), false);
+            return (
+                (
+                    Position {
+                        line_index: lines.len() - 1,
+                        byte_index: lines[lines.len() - 1].len(),
+                    },
+                    Affinity::After,
+                ),
+                false,
+            );
         }
         let mut line_index = layout.find_first_line_ending_after_y(position.y);
         let mut origin_y = layout.line(line_index).y();
@@ -1248,22 +1253,28 @@ impl CodeEditor {
                                     if (start_y..=end_y).contains(&position.y) {
                                         let mid_x = (start_x + end_x) / 2.0;
                                         if (start_x..=mid_x).contains(&position.x) {
-                                            return ((
-                                                Position {
-                                                    line_index,
-                                                    byte_index,
-                                                },
-                                                Affinity::After,
-                                            ), false);
+                                            return (
+                                                (
+                                                    Position {
+                                                        line_index,
+                                                        byte_index,
+                                                    },
+                                                    Affinity::After,
+                                                ),
+                                                false,
+                                            );
                                         }
                                         if (mid_x..=end_x).contains(&position.x) {
-                                            return ((
-                                                Position {
-                                                    line_index,
-                                                    byte_index: byte_index + grapheme.len(),
-                                                },
-                                                Affinity::Before,
-                                            ), false);
+                                            return (
+                                                (
+                                                    Position {
+                                                        line_index,
+                                                        byte_index: byte_index + grapheme.len(),
+                                                    },
+                                                    Affinity::Before,
+                                                ),
+                                                false,
+                                            );
                                         }
                                     }
                                     byte_index += grapheme.len();
@@ -1285,13 +1296,16 @@ impl CodeEditor {
                                 if (start_y..=end_y).contains(&position.y)
                                     && (start_x..=end_x).contains(&position.x)
                                 {
-                                    return ((
-                                        Position {
-                                            line_index,
-                                            byte_index,
-                                        },
-                                        Affinity::Before,
-                                    ), false);
+                                    return (
+                                        (
+                                            Position {
+                                                line_index,
+                                                byte_index,
+                                            },
+                                            Affinity::Before,
+                                        ),
+                                        false,
+                                    );
                                 }
                                 column_index += text.column_count();
                             }
@@ -1304,19 +1318,29 @@ impl CodeEditor {
                                 let start_y = origin_y + y;
                                 let end_y = start_y + line.scale();
                                 if (start_y..=end_y).contains(&position.y) {
-                                    return
-                                        if position.x < 0.0 {
-                                            ((Position {
-                                                line_index,
-                                                byte_index: 0,
-                                            }, Affinity::Before), true)
-                                        } else {
-                                            ((Position {
-                                                line_index,
-                                                byte_index,
-                                            }, Affinity::Before), false)
-                                        }
-                                    ;
+                                    return if position.x < 0.0 {
+                                        (
+                                            (
+                                                Position {
+                                                    line_index,
+                                                    byte_index: 0,
+                                                },
+                                                Affinity::Before,
+                                            ),
+                                            true,
+                                        )
+                                    } else {
+                                        (
+                                            (
+                                                Position {
+                                                    line_index,
+                                                    byte_index,
+                                                },
+                                                Affinity::Before,
+                                            ),
+                                            false,
+                                        )
+                                    };
                                 }
                                 column_index = line.wrap_indent_column_count();
                                 row_index += 1;
@@ -1327,19 +1351,29 @@ impl CodeEditor {
                     let start_y = origin_y + y;
                     let end_y = start_y + line.scale();
                     if (start_y..=end_y).contains(&position.y) {
-                        return
-                            if position.x < 0.0 {
-                                ((Position {
-                                    line_index,
-                                    byte_index: 0,
-                                },
-                                Affinity::Before), true)
-                            } else {
-                                ((Position {
-                                    line_index,
-                                    byte_index,
-                                }, Affinity::Before), false)
-                            }
+                        return if position.x < 0.0 {
+                            (
+                                (
+                                    Position {
+                                        line_index,
+                                        byte_index: 0,
+                                    },
+                                    Affinity::Before,
+                                ),
+                                true,
+                            )
+                        } else {
+                            (
+                                (
+                                    Position {
+                                        line_index,
+                                        byte_index,
+                                    },
+                                    Affinity::Before,
+                                ),
+                                false,
+                            )
+                        };
                     }
                     line_index += 1;
                     origin_y += line.height();
@@ -1351,13 +1385,16 @@ impl CodeEditor {
                     let start_y = origin_y;
                     let end_y = start_y + line.height();
                     if (start_y..=end_y).contains(&position.y) {
-                        return ((
-                            Position {
-                                line_index,
-                                byte_index: 0,
-                            },
-                            Affinity::Before,
-                        ), false);
+                        return (
+                            (
+                                Position {
+                                    line_index,
+                                    byte_index: 0,
+                                },
+                                Affinity::Before,
+                            ),
+                            false,
+                        );
                     }
                     origin_y += line.height();
                 }
