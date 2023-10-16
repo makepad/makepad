@@ -391,6 +391,15 @@ impl AppMain for App {
                             }
                         }
                     }
+
+                    // When the document for a session is modified, it sends a copy of this
+                    // modification to the mpsc queues of its sessions so they can update
+                    // themselves accordingly. It is the responsibility of the consumer to make
+                    // sure that these mpsc queues are actually polled.
+                    // 
+                    // To make sure that our sessions are always up to date, we poll the mpsc
+                    // queues for every session here.
+                    self.file_system.handle_sessions();
                 }
             }
         }
