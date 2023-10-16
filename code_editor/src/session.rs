@@ -184,6 +184,7 @@ impl Session {
             layout.y.truncate(line + 1);
         }
         fold_state_ref.unfolding_lines = new_unfolding_lines;
+        drop(layout);
         drop(fold_state_ref);
         self.update_y();
         true
