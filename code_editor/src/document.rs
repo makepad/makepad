@@ -98,19 +98,33 @@ impl Document {
             );
             for edit in &edits[edit_start..] {
                 match edit.change {
-                    Change::Insert(position, ref text) if text.as_lines().len() > 1 => {
-                        line_ranges.push(Range {
-                            start: if history.as_text().as_lines()[position.line_index]
-                                [..position.byte_index]
-                                .chars()
-                                .all(|char| char.is_whitespace())
+                    Change::Insert(position, ref text) => {
+                        if let Some(char) = text.to_single_char() {
+                            if char == '}'
+                                && history.as_text().as_lines()[position.line_index]
+                                    [..position.byte_index]
+                                    .chars()
+                                    .all(|char| char.is_whitespace())
                             {
-                                position.line_index
-                            } else {
-                                position.line_index + 1
-                            },
-                            end: position.line_index + text.as_lines().len(),
-                        });
+                                line_ranges.push(Range {
+                                    start: position.line_index,
+                                    end: position.line_index + 1,
+                                });
+                            }
+                        } else if text.as_lines().len() > 1 {
+                            line_ranges.push(Range {
+                                start: if history.as_text().as_lines()[position.line_index]
+                                    [..position.byte_index]
+                                    .chars()
+                                    .all(|char| char.is_whitespace())
+                                {
+                                    position.line_index
+                                } else {
+                                    position.line_index + 1
+                                },
+                                end: position.line_index + text.as_lines().len(),
+                            });
+                        }
                     }
                     _ => {}
                 }
