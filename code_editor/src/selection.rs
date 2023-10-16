@@ -309,7 +309,7 @@ impl Cursor {
         if !self.is_at_first_line() {
             return self.move_to_last_row_of_prev_line(layout);
         }
-        self
+        self.move_to_start_of_line()
     }
 
     pub fn move_down(self, layout: &Layout<'_>) -> Self {
@@ -319,7 +319,7 @@ impl Cursor {
         if !self.is_at_last_line(layout.as_text().as_lines().len()) {
             return self.move_to_first_row_of_next_line(layout);
         }
-        self
+        self.move_to_end_of_line(layout.as_text().as_lines())
     }
 
     pub fn home(self, lines: &[String]) -> Self {
