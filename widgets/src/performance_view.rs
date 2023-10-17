@@ -64,7 +64,7 @@ live_design!{
 pub struct PerformanceView {
     #[deref] view: View,
     #[rust] next_frame: NextFrame,
-    #[rust] next_refresh_in: f64,
+    #[rust] next_refresh_at: f64,
 }
 
 impl LiveHook for PerformanceView {
@@ -74,7 +74,7 @@ impl LiveHook for PerformanceView {
 
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
-        self.next_refresh_in = 2.0;
+        self.next_refresh_at = 2.0;
     }
 }
 
@@ -99,23 +99,19 @@ impl Widget for PerformanceView {
 impl PerformanceView {
     pub fn handle_widget(&mut self, cx: &mut Cx, event: &Event) {
         if let Some(ne) = self.next_frame.is_event(event) {
-            if self.next_refresh_in < ne.time {
-                let prev_refresh_in = self.next_refresh_in;
-                self.next_refresh_in = ne.time + 0.5;
+            if self.next_refresh_at < ne.time {
+                self.next_refresh_at = ne.time + 0.5;
                 
-                if cx.performance_stats.frame_times.len() > 0 {
-                    let last_sec_data = cx.performance_stats.frame_times.iter().filter_map(|f|
-                        if f.occurred_at >= prev_refresh_in - 0.5 {
-                            Some((f.time_spent * 1000.) as u32)
-                        } else {
-                            None
-                        }
-                    ).collect::<Vec<u32>>();
+                if cx.performance_stats.max_frame_times.len() > 0 {
+                    // Data is stored in 100ms buckets, so we take the max of the last 10 buckets
+                    let last_sec_data = cx.performance_stats.max_frame_times.iter().take(10);
+                    let time = (last_sec_data.max_by(|a, b|
+                        a.time_spent.partial_cmp(&b.time_spent).unwrap()
+                    ).unwrap().time_spent * 1000.0) as i64;
 
-                    let fps = last_sec_data.iter().max().unwrap();
-                    self.label(id!(frame_time)).set_text(&format!("{} ms", fps));
+                    self.label(id!(frame_time)).set_text(&format!("{} ms", time));
                     
-                    let color = match fps {
+                    let color = match time {
                         0..=16 => vec4(0.4, 1.0, 0.4, 1.0),
                         17..=33 => vec4(0.9, 0.9, 0.4, 1.0),
                         _ => vec4(1.0, 0.2, 0.2, 1.0)
