@@ -103,8 +103,8 @@ impl PerformanceView {
                 let prev_refresh_in = self.next_refresh_in;
                 self.next_refresh_in = ne.time + 0.5;
                 
-                if cx.performance.frame_times.len() > 0 {
-                    let last_sec_data = cx.performance.frame_times.iter().filter_map(|f|
+                if cx.performance_stats.frame_times.len() > 0 {
+                    let last_sec_data = cx.performance_stats.frame_times.iter().filter_map(|f|
                         if f.occurred_at >= prev_refresh_in - 0.5 {
                             Some((f.time_spent * 1000.) as u32)
                         } else {
