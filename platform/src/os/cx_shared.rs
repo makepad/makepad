@@ -168,26 +168,7 @@ impl Cx {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
 
-        if let Some(previous_time) = self.performance.last_frame_time {
-            if self.performance.frame_times.len() >= 100000 {
-                self.performance.frame_times.pop_back();
-                // if let Some(d) = discarded {
-                //     if time - d.occurred_at < 1. {
-                //         log!("Discarding non-used data {} {}", time, d.occurred_at);
-                //     }
-                // }
-            }
-            self.performance.frame_times.push_front(crate::cx::FrameStats{
-                occurred_at: time,
-                time_spent: time - previous_time
-            });
-
-            if time - previous_time > 0.05 {
-                log!("Frame took {} seconds", time - previous_time);
-            }
-        };
-        self.performance.last_frame_time = Some(time);
-
+        self.performance_stats.process_frame_data(time);
 
         self.call_event_handler(&Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }

@@ -4,7 +4,6 @@ use {
         collections::{
             HashMap,
             HashSet,
-            VecDeque,
         },
         any::{Any, TypeId},
         rc::Rc,
@@ -21,6 +20,7 @@ use {
         draw_matrix::CxDrawMatrixPool,
         os::{CxOs},
         debug::Debug,
+        performance_stats::PerformanceStats,
         event::{
             DrawEvent,
             CxFingers,
@@ -110,7 +110,7 @@ pub struct Cx {
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
 
-    pub performance: PerformanceStats,
+    pub performance_stats: PerformanceStats,
 }
 
 #[derive(Clone)]
@@ -156,25 +156,6 @@ pub enum OsType {
 pub struct XrCapabilities {
     pub ar_supported: bool,
     pub vr_supported: bool,
-}
-
-pub struct FrameStats {
-    pub occurred_at: f64,
-    pub time_spent: f64
-}
-
-pub struct PerformanceStats {
-    pub last_frame_time: Option<f64>,
-    pub frame_times: VecDeque<FrameStats>
-}
-
-impl Default for PerformanceStats {
-    fn default() -> Self {
-        Self {
-            last_frame_time: None,
-            frame_times: VecDeque::with_capacity(100000),
-        }
-    }
 }
 
 impl OsType {
@@ -279,7 +260,7 @@ impl Cx {
             spawner,
 
             self_ref: None,
-            performance: Default::default(),
+            performance_stats: Default::default(),
         }
     }
 }
