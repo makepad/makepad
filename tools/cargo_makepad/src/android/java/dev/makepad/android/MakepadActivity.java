@@ -460,12 +460,12 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void initializeVideoDecoding(long videoId, byte[] videoData, int chunkSize) {
+    public void initializeVideoDecoding(long videoId, byte[] videoData) {
         BlockingQueue<ByteBuffer> videoFrameQueue = new LinkedBlockingQueue<>();
         mVideoFrameQueues.put(videoId, videoFrameQueue);
 
         VideoDecoder videoDecoder = new VideoDecoder(this, videoId, videoFrameQueue);
-        VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, chunkSize, videoDecoder);
+        VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, videoDecoder);
 
         mDecoderRunnables.put(videoId, runnable);
         mDecoderHandler.post(runnable);

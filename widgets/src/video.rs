@@ -271,7 +271,7 @@ impl Video {
         if self.decoding_state == DecodingState::NotStarted {
             match cx.get_dependency(self.source.as_str()) {
                 Ok(data) => {
-                    cx.initialize_video_decoding(self.id, data, 60);
+                    cx.initialize_video_decoding(self.id, data);
                     self.decoding_state = DecodingState::Initializing;
                 }
                 Err(e) => {
