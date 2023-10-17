@@ -593,7 +593,7 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>, chunk_size: usize) {
+pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>) {
     let video_data = &*video;
 
     let java_body = (**env).NewByteArray.unwrap()(env, video_data.len() as i32);
@@ -609,10 +609,9 @@ pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video
         env,
         ACTIVITY,
         "initializeVideoDecoding",
-        "(J[BI)V",
+        "(J[B)V",
         video_id.get_value() as jni_sys::jlong,
-        java_body as jni_sys::jobject,
-        chunk_size
+        java_body as jni_sys::jobject
     );
 }
 
