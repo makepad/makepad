@@ -138,6 +138,11 @@ pub struct LinuxWindowParams {
 }
 
 #[derive(Clone, Debug)]
+pub struct LinuxDirectParams {
+	pub has_pointer: bool,
+}
+
+#[derive(Clone, Debug)]
 pub enum OsType {
     Unknown,
     Windows,
@@ -145,7 +150,7 @@ pub enum OsType {
     Ios,
     Android(AndroidParams),
     LinuxWindow (LinuxWindowParams),
-    LinuxDirect,
+    LinuxDirect(LinuxDirectParams),
     Web(WebParams)
 }
 
@@ -159,9 +164,9 @@ impl OsType {
     pub fn is_single_window(&self)->bool{
         match self{
             OsType::Web(_) => true,
-            OsType::Ios=>true,
+            OsType::Ios => true,
             OsType::Android(_) => true,
-            OsType::LinuxDirect=> true,
+            OsType::LinuxDirect(_) => true,
             _=> false
         }
     }

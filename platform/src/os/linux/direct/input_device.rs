@@ -1,28 +1,25 @@
 use std::{
 	fs::File,
 	os::fd::AsRawFd,
-	sync::{mpsc::Sender,
-		Arc,
-		Mutex, atomic::AtomicBool,
-	},
+	sync::Arc,
 	thread::JoinHandle,
 	thread,
 	io::Read,
-	time::Instant,
 	cell::Cell,
 	ffi::CStr,
 };
 
-use crate::{event::*,
+use crate::{
+	event::*,
 	libc_sys,
-	window::WindowId,
 	makepad_math::*,
-	KeyModifiers,
 	area::Area,
 };
 
-use super::{input_sys::*,
+use super::{
+	input_sys::*,
 	direct_event::*,
+	raw_input::RawInput,
 };
 
 #[repr(C)]
@@ -69,8 +66,6 @@ pub struct InputAbsInfo {
 pub struct InputDevice {
 	///The event file of the device
 	fd: File,
-	///Time that the App was launched
-	time_start: Instant,
 	///Name of the device (unused right now)
 	name: String,
 	///Holds the bitfields for the device properties see input-event-codes.h
@@ -105,28 +100,15 @@ pub struct InputDevice {
 	num_fingers: usize,
 	///Finger number thats being read from
 	current_slot: usize,
-	///Sender to send events back to the event loop
-	sender: Sender<Vec<DirectEvent>>,
-	///Shared between event threads, holds the absolute cursor position
-	abs: Arc<Mutex<DVec2>>,
-	///Shared between event threads, holds the window size/dpi_factor
-	window: Arc<DVec2>,
-	///Shared between event threads, holds the key modifiers
-	modifiers: Arc<Mutex<KeyModifiers>>,
-	///Shared between event threads, whether caps lock is active
-	caps_lock: Arc<AtomicBool>,
-	///The screen dpi factor
-	dpi_factor: Arc<f64>,
-	///The makepad window id
-	window_id: WindowId,
+	///Shared input state
+	parent: Arc<RawInput>,
 }
 
 impl InputDevice {
 	///Spawn a new InputDevice and start running a thread to read events from it.
-	pub fn new(file: File, sender: Sender<Vec<DirectEvent>>, time_start: Instant, abs: Arc<Mutex<DVec2>>, window: Arc<DVec2>, modifiers: Arc<Mutex<KeyModifiers>>,caps_lock: Arc<AtomicBool>, dpi_factor: Arc<f64>, window_id: WindowId) -> JoinHandle<()>{
+	pub fn new(file: File, parent: Arc<RawInput>) -> JoinHandle<()>{
 		let mut dev = InputDevice { 
 			fd: file,
-			time_start,
 			name: String::default(),
 			property_bits: [0u8;number_of_bytes(InputProperty::CNT.0)],
 			event_bits: [0u8;number_of_bytes(InputEventType::EV_CNT.0)],
@@ -144,13 +126,7 @@ impl InputDevice {
 			touches: Vec::new(),
 			num_fingers: 0,
 			current_slot: 0,
-			sender,
-			abs,
-			window,
-			modifiers,
-			caps_lock,
-			dpi_factor,
-			window_id,
+			parent,
 		};
 		let mut name_buff = [0u8;256];
 		unsafe {
@@ -190,50 +166,51 @@ impl InputDevice {
 			}
 		}
 		if Self::is_bit_set(&dev.led_values, EvLedCodes::LED_CAPSL.0) {
-			dev.caps_lock.store(true, std::sync::atomic::Ordering::Relaxed);
+			dev.parent.caps_lock.store(true, std::sync::atomic::Ordering::Relaxed);
+		}
+
+		if dev.is_pointer() || dev.name.contains("Mouse") { //mice dont have the pointer property :( )
+			let old = dev.parent.num_pointers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			println!("Pointer device connected there are now {} pointer devices connected", old + 1);
 		}
 		
 		println!("{} connected",dev.name);
 		thread::spawn(move || {
+			let mut evts = Vec::new();
 			loop {
-				let mut evts: Vec<InputEvent> = Vec::new();
-				loop {
-					if let Ok(evt) = dev.read_input_event() {
-						// dbg!(&evt);
-						match evt.ty {
-							InputEventType::EV_SYN => {
-								let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
-								match code {
-									EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
-										evts.push(evt);
-										let dir_evts = dev.process_event_group(evts);
-										dev.sender.send(dir_evts).unwrap();
-										break;
-									},
-									EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
-										evts.clear();
-										while let Ok(dropped) = dev.read_input_event() {
-											match dropped.ty {
-												InputEventType::EV_SYN => {
-													if dropped.code == EvSynCodes::SYN_REPORT.0 {
-														break;
-													}
-												},
-												_ => continue
-											}
+				if let Ok(evt) = dev.read_input_event() {
+					// dbg!(&evt);
+					match evt.ty {
+						InputEventType::EV_SYN => {
+							let code: EvSynCodes = unsafe { std::mem::transmute_copy(&evt.code) };
+							match code {
+								EvSynCodes::SYN_REPORT => { //end of event reached send event through the channel, break and make a new buffer
+									evts.push(evt);
+									dev.process_event_group(&mut evts);
+								},
+								EvSynCodes::SYN_DROPPED => { //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
+									evts.clear();
+									while let Ok(dropped) = dev.read_input_event() {
+										match dropped.ty {
+											InputEventType::EV_SYN => {
+												if dropped.code == EvSynCodes::SYN_REPORT.0 {
+													break;
+												}
+											},
+											_ => continue
 										}
-									},
-									_ => evts.push(evt)
-								}
-							},
-							_ => {
-								evts.push(evt);
+									}
+								},
+								_ => evts.push(evt)
 							}
+						},
+						_ => {
+							evts.push(evt);
 						}
-					} else {
-						println!("{} disconnected",dev.name);
-						return
 					}
+				} else {
+					println!("{} disconnected",dev.name);
+					return
 				}
 			}
 		})
@@ -290,12 +267,6 @@ impl InputDevice {
 		self.has_property(InputProperty::POINTER)
 	}
 
-	///Check what the time is since the start of the application in seconds
-	fn time_now(&self) -> f64 {
-		let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-		(time_now.duration_since(self.time_start)).as_secs_f64()
-	}
-
 	///Read one InputEvent from the event file
 	fn read_input_event(&mut self) -> Result<InputEvent, ()> {
 		let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
@@ -319,34 +290,31 @@ impl InputDevice {
 	}
 
 	///Process a group of InputEvents ending in an EV_SYN:SYN_REPORT
-	fn process_event_group(&mut self, evts: Vec<InputEvent>) -> Vec<DirectEvent> {
-		let time = self.time_now(); //Cant use the event timeval_t unfortunately because it seems to use system time, while rust Instant seems to use time since boot.
-		let mut dir_evts = Vec::new();
-		for evt in evts {
+	fn process_event_group(&mut self, evts: &mut Vec<InputEvent>) {
+		for evt in evts.drain(..) {
 			match evt.ty {
 				InputEventType::EV_REL => { // relative input
-					self.process_rel_event(evt, &mut dir_evts, time);
+					self.process_rel_event(evt, self.parent.time_now());
 				},
 				InputEventType::EV_ABS => { // absolute input
-					self.process_abs_event(evt, &mut dir_evts, time);
+					self.process_abs_event(evt, self.parent.time_now());
 				},
 				InputEventType::EV_KEY => { // key press
-					self.process_key_event(evt, &mut dir_evts, time);
+					self.process_key_event(evt, self.parent.time_now());
 				},
 				InputEventType::EV_LED => { // led event
 					self.process_led_event(evt);
 				},
 				InputEventType::EV_SYN => {
-					self.process_syn_event(evt, &mut dir_evts, time);
+					self.process_syn_event(evt, self.parent.time_now());
 				},
 				_ => ()
 			};
 		};
-		dir_evts
 	}
 
 	///Process a synchronisation event
-	fn process_syn_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
+	fn process_syn_event(&mut self, evt: InputEvent, time: f64){
 		let code: EvSynCodes = EvSynCodes(evt.code);
 		match code {
 			EvSynCodes::SYN_REPORT => { //finish up the event.
@@ -365,10 +333,10 @@ impl InputDevice {
 				}
 				//if there are any fingers on the screen make a TouchUpdateEvent
 				if self.touches.len() > 0 {
-					dir_evts.push(DirectEvent::TouchUpdate(TouchUpdateEvent {
+					self.parent.direct_events.lock().unwrap().push(DirectEvent::TouchUpdate(TouchUpdateEvent {
 						time,
-						window_id: self.window_id,
-						modifiers: self.modifiers.lock().unwrap().clone(),
+						window_id: self.parent.window_id,
+						modifiers: self.parent.modifiers.lock().unwrap().clone(),
 						touches: self.touches.clone(), //TODO this is pretty bad and should be fixed but dont know how (yet)
 					}))
 				};
@@ -392,54 +360,54 @@ impl InputDevice {
 		let code: EvLedCodes = EvLedCodes(evt.code);
 		match code {
 			EvLedCodes::LED_CAPSL => {
-				self.caps_lock.store(evt.value > 0, std::sync::atomic::Ordering::Relaxed)
+				self.parent.caps_lock.store(evt.value > 0, std::sync::atomic::Ordering::Relaxed)
 			},
 			_ => ()
 		}
 	}
 
 	///Process a relative input event
-	fn process_rel_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
+	fn process_rel_event(&mut self, evt: InputEvent, time: f64){
 		let code: EvRelCodes = EvRelCodes(evt.code);
 		match code {
 			EvRelCodes::REL_X => {
-				let mut abs = self.abs.lock().unwrap();
+				let mut abs = self.parent.abs.lock().unwrap();
 				abs.x += evt.value as f64;
 				if abs.x < 0.0{ abs.x = 0.0}
-				if abs.x > self.window.x{ abs.x = self.window.x}
+				if abs.x > self.parent.window.x{ abs.x = self.parent.window.x}
 				
 			},
 			EvRelCodes::REL_Y => {
-				let mut abs = self.abs.lock().unwrap();
+				let mut abs = self.parent.abs.lock().unwrap();
 				abs.y += evt.value as f64;
 				if abs.y < 0.0{ abs.y = 0.0}
-				if abs.y > self.window.y{ abs.y = self.window.y}
+				if abs.y > self.parent.window.y{ abs.y = self.parent.window.y}
 			},
 			_ => return ()
 		}
-		dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
-			abs: self.abs.lock().unwrap().clone(),
-			window_id: self.window_id,
-			modifiers: self.modifiers.lock().unwrap().clone(),
+		self.parent.direct_events.lock().unwrap().push(DirectEvent::MouseMove(MouseMoveEvent {
+			abs: self.parent.abs.lock().unwrap().clone(),
+			window_id: self.parent.window_id,
+			modifiers: self.parent.modifiers.lock().unwrap().clone(),
 			time,
 			handled: Cell::new(Area::Empty),
 		}));
 	}
 
 	///Process an absolute input event TODO implement touchpad using the self.is_pointer() property.
-	fn process_abs_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
+	fn process_abs_event(&mut self, evt: InputEvent, time: f64){
 		let code: EvAbsCodes = EvAbsCodes(evt.code);
 		static mut FIRST_TOUCH_X: bool = false;
 		static mut FIRST_TOUCH_Y: bool = false;
 		match code {
 			EvAbsCodes::ABS_X => {
-				let mut abs = self.abs.lock().unwrap();
-				abs.x = (evt.value as f64 / 32767.0) * self.window.x;
+				let mut abs = self.parent.abs.lock().unwrap();
+				abs.x = (evt.value as f64 / 32767.0) * self.parent.window.x;
 			},
 
 			EvAbsCodes::ABS_Y => {
-				let mut abs = self.abs.lock().unwrap();
-				abs.y = (evt.value as f64 / 32767.0) * self.window.y;
+				let mut abs = self.parent.abs.lock().unwrap();
+				abs.y = (evt.value as f64 / 32767.0) * self.parent.window.y;
 			},
 
 			EvAbsCodes::ABS_MT_POSITION_X => {
@@ -447,7 +415,7 @@ impl InputDevice {
 					self.num_fingers +=1; //Type A will always send X and Y, but we only need to increment num fingers once, so we do it on X
 				}
 				if let Some(touch) = self.touches.get_mut(self.current_slot){
-					touch.abs.x = evt.value as f64 / self.dpi_factor.as_ref();
+					touch.abs.x = evt.value as f64 / self.parent.dpi_factor;
 					if unsafe {!FIRST_TOUCH_X} {
 						touch.state = TouchState::Move;
 
@@ -457,7 +425,7 @@ impl InputDevice {
 				} else { //MT Type A could start with an absolute x, in which case a touchpoint might not yet exist
 					self.touches.push(TouchPoint {
 						state: TouchState::Start,
-						abs: DVec2 { x: evt.value as f64 / self.dpi_factor.as_ref(), y: 0.0 },
+						abs: DVec2 { x: evt.value as f64 / self.parent.dpi_factor, y: 0.0 },
 						uid: 0,
 						rotation_angle: 0.0,
 						force: 0.0,
@@ -471,7 +439,7 @@ impl InputDevice {
 
 			EvAbsCodes::ABS_MT_POSITION_Y => {
 				if let Some(touch) = self.touches.get_mut(self.current_slot) {
-					touch.abs.y = evt.value as f64 / self.dpi_factor.as_ref();
+					touch.abs.y = evt.value as f64 / self.parent.dpi_factor;
 					if unsafe {!FIRST_TOUCH_Y} {
 						touch.state = TouchState::Move;
 					} else {
@@ -480,7 +448,7 @@ impl InputDevice {
 				} else {
 					self.touches.push(TouchPoint {
 						state: TouchState::Start,
-						abs: DVec2 { x: 0.0, y: evt.value as f64 / self.dpi_factor.as_ref() },
+						abs: DVec2 { x: 0.0, y: evt.value as f64 / self.parent.dpi_factor },
 						uid: 0,
 						rotation_angle: 0.0,
 						force: 0.0,
@@ -541,16 +509,16 @@ impl InputDevice {
 			}
 			_=> return ()
 		}
-		dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
-			abs: self.abs.lock().unwrap().clone(),
-			window_id: self.window_id,
-			modifiers: self.modifiers.lock().unwrap().clone(),
+		self.parent.direct_events.lock().unwrap().push(DirectEvent::MouseMove(MouseMoveEvent {
+			abs: self.parent.abs.lock().unwrap().clone(),
+			window_id: self.parent.window_id,
+			modifiers: self.parent.modifiers.lock().unwrap().clone(),
 			time,
 			handled: Cell::new(Area::Empty),
 		}))
 	}
 
-	fn process_key_event(&mut self, evt: InputEvent, dir_evts: &mut Vec<DirectEvent>, time: f64){
+	fn process_key_event(&mut self, evt: InputEvent, time: f64){
 		let code: EvKeyCodes = EvKeyCodes(evt.code);
 		let key_action: KeyAction = KeyAction(evt.value);
 		let key_code = match code {
@@ -664,37 +632,37 @@ impl InputDevice {
 		match key_action {
 			KeyAction::KEY_DOWN => {
 				match key_code {
-					KeyCode::Shift => self.modifiers.lock().unwrap().shift = true,
-					KeyCode::Control => self.modifiers.lock().unwrap().control = true,
-					KeyCode::Logo => self.modifiers.lock().unwrap().logo = true,
-					KeyCode::Alt => self.modifiers.lock().unwrap().alt = true,
+					KeyCode::Shift => self.parent.modifiers.lock().unwrap().shift = true,
+					KeyCode::Control => self.parent.modifiers.lock().unwrap().control = true,
+					KeyCode::Logo => self.parent.modifiers.lock().unwrap().logo = true,
+					KeyCode::Alt => self.parent.modifiers.lock().unwrap().alt = true,
 					_ => ()
 				};
 				match code {
 					EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
-						dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
+						self.parent.direct_events.lock().unwrap().push(DirectEvent::MouseDown(MouseDownEvent {
 							button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
-							abs: self.abs.lock().unwrap().clone(),
-							window_id: self.window_id,
-							modifiers: self.modifiers.lock().unwrap().clone(),
+							abs: self.parent.abs.lock().unwrap().clone(),
+							window_id: self.parent.window_id,
+							modifiers: self.parent.modifiers.lock().unwrap().clone(),
 							time,
 							handled: Cell::new(Area::Empty),
 						}))
 					},
 					_ => {
-						let modifiers = self.modifiers.lock().unwrap();
+						let modifiers = self.parent.modifiers.lock().unwrap();
 						if !modifiers.control && !modifiers.alt && !modifiers.logo {
 							let uc = modifiers.shift;
-							let inp = key_code.to_char_linux_direct(uc, self.caps_lock.load(std::sync::atomic::Ordering::Relaxed));
+							let inp = key_code.to_char_linux_direct(uc, self.parent.caps_lock.load(std::sync::atomic::Ordering::Relaxed));
 							if let Some(inp) = inp {
-								dir_evts.push(DirectEvent::TextInput(TextInputEvent {
+								self.parent.direct_events.lock().unwrap().push(DirectEvent::TextInput(TextInputEvent {
 									input: format!("{}", inp),
 									was_paste: false,
 									replace_last: false
 								}));
 							}
 						}
-						dir_evts.push(DirectEvent::KeyDown(KeyEvent {
+						self.parent.direct_events.lock().unwrap().push(DirectEvent::KeyDown(KeyEvent {
 							key_code,
 							is_repeat: false,
 							modifiers: modifiers.clone(),
@@ -706,19 +674,19 @@ impl InputDevice {
 			},
 			KeyAction::KEY_UP => {
 				match key_code {
-					KeyCode::Shift => self.modifiers.lock().unwrap().shift = false,
-					KeyCode::Control => self.modifiers.lock().unwrap().control = false,
-					KeyCode::Logo => self.modifiers.lock().unwrap().logo = false,
-					KeyCode::Alt => self.modifiers.lock().unwrap().alt = false,
+					KeyCode::Shift => self.parent.modifiers.lock().unwrap().shift = false,
+					KeyCode::Control => self.parent.modifiers.lock().unwrap().control = false,
+					KeyCode::Logo => self.parent.modifiers.lock().unwrap().logo = false,
+					KeyCode::Alt => self.parent.modifiers.lock().unwrap().alt = false,
 					_ => ()
 				};
 				match code {
 					EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
-						dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
+						self.parent.direct_events.lock().unwrap().push(DirectEvent::MouseUp(MouseUpEvent {
 							button: (evt.code - EvKeyCodes::BTN_LEFT.0) as usize,
-							abs: self.abs.lock().unwrap().clone(),
-							window_id: self.window_id,
-							modifiers: self.modifiers.lock().unwrap().clone(),
+							abs: self.parent.abs.lock().unwrap().clone(),
+							window_id: self.parent.window_id,
+							modifiers: self.parent.modifiers.lock().unwrap().clone(),
 							time,
 						}))
 					},
@@ -727,20 +695,20 @@ impl InputDevice {
 						
 					},
 					_ => {
-						dir_evts.push(DirectEvent::KeyUp(KeyEvent {
+						self.parent.direct_events.lock().unwrap().push(DirectEvent::KeyUp(KeyEvent {
 							key_code,
 							is_repeat: false,
-							modifiers: self.modifiers.lock().unwrap().clone(),
+							modifiers: self.parent.modifiers.lock().unwrap().clone(),
 							time
 						}))
 					}
 				}
 			},
 			KeyAction::KEY_REPEAT => {
-				dir_evts.push(DirectEvent::KeyDown(KeyEvent {
+				self.parent.direct_events.lock().unwrap().push(DirectEvent::KeyDown(KeyEvent {
 					key_code,
 					is_repeat: false,
-					modifiers: self.modifiers.lock().unwrap().clone(),
+					modifiers: self.parent.modifiers.lock().unwrap().clone(),
 					time
 				}))
 			},
@@ -827,6 +795,15 @@ impl KeyCode {
 			KeyCode::Numpad8 => Some('8'),
 			KeyCode::Numpad9 => Some('9'),
 			_ => None
+		}
+	}
+}
+
+impl Drop for InputDevice {
+	fn drop(&mut self) {
+		if self.is_pointer() || self.name.contains("Mouse") {
+			let old = self.parent.num_pointers.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+			println!("Pointer device disconnected there are now {} pointer devices connected", old - 1);
 		}
 	}
 }
