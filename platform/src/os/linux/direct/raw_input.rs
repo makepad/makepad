@@ -1,7 +1,12 @@
-use std::sync::atomic::{
-    AtomicBool,
-    AtomicUsize
+use std::{
+    sync::atomic::{
+        AtomicBool,
+        AtomicUsize
+    },
+    time::SystemTime
 };
+
+use crate::libc_sys::timeval;
 
 use {
     self::super::{
@@ -21,7 +26,6 @@ use {
         },
         path::PathBuf,
         fs,
-        time::Instant,
     },
     inotify::{
         EventMask,
@@ -63,8 +67,8 @@ pub struct RawInput {
     pub dpi_factor: f64,
     ///Amount of ponter devices
     pub num_pointers: AtomicUsize,
-    ///Starting time of the app
-    pub time_start: Instant,
+    ///Starting time of the event listener
+    pub time_start: timeval,
     ///Makepad window id
     pub window_id: WindowId,
     ///Event que
@@ -72,7 +76,7 @@ pub struct RawInput {
 }
 
 impl RawInput {
-    pub fn new(width: f64, height: f64, dpi_factor: f64, time_start: Instant, window_id: WindowId) -> Arc<Self> {
+    pub fn new(width: f64, height: f64, dpi_factor: f64, window_id: WindowId) -> Arc<Self> {
         let input_state = Arc::new(RawInput {
             abs: Mutex::new(dvec2(0.0, 0.0)),
             window: dvec2(width, height),
@@ -80,7 +84,7 @@ impl RawInput {
             caps_lock: false.into(),
             dpi_factor,
             num_pointers: 0.into(),
-            time_start,
+            time_start: timeval::from_system_time(SystemTime::now()),
             window_id,
             direct_events: Mutex::new(Vec::new()),
         });
@@ -127,12 +131,6 @@ impl RawInput {
 
     pub fn has_pointer(&self) -> bool {
         self.num_pointers.load(std::sync::atomic::Ordering::Relaxed) > 0
-    }
-
-    ///Check what the time is since the start of the application in seconds
-    pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_secs_f64()
     }
 }
 

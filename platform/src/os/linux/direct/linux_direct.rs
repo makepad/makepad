@@ -79,7 +79,7 @@ impl DirectApp {
         Self {
             dpi_factor,
             egl,
-            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor, dpi_factor, timers.time_start.clone(), CxWindowPool::id_zero()),
+            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor, dpi_factor, CxWindowPool::id_zero()),
             drm,
             timers,
         }
