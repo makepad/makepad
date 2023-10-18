@@ -13,16 +13,14 @@ use {
         dma_buf,
         egl_sys::{self, LibEgl},
         gl_sys,
-        opengl::CxOsTexture,
     },
     crate::{
         cx::Cx,
         window::WindowId,
-        makepad_error_log::*,
         makepad_math::DVec2,
         pass::{PassClearColor, PassClearDepth, PassId},
         event::*,
-        texture::{Texture, TextureDesc},
+        texture::{CxTexture, Texture},
     },
 };
 
@@ -94,7 +92,7 @@ impl Cx {
         texture: &Texture,
     ) -> dma_buf::Image<OwnedFd> {
         let cxtexture = &mut self.textures[texture.texture_id()];
-        cxtexture.os.update_shared_texture(&cxtexture.desc);
+        cxtexture.update_shared_texture();
 
         let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
         unsafe {
@@ -177,39 +175,24 @@ impl Cx {
 }
 
 
-impl CxOsTexture {
-    fn update_shared_texture(&mut self, desc: &TextureDesc) {
-        // FIXME(eddyb) !!!!! arne't these the same!!!??
-        if false { self.update_platform_render_target(desc, Default::default(), false); }
-
-        // we need a width/height for this one.
-        if desc.width.is_none() || desc.height.is_none() {
-            log!("Shared texture width/height is undefined, cannot allocate it");
+impl CxTexture {
+    fn update_shared_texture(&mut self) {
+        if self.alloc_shared(){
             return
         }
-
-        let width = desc.width.unwrap() as u64;
-        let height = desc.height.unwrap() as u64;
-
-        if self.gl_texture.is_some() && self.width == width && self.height == height && self.alloc_desc == *desc {
-            return;
-        }
-
+        let alloc = self.alloc.as_ref().unwrap();
+        
         // HACK(eddyb) drain error queue, so that we can check erors below.
         while unsafe { gl_sys::GetError() } != 0 {}
 
-        self.alloc_desc = desc.clone();
-        self.width = width;
-        self.height = height;
-
         unsafe {
-            if self.gl_texture.is_none() {
+            if self.os.gl_texture.is_none() {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
                 gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                self.gl_texture = Some(gl_texture.assume_init());
+                self.os.gl_texture = Some(gl_texture.assume_init());
             }
 
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
 
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
@@ -217,14 +200,14 @@ impl CxOsTexture {
                 gl_sys::TEXTURE_2D,
                 0,
                 gl_sys::RGBA as i32,
-                width as i32,
-                height as i32,
+                alloc.width as i32,
+                alloc.height as i32,
                 0,
                 gl_sys::RGBA,
                 gl_sys::UNSIGNED_BYTE,
                 std::ptr::null()
             );
-            assert_eq!(gl_sys::GetError(), 0, "glTexImage2D({width}, {height}) failed");
+            assert_eq!(gl_sys::GetError(), 0, "glTexImage2D({}, {}) failed", alloc.width, alloc.height);
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
@@ -232,17 +215,12 @@ impl CxOsTexture {
     pub fn update_from_shared_dma_buf_image(
         &mut self,
         opengl_cx: &OpenglCx,
-        desc: &TextureDesc,
         dma_buf_image: &dma_buf::Image<os::fd::OwnedFd>,
     ) {
-        // we need a width/height for this one.
-        if desc.width.is_none() || desc.height.is_none() {
-            log!("Shared texture width/height is undefined, cannot import it");
+        if self.alloc_shared(){
             return
         }
-
-        let width = desc.width.unwrap() as u64;
-        let height = desc.height.unwrap() as u64;
+        let alloc = self.alloc.as_ref().unwrap();
 
         // HACK(eddyb) drain error queue, so that we can check erors below.
         while unsafe { gl_sys::GetError() } != 0 {}
@@ -255,9 +233,9 @@ impl CxOsTexture {
             egl_sys::EGL_LINUX_DRM_FOURCC_EXT,
             drm_format.fourcc,
             egl_sys::EGL_WIDTH,
-            width as u32,
+            alloc.width as u32,
             egl_sys::EGL_HEIGHT,
-            height as u32,
+            alloc.height as u32,
             egl_sys::EGL_DMA_BUF_PLANE0_FD_EXT,
             plane0.dma_buf_fd.as_raw_fd() as u32,
             egl_sys::EGL_DMA_BUF_PLANE0_OFFSET_EXT,
@@ -279,12 +257,8 @@ impl CxOsTexture {
         ) };
         assert!(!egl_image.is_null(), "eglCreateImageKHR failed");
 
-        self.alloc_desc = desc.clone();
-        self.width = width;
-        self.height = height;
-
         unsafe {
-            let gl_texture = *self.gl_texture.get_or_insert_with(|| {
+            let gl_texture = *self.os.gl_texture.get_or_insert_with(|| {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
                 gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
                 assert_eq!(gl_sys::GetError(), 0, "glGenTextures failed");
