@@ -189,6 +189,12 @@ impl FileSystem {
             }
         }
     }
+
+    pub fn handle_sessions(&mut self) {
+        for session in self.tab_id_to_session.values_mut() {
+            session.handle_changes();
+        }
+    }
     
     pub fn request_open_file(&mut self, tab_id: LiveId, file_id: FileNodeId) {
         // ok lets see if we have a document
