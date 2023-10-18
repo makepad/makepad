@@ -209,7 +209,7 @@ impl Cx {
                             metal_cx.device,
                         );
                     }
-                    else {
+                    else if cxtexture.format.is_vec(){
                         cxtexture.update_vec_texture(
                             metal_cx,
                         );
@@ -328,7 +328,7 @@ impl Cx {
                 let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
-                let cxtexture = &mut self.textures[color_texture.texture_id];
+                let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                 let size = dpi_factor * pass_rect.size; 
                 cxtexture.update_render_target(metal_cx, size.x as usize, size.y as usize);
                 
@@ -377,10 +377,10 @@ impl Cx {
             }
         }
         // attach depth texture
-        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture_id];
+        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
+            let cxtexture = &mut self.textures[depth_texture.texture_id()];
             let size = dpi_factor * pass_rect.size;
-            cxtexture.update_depth_buffer(metal_cx, size.x as usize, size.y as usize);
+            cxtexture.update_depth_stencil(metal_cx, size.x as usize, size.y as usize);
             let is_initial = cxtexture.check_initial();
             
             let depth_attachment: ObjcId = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
@@ -863,37 +863,38 @@ impl CxTexture {
         metal_device: ObjcId,
     ) {
         // we need a width/height for this one.
-        if self.alloc_shared(){
-            let alloc = self.alloc.as_ref().unwrap();
-            let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
-                msg_send![class!(MTLTextureDescriptor), new]
-            }).unwrap());
+        if !self.alloc_shared(){
+            return
+        }
+        let alloc = self.alloc.as_ref().unwrap();
+        let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+            msg_send![class!(MTLTextureDescriptor), new]
+        }).unwrap());
             
-            let _: () = unsafe{msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
-            let _: () = unsafe{msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
-            let _: () = unsafe{msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
-            let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
-            let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
-            let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
-            match &alloc.pixel {
-                TexturePixel::BGRAu8=>{
-                    let _: () = unsafe{msg_send![
-                        descriptor.as_id(),
-                        setPixelFormat: MTLPixelFormat::BGRA8Unorm
-                    ]};
-                },
-                _=>{panic!()}
-            };
-            match &self.format {
-                TextureFormat::SharedBGRAu8{id, ..} => {
-                    let texture: ObjcId = unsafe{msg_send![metal_device, newSharedTextureWithDescriptor: descriptor]};
-                    let shared: ObjcId = unsafe{msg_send![texture, newSharedTextureHandle]};
-                    store_xpc_service_texture(*id, shared);
-                    let _: () = unsafe{msg_send![shared, release]};
-                    self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
-                }
-                _ => panic!(),
+        let _: () = unsafe{msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
+        match &alloc.pixel {
+            TexturePixel::BGRAu8=>{
+                let _: () = unsafe{msg_send![
+                    descriptor.as_id(),
+                    setPixelFormat: MTLPixelFormat::BGRA8Unorm
+                ]};
+            },
+            _=>{panic!()}
+        };
+        match &self.format {
+            TextureFormat::SharedBGRAu8{id, ..} => {
+                let texture: ObjcId = unsafe{msg_send![metal_device, newSharedTextureWithDescriptor: descriptor]};
+                let shared: ObjcId = unsafe{msg_send![texture, newSharedTextureHandle]};
+                store_xpc_service_texture(*id, shared);
+                let _: () = unsafe{msg_send![shared, release]};
+                self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
             }
+            _ => panic!(),
         }
     }
     
@@ -904,20 +905,21 @@ impl CxTexture {
         shared_handle: ObjcId,
     ) -> bool {
         // we need a width/height for this one.
-        if self.alloc_shared(){
-            let alloc = self.alloc.as_ref().unwrap();
-    
-            let texture = RcObjcId::from_owned(NonNull::new(unsafe {
-                msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
-            }).unwrap());
-            let width: u64 = unsafe{msg_send![texture.as_id(), width]};
-            let height: u64 = unsafe{msg_send![texture.as_id(), height]};
-            // FIXME(eddyb) can these be an assert now?
-            if width != alloc.width as u64|| height != alloc.height as u64{
-                return false
-            }
-            self.os.texture = Some(texture);
+        if !self.alloc_shared(){
+            return true
         }
+        let alloc = self.alloc.as_ref().unwrap();
+    
+        let texture = RcObjcId::from_owned(NonNull::new(unsafe {
+            msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
+        }).unwrap());
+        let width: u64 = unsafe{msg_send![texture.as_id(), width]};
+        let height: u64 = unsafe{msg_send![texture.as_id(), height]};
+        // FIXME(eddyb) can these be an assert now?
+        if width != alloc.width as u64|| height != alloc.height as u64{
+            return false
+        }
+        self.os.texture = Some(texture);
         true
     }
     
@@ -957,7 +959,7 @@ impl CxTexture {
     }
     
     
-    fn update_depth_buffer(
+    fn update_depth_stencil(
         &mut self,
         metal_cx: &MetalCx,
         width: usize,
