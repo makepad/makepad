@@ -88,8 +88,9 @@ pub(crate) struct TextureAlloc{
     pub height: usize,
 }
 
+#[allow(unused)]    
 #[derive(Clone, Debug)]
-pub(crate) enum TextureCategory{
+pub enum TextureCategory{
     Vec{updated:bool},
     Render{initial:bool},
     DepthBuffer{initial:bool},
@@ -107,6 +108,7 @@ impl PartialEq for TextureCategory{
     }
 }
 
+#[allow(unused)]    
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TexturePixel{
     BGRAu8,
@@ -131,6 +133,17 @@ impl CxTexture{
             if let TextureCategory::Vec{updated} = &mut alloc.category{
                 let u = *updated;
                 *updated = false;
+                if u{ // check our buffer sizes
+                    match &self.format{
+                        TextureFormat::VecBGRAu8{width, height, data}=>{
+                            if width * height != data.len(){
+                                error!("Texture buffer size incorrect {}*{} != {}", width, height, data.len());
+                                return false
+                            }
+                        }
+                        _=>()
+                    }
+                }
                 return u
             }
         }
@@ -149,7 +162,7 @@ impl CxTexture{
             }
         }
     }
-        
+    #[allow(unused)]    
     pub(crate) fn check_initial(&mut self)->bool{
         if let Some(alloc) = &mut  self.alloc{
             match &mut alloc.category{
@@ -176,6 +189,7 @@ impl CxTexture{
         false
     }
     
+    #[allow(unused)]
     pub(crate) fn alloc_shared(&mut self)->bool{
         if let Some(alloc) = self.format.as_shared_alloc(){
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc{
@@ -185,7 +199,7 @@ impl CxTexture{
         }
         false
     }
-        
+    
     pub(crate) fn alloc_render(&mut self, width:usize, height: usize)->bool{
         if let Some(alloc) = self.format.as_render_alloc(width, height){
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc{
@@ -280,7 +294,7 @@ impl TextureFormat{
             _=>None
         }
     }
-        
+    #[allow(unused)]    
     pub(crate) fn as_render_alloc(&self, width:usize, height:usize)->Option<TextureAlloc>{
         match self{
             Self::RenderBGRAu8{size,..}=>{
@@ -329,6 +343,7 @@ impl TextureFormat{
         }
     }
     
+    #[allow(unused)]
     pub(crate) fn as_shared_alloc(&self)->Option<TextureAlloc>{
         match self{
             Self::SharedBGRAu8{width, height, ..}=>{

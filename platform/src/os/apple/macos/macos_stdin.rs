@@ -60,7 +60,7 @@ impl Cx {
                         let pass = &mut self.passes[window.main_pass_id.unwrap()];
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: texture.texture_id(),
+                            texture: texture.clone(),
                         }];
 
                         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();

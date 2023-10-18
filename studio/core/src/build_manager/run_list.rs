@@ -254,6 +254,9 @@ impl BuildManager {
             },
             BuildTarget::ANDROID => BuildTarget::Android,
             BuildTarget::WEBASSEMBLY => BuildTarget::WebAssembly,
+            BuildTarget::CHECK_MACOS => BuildTarget::CheckMacos,
+            BuildTarget::CHECK_WINDOWS => BuildTarget::CheckWindows,
+            BuildTarget::CHECK_LINUX => BuildTarget::CheckLinux,
             BuildTarget::CHECK_ALL => BuildTarget::CheckAll,
             _ => panic!()
         }
