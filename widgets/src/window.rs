@@ -28,7 +28,7 @@ pub struct Window {
     #[live] overlay: Overlay,
     #[live] main_draw_list: DrawList2d,
     #[live] pass: Pass,
-    #[live] depth_texture: Texture,
+    #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[deref] view: View,
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
@@ -60,6 +60,9 @@ impl LiveHook for Window {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
+        self.depth_texture.set_format(cx, TextureFormat::DepthD32S8{
+            size:TextureSize::Auto
+        });
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
@@ -75,11 +78,11 @@ impl LiveHook for Window {
                 }
             }
             OsType::Macos => {
-                if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
                     self.apply_over(cx, live!{
                         caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
-                    });
-                }
+                    }); 
+                }*/
                 
                 //draw_bg: {color: (THEME_COLOR_BG_APP)}  
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);

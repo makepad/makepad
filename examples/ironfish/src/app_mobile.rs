@@ -567,7 +567,6 @@ live_design!{
         }
     }
     
-    
     SequencerControls = <View> {
         flow: Down, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}
         width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}

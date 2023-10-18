@@ -64,6 +64,10 @@ pub enum FileSystemAction {
 impl FileSystem {
     pub fn init(&mut self, cx: &mut Cx) {
         self.file_client.init(cx);
+        self.reload_file_tree();
+    }
+    
+    pub fn reload_file_tree(&mut self) {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
@@ -105,6 +109,8 @@ impl FileSystem {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, dispatch_action: &mut dyn FnMut(&mut Cx, FileSystemAction)) {
+        
+        
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
