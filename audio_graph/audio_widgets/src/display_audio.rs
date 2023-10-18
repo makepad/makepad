@@ -44,10 +44,8 @@ live_design!{
     }
     
     DisplayAudio = {{DisplayAudio}} {
-        
-            width: Fill,
-            height: Fill
-        
+        width: Fill,
+        height: Fill
     }
 }
 
