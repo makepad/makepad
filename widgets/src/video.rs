@@ -413,12 +413,12 @@ impl Video {
     fn update_texture(&mut self, cx: &mut Cx, pixel_data: Arc<Mutex<Vec<u32>>>) {
         if self.texture.is_none() {
             let texture = Texture::new(cx);
-            texture.set_desc(
+            texture.set_format(
                 cx,
-                TextureDesc {
-                    format: TextureFormat::ImageBGRA,
-                    width: Some(self.video_width),
-                    height: Some(self.video_height),
+                TextureFormat::VecBGRAu8 {
+                    width: self.video_width,
+                    height: self.video_height,
+                    data: vec![]
                 },
             );
             self.texture = Some(texture);
@@ -428,7 +428,7 @@ impl Video {
 
         {
             let mut data_locked = pixel_data.lock().unwrap();
-            texture.swap_image_u32(cx, &mut *data_locked);
+            texture.swap_vec_u32(cx, &mut *data_locked);
         }
 
         self.vec_pool
