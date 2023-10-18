@@ -6,19 +6,13 @@ live_design! {
 
 #[derive(Live)]
 pub struct RotatedImage {
-    #[walk]
-    walk: Walk,
-    #[layout]
-    layout: Layout,
-    #[live]
-    draw_bg: DrawColor,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+    #[live] draw_bg: DrawColor,
 
-    #[live]
-    source: LiveDependency,
-    #[live]
-    texture: Option<Texture>,
-    #[live]
-    scale: f64,
+    #[live] source: LiveDependency,
+    #[rust(Texture::new(cx))] texture: Option<Texture>,
+    #[live] scale: f64,
 }
 
 impl ImageCacheImpl for RotatedImage {

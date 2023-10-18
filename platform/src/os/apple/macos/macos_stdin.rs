@@ -17,8 +17,7 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::{Texture, TextureDesc, TextureFormat},
-        live_traits::LiveNew,
+        texture::{Texture, TextureFormat},
         thread::Signal,
         os::{
             apple_sys::*,
@@ -188,15 +187,14 @@ impl Cx {
                         ); 
                         if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(1)) {
                             let texture = Texture::new(self);
-                            let desc = TextureDesc {
-                                format: TextureFormat::SharedBGRA(presentable_image.id),
-                                width: Some(swapchain.alloc_width as usize),
-                                height: Some(swapchain.alloc_height as usize),
+                            let format = TextureFormat::SharedBGRAu8 {
+                                id: presentable_image.id,
+                                width: swapchain.alloc_width as usize,
+                                height: swapchain.alloc_height as usize,
                             };
-                            texture.set_desc(self, desc);
-                            if self.textures[texture.texture_id()].os.update_from_shared_handle(
+                            texture.set_format(self, format);
+                            if self.textures[texture.texture_id()].update_from_shared_handle(
                                 metal_cx,
-                                &desc,
                                 fb.as_id(),
                             ) {
                                 let [presentable_image] = &mut swapchain.presentable_images;
