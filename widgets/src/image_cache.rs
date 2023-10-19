@@ -64,7 +64,7 @@ impl ImageBuffer {
     pub fn into_texture(self, cx:&mut Cx, texture:&Texture){
         texture.set_format(
             cx,
-            TextureFormat::VecBGRAu8 {
+            TextureFormat::VecBGRAu8_32 {
                 width: self.width,
                 height: self.height,
                 data: self.data

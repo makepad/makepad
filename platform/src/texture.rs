@@ -68,15 +68,16 @@ impl TextureSize{
 #[derive(Clone, Debug)]
 pub enum TextureFormat {
     Unknown,
-    VecBGRAu8{width:usize, height:usize, data:Vec<u32>},
-    VecMipBGRAu8{width:usize, height:usize, data:Vec<u32>, max_level:Option<usize>},
-    VecBGRAf32{width:usize, height:usize, data:Vec<f32>},
+    VecBGRAu8_32{width:usize, height:usize, data:Vec<u32>},
+    VecMipBGRAu8_32{width:usize, height:usize, data:Vec<u32>, max_level:Option<usize>},
+    VecRGBAf32{width:usize, height:usize, data:Vec<f32>},
     VecRu8{width:usize, height:usize, data:Vec<u8>},
+    VecRGu8_16{width:usize, height:usize, data:Vec<u16>},
     VecRf32{width:usize, height:usize, data:Vec<f32>},
-    DepthD32S8{size:TextureSize},
+    DepthD32{size:TextureSize},
     RenderBGRAu8{size:TextureSize},
-    RenderBGRAf16{size:TextureSize},
-    RenderBGRAf32{size:TextureSize},
+    RenderRGBAf16{size:TextureSize},
+    RenderRGBAf32{size:TextureSize},
     SharedBGRAu8{width:usize, height:usize, id:crate::cx_stdin::PresentableImageId},
 }
 
@@ -112,11 +113,12 @@ impl PartialEq for TextureCategory{
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TexturePixel{
     BGRAu8,
-    BGRAf16,
-    BGRAf32,
+    RGBAf16,
+    RGBAf32,
     Ru8,
+    RGu8,
     Rf32,
-    D32S8,
+    D32,
 }
 
 impl CxTexture{
@@ -135,7 +137,7 @@ impl CxTexture{
                 *updated = false;
                 if u{ // check our buffer sizes
                     match &self.format{
-                        TextureFormat::VecBGRAu8{width, height, data}=>{
+                        TextureFormat::VecBGRAu8_32{width, height, data}=>{
                             if width * height != data.len(){
                                 error!("Texture buffer size incorrect {}*{} != {}", width, height, data.len());
                                 return false
@@ -150,7 +152,7 @@ impl CxTexture{
         false
     }
     
-    pub(crate) fn _set_initial(&mut self, init:bool){
+    pub fn set_initial(&mut self, init:bool){
         if let Some(alloc) = &mut self.alloc{
             match &mut alloc.category{
                 TextureCategory::Render{initial} |
@@ -230,9 +232,11 @@ impl TextureFormat{
     }
     pub fn is_vec(&self)->bool{
         match self{
-            Self::VecBGRAu8{..}=>true,
-            Self::VecBGRAf32{..}=>true,
+            Self::VecBGRAu8_32{..}=>true,
+            Self::VecMipBGRAu8_32{..}=>true,
+            Self::VecRGBAf32{..}=>true,
             Self::VecRu8{..}=>true,
+            Self::VecRGu8_16{..}=>true,
             Self::VecRf32{..}=>true,
             _=>false
         }
@@ -241,25 +245,26 @@ impl TextureFormat{
     pub fn is_render(&self)->bool{
         match self{
             Self::RenderBGRAu8{..}=>true,
-            Self::RenderBGRAf16{..}=>true,
-            Self::RenderBGRAf32{..}=>true,
+            Self::RenderRGBAf16{..}=>true,
+            Self::RenderRGBAf32{..}=>true,
             _=>false
         }
     }
         
     pub fn is_depth(&self)->bool{
         match self{
-            Self::DepthD32S8{..}=>true,
+            Self::DepthD32{..}=>true,
             _=>false
         }
     }
     
     pub fn vec_width_height(&self)->Option<(usize,usize)>{
         match self{
-            Self::VecBGRAu8{width, height, .. }=>Some((*width,*height)),
-            Self::VecMipBGRAu8{width, height, ..}=>Some((*width,*height)),
-            Self::VecBGRAf32{width, height, ..}=>Some((*width,*height)),
+            Self::VecBGRAu8_32{width, height, .. }=>Some((*width,*height)),
+            Self::VecMipBGRAu8_32{width, height, ..}=>Some((*width,*height)),
+            Self::VecRGBAf32{width, height, ..}=>Some((*width,*height)),
             Self::VecRu8{width, height, ..}=>Some((*width,*height)),
+            Self::VecRGu8_16{width, height, ..}=>Some((*width,*height)),
             Self::VecRf32{width, height,..}=>Some((*width,*height)),
             _=>None
         }
@@ -267,22 +272,34 @@ impl TextureFormat{
     
     pub(crate) fn as_vec_alloc(&self)->Option<TextureAlloc>{
         match self{
-            Self::VecBGRAu8{width,height,..}=>Some(TextureAlloc{
+            Self::VecBGRAu8_32{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::BGRAu8,
                 category: TextureCategory::Vec{updated:true}
             }),
-            Self::VecBGRAf32{width,height,..}=>Some(TextureAlloc{
+            Self::VecMipBGRAu8_32{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
-                pixel:TexturePixel::BGRAf32,
+                pixel:TexturePixel::BGRAu8,
+                category: TextureCategory::Vec{updated:true}
+            }),
+            Self::VecRGBAf32{width,height,..}=>Some(TextureAlloc{
+                width:*width,
+                height:*height,
+                pixel:TexturePixel::RGBAf32,
                 category: TextureCategory::Vec{updated:true}
             }),
             Self::VecRu8{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::Ru8,
+                category: TextureCategory::Vec{updated:true}
+            }),
+            Self::VecRGu8_16{width,height,..}=>Some(TextureAlloc{
+                width:*width,
+                height:*height,
+                pixel:TexturePixel::RGu8,
                 category: TextureCategory::Vec{updated:true}
             }),
             Self::VecRf32{width,height,..}=>Some(TextureAlloc{
@@ -306,21 +323,21 @@ impl TextureFormat{
                     category: TextureCategory::Render{initial:true}
                 })
             }
-            Self::RenderBGRAf16{size,..}=>{
+            Self::RenderRGBAf16{size,..}=>{
                 let (width,height) = size.width_height(width, height);
                 Some(TextureAlloc{
                     width,
                     height,
-                    pixel:TexturePixel::BGRAf16,
+                    pixel:TexturePixel::RGBAf16,
                     category: TextureCategory::Render{initial:true}
                 })
             }
-            Self::RenderBGRAf32{size,..}=>{
+            Self::RenderRGBAf32{size,..}=>{
                 let (width,height) = size.width_height(width, height);
                 Some(TextureAlloc{
                     width,
                     height,
-                    pixel:TexturePixel::BGRAf32,
+                    pixel:TexturePixel::RGBAf32,
                     category: TextureCategory::Render{initial:true}
                 })
             }
@@ -330,12 +347,12 @@ impl TextureFormat{
         
     pub(crate) fn as_depth_alloc(&self, width:usize, height:usize)->Option<TextureAlloc>{
         match self{
-            Self::DepthD32S8{size,..}=>{
+            Self::DepthD32{size,..}=>{
                 let (width,height) = size.width_height(width, height);
                 Some(TextureAlloc{
                     width,
                     height,
-                    pixel:TexturePixel::D32S8,
+                    pixel:TexturePixel::D32,
                     category: TextureCategory::DepthBuffer{initial:true}
                 })
             },
@@ -383,7 +400,7 @@ impl Texture {
     pub fn swap_vec_u32(&self, cx: &mut Cx, image: &mut Vec<u32>) {
         let cxtexture = &mut cx.textures[self.texture_id()];
         match &mut cxtexture.format{
-            TextureFormat::VecBGRAu8{data,..} => {
+            TextureFormat::VecBGRAu8_32{data,..} => {
                 std::mem::swap(data, image);
                 cxtexture.set_updated(true);
             }
@@ -405,11 +422,28 @@ impl Texture {
             }
         }
     }
-            
+    
+    pub fn swap_vec_u16(&self, cx: &mut Cx, image: &mut Vec<u16>) {
+        let cxtexture = &mut cx.textures[self.texture_id()];
+        match &mut cxtexture.format{
+            TextureFormat::VecRGu8_16{data,..} => {
+                std::mem::swap(data, image);
+                cxtexture.set_updated(true);
+            }
+            _=>{
+                panic!("Not the correct texture desc for u8 image buffer")
+            }
+        }
+    }
+    
     pub fn swap_vec_f32(&self, cx: &mut Cx, image: &mut Vec<f32>) {
         let cxtexture = &mut cx.textures[self.texture_id()];
         match &mut cxtexture.format{
             TextureFormat::VecRf32{data,..} => {
+                std::mem::swap(data, image);
+                cxtexture.set_updated(true);
+            }
+            TextureFormat::VecRGBAf32{data,..} => {
                 std::mem::swap(data, image);
                 cxtexture.set_updated(true);
             }

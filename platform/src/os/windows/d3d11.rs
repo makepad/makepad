@@ -113,11 +113,14 @@ use crate::{
                     Common::{
                         DXGI_FORMAT,
                         DXGI_ALPHA_MODE_IGNORE,
-                        DXGI_FORMAT_R8G8B8A8_UNORM,
+                        DXGI_FORMAT_R8_UNORM, 
+                        DXGI_FORMAT_R8G8_UNORM,
                         DXGI_FORMAT_B8G8R8A8_UNORM,
                         DXGI_SAMPLE_DESC,
                         DXGI_FORMAT_R32G32B32A32_FLOAT,
-                        DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+                        DXGI_FORMAT_R16_FLOAT, 
+                        //DXGI_FORMAT_D32_FLOAT_S8X 24_UINT,
+                        DXGI_FORMAT_D32_FLOAT,
                         DXGI_FORMAT_R32_UINT,
                         DXGI_FORMAT_R32_FLOAT,
                         DXGI_FORMAT_R32G32_FLOAT,
@@ -507,6 +510,18 @@ impl Cx {
     }
 }
 
+fn texture_pixel_to_dx11_pixel(pix:&TexturePixel)->DXGI_FORMAT{
+    match pix{
+        TexturePixel::BGRAu8 => DXGI_FORMAT_B8G8R8A8_UNORM,
+        TexturePixel::RGBAf16 => DXGI_FORMAT_R16_FLOAT,
+        TexturePixel::RGBAf32 => DXGI_FORMAT_R32G32B32A32_FLOAT,
+        TexturePixel::Ru8  => DXGI_FORMAT_R8_UNORM,
+        TexturePixel::RGu8  => DXGI_FORMAT_R8G8_UNORM,
+        TexturePixel::Rf32  => DXGI_FORMAT_R32_FLOAT,
+        TexturePixel::D32 => DXGI_FORMAT_D32_FLOAT,
+    }   
+}
+
 pub struct D3d11Window {
     pub window_id: WindowId,
     pub is_in_resize: bool,
@@ -792,40 +807,57 @@ impl CxTexture {
         // TODO maybe we can update the data instead of making a new texture?
         if self.alloc_vec(){}
         if self.check_updated(){
-            match &self.format{
-                TextureFormat::VecBGRAu8{width, height, data}=>{
-                    let sub_data = D3D11_SUBRESOURCE_DATA {
-                        pSysMem: data.as_ptr() as *const _,
-                        SysMemPitch: (width * 4) as u32,
-                        SysMemSlicePitch: 0
-                    };
-                            
-                    let texture_desc = D3D11_TEXTURE2D_DESC {
-                        Width: *width as u32,
-                        Height: *height as u32,
-                        MipLevels: 1,
-                        ArraySize: 1,
-                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                        SampleDesc: DXGI_SAMPLE_DESC {
-                            Count: 1,
-                            Quality: 0
-                        },
-                        Usage: D3D11_USAGE_DEFAULT,
-                        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                        CPUAccessFlags: 0,
-                        MiscFlags: 0,
-                    };
-                            
-                    let mut texture = None;
-                    unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)).unwrap()};
-                    let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
-                    let mut shader_resource_view = None;
-                    unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
-                    self.os.texture = texture;
-                    self.os.shader_resource_view = shader_resource_view;
+            fn get_descs(format: DXGI_FORMAT, width: usize, height: usize, bpp: usize, data: *const std::ffi::c_void)->(D3D11_SUBRESOURCE_DATA,D3D11_TEXTURE2D_DESC) {
+                let sub_data = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: data,
+                    SysMemPitch: (width * bpp) as u32,
+                    SysMemSlicePitch: 0
+                };
+                                            
+                let texture_desc = D3D11_TEXTURE2D_DESC {
+                    Width: width as u32,
+                    Height: height as u32,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: format,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                (sub_data,texture_desc)
+            }
+            
+            let (sub_data, texture_desc) = match &self.format{
+                TextureFormat::VecBGRAu8_32{width, height, data}=>{
+                    get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, data.as_ptr() as *const _)
+                }
+                TextureFormat::VecRGBAf32{width, height, data}=>{
+                    get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, data.as_ptr() as *const _)
+                }
+                TextureFormat::VecRu8{width, height, data}=>{
+                    get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, data.as_ptr() as *const _)
+                }
+                TextureFormat::VecRGu8_16{width, height, data}=>{
+                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 2, data.as_ptr() as *const _)
+                }
+                TextureFormat::VecRf32{width, height, data}=>{
+                    get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, data.as_ptr() as *const _)
                 }
                 _=>panic!()
-            }
+            };
+                                        
+            let mut texture = None;
+            unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)).unwrap()};
+            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
+            let mut shader_resource_view = None;
+            unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
+            self.os.texture = texture;
+            self.os.shader_resource_view = shader_resource_view;
         }
     }
     
@@ -837,21 +869,9 @@ impl CxTexture {
     ) {
         if self.alloc_render(width, height){
             let alloc = self.alloc.as_ref().unwrap();
-            let format;
-            let misc_flags;
-            match &alloc.pixel {
-                TexturePixel::BGRAu8 => {
-                    format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                    misc_flags = D3D11_RESOURCE_MISC_FLAG(2);  // D3D11_RESOURCE_MISC_SHARED
-                },
-                TexturePixel::BGRAf32 => {
-                    format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-                    misc_flags = D3D11_RESOURCE_MISC_FLAG(2);
-                },
-                _ => {
-                    panic!("Wrong format for update_render_target");
-                }
-            }
+            let misc_flags = D3D11_RESOURCE_MISC_FLAG(0);
+            let format = texture_pixel_to_dx11_pixel(&alloc.pixel);
+            
             let texture_desc = D3D11_TEXTURE2D_DESC {
                 Width: width as u32,
                 Height: height as u32,
@@ -889,8 +909,8 @@ impl CxTexture {
             let alloc = self.alloc.as_ref().unwrap();
             let format;
             match alloc.pixel {
-                TexturePixel::D32S8 => {
-                    format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+                TexturePixel::D32 => {
+                    format = DXGI_FORMAT_D32_FLOAT;
                 }
                 _ => {
                     panic!("Wrong format for update_depth_stencil");
@@ -915,7 +935,7 @@ impl CxTexture {
             //let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
             
             let dsv_desc = D3D11_DEPTH_STENCIL_VIEW_DESC {
-                Format: DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+                Format: DXGI_FORMAT_D32_FLOAT,
                 ViewDimension: D3D11_DSV_DIMENSION_TEXTURE2D,
                 Flags: 0,
                 ..Default::default()
@@ -942,7 +962,7 @@ impl CxTexture {
                 Height: alloc.height as u32,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0
