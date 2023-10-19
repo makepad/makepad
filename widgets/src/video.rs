@@ -415,7 +415,7 @@ impl Video {
             let texture = Texture::new(cx);
             texture.set_format(
                 cx,
-                TextureFormat::VecBGRAu8 {
+                TextureFormat::VecBGRAu8_32 {
                     width: self.video_width,
                     height: self.video_height,
                     data: vec![]

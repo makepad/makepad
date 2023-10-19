@@ -680,7 +680,7 @@ impl CxOsDrawShader {
             let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
             let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
             
-            let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
+            let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
             
             let mut error: ObjcId = nil;
             msg_send![
@@ -803,7 +803,17 @@ struct MetalBufferInner {
 pub struct CxOsTexture {
     texture: Option<RcObjcId>
 }
-
+fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)->MTLPixelFormat{
+     match pix{
+         TexturePixel::BGRAu8 => MTLPixelFormat::BGRA8Unorm,
+         TexturePixel::RGBAf16 => MTLPixelFormat::RGBA16Float,
+         TexturePixel::RGBAf32 => MTLPixelFormat::RGBA32Float,
+         TexturePixel::Ru8  => MTLPixelFormat::R8Unorm,
+         TexturePixel::RGu8  => MTLPixelFormat::RG8Unorm,
+         TexturePixel::Rf32  => MTLPixelFormat::R32Float,
+         TexturePixel::D32 => MTLPixelFormat::Depth32Float,
+     }   
+}
 impl CxTexture {
     
     fn update_vec_texture(
@@ -824,33 +834,41 @@ impl CxTexture {
             let _: () = unsafe {msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead]};
             let _: () = unsafe {msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
             let _: () = unsafe {msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
-            match &alloc.pixel {
-                TexturePixel::BGRAu8=>{
-                    let _: () = unsafe{msg_send![
-                        descriptor.as_id(),
-                        setPixelFormat: MTLPixelFormat::BGRA8Unorm
-                    ]};
-                    let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
-                    self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
-                },
-                _=>{panic!()}
-            };
+            let _: () = unsafe{msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]};
+            let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
+            self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         }
         if self.check_updated(){
+            fn update_data(texture:&Option<RcObjcId>, width: usize, height: usize, bpp: u64, data: *const std::ffi::c_void){
+                let region = MTLRegion {
+                    origin: MTLOrigin {x: 0, y: 0, z: 0},
+                    size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+                };
+                                            
+                let () = unsafe {msg_send![
+                    texture.as_ref().unwrap().as_id(),
+                    replaceRegion: region
+                    mipmapLevel: 0
+                    withBytes: data
+                    bytesPerRow: (width as u64) * bpp
+                ]};
+            }
+            
             match &self.format{
-                TextureFormat::VecBGRAu8{width, height, data}=>{
-                    let region = MTLRegion {
-                        origin: MTLOrigin {x: 0, y: 0, z: 0},
-                        size: MTLSize {width: *width as u64, height: *height as u64, depth: 1}
-                    };
-                            
-                    let () = unsafe {msg_send![
-                        self.os.texture.as_ref().unwrap().as_id(),
-                        replaceRegion: region
-                        mipmapLevel: 0
-                        withBytes: data.as_ptr() as *const std::ffi::c_void
-                        bytesPerRow: (*width as u64 * std::mem::size_of::<u32>() as u64)
-                    ]};
+                TextureFormat::VecBGRAu8_32{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 4,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                TextureFormat::VecRGBAf32{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 16,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                TextureFormat::VecRu8{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 1,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                TextureFormat::VecRGu8_16{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 2,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                TextureFormat::VecRf32{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 4,  data.as_ptr() as *const std::ffi::c_void);
                 }
                 _=>panic!()
             }
@@ -877,15 +895,7 @@ impl CxTexture {
         let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
         let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
         let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
-        match &alloc.pixel {
-            TexturePixel::BGRAu8=>{
-                let _: () = unsafe{msg_send![
-                    descriptor.as_id(),
-                    setPixelFormat: MTLPixelFormat::BGRA8Unorm
-                ]};
-            },
-            _=>{panic!()}
-        };
+        let _: () = unsafe{msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]};
         match &self.format {
             TextureFormat::SharedBGRAu8{id, ..} => {
                 let texture: ObjcId = unsafe{msg_send![metal_device, newSharedTextureWithDescriptor: descriptor]};
@@ -941,15 +951,7 @@ impl CxTexture {
             let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
             let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
             let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
-            match &alloc.pixel {
-                TexturePixel::BGRAu8 => {
-                    let _: () = unsafe{msg_send![
-                        descriptor.as_id(),
-                        setPixelFormat: MTLPixelFormat::BGRA8Unorm
-                    ]};
-                }
-                _ => panic!(),
-            }
+            let _: () = unsafe{msg_send![descriptor.as_id(),setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]};
             let texture = RcObjcId::from_owned(NonNull::new(unsafe {
                 msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
             }).unwrap());
@@ -978,15 +980,10 @@ impl CxTexture {
             let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
             let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
             let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
-            match alloc.pixel {
-                TexturePixel::D32S8 => {
-                    let _: () = unsafe{msg_send![
-                        descriptor.as_id(),
-                        setPixelFormat: MTLPixelFormat::Depth32Float_Stencil8
-                    ]};
-                }
-                _=>panic!()
-            }
+            let _: () = unsafe{msg_send![
+                descriptor.as_id(),
+                setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)
+            ]};
             let texture = RcObjcId::from_owned(NonNull::new(unsafe {
                 msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
             }).unwrap());
