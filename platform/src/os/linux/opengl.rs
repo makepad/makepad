@@ -845,13 +845,48 @@ impl CxTexture {
             }
         }
         if self.check_updated(){
+            unsafe{
+                gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+                gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+            }                       
             match &self.format{
-                TextureFormat::VecBGRAu8{width, height, data}=>unsafe{
-                    gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);            
+                TextureFormat::VecBGRAu8_32{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::BGRA as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::BGRA,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ptr() as *const _
+                    );
+                }
+                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::BGRA as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::BGRA,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ptr() as *const _
+                    );
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
+                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
+                },
+                TextureFormat::VecRGBAf32{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -860,15 +895,59 @@ impl CxTexture {
                         *height as i32,
                         0,
                         gl_sys::RGBA,
+                        gl_sys::FLOAT,
+                        data.as_ptr() as *const _
+                    );
+                },
+                TextureFormat::VecRu8{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RED as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::RED,
                         gl_sys::UNSIGNED_BYTE,
                         data.as_ptr() as *const _
                     );
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, 3);
-                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
-                    gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+                },
+                TextureFormat::VecRGu8_16{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RG as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::RG,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ptr() as *const _
+                    );
+                },
+                TextureFormat::VecRf32{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RED as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::RED,
+                        gl_sys::FLOAT,
+                        data.as_ptr() as *const _
+                    );
                 },
                 _=>{panic!()}
+            }
+            unsafe{
+                gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
             }
         }
     }
@@ -876,15 +955,16 @@ impl CxTexture {
     pub fn update_render_target(&mut self, width: usize, height: usize) {
         if self.alloc_render(width, height){
             let alloc = self.alloc.as_ref().unwrap();
+            if self.os.gl_texture.is_none() {
+                let mut gl_texture = std::mem::MaybeUninit::uninit();
+                unsafe{
+                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    self.os.gl_texture = Some(gl_texture.assume_init());
+                }
+            }
+            unsafe{gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap())};
             match &alloc.pixel {
                 TexturePixel::BGRAu8 => unsafe{
-                    if self.os.gl_texture.is_none() {
-                        let mut gl_texture = std::mem::MaybeUninit::uninit();
-                        gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                        self.os.gl_texture = Some(gl_texture.assume_init());
-                    }
-                                            
-                    gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
                     gl_sys::TexImage2D(
@@ -898,11 +978,41 @@ impl CxTexture {
                         gl_sys::UNSIGNED_BYTE,
                         ptr::null()
                     );
-                    gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
                 },
-                _ => {
-                    println!("update_platform_render_target unsupported texture format");
+                TexturePixel::RGBAf16 => unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RGBA as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        gl_sys::RGBA,
+                        gl_sys::HALF_FLOAT,
+                        ptr::null()
+                    );
                 }
+                TexturePixel::RGBAf32 => unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RGBA as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        gl_sys::RGBA,
+                        gl_sys::FLOAT,
+                        ptr::null()
+                    );
+                }
+                _ => panic!()
+            }
+            unsafe{
+                gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
             }
         }
     }
@@ -916,7 +1026,7 @@ impl CxTexture {
                    
             let alloc = self.alloc.as_ref().unwrap();
             match &alloc.pixel {
-                TexturePixel::D32S8 => unsafe{
+                TexturePixel::D32 => unsafe{
                     if self.os.gl_renderbuffer.is_none() {
                         let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
                         gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
@@ -1017,29 +1127,3 @@ impl OpenglBuffer {
     }
 
 }
-
-/*
-// void shaders to test if we are shader compiletime bottlenecked
-
-                let vertex = "
-uniform float const_table[24];
-uniform float draw_table[1];
-uniform float pass_table[50];
-uniform float view_table[16];
-attribute vec2 packed_geometry_0;
-attribute vec4 packed_instance_0;
-attribute vec3 packed_instance_1;
-
-void main() {
-    gl_Position = vec4(0.0,0.0,0.0,0.0);
-}";
-
-let pixel = "
-uniform float const_table[24];
-uniform float draw_table[1];
-uniform float pass_table[50];
-uniform float view_table[16];
-
-void main() {
-    gl_FragColor = vec4(0.0,0.0,0.0,0.0);
-}";*/
