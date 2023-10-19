@@ -18,7 +18,7 @@ pub struct Image {
     #[live(1.0)] width_scale: f64,
     #[live] fit: ImageFit,
     #[live] source: LiveDependency,
-    #[live] texture: Option<Texture>,
+    #[rust] texture: Option<Texture>,
 }
 
 impl ImageCacheImpl for Image {
@@ -68,10 +68,8 @@ impl Image {
         let dpi = cx.current_dpi_factor();
         let (width, height) = if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
-            let desc = image_texture.get_desc(cx);
-            let width = desc.width.unwrap_or(self.min_width as usize) as f64 / dpi;
-            let height = desc.height.unwrap_or(self.min_height as usize) as f64 / dpi;
-            (width*self.width_scale,height)
+            let (width,height) = image_texture.get_format(cx).vec_width_height().unwrap_or((self.min_width as usize, self.min_height as usize));
+            (width as f64 * self.width_scale, height as f64)
         }
         else {
             self.draw_bg.draw_vars.empty_texture(0);

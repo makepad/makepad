@@ -148,11 +148,10 @@ impl TileCache {
             empty.push(Tile::new(i));
             
             let texture = Texture::new(cx);
-            texture.set_desc(cx, TextureDesc {
-                format: TextureFormat::ImageBGRA,
-                width: Some(TILE_SIZE_X),
-                height: Some(TILE_SIZE_Y),
-                ..Default::default()
+            texture.set_format(cx, TextureFormat::VecBGRAu8 {
+                data: vec![],
+                width: TILE_SIZE_X,
+                height: TILE_SIZE_Y,
             });
             textures.push(texture);
         }
@@ -172,7 +171,7 @@ impl TileCache {
     
     fn tile_completed(&mut self, cx: &mut Cx, mut tile: Tile) {
         self.tiles_in_flight -= 1;
-        self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
+        self.textures[tile.texture_index].swap_vec_u32(cx, &mut tile.buffer);
         self.next.push(tile)
     }
     
@@ -207,14 +206,14 @@ impl TileCache {
     
     fn discard_next_layer(&mut self, cx: &mut Cx) {
         while let Some(mut tile) = self.next.pop() {
-            self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
+            self.textures[tile.texture_index].swap_vec_u32(cx, &mut tile.buffer);
             self.empty.push(tile);
         }
     }
     
     fn discard_current_layer(&mut self, cx: &mut Cx) {
         while let Some(mut tile) = self.current.pop() {
-            self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
+            self.textures[tile.texture_index].swap_vec_u32(cx, &mut tile.buffer);
             self.empty.push(tile);
         }
         self.current_zoom = self.next_zoom;
