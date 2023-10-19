@@ -236,7 +236,9 @@ impl CxDrawFontsAtlas {
     pub fn new(cx: &mut Cx) -> Self {
         
         let atlas_texture = Texture::new(cx);
-        
+        atlas_texture.set_format(cx, TextureFormat::RenderBGRAu8{
+            size: TextureSize::Auto
+        });
         //cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
         
         let draw_trapezoid = DrawTrapezoidVector::new_local(cx);

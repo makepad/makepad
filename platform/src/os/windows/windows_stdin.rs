@@ -13,8 +13,7 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::{Texture, TextureDesc, TextureFormat},
-        live_traits::LiveNew,
+        texture::{Texture,  TextureFormat},
         thread::Signal,
         os::{
             d3d11::D3d11Cx,
@@ -32,7 +31,7 @@ impl Cx {
     pub (crate) fn stdin_handle_repaint(
         &mut self,
         d3d11_cx: &mut D3d11Cx,
-        swapchain: Option<&Swapchain<Texture >>,
+        swapchain: Option<&Swapchain<Texture>>,
         present_index: &mut usize,
     ) {
         let mut passes_todo = Vec::new();
@@ -171,15 +170,13 @@ impl Cx {
                         let handle = HANDLE(pi.image as isize);
                         
                         let texture = Texture::new(self);
-                        let desc = TextureDesc {
-                            format: TextureFormat::SharedBGRA(pi.id),
-                            width: Some(new_swapchain.alloc_width as usize),
-                            height: Some(new_swapchain.alloc_height as usize),
-                            ..Default::default()
+                        let format = TextureFormat::SharedBGRAu8 {
+                            id: pi.id,
+                            width: new_swapchain.alloc_width as usize,
+                            height: new_swapchain.alloc_height as usize,
                         };
-                        texture.set_desc(self, desc);
-                        self.textures[texture.texture_id()]
-                            .os.update_from_shared_handle(d3d11_cx, handle);
+                        texture.set_format(self, format);
+                        self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);
                         texture
                     });
                     let swapchain = swapchain.insert(new_swapchain);
@@ -275,7 +272,7 @@ impl Cx {
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: swapchain.presentable_images[present_index].image.texture_id(),
+                            texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
                     }
                 },

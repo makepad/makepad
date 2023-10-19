@@ -35,7 +35,7 @@ use {
         window::CxWindowPool,
         draw_list::CxDrawListPool,
         pass::CxPassPool,
-        texture::{CxTexturePool,TextureDesc,TextureFormat,Texture, PixelData},
+        texture::{CxTexturePool,TextureFormat,Texture},
         geometry::{
             Geometry,
             CxGeometryPool,
@@ -191,14 +191,11 @@ impl Cx {
         let mut textures = CxTexturePool::default();
         let null_texture = textures.alloc();
         let texture = &mut textures[null_texture.texture_id()];
-        texture.desc = TextureDesc {
-            format: TextureFormat::ImageBGRA,
-            width: Some(4),
-            height: Some(4),
-            ..Default::default()
+        texture.format = TextureFormat::VecBGRAu8_32 {
+            width: 4,
+            height: 4,
+            data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         };
-        texture.pixel_data = PixelData::U32(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        texture.update_image =  true;
         
         let (executor, spawner) = executor::new_executor_and_spawner();
         let (send, recv) = std::sync::mpsc::channel();

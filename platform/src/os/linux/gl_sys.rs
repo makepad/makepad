@@ -22,7 +22,6 @@ pub use types::*;
 
 pub const TRUE: types::GLboolean = 1;
 pub const ARRAY_BUFFER: types::GLenum = 0x8892;
-pub const FLOAT: types::GLenum = 0x1406;
 pub const ELEMENT_ARRAY_BUFFER: types::GLenum = 0x8893;
 pub const TEXTURE0: types::GLenum = 0x84C0;
 pub const TEXTURE_2D: types::GLenum = 0x0DE1;
@@ -53,9 +52,13 @@ pub const TEXTURE_BASE_LEVEL: types::GLenum = 0x813C;
 pub const TEXTURE_MAX_LEVEL: types::GLenum = 0x813D;
 pub const TEXTURE_MAG_FILTER: types::GLenum = 0x2800;
 pub const RGBA: types::GLenum = 0x1908;
-pub const RG: types::GLenum = 0x8227;
-pub const R: types::GLenum = 0x1903;
+pub const BGRA: types::GLenum = 0x80E1;
+pub const RED: types::GLenum = 0x1903;
+pub const RG: types::GLenum =  0x8227;
 pub const UNSIGNED_BYTE: types::GLenum = 0x1401;
+pub const HALF_FLOAT: types::GLenum =  0x140B;
+pub const FLOAT: types::GLenum = 0x1406;
+
 pub const DEPTH_COMPONENT32F: types::GLenum = 0x8CAC;
 pub const STATIC_DRAW: types::GLenum = 0x88E4;
 pub const NEAREST: types::GLenum = 0x2600;

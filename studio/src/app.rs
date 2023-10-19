@@ -284,7 +284,7 @@ impl LiveHook for App {
 app_main!(App);
 
 impl App {
-    fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
+    pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.file_system.path_to_file_node_id(&path) {
             let dock = self.ui.dock(id!(dock));            
             let tab_id = dock.unique_tab_id(file_id.0.0);
@@ -357,13 +357,19 @@ impl AppMain for App {
                     self.build_manager.clear_log(cx, &dock, &mut self.file_system);
                     log_list.redraw(cx);
                 }
+                else if let KeyCode::KeyR = key_code{
+                    // lets reload the tree
+                    self.file_system.reload_file_tree();
+                    
+                }
             }
         }
                 
         for action in self.file_system.handle_event(cx, event, &self.ui) {
             match action {
                 FileSystemAction::TreeLoaded => {
-                    self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
+                    file_tree.redraw(cx);
+                    //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
                 }
                 FileSystemAction::RecompileNeeded => {
                     self.build_manager.start_recompile_timer(cx, &self.ui);
@@ -391,6 +397,15 @@ impl AppMain for App {
                             }
                         }
                     }
+
+                    // When the document for a session is modified, it sends a copy of this
+                    // modification to the mpsc queues of its sessions so they can update
+                    // themselves accordingly. It is the responsibility of the consumer to make
+                    // sure that these mpsc queues are actually polled.
+                    // 
+                    // To make sure that our sessions are always up to date, we poll the mpsc
+                    // queues for every session here.
+                    self.file_system.handle_sessions();
                 }
             }
         }
