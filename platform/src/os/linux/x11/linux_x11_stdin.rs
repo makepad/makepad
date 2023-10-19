@@ -13,8 +13,7 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::{Texture, TextureDesc, TextureFormat},
-        live_traits::LiveNew,
+        texture::{Texture, TextureFormat},
         thread::Signal,
         os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain, PollTimer},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
@@ -44,7 +43,7 @@ impl Cx {
                         *present_index = (*present_index + 1) % swapchain.presentable_images.len();
 
                         // render to swapchain
-                        self.draw_pass_to_texture(pass_id, current_image.image.texture_id());
+                        self.draw_pass_to_texture(pass_id, &current_image.image);
 
                         // wait for GPU to finish rendering
                         unsafe { gl_sys::Finish(); }
@@ -165,17 +164,15 @@ impl Cx {
                         match pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
                             Ok(pi) => {
                                 // update texture
-                                let desc = TextureDesc {
-                                    format: TextureFormat::SharedBGRA(pi.id),
-                                    width: Some(new_swapchain.alloc_width as usize),
-                                    height: Some(new_swapchain.alloc_height as usize),
-                                    ..Default::default()
+                                let desc = TextureFormat::SharedBGRAu8{
+                                    id: pi.id,
+                                    width: new_swapchain.alloc_width as usize,
+                                    height: new_swapchain.alloc_height as usize,
                                 };
-                                new_texture.set_desc(self, desc);
+                                new_texture.set_format(self, desc);
                                 self.textures[new_texture.texture_id()]
-                                .os.update_from_shared_dma_buf_image(
+                                .update_from_shared_dma_buf_image(
                                     self.os.opengl_cx.as_ref().unwrap(),
-                                    &desc,
                                     &pi.image,
                                 );
                             }
@@ -251,7 +248,7 @@ impl Cx {
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: swapchain.presentable_images[present_index].image.texture_id(),
+                            texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
                     }
                 },

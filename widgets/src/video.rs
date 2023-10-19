@@ -443,33 +443,33 @@ impl Video {
                 // y
                 let y_plane_range = range.start..range.start + y_stride * self.video_height;
                 self.drain_frame_buffer(y_plane_range);
-                self.update_texture(cx, 0, TextureFormat::ImageR8, y_stride);
+                self.update_texture_r(cx, 0, self.video_width, self.video_height, y_stride);
 
                 // u
-                let u_plane_start = range.start; // + y_stride * self.video_height;
+                let u_plane_start = range.start;
                 let u_plane_range =
                     u_plane_start..u_plane_start + u_stride * (self.video_height / 2);
                 self.drain_frame_buffer(u_plane_range);
-                self.update_texture(cx, 1, TextureFormat::ImageR8, u_stride);
+                self.update_texture_r(cx, 1, self.video_width / 2, self.video_height / 2, u_stride);
 
                 // v
-                let v_plane_start = u_plane_start; //+ u_stride * (self.video_height / 2);
+                let v_plane_start = u_plane_start;
                 let v_plane_range =
                     v_plane_start..v_plane_start + v_stride * (self.video_height / 2);
                 self.drain_frame_buffer(v_plane_range);
-                self.update_texture(cx, 2, TextureFormat::ImageR8, v_stride);
+                self.update_texture_r(cx, 2, self.video_width / 2, self.video_height / 2, v_stride);
             }
             VideoColorFormat::YUV420SemiPlanar => {
                 // y
                 let y_plane_range = range.start..range.start + y_stride * self.video_height;
                 self.drain_frame_buffer(y_plane_range);
-                self.update_texture(cx, 0, TextureFormat::ImageR8, y_stride);
+                self.update_texture_r(cx, 0, self.video_width, self.video_height, y_stride);
 
                 // uv
                 let uv_plane_size = y_stride * self.video_height / 2;
                 let uv_plane_range = 0..uv_plane_size;
                 self.drain_frame_buffer(uv_plane_range);
-                self.update_texture(cx, 1, TextureFormat::ImageRG8, u_stride);
+                self.update_texture_rg(cx, 1, self.video_width, self.video_height / 2, u_stride);
             }
             _ => todo!(),
         }
@@ -481,28 +481,15 @@ impl Video {
         self.tmp_recycled_vec.extend(frame_buffer.drain(range));
     }
 
-    fn update_texture(&mut self, cx: &mut Cx, slot: usize, format: TextureFormat, stride: usize) {
+    fn update_texture_r(&mut self, cx: &mut Cx, slot: usize, width: usize, height: usize, stride: usize) {
         if self.textures[slot].is_none() {
             let new_texture = Texture::new(cx);
-            let (width, height) = match (self.color_format, slot) {
-                (VideoColorFormat::YUV420Planar, 0) | (VideoColorFormat::YUV420SemiPlanar, 0) => {
-                    (self.video_width, self.video_height)
-                }
-                (VideoColorFormat::YUV420Planar, _) => {
-                    (self.video_width / 2, self.video_height / 2)
-                }
-                (VideoColorFormat::YUV420SemiPlanar, 1) => {
-                    (self.video_width, self.video_height / 2)
-                }
-                _ => panic!("Unsupported color format or slot"),
-            };
-            new_texture.set_desc(
+            new_texture.set_format(
                 cx,
-                TextureDesc {
-                    format,
-                    width: Some(width),
-                    height: Some(height),
-                    mipmapping: false,
+                TextureFormat::VecRu8 {
+                    width,
+                    height,
+                    data: vec![],
                     unpack_row_length: Some(stride),
                 },
             );
@@ -510,7 +497,28 @@ impl Video {
         }
 
         let texture = self.textures[slot].as_mut().unwrap();
-        texture.swap_image_u8(cx, &mut self.tmp_recycled_vec);
+        texture.swap_vec_u8(cx, &mut self.tmp_recycled_vec);
+
+        self.draw_bg.draw_vars.set_texture(slot, &texture);
+    }
+
+    fn update_texture_rg(&mut self, cx: &mut Cx, slot: usize, width: usize, height: usize, stride: usize) {
+        if self.textures[slot].is_none() {
+            let new_texture = Texture::new(cx);
+            new_texture.set_format(
+                cx,
+                TextureFormat::VecRGu8 {
+                    width,
+                    height,
+                    data: vec![],
+                    unpack_row_length: Some(stride),
+                },
+            );
+            self.textures[slot] = Some(new_texture);
+        } 
+
+        let texture = self.textures[slot].as_mut().unwrap();
+        texture.swap_vec_u8(cx, &mut self.tmp_recycled_vec);
 
         self.draw_bg.draw_vars.set_texture(slot, &texture);
     }

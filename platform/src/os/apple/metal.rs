@@ -27,10 +27,10 @@ use {
         cx::Cx,
         pass::{PassClearColor, PassClearDepth, PassId},
         texture::{
+            CxTexture,
             Texture,
+            TexturePixel,
             TextureFormat,
-            TextureDesc,
-            PixelData,
         },
     },
     std::sync::{
@@ -203,31 +203,27 @@ impl Cx {
                     
                     let cxtexture = &mut self.textures[texture_id];
                     
-                    if cxtexture.desc.format.is_shared() {
+                    if cxtexture.format.is_shared() {
                         #[cfg(target_os = "macos")]
-                        cxtexture.os.update_shared_texture(
+                        cxtexture.update_shared_texture(
                             metal_cx.device,
-                            &cxtexture.desc,
                         );
                     }
-                    else if cxtexture.update_image {
-                        cxtexture.update_image = false;
-                        cxtexture.os.update_normal_texture(
+                    else if cxtexture.format.is_vec(){
+                        cxtexture.update_vec_texture(
                             metal_cx,
-                            &cxtexture.desc,
-                            &cxtexture.pixel_data
                         );
                     }
                     
-                    if let Some(inner) = cxtexture.os.inner.as_ref() {
+                    if let Some(texture) = cxtexture.os.texture.as_ref() {
                         let () = unsafe {msg_send![
                             encoder,
-                            setFragmentTexture: inner.texture.as_id()
+                            setFragmentTexture: texture.as_id()
                             atIndex: i as u64
                         ]};
                         let () = unsafe {msg_send![
                             encoder,
-                            setVertexTexture: inner.texture.as_id()
+                            setVertexTexture: texture.as_id()
                             atIndex: i as u64
                         ]};
                     }
@@ -332,16 +328,16 @@ impl Cx {
                 let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
-                let cxtexture = &mut self.textures[color_texture.texture_id];
-
-                cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_rect.size);
+                let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
+                let size = dpi_factor * pass_rect.size; 
+                cxtexture.update_render_target(metal_cx, size.x as usize, size.y as usize);
                 
-                let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
+                let is_initial = cxtexture.check_initial();
                 
-                if let Some(inner) = cxtexture.os.inner.as_ref() {
+                if let Some(texture) = cxtexture.os.texture.as_ref() {
                     let () = unsafe {msg_send![
                         color_attachment,
-                        setTexture: inner.texture.as_id()
+                        setTexture: texture.as_id()
                     ]};
                 }
                 else {
@@ -381,15 +377,16 @@ impl Cx {
             }
         }
         // attach depth texture
-        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture_id];
-            cxtexture.os.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_rect.size);
-            let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
+        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
+            let cxtexture = &mut self.textures[depth_texture.texture_id()];
+            let size = dpi_factor * pass_rect.size;
+            cxtexture.update_depth_stencil(metal_cx, size.x as usize, size.y as usize);
+            let is_initial = cxtexture.check_initial();
             
             let depth_attachment: ObjcId = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
             
-            if let Some(inner) = cxtexture.os.inner.as_ref() {
-                unsafe {msg_send![depth_attachment, setTexture: inner.texture.as_id()]}
+            if let Some(texture) = cxtexture.os.texture.as_ref() {
+                unsafe {msg_send![depth_attachment, setTexture: texture.as_id()]}
             }
             else {
                 error!("draw_pass_to_texture invalid render target");
@@ -538,7 +535,7 @@ impl Cx {
         texture: &Texture,
     ) -> crate::cx_stdin::SharedPresentableImageOsHandle {
         let cxtexture = &mut self.textures[texture.texture_id()];
-        cxtexture.os.update_shared_texture(self.os.metal_device.unwrap(), &cxtexture.desc);
+        cxtexture.update_shared_texture(self.os.metal_device.unwrap());
 
         // HACK(eddyb) macOS has no real `SharedPresentableImageOsHandle` because
         // the texture is actually shared through an XPC helper service instead,
@@ -683,7 +680,7 @@ impl CxOsDrawShader {
             let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
             let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
             
-            let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
+            let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
             
             let mut error: ObjcId = nil;
             msg_send![
@@ -804,172 +801,110 @@ struct MetalBufferInner {
 
 #[derive(Default)]
 pub struct CxOsTexture {
-    inner: Option<CxOsTextureInner>
+    texture: Option<RcObjcId>
 }
-
-impl CxOsTexture {
+fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)->MTLPixelFormat{
+     match pix{
+         TexturePixel::BGRAu8 => MTLPixelFormat::BGRA8Unorm,
+         TexturePixel::RGBAf16 => MTLPixelFormat::RGBA16Float,
+         TexturePixel::RGBAf32 => MTLPixelFormat::RGBA32Float,
+         TexturePixel::Ru8  => MTLPixelFormat::R8Unorm,
+         TexturePixel::RGu8  => MTLPixelFormat::RG8Unorm,
+         TexturePixel::Rf32  => MTLPixelFormat::R32Float,
+         TexturePixel::D32 => MTLPixelFormat::Depth32Float,
+     }   
+}
+impl CxTexture {
     
-    
-    fn update_normal_texture(
+    fn update_vec_texture(
         &mut self,
         metal_cx: &MetalCx,
-        desc: &TextureDesc,
-        pixel_data: &PixelData,
     ) {
-        // we need a width/height for this one.
-        if desc.width.is_none() || desc.height.is_none() {
-            log!("Normal texture width/height is undefined, cannot allocate it");
-            return
-        }
-        
-        let width = desc.width.unwrap() as u64;
-        let height = desc.height.unwrap() as u64;
-        
-        match desc.format {
-            TextureFormat::ImageBGRA | TextureFormat::Default => {
-                if (width * height)as usize != pixel_data.len() {
-                    if pixel_data.len() != 0 {
-                        error!("Texture buffer not correct size {}*{} != {}", width, height, pixel_data.len());
-                    }
-                    return
-                }
-            }
-            _ => panic!(),
-        }
-        
-        let need_alloc = if let Some(inner) = &self.inner {
-            CxOsTextureInner::need_alloc(width, height, desc, inner)
-        }
-        else {
-            true
-        };
-        
-        if need_alloc {
+        // ok lets see if we need to alloc
+        if self.alloc_vec(){
+            let alloc = self.alloc.as_ref().unwrap();
+            
             let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
                 msg_send![class!(MTLTextureDescriptor), new]
             }).unwrap());
-            
-            let texture = RcObjcId::from_owned(NonNull::new(unsafe {
-                let _: () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
-                let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];
-                let _: () = msg_send![descriptor.as_id(), setHeight: height as u64];
-                let _: () = msg_send![descriptor.as_id(), setDepth: 1u64];
-                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared];
-                let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead];
-                match desc.format {
-                    TextureFormat::ImageBGRA | TextureFormat::Default => {
-                        let _: () = msg_send![
-                            descriptor.as_id(),
-                            setPixelFormat: MTLPixelFormat::BGRA8Unorm
-                        ];
-                        msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
-                    }
-                    /*
-                    TextureFormat::SharedBGRA(shared_id) => {
-                        log!("GOT HERE");
-                        let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
-                        let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
-                        let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
-                        // lets send this to the other side.
-                        let shared: ObjcId = msg_send![texture, makeSharedTextureHandle];
-                        // lets send it over
-                       
-                        store_xpc_service_texture(shared_id, shared);
                         
-                        texture
-                    }*/
-                    _ => panic!(),
+            let _: () = unsafe {msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setDepth: 1u64]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]};
+            let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
+            self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
+        }
+        if self.check_updated(){
+            fn update_data(texture:&Option<RcObjcId>, width: usize, height: usize, bpp: u64, data: *const std::ffi::c_void){
+                let region = MTLRegion {
+                    origin: MTLOrigin {x: 0, y: 0, z: 0},
+                    size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+                };
+                                            
+                let () = unsafe {msg_send![
+                    texture.as_ref().unwrap().as_id(),
+                    replaceRegion: region
+                    mipmapLevel: 0
+                    withBytes: data
+                    bytesPerRow: (width as u64) * bpp
+                ]};
+            }
+            
+            match &self.format{
+                TextureFormat::VecBGRAu8_32{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 4,  data.as_ptr() as *const std::ffi::c_void);
                 }
-            }).unwrap());
-            
-            self.inner = Some(CxOsTextureInner {
-                is_initial: true,
-                width,
-                height,
-                format: desc.format,
-                texture,
-            });
-            
-            if desc.format.is_shared() {
-                return
+                TextureFormat::VecRGBAf32{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 16,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                TextureFormat::VecRu8{width, height, data, ..}=>{
+                    update_data(&self.os.texture, *width, *height, 1,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                TextureFormat::VecRGu8{width, height, data, ..}=>{
+                    update_data(&self.os.texture, *width, *height, 2,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                TextureFormat::VecRf32{width, height, data}=>{
+                    update_data(&self.os.texture, *width, *height, 4,  data.as_ptr() as *const std::ffi::c_void);
+                }
+                _=>panic!()
             }
         }
-        
-        let inner = self.inner.as_ref().unwrap();
-        
-        // ok now update the texture
-        let region = MTLRegion {
-            origin: MTLOrigin {x: 0, y: 0, z: 0},
-            size: MTLSize {width: width as u64, height: height as u64, depth: 1}
-        };
-
-        let (data_ptr, _alignment) = match pixel_data {
-            PixelData::U8(data) => (data.as_ptr() as *const _, 1),
-            PixelData::U32(data) => (data.as_ptr() as *const _, 4),
-        };
-        
-        let () = unsafe {msg_send![
-            inner.texture.as_id(),
-            replaceRegion: region
-            mipmapLevel: 0
-            withBytes: data_ptr
-            bytesPerRow: (width * std::mem::size_of::<u32>() as u64)
-        ]};
     }
     
     #[cfg(target_os = "macos")]
     fn update_shared_texture(
         &mut self,
         metal_device: ObjcId,
-        desc: &TextureDesc,
     ) {
         // we need a width/height for this one.
-        if desc.width.is_none() || desc.height.is_none() {
-            log!("Shared texture width/height is undefined, cannot allocate it");
+        if !self.alloc_shared(){
             return
         }
-        
-        let width = desc.width.unwrap() as u64;
-        let height = desc.height.unwrap() as u64;
-        
-        let need_alloc = if let Some(inner) = &self.inner {
-            CxOsTextureInner::need_alloc(width, height, desc, inner)
-        }
-        else {
-            true
-        };
-        
-        if need_alloc {
-            let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
-                msg_send![class!(MTLTextureDescriptor), new]
-            }).unwrap());
+        let alloc = self.alloc.as_ref().unwrap();
+        let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+            msg_send![class!(MTLTextureDescriptor), new]
+        }).unwrap());
             
-            let texture = RcObjcId::from_owned(NonNull::new(unsafe {
-                let _: () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
-                let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];
-                let _: () = msg_send![descriptor.as_id(), setHeight: height as u64];
-                let _: () = msg_send![descriptor.as_id(), setDepth: 1u64];
-                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
-                let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
-                match desc.format {
-                    TextureFormat::SharedBGRA(shared_id) => {
-                        let texture: ObjcId = msg_send![metal_device, newSharedTextureWithDescriptor: descriptor];
-                        let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
-                        store_xpc_service_texture(shared_id, shared);
-                        let _: () = msg_send![shared, release];
-                        texture
-                    }
-                    _ => panic!(),
-                }
-            }).unwrap());
-            
-            self.inner = Some(CxOsTextureInner {
-                is_initial: true,
-                width,
-                height,
-                format: desc.format,
-                texture,
-            });
+        let _: () = unsafe{msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
+        let _: () = unsafe{msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]};
+        match &self.format {
+            TextureFormat::SharedBGRAu8{id, ..} => {
+                let texture: ObjcId = unsafe{msg_send![metal_device, newSharedTextureWithDescriptor: descriptor]};
+                let shared: ObjcId = unsafe{msg_send![texture, newSharedTextureHandle]};
+                store_xpc_service_texture(*id, shared);
+                let _: () = unsafe{msg_send![shared, release]};
+                self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
+            }
+            _ => panic!(),
         }
     }
     
@@ -977,136 +912,84 @@ impl CxOsTexture {
     pub fn update_from_shared_handle(
         &mut self,
         metal_cx: &MetalCx,
-        desc: &TextureDesc,
         shared_handle: ObjcId,
     ) -> bool {
         // we need a width/height for this one.
-        if desc.width.is_none() || desc.height.is_none() {
-            log!("Shared texture width/height is undefined, cannot import it");
-            return false;
+        if !self.alloc_shared(){
+            return true
         }
-
-        let width = desc.width.unwrap() as u64;
-        let height = desc.height.unwrap() as u64;
-
+        let alloc = self.alloc.as_ref().unwrap();
+    
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
         }).unwrap());
-        let width2: u64 = unsafe{msg_send![texture.as_id(), width]};
-        let height2: u64 = unsafe{msg_send![texture.as_id(), height]};
+        let width: u64 = unsafe{msg_send![texture.as_id(), width]};
+        let height: u64 = unsafe{msg_send![texture.as_id(), height]};
         // FIXME(eddyb) can these be an assert now?
-        if width2 != width || height2 != height{
+        if width != alloc.width as u64|| height != alloc.height as u64{
             return false
         }
-        self.inner = Some(CxOsTextureInner {
-            is_initial: true,
-            width,
-            height,
-            format: desc.format,
-            texture,
-        });
+        self.os.texture = Some(texture);
         true
     }
     
     fn update_render_target(
         &mut self,
         metal_cx: &MetalCx,
-        attachment_kind: AttachmentKind,
-        desc: &TextureDesc,
-        default_size: DVec2
+        width: usize,
+        height: usize
     ) {
-        let width = desc.width.unwrap_or(default_size.x as usize) as u64;
-        let height = desc.height.unwrap_or(default_size.y as usize) as u64;
-        
-        if let Some(inner) = &self.inner {
-            if inner.format.is_shared() {
-                return;
-            }
-            if !CxOsTextureInner::need_alloc(width, height, desc, inner) {
-                return
-            }
+        if self.alloc_render(width, height){
+            let alloc = self.alloc.as_ref().unwrap();
+            let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+                msg_send![class!(MTLTextureDescriptor), new]
+            }).unwrap());
+            
+            let _: () = unsafe{msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
+            let _: () = unsafe{msg_send![descriptor.as_id(),setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]};
+            let texture = RcObjcId::from_owned(NonNull::new(unsafe {
+                msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
+            }).unwrap());
+            
+            self.os.texture = Some(texture); 
         }
-        
-        let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
-            msg_send![class!(MTLTextureDescriptor), new]
-        }).unwrap());
-        
-        let texture = RcObjcId::from_owned(NonNull::new(unsafe {
-            let _: () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
-            let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];
-            let _: () = msg_send![descriptor.as_id(), setHeight: height as u64];
-            let _: () = msg_send![descriptor.as_id(), setDepth: 1u64];
-            let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
-            let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
-            match attachment_kind {
-                AttachmentKind::Color => {
-                    match desc.format {
-                        TextureFormat::RenderBGRA | TextureFormat::Default => {
-                            let _: () = msg_send![
-                                descriptor.as_id(),
-                                setPixelFormat: MTLPixelFormat::BGRA8Unorm
-                            ];
-                        }
-                        _ => panic!(),
-                    }
-                }
-                AttachmentKind::Depth => {
-                    match desc.format {
-                        TextureFormat::Depth32Stencil8 | TextureFormat::Default => {
-                            let _: () = msg_send![
-                                descriptor.as_id(),
-                                setPixelFormat: MTLPixelFormat::Depth32Float_Stencil8
-                            ];
-                        }
-                        _ => panic!("{:?}", desc.format),
-                    }
-                }
-            }
-            msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
-        }).unwrap());
-        
-        self.inner = Some(CxOsTextureInner {
-            is_initial: true,
-            width,
-            height,
-            format: desc.format,
-            texture,
-        });
-    }
-}
-
-struct CxOsTextureInner {
-    is_initial: bool,
-    width: u64,
-    height: u64,
-    format: TextureFormat,
-    texture: RcObjcId
-}
-
-impl CxOsTextureInner {
-    fn need_alloc(width: u64, height: u64, desc: &TextureDesc, inner: &CxOsTextureInner) -> bool {
-        if inner.width != width {
-            return true;
-        }
-        if inner.height != height {
-            return true;
-        }
-        if inner.format != desc.format {
-            return true;
-        }
-        false
     }
     
-    fn initial(&mut self) -> bool {
-        let ret = self.is_initial;
-        self.is_initial = false;
-        ret
-    }
-}
-
-enum AttachmentKind {
-    Color,
-    Depth,
+    
+    fn update_depth_stencil(
+        &mut self,
+        metal_cx: &MetalCx,
+        width: usize,
+        height: usize
+    ) {
+        if self.alloc_depth(width, height){
+       
+            let alloc = self.alloc.as_ref().unwrap();
+            let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+                msg_send![class!(MTLTextureDescriptor), new]
+            }).unwrap());
+                        
+            let _: () = unsafe{msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setDepth: 1u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget]};
+            let _: () = unsafe{msg_send![
+                descriptor.as_id(),
+                setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)
+            ]};
+            let texture = RcObjcId::from_owned(NonNull::new(unsafe {
+                msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
+            }).unwrap());
+            self.os.texture = Some(texture);
+        }
+    }    
 }
 
 #[derive(Default)]

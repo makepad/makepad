@@ -311,11 +311,10 @@ impl RunView {
 
                 // Prepare a version of the swapchain for cross-process sharing.
                 let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
-                    pi.image.set_desc(cx, TextureDesc {
-                        format: TextureFormat::SharedBGRA(pi.id),
-                        width: Some(swapchain.alloc_width as usize),
-                        height: Some(swapchain.alloc_height as usize),
-                        ..Default::default()
+                    pi.image.set_format(cx, TextureFormat::SharedBGRAu8 {
+                        id: pi.id,
+                        width: swapchain.alloc_width as usize,
+                        height: swapchain.alloc_height as usize,
                     });
                     cx.share_texture_for_presentable_image(&pi.image)
                 });

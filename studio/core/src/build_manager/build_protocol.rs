@@ -19,6 +19,9 @@ pub enum BuildTarget {
     IosDevice{org:String, app:String},
     Android,
     WebAssembly,
+    CheckMacos,
+    CheckWindows,
+    CheckLinux,
     CheckAll,
 }
 
@@ -40,8 +43,11 @@ impl BuildTarget {
     pub const IOS_DEVICE:u64 = 6;
     pub const ANDROID:u64 = 7;
     pub const WEBASSEMBLY:u64 = 8;
-    pub const CHECK_ALL:u64 = 9;
-    pub fn len() -> u64 {10}
+    pub const CHECK_MACOS:u64 = 9;
+    pub const CHECK_WINDOWS:u64 = 10;
+    pub const CHECK_LINUX:u64 = 11;
+    pub const CHECK_ALL:u64 = 12;
+    pub fn len() -> u64 {13}
     pub fn name(idx: u64) -> &'static str {
         match idx {
             Self::RELEASE_STUDIO=> "Release Studio",
@@ -53,6 +59,9 @@ impl BuildTarget {
             Self::IOS_DEVICE=> "iOS Device",
             Self::ANDROID=> "Android",
             Self::WEBASSEMBLY=> "WebAssembly",
+            Self::CHECK_MACOS=> "Check Macos",
+            Self::CHECK_WINDOWS=> "Check Windows",
+            Self::CHECK_LINUX=> "Check Linux",
             Self::CHECK_ALL=> "Check All",
             _=>"Unknown"
         }
@@ -68,6 +77,9 @@ impl BuildTarget {
             Self::IosDevice{..}=>Self::IOS_DEVICE,
             Self::Android=>Self::ANDROID,
             Self::WebAssembly=>Self::WEBASSEMBLY,
+            Self::CheckMacos=>Self::CHECK_MACOS,
+            Self::CheckWindows=>Self::CHECK_WINDOWS,
+            Self::CheckLinux=>Self::CHECK_LINUX,
             Self::CheckAll=>Self::CHECK_ALL
         }
     }

@@ -80,14 +80,13 @@ impl AppMain for App {
         match event {
             Event::Signal => {
                 while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
-                    self.video_input[id].set_desc(cx, TextureDesc {
-                        format: TextureFormat::ImageBGRA,
-                        width: Some(vfb.format.width / 2),
-                        height: Some(vfb.format.height),
-                        ..Default::default()
+                    self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8{
+                        data: vec![],
+                        width: vfb.format.width / 2,
+                        height: vfb.format.height
                     });
                     if let Some(buf) = vfb.as_vec_u32() {
-                        self.video_input[id].swap_image_u32(cx, buf);
+                        self.video_input[id].swap_vec_u32(cx, buf);
                     }
                     let image_size = [vfb.format.width as f32, vfb.format.height as f32];
                     let v = self.ui.view(id!(video_input0));
