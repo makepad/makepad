@@ -191,7 +191,7 @@ impl Cx {
         let mut textures = CxTexturePool::default();
         let null_texture = textures.alloc();
         let texture = &mut textures[null_texture.texture_id()];
-        texture.format = TextureFormat::VecBGRAu8 {
+        texture.format = TextureFormat::VecBGRAu8_32 {
             width: 4,
             height: 4,
             data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]

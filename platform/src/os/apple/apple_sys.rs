@@ -576,12 +576,17 @@ pub struct MTLClearColor {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum MTLPixelFormat {
-    RGBA8Unorm = 70,
+    //RGBA8Unorm = 70,
+    R8Unorm = 10,
+    RG8Unorm   = 30,
+    R32Float = 55,
     BGRA8Unorm = 80,
+    RGBA16Float  = 115,
+    RGBA32Float = 125,
     Depth32Float = 252,
-    Stencil8 = 253,
-    Depth24Unorm_Stencil8 = 255,
-    Depth32Float_Stencil8 = 260,
+    //Stencil8 = 253,
+    //Depth24Unorm_Stencil8 = 255,
+    //Depth32Float_Stencil8 = 260,
 }
 
 #[repr(u64)]
