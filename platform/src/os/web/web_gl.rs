@@ -85,7 +85,7 @@ impl Cx {
                         if cxtexture.alloc_vec(){}
                         if cxtexture.check_updated(){
                             match &cxtexture.format{
-                                TextureFormat::VecBGRAu8{width, height, data}=>{
+                                TextureFormat::VecBGRAu8_32{width, height, data}=>{
                                     self.os.from_wasm(FromWasmAllocTextureImage2D {
                                         texture_id: texture_id.0,
                                         width: *width,
