@@ -22,7 +22,7 @@ pub struct VideoDecodingErrorEvent {
     pub error: String,
 }
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub enum VideoColorFormat {
     YUV420Planar,
     YUV420SemiPlanar,

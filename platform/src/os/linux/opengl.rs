@@ -899,9 +899,13 @@ impl CxTexture {
                         data.as_ptr() as *const _
                     );
                 },
-                TextureFormat::VecRu8{width, height, data}=>unsafe{
+                TextureFormat::VecRu8{width, height, data, unpack_row_length}=>unsafe{
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    if let Some(row_length) = unpack_row_length {
+                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                    }
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -914,9 +918,13 @@ impl CxTexture {
                         data.as_ptr() as *const _
                     );
                 },
-                TextureFormat::VecRGu8_16{width, height, data}=>unsafe{
+                TextureFormat::VecRGu8{width, height, data, unpack_row_length}=>unsafe{
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    if let Some(row_length) = unpack_row_length {
+                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                    }
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,

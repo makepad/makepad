@@ -683,10 +683,10 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
-                CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size) => {
+                CxOsOp::InitializeVideoDecoding(video_id, video) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_initialize_video_decoding(env, video_id, video, chunk_size);
+                        android_jni::to_java_initialize_video_decoding(env, video_id, video);
                     }
                 },
                 CxOsOp::DecodeNextVideoChunk(video_id, max_frames_to_decode) => {
