@@ -71,8 +71,8 @@ pub enum TextureFormat {
     VecBGRAu8_32{width:usize, height:usize, data:Vec<u32>},
     VecMipBGRAu8_32{width:usize, height:usize, data:Vec<u32>, max_level:Option<usize>},
     VecRGBAf32{width:usize, height:usize, data:Vec<f32>},
-    VecRu8{width:usize, height:usize, data:Vec<u8>},
-    VecRGu8_16{width:usize, height:usize, data:Vec<u16>},
+    VecRu8{width:usize, height:usize, data:Vec<u8>, unpack_row_length:Option<usize>},
+    VecRGu8{width:usize, height:usize, data:Vec<u8>, unpack_row_length:Option<usize>},
     VecRf32{width:usize, height:usize, data:Vec<f32>},
     DepthD32{size:TextureSize},
     RenderBGRAu8{size:TextureSize},
@@ -236,7 +236,7 @@ impl TextureFormat{
             Self::VecMipBGRAu8_32{..}=>true,
             Self::VecRGBAf32{..}=>true,
             Self::VecRu8{..}=>true,
-            Self::VecRGu8_16{..}=>true,
+            Self::VecRGu8{..}=>true,
             Self::VecRf32{..}=>true,
             _=>false
         }
@@ -264,7 +264,7 @@ impl TextureFormat{
             Self::VecMipBGRAu8_32{width, height, ..}=>Some((*width,*height)),
             Self::VecRGBAf32{width, height, ..}=>Some((*width,*height)),
             Self::VecRu8{width, height, ..}=>Some((*width,*height)),
-            Self::VecRGu8_16{width, height, ..}=>Some((*width,*height)),
+            Self::VecRGu8{width, height, ..}=>Some((*width,*height)),
             Self::VecRf32{width, height,..}=>Some((*width,*height)),
             _=>None
         }
@@ -296,7 +296,7 @@ impl TextureFormat{
                 pixel:TexturePixel::Ru8,
                 category: TextureCategory::Vec{updated:true}
             }),
-            Self::VecRGu8_16{width,height,..}=>Some(TextureAlloc{
+            Self::VecRGu8{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::RGu8,
@@ -413,23 +413,10 @@ impl Texture {
     pub fn swap_vec_u8(&self, cx: &mut Cx, image: &mut Vec<u8>) {
         let cxtexture = &mut cx.textures[self.texture_id()];
         match &mut cxtexture.format{
-            TextureFormat::VecRu8{data,..} => {
+            TextureFormat::VecRu8{data,..} | TextureFormat::VecRGu8 { data, ..} => {
                 std::mem::swap(data, image);
                 cxtexture.set_updated(true);
-            }
-            _=>{
-                panic!("Not the correct texture desc for u8 image buffer")
-            }
-        }
-    }
-    
-    pub fn swap_vec_u16(&self, cx: &mut Cx, image: &mut Vec<u16>) {
-        let cxtexture = &mut cx.textures[self.texture_id()];
-        match &mut cxtexture.format{
-            TextureFormat::VecRGu8_16{data,..} => {
-                std::mem::swap(data, image);
-                cxtexture.set_updated(true);
-            }
+            },
             _=>{
                 panic!("Not the correct texture desc for u8 image buffer")
             }
