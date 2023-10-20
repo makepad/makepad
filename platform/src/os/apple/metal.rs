@@ -861,10 +861,10 @@ impl CxTexture {
                 TextureFormat::VecRGBAf32{width, height, data}=>{
                     update_data(&self.os.texture, *width, *height, 16,  data.as_ptr() as *const std::ffi::c_void);
                 }
-                TextureFormat::VecRu8{width, height, data}=>{
+                TextureFormat::VecRu8{width, height, data, ..}=>{
                     update_data(&self.os.texture, *width, *height, 1,  data.as_ptr() as *const std::ffi::c_void);
                 }
-                TextureFormat::VecRGu8_16{width, height, data}=>{
+                TextureFormat::VecRGu8{width, height, data, ..}=>{
                     update_data(&self.os.texture, *width, *height, 2,  data.as_ptr() as *const std::ffi::c_void);
                 }
                 TextureFormat::VecRf32{width, height, data}=>{

@@ -67,6 +67,8 @@ pub const TEXTURE_WRAP_T: types::GLenum = 0x2803;
 pub const CLAMP_TO_EDGE: types::GLenum = 0x812F;
 pub const PROGRAM_BINARY_LENGTH: types::GLenum = 0x8741;
 pub const NO_ERROR: types::GLenum = 0x0;
+pub const UNPACK_ALIGNMENT: types::GLenum = 0x0CF5;
+pub const UNPACK_ROW_LENGTH: types::GLenum = 0x0CF2;
 
 #[inline] pub unsafe fn GenVertexArrays(n: types::GLsizei, arrays: *mut types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenVertexArrays.f)(n, arrays)}
 #[inline] pub unsafe fn BindVertexArray(array: types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::BindVertexArray.f)(array)}
@@ -124,6 +126,7 @@ pub const NO_ERROR: types::GLenum = 0x0;
 #[inline] pub unsafe fn DeleteFramebuffers(n: types::GLsizei, framebuffers: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteFramebuffers.f)(n, framebuffers) }
 #[inline] pub unsafe fn DeleteVertexArrays(n: types::GLsizei, arrays: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteVertexArrays.f)(n, arrays) }
 #[inline] pub unsafe fn GenerateMipmap(target: types::GLenum) -> () { mem::transmute::<_, extern "system" fn(types::GLenum) -> ()>( storage::GenerateMipmap.f)(target)}
+#[inline] pub unsafe fn PixelStorei(pname: types::GLenum, param: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLint) -> ()>(storage::PixelStorei.f)(pname, param)}
 
 mod storage {
     use super::FnPtr;
@@ -184,6 +187,7 @@ mod storage {
     pub static mut DeleteFramebuffers: FnPtr = FnPtr::default();
     pub static mut DeleteVertexArrays: FnPtr = FnPtr::default();
     pub static mut GenerateMipmap: FnPtr = FnPtr::default();
+    pub static mut PixelStorei: FnPtr = FnPtr::default();
 }
 
 pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const raw::c_void {
@@ -244,6 +248,7 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::DeleteFramebuffers = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteFramebuffers", &["glDeleteFramebuffersEXT"]));
     storage::DeleteVertexArrays = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteVertexArrays", &["glDeleteVertexArraysAPPLE", "glDeleteVertexArraysOES"]));
     storage::GenerateMipmap = FnPtr::new(metaloadfn(&mut loadfn, "glGenerateMipmap", &[]));
+    storage::PixelStorei = FnPtr::new(metaloadfn(&mut loadfn, "glPixelStorei", &[]));
 }
 
 #[inline(never)]
