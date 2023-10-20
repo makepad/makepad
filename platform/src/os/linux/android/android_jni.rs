@@ -476,8 +476,11 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
 // TODO: cache method ids
 unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sys::jobject) -> Vec<u8> {
     let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
-    let position_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, c_str("position"), c_str("()I"));
-    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, c_str("remaining"), c_str("()I"));
+    let poisition_cstring = CString::new("position").unwrap();
+    let remaining_cstring = CString::new("remaining").unwrap();
+    let signature_cstring = CString::new("()I").unwrap();
+    let position_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, poisition_cstring.as_ptr(), signature_cstring.as_ptr());
+    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, remaining_cstring.as_ptr(), signature_cstring.as_ptr());
     let position = (**env).CallIntMethod.unwrap()(env, byte_buffer, position_method_id) as isize;
     let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id) as usize;
 
@@ -489,12 +492,6 @@ unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sy
 
     out_bytes
 }
-
-fn c_str(s: &str) -> *const u8 {
-    // into_raw() to prevent CString from being deallocated
-    CString::new(s).unwrap().into_raw()
-}
-
 
 pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: bool) {
     ndk_utils::call_void_method!(env, ACTIVITY, "setFullScreen", "(Z)V", fullscreen as i32);
