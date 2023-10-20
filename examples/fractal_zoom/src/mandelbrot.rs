@@ -148,7 +148,7 @@ impl TileCache {
             empty.push(Tile::new(i));
             
             let texture = Texture::new(cx);
-            texture.set_format(cx, TextureFormat::VecBGRAu8 {
+            texture.set_format(cx, TextureFormat::VecBGRAu8_32 {
                 data: vec![],
                 width: TILE_SIZE_X,
                 height: TILE_SIZE_Y,

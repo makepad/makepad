@@ -80,7 +80,7 @@ impl AppMain for App {
         match event {
             Event::Signal => {
                 while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
-                    self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8{
+                    self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8_32{
                         data: vec![],
                         width: vfb.format.width / 2,
                         height: vfb.format.height
