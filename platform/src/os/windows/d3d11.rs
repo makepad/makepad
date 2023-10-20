@@ -839,11 +839,11 @@ impl CxTexture {
                 TextureFormat::VecRGBAf32{width, height, data}=>{
                     get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, data.as_ptr() as *const _)
                 }
-                TextureFormat::VecRu8{width, height, data}=>{
+                TextureFormat::VecRu8{width, height, data, ..}=>{
                     get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, data.as_ptr() as *const _)
                 }
-                TextureFormat::VecRGu8_16{width, height, data}=>{
-                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 2, data.as_ptr() as *const _)
+                TextureFormat::VecRGu8{width, height, data, ..}=>{
+                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, data.as_ptr() as *const _)
                 }
                 TextureFormat::VecRf32{width, height, data}=>{
                     get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, data.as_ptr() as *const _)

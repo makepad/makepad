@@ -473,28 +473,22 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
     out_bytes
 }
 
+// TODO: cache method ids
 unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sys::jobject) -> Vec<u8> {
     let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
+    let poisition_cstring = CString::new("position").unwrap();
+    let remaining_cstring = CString::new("remaining").unwrap();
+    let signature_cstring = CString::new("()I").unwrap();
+    let position_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, poisition_cstring.as_ptr(), signature_cstring.as_ptr());
+    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, remaining_cstring.as_ptr(), signature_cstring.as_ptr());
+    let position = (**env).CallIntMethod.unwrap()(env, byte_buffer, position_method_id) as isize;
+    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id) as usize;
 
-    // call 'remaining' method to find out how many elements are remaining between the current position and the limit
-    let method_name = CString::new("remaining").unwrap();
-    let method_sig = CString::new("()I").unwrap();
-    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
-    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id);
+    let direct_buffer_ptr = (**env).GetDirectBufferAddress.unwrap()(env, byte_buffer) as *const u8;
 
-    // call 'array()' to get the backing byte array (works only for non-direct byte buffers)
-    let method_name = CString::new("array").unwrap();
-    let method_sig = CString::new("()[B").unwrap();
-    let array_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
-    let byte_array = (**env).CallObjectMethod.unwrap()(env, byte_buffer, array_method_id);
+    let slice = std::slice::from_raw_parts(direct_buffer_ptr.offset(position), remaining);
 
-    // extract elements from byte array
-    let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
-    let mut out_bytes = Vec::new();
-    let slice = std::slice::from_raw_parts(bytes as *const u8, remaining as usize);
-    out_bytes.extend_from_slice(slice);
-
-    (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, jni_sys::JNI_ABORT);
+    let out_bytes = slice.to_vec();
 
     out_bytes
 }
@@ -596,7 +590,7 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>, chunk_size: usize) {
+pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>) {
     let video_data = &*video;
 
     let java_body = (**env).NewByteArray.unwrap()(env, video_data.len() as i32);
@@ -612,10 +606,9 @@ pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video
         env,
         ACTIVITY,
         "initializeVideoDecoding",
-        "(J[BI)V",
+        "(J[B)V",
         video_id.get_value() as jni_sys::jlong,
-        java_body as jni_sys::jobject,
-        chunk_size
+        java_body as jni_sys::jobject
     );
 }
 
