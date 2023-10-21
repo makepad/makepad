@@ -5,7 +5,6 @@ use crate::cx::Cx;
 pub trait AppMain{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
 }
-
 #[macro_export]
 macro_rules!app_main {
     ( $ app: ident) => {

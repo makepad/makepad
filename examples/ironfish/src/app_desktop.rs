@@ -495,7 +495,6 @@ live_design!{
                         apply: {draw_check: {selected: 0.0}}
                     }
                     on = {
-                        cursor: Arrow,
                         from: {all: Forward {duration: 0.1}}
                         apply: {draw_check: {selected: 1.0}}
                     }
@@ -507,6 +506,7 @@ live_design!{
                 instance border_color2: #xFFFFFF0A
                 size: 8.5;
                 fn pixel(self) -> vec4 {
+                    //return 
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     let sz = self.size;
                     let left = sz + 1.;

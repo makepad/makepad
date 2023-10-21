@@ -28,7 +28,7 @@ use {
 pub struct Document(Rc<DocumentInner>);
 
 impl Document {
-    pub fn new(text: Text, decorations:DecorationSet) -> Self {
+    pub fn new(text: Text, decorations: DecorationSet) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
             .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
@@ -62,7 +62,9 @@ impl Document {
     }
 
     pub fn decorations(&self) -> Ref<'_, [Decoration]> {
-        Ref::map(self.0.decorations.borrow(), |decorations| decorations.as_decorations())
+        Ref::map(self.0.decorations.borrow(), |decorations| {
+            decorations.as_decorations()
+        })
     }
 
     pub fn edit_selections(
@@ -96,19 +98,33 @@ impl Document {
             );
             for edit in &edits[edit_start..] {
                 match edit.change {
-                    Change::Insert(position, ref text) if text.as_lines().len() > 1 => {
-                        line_ranges.push(Range {
-                            start: if history.as_text().as_lines()[position.line_index]
-                                [..position.byte_index]
-                                .chars()
-                                .all(|char| char.is_whitespace())
+                    Change::Insert(position, ref text) => {
+                        if let Some(char) = text.to_single_char() {
+                            if char == '}'
+                                && history.as_text().as_lines()[position.line_index]
+                                    [..position.byte_index]
+                                    .chars()
+                                    .all(|char| char.is_whitespace())
                             {
-                                position.line_index
-                            } else {
-                                position.line_index + 1
-                            },
-                            end: position.line_index + text.as_lines().len(),
-                        });
+                                line_ranges.push(Range {
+                                    start: position.line_index,
+                                    end: position.line_index + 1,
+                                });
+                            }
+                        } else if text.as_lines().len() > 1 {
+                            line_ranges.push(Range {
+                                start: if history.as_text().as_lines()[position.line_index]
+                                    [..position.byte_index]
+                                    .chars()
+                                    .all(|char| char.is_whitespace())
+                                {
+                                    position.line_index
+                                } else {
+                                    position.line_index + 1
+                                },
+                                end: position.line_index + text.as_lines().len(),
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -299,11 +315,11 @@ impl Document {
         }
     }
 
-    pub fn force_new_group(&mut self) {
+    pub fn force_new_group(&self) {
         self.0.history.borrow_mut().force_new_group()
     }
 
-    pub fn undo(&mut self, origin_id: SessionId, selections: &SelectionSet) -> bool {
+    pub fn undo(&self, origin_id: SessionId, selections: &SelectionSet) -> bool {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().undo(selections, &mut changes);
         if let Some(selections) = selections {
@@ -314,7 +330,7 @@ impl Document {
         }
     }
 
-    pub fn redo(&mut self, origin_id: SessionId, selections: &SelectionSet) -> bool {
+    pub fn redo(&self, origin_id: SessionId, selections: &SelectionSet) -> bool {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().redo(selections, &mut changes);
         if let Some(selections) = selections {

@@ -5,6 +5,7 @@ use {
         makepad_micro_serde::*,
         makepad_platform::*,
         makepad_widgets::*,
+        makepad_widgets::file_tree::FileNodeId,
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_platform::os::cx_stdin::{
             HostToStdin,
@@ -17,7 +18,7 @@ use {
         },
         makepad_shell::*,
     },
-    makepad_code_editor::{text::Position, decoration::{Decoration}},
+    makepad_code_editor::{text::Position, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
     std::{
         collections::HashMap,
@@ -148,11 +149,12 @@ pub struct BuildBinary {
     pub name: String
 }
 
-
 pub enum BuildManagerAction {
     RedrawDoc, // {doc_id: DocumentId},
     StdinToHost {run_view_id: LiveId, msg: StdinToHost},
     RedrawLog,
+    RedrawFile(FileNodeId),
+    RecompileStarted,
     ClearLog,
     None
 }
@@ -163,21 +165,8 @@ impl BuildManager {
         // not great but it will do.
         self.clients = vec![BuildClient::new_with_local_server(&self.path)];
         self.update_run_list(cx);
-        self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        self.discover_external_ip(cx);
-        // alright lets start our http server
-        self.start_http_server();
+        //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
-    
-    
-    /*pub fn get_process_texture(&self, run_view_id: LiveId) -> Option<Texture> {
-        for v in self.active.builds.values() {
-            if v.run_view_id == run_view_id {
-                return Some(v.texture.clone())
-            }
-        }
-        None
-    }*/
     
     pub fn send_host_to_stdin(&self, run_view_id: LiveId, msg: HostToStdin) {
         if let Some(cmd_id) = self.active.cmd_id_from_run_view_id(run_view_id) {
@@ -240,7 +229,7 @@ impl BuildManager {
             let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
             active_build.cmd_id = Some(cmd_id);
             active_build.swapchain = None;
-            active_build.last_swapchain_with_completed_draws = None;
+            //active_build.last_swapchain_with_completed_draws = None;
             active_build.aux_chan_host_endpoint = None;
         }
     }
@@ -271,9 +260,9 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dock: &DockRef) -> Vec<BuildManagerAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
-        self.handle_event_with(cx, event, file_system, dock, &mut | _, action | actions.push(action));
+        self.handle_event_with(cx, event, file_system, &mut | _, action | actions.push(action));
         actions
     }
     
@@ -290,7 +279,7 @@ impl BuildManager {
         let _ = self.send_file_change.send(live_file_change);
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dock: &DockRef, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dispatch_action: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if let Event::Signal = event {
             if let Ok(mut addr) = self.recv_external_ip.try_recv() {
                 addr.set_port(self.http_port as u16);
@@ -300,53 +289,57 @@ impl BuildManager {
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            self.clear_log(cx, &dock, file_system);
-            
-            if let Some(mut dock) = dock.borrow_mut() {
-                for (_id, (_, item)) in dock.items().iter() {
-                    if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                        run_view.resend_framebuffer(cx);
-                    }
-                }
-            }
-            dispatch_event(cx, BuildManagerAction::RedrawLog)
+            dispatch_action(cx, BuildManagerAction::RecompileStarted)
         }
         
-        // process events on all run_views
-        if let Some(mut dock) = dock.borrow_mut() {
-            for (id, (_, item)) in dock.items().iter() {
-                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                    run_view.pump_event_loop(cx, event, *id, self);
-                }
-            }
-        }
         
         let log = &mut self.log;
         let active = &mut self.active;
         //let editor_state = &mut state.editor_state;
         self.clients[0].handle_event_with(cx, event, &mut | cx, wrap | {
+            /*match &wrap.item{
+                LogItem::StdinToHost(line) => {
+                    log!("GOT {}", line);
+                }
+                _=>()
+            }*/
+                            
             //let msg_id = editor_state.messages.len();
             // ok we have a cmd_id in wrap.msg
             match wrap.item {
                 LogItem::Location(loc) => {
+                    //log!("{:?}", loc);
                     let pos = Position {
-                        line_index: loc.start.line_index.max(1) - 1,
-                        byte_index: loc.start.byte_index.max(1) - 1
+                        line_index: loc.start.line_index,
+                        byte_index: loc.start.byte_index
                     };
+                    //log!("{:?} {:?}", pos, pos + loc.length);
                     if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
-                        if loc.level == LogItemLevel::Warning ||
-                        loc.level == LogItemLevel::Error {
-                            file_system.add_decoration(file_id, Decoration::new(
-                                0,
-                                pos,
-                                pos + loc.length
-                            ));
-                            file_system.redraw_view_by_file_id(cx, file_id, dock);
+                        match loc.level{
+                            LogItemLevel::Warning=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    pos,
+                                    pos + loc.length,
+                                    DecorationType::Warning
+                                ));
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            LogItemLevel::Error=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    pos,
+                                    pos + loc.length,
+                                    DecorationType::Error
+                                ));
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            _=>()
                         }
                     }
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Location(loc)));
-                        dispatch_event(cx, BuildManagerAction::RedrawLog)
+                        dispatch_action(cx, BuildManagerAction::RedrawLog)
                     }
                     //if let Some(doc) = file_system.open_documents.get(&path){
                     
@@ -363,9 +356,10 @@ impl BuildManager {
                     //editor_state.messages.push(BuildMsg::Location(loc));
                 }
                 LogItem::Bare(bare) => {
+                    //log!("{:?}", bare);
                     if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                         log.push((id, LogItem::Bare(bare)));
-                        dispatch_event(cx, BuildManagerAction::RedrawLog)
+                        dispatch_action(cx, BuildManagerAction::RedrawLog)
                     }
                     //editor_state.messages.push(wrap.msg);
                 }
@@ -373,7 +367,7 @@ impl BuildManager {
                     let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
                     match msg {
                         Ok(msg) => {
-                            dispatch_event(cx, BuildManagerAction::StdinToHost {
+                            dispatch_action(cx, BuildManagerAction::StdinToHost {
                                 run_view_id: active.run_view_id_from_cmd_id(wrap.cmd_id).unwrap_or(LiveId(0)),
                                 msg
                             });
@@ -384,7 +378,7 @@ impl BuildManager {
                                     level: LogItemLevel::Log,
                                     line: line.trim().to_string()
                                 })));
-                                dispatch_event(cx, BuildManagerAction::RedrawLog)
+                                dispatch_action(cx, BuildManagerAction::RedrawLog)
                             }
                             /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                 level: BuildMsgLevel::Log,
@@ -410,7 +404,7 @@ impl BuildManager {
         let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), self.http_port as u16);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
         
-        log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
+        //log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
         start_http_server(HttpServer {
             listen_address: addr,
             post_max_size: 1024 * 1024,
@@ -463,11 +457,18 @@ impl BuildManager {
             // TODO fix this proper:
             let makepad_path = "./".to_string();
             let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
+            let mut root = "./".to_string();
+            for arg in std::env::args(){
+                if let Some(prefix) = arg.strip_prefix("--root="){
+                    root = prefix.to_string();
+                    break;
+                }
+            }
             let remaps = [
                 (format!("/makepad/{}/", abs_makepad_path), makepad_path.clone()),
                 (format!("/makepad/{}/", std::env::current_dir().unwrap().display()), "".to_string()),
-                ("/makepad//".to_string(), makepad_path.clone()),
-                ("/makepad/".to_string(), makepad_path.clone()),
+                ("/makepad//".to_string(), format!("{}/{}",root,makepad_path.clone())),
+                ("/makepad/".to_string(), format!("{}/{}",root,makepad_path.clone())),
                 ("/".to_string(), "".to_string())
             ];
             

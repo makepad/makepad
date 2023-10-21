@@ -7,7 +7,6 @@ use {
     },
 
     crate::{
-        makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_objc_sys::runtime::{ObjcId},
         os::{
@@ -30,9 +29,6 @@ use {
         thread::Signal,
         window::CxWindowPool,
         event::{
-            NetworkResponse,
-            HttpRequest,
-            HttpMethod,
             Event,
             NetworkResponseChannel
         },
@@ -40,7 +36,10 @@ use {
         cx::{Cx, OsType},
     }
 };
-
+#[cfg(not(ios_sim))]
+use crate::makepad_live_compiler::LiveFileChange;
+#[cfg(not(ios_sim))]
+use crate::event::{NetworkResponse, HttpRequest, HttpMethod};
 
 impl Cx {
     
@@ -329,7 +328,7 @@ impl Cx {
                 CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
                     todo!()
                 },
-                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
                 CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
                 CxOsOp::CleanupVideoDecoding(_) => todo!(),
@@ -376,7 +375,7 @@ impl Cx {
         }
         false
     }
-    
+    #[cfg(not(ios_sim))]
     fn poll_studio_http(&self) {
         let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
         if studio_http.is_none() {
