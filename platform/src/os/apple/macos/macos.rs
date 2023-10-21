@@ -35,6 +35,7 @@ use {
         },
         pass::CxPassParent,
         thread::Signal,
+        cx_stdin::PollTimers,
         window::WindowId,
         event::{
             WindowGeom,
@@ -527,7 +528,7 @@ impl Cx {
                 CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     todo!()
                 }
-                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
                 CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
                 CxOsOp::CleanupVideoDecoding(_) => todo!(),
@@ -583,5 +584,7 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) decoding: CxAppleDecoding,
+    pub (crate) stdin_timers: PollTimers,
+
     pub metal_device: Option<ObjcId>,
 }

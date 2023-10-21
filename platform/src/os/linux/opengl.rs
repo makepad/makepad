@@ -12,7 +12,7 @@ use {
         makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
         cx::Cx,
-        texture::{TextureId, TextureDesc, TextureFormat},
+        texture::{Texture, TextureFormat, TexturePixel, CxTexture},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
@@ -183,25 +183,20 @@ impl Cx {
                     
                     // lets set our textures
                     for i in 0..sh.mapping.textures.len() {
-                        let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                            texture_id
+                        let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                            texture.texture_id()
                         }else {
                             continue;
                         };
                         let cxtexture = &mut self.textures[texture_id];
-
-                        if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
-                            cxtexture.update_image = false;
-                            cxtexture.os.update_platform_texture_image2d(
-                                cxtexture.desc.width.unwrap() as u32,
-                                cxtexture.desc.height.unwrap() as u32,
-                                &cxtexture.image_u32
-                            );
+                        
+                        if cxtexture.format.is_vec(){
+                            cxtexture.update_vec_texture();
                         }
                     }
                     for i in 0..sh.mapping.textures.len() {
-                        let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                            texture_id
+                        let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                            texture.texture_id()
                         }else {
                             continue;
                         };
@@ -257,8 +252,8 @@ impl Cx {
         Some(pass_rect.size)
     }
 
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, texture_id: TextureId) {
-        self.draw_pass_to_texture_inner(pass_id, Some(texture_id))
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, texture: &Texture) {
+        self.draw_pass_to_texture_inner(pass_id, Some(texture))
     }
 
     pub fn draw_pass_to_magic_texture(&mut self, pass_id: PassId) {
@@ -268,7 +263,7 @@ impl Cx {
     fn draw_pass_to_texture_inner(
         &mut self,
         pass_id: PassId,
-        maybe_texture_id: Option<TextureId>,
+        maybe_texture: Option<&Texture>,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -301,10 +296,10 @@ impl Cx {
             gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, self.passes[pass_id].os.gl_framebuffer.unwrap());
         }
 
-        let color_textures_from_fb_texture = maybe_texture_id.map(|texture_id| {
+        let color_textures_from_fb_texture = maybe_texture.map(|texture| {
             [crate::pass::CxPassColorTexture {
                 clear_color: PassClearColor::ClearWith(self.passes[pass_id].clear_color),
-                texture_id,
+                texture: texture.clone(),
             }]
         });
         let color_textures = color_textures_from_fb_texture
@@ -313,20 +308,23 @@ impl Cx {
         for (index, color_texture) in color_textures.iter().enumerate() {
             match color_texture.clear_color {
                 PassClearColor::InitWith(_clear_color) => {
-                    let cxtexture = &mut self.textures[color_texture.texture_id];
-                    if cxtexture.os.update_platform_render_target(&cxtexture.desc, dpi_factor * pass_size, false) {
-                        clear_color = _clear_color;
-                        clear_flags |= gl_sys::COLOR_BUFFER_BIT;
+                    let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
+                    let size = dpi_factor * pass_size;
+                    cxtexture.update_render_target(size.x as usize, size.y as usize);
+                    if cxtexture.check_initial(){
+                       clear_color = _clear_color;
+                       clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                     }
                 },
                 PassClearColor::ClearWith(_clear_color) => {
-                    let cxtexture = &mut self.textures[color_texture.texture_id];
-                    cxtexture.os.update_platform_render_target(&cxtexture.desc, dpi_factor * pass_size, false);
+                    let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
+                    let size = dpi_factor * pass_size;
+                    cxtexture.update_render_target(size.x as usize, size.y as usize);
                     clear_color = _clear_color;
                     clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                 }
             }
-            if let Some(gl_texture) = self.textures[color_texture.texture_id].os.gl_texture {
+            if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()].os.gl_texture {
                 unsafe {
                     gl_sys::FramebufferTexture2D(gl_sys::FRAMEBUFFER, gl_sys::COLOR_ATTACHMENT0 + index as u32, gl_sys::TEXTURE_2D, gl_texture, 0);
                 }
@@ -334,18 +332,21 @@ impl Cx {
         }
         
         // attach/clear depth buffers, if any
-        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
+        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
             match self.passes[pass_id].clear_depth {
                 PassClearDepth::InitWith(_clear_depth) => {
-                    let cxtexture = &mut self.textures[depth_texture_id];
-                    if cxtexture.os.update_platform_render_target(&cxtexture.desc, dpi_factor * pass_size, true) {
+                    let cxtexture = &mut self.textures[depth_texture.texture_id()];
+                    let size = dpi_factor * pass_size;
+                    cxtexture.update_depth_stencil(size.x as usize, size.y as usize);
+                    if cxtexture.check_initial(){
                         clear_depth = _clear_depth;
                         clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                     }
                 },
                 PassClearDepth::ClearWith(_clear_depth) => {
-                    let cxtexture = &mut self.textures[depth_texture_id];
-                    cxtexture.os.update_platform_render_target(&cxtexture.desc, dpi_factor * pass_size, true);
+                    let cxtexture = &mut self.textures[depth_texture.texture_id()];
+                    let size = dpi_factor * pass_size;
+                    cxtexture.update_depth_stencil(size.x as usize, size.y as usize);
                     clear_depth = _clear_depth;
                     clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                 }
@@ -385,18 +386,17 @@ impl Cx {
             // HACK(eddyb) to try and match DirectX and Metal conventions, we
             // need the viewport to be placed on the other end of the Y axis.
             if let [color_texture] = color_textures {
-                let cxtexture = &mut self.textures[color_texture.texture_id];
+                let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                 if cxtexture.os.gl_texture.is_some() {
-                    if let Some(alloc_height) = cxtexture.os.alloc_desc.height {
-                        let alloc_height = alloc_height as u32;
-                        if alloc_height > height {
-                            y = alloc_height - height;
-                        }
+                    let alloc_height = cxtexture.alloc.as_ref().unwrap().height as u32;
+                    if alloc_height > height {
+                        y = alloc_height - height;
                     }
                 }
             }
 
             gl_sys::Viewport(x as i32, y as i32, width as i32, height as i32);
+            
             assert_eq!(gl_sys::GetError(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
         }
 
@@ -827,137 +827,242 @@ impl CxOsDrawCall {
 
 #[derive(Clone, Default)]
 pub struct CxOsTexture {
-    pub alloc_desc: TextureDesc,
-    pub width: u64,
-    pub height: u64,
     pub gl_texture: Option<u32>,
     pub gl_renderbuffer: Option<u32>,
 }
 
-impl CxOsTexture {
+impl CxTexture {
     
-    pub fn update_platform_texture_image2d(&mut self, width: u32, height: u32, image_u32: &Vec<u32>) {
-        
-        if image_u32.len() != (width * height) as usize {
-            log!("update_platform_texture_image2d with wrong buffer_u32 size! {} {} {}", image_u32.len(), width, height);
-            return;
-        }
-        
-        if self.gl_texture.is_none() {
-            unsafe {
-                let mut gl_texture = std::mem::MaybeUninit::uninit();
-                gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                self.gl_texture = Some(gl_texture.assume_init());
+    pub fn update_vec_texture(&mut self) {
+        if self.alloc_vec(){
+            //let alloc = self.alloc.as_ref().unwrap();
+            if self.os.gl_texture.is_none() { 
+                unsafe {
+                    let mut gl_texture = std::mem::MaybeUninit::uninit();
+                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    self.os.gl_texture = Some(gl_texture.assume_init());
+                }
             }
         }
-        unsafe {
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);            
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
-            gl_sys::TexImage2D(
-                gl_sys::TEXTURE_2D,
-                0,
-                gl_sys::RGBA as i32,
-                width as i32,
-                height as i32,
-                0,
-                gl_sys::RGBA,
-                gl_sys::UNSIGNED_BYTE,
-                image_u32.as_ptr() as *const _
-            );
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, 3);
-            gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+        if self.check_updated(){
+            unsafe{
+                gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+                gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+            }                       
+            match &self.format{
+                TextureFormat::VecBGRAu8_32{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::BGRA as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::BGRA,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ptr() as *const _
+                    );
+                }
+                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::BGRA as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::BGRA,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ptr() as *const _
+                    );
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
+                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
+                },
+                TextureFormat::VecRGBAf32{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RGBA as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::RGBA,
+                        gl_sys::FLOAT,
+                        data.as_ptr() as *const _
+                    );
+                },
+                TextureFormat::VecRu8{width, height, data, unpack_row_length}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    if let Some(row_length) = unpack_row_length {
+                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                    }
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RED as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::RED,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ptr() as *const _
+                    );
+                },
+                TextureFormat::VecRGu8{width, height, data, unpack_row_length}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    if let Some(row_length) = unpack_row_length {
+                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                    }
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RG as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::RG,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ptr() as *const _
+                    );
+                },
+                TextureFormat::VecRf32{width, height, data}=>unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RED as i32,
+                        *width as i32,
+                        *height as i32,
+                        0,
+                        gl_sys::RED,
+                        gl_sys::FLOAT,
+                        data.as_ptr() as *const _
+                    );
+                },
+                _=>{panic!()}
+            }
+            unsafe{
+                gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+            }
         }
     }
     
-    pub fn update_platform_render_target(&mut self, desc: &TextureDesc, default_size: DVec2, is_depth: bool) -> bool {
-        let width = desc.width.unwrap_or(default_size.x as usize) as u64;
-        let height = desc.height.unwrap_or(default_size.y as usize) as u64;
-        
-        if (self.gl_texture.is_some() || self.gl_renderbuffer.is_some()) && self.width == width && self.height == height && self.alloc_desc == *desc {
-            return false
-        }
-        
-        unsafe {
-            
-            self.alloc_desc = desc.clone();
-            self.width = width;
-            self.height = height;
-            
-            if !is_depth {
-                match desc.format {
-                    TextureFormat::Default | TextureFormat::RenderBGRA => {
-                        if self.gl_texture.is_none() {
-                            let mut gl_texture = std::mem::MaybeUninit::uninit();
-                            gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                            self.gl_texture = Some(gl_texture.assume_init());
-                        }
-                        
-                        gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
-                        
-                        //self.gl_texture = Some(gl_texture);
-                        
-                        gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                        gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
-                        gl_sys::TexImage2D(
-                            gl_sys::TEXTURE_2D,
-                            0,
-                            gl_sys::RGBA as i32,
-                            width as i32,
-                            height as i32,
-                            0,
-                            gl_sys::RGBA,
-                            gl_sys::UNSIGNED_BYTE,
-                            ptr::null()
-                        );
-                        gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
-                    },
-                    _ => {
-                        println!("update_platform_render_target unsupported texture format");
-                        return false;
-                    }
+    pub fn update_render_target(&mut self, width: usize, height: usize) {
+        if self.alloc_render(width, height){
+            let alloc = self.alloc.as_ref().unwrap();
+            if self.os.gl_texture.is_none() {
+                let mut gl_texture = std::mem::MaybeUninit::uninit();
+                unsafe{
+                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
-            else {
-                match desc.format {
-                    TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
-                        
-                        if self.gl_renderbuffer.is_none() {
-                            let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
-                            gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
-                            let gl_renderbuffer = gl_renderbuf.assume_init();
-                            self.gl_renderbuffer = Some(gl_renderbuffer);
-                        }
-                        
-                        gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, self.gl_renderbuffer.unwrap());
-                        gl_sys::RenderbufferStorage(
-                            gl_sys::RENDERBUFFER,
-                            gl_sys::DEPTH_COMPONENT32F,
-                            width as i32,
-                            height as i32
-                        );
-                        gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, 0);
-                    },
-                    _ => {
-                        println!("update_platform_render_targete unsupported texture format");
-                        return false;
+            unsafe{gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap())};
+            match &alloc.pixel {
+                TexturePixel::BGRAu8 => unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RGBA as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        gl_sys::RGBA,
+                        gl_sys::UNSIGNED_BYTE,
+                        ptr::null()
+                    );
+                },
+                TexturePixel::RGBAf16 => unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RGBA as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        gl_sys::RGBA,
+                        gl_sys::HALF_FLOAT,
+                        ptr::null()
+                    );
+                }
+                TexturePixel::RGBAf32 => unsafe{
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::RGBA as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        gl_sys::RGBA,
+                        gl_sys::FLOAT,
+                        ptr::null()
+                    );
+                }
+                _ => panic!()
+            }
+            unsafe{
+                gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+            }
+        }
+    }
+    
+    fn update_depth_stencil(
+        &mut self,
+        width: usize,
+        height: usize
+    ) {
+        if self.alloc_depth(width, height){
+                   
+            let alloc = self.alloc.as_ref().unwrap();
+            match &alloc.pixel {
+                TexturePixel::D32 => unsafe{
+                    if self.os.gl_renderbuffer.is_none() {
+                        let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
+                        gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                        let gl_renderbuffer = gl_renderbuf.assume_init();
+                        self.os.gl_renderbuffer = Some(gl_renderbuffer);
                     }
+                        
+                    gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, self.os.gl_renderbuffer.unwrap());
+                    gl_sys::RenderbufferStorage(
+                        gl_sys::RENDERBUFFER,
+                        gl_sys::DEPTH_COMPONENT32F,
+                        width as i32,
+                        height as i32
+                    );
+                    gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, 0);
+                },
+                _ => {
+                    println!("update_platform_render_targete unsupported texture format");
                 }
             }
-            
         }
-        return true;
     }
     
     pub fn free_resources(&mut self){
-        if let Some(gl_texture) = self.gl_texture.take(){
+        if let Some(gl_texture) = self.os.gl_texture.take(){
             unsafe{gl_sys::DeleteTextures(1, &gl_texture)};
         }
-        if let Some(gl_renderbuffer) = self.gl_renderbuffer.take(){
+        if let Some(gl_renderbuffer) = self.os.gl_renderbuffer.take(){
             unsafe{gl_sys::DeleteRenderbuffers(1, &gl_renderbuffer)};
         }
     }
@@ -1030,30 +1135,3 @@ impl OpenglBuffer {
     }
 
 }
-
-/*
-// void shaders to test if we are shader compiletime bottlenecked
-
-                let vertex = "
-uniform float const_table[24];
-uniform float draw_table[1];
-uniform float pass_table[50];
-uniform float view_table[16];
-attribute vec2 packed_geometry_0;
-attribute vec4 packed_instance_0;
-attribute vec3 packed_instance_1;
-
-void main() {
-    gl_Position = vec4(0.0,0.0,0.0,0.0);
-}";
-
-let pixel = "
-uniform float const_table[24];
-uniform float draw_table[1];
-uniform float pass_table[50];
-uniform float view_table[16];
-
-void main() {
-    gl_FragColor = vec4(0.0,0.0,0.0,0.0);
-}";*/
-

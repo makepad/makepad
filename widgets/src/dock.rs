@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::str::Chars;
 use crate::{
+    makepad_micro_serde::*,
     makepad_derive_widget::*,
     widget::*,
     makepad_draw::*,
-    splitter::{SplitterAction, Splitter, SplitterAlign},
+    splitter::{SplitterAction, Splitter, SplitterAlign, SplitterAxis},
     tab::{TabClosable},
     tab_bar::{TabBarAction, TabBar},
 };
@@ -50,6 +52,8 @@ pub struct Dock {
     
     #[live] tab_bar: Option<LivePtr>,
     #[live] splitter: Option<LivePtr>,
+    
+    #[rust] needs_save: bool,
     
     #[rust] area: Area,
     
@@ -147,7 +151,7 @@ impl DrawStackItem {
 
 #[derive(Clone, WidgetAction)]
 pub enum DockAction {
-    SplitPanelChanged {panel_id: LiveId, axis: Axis, align: SplitterAlign},
+    SplitPanelChanged {panel_id: LiveId, axis: SplitterAxis, align: SplitterAlign},
     TabWasPressed(LiveId),
     TabCloseWasPressed(LiveId),
     ShouldTabStartDrag(LiveId),
@@ -178,9 +182,9 @@ pub enum DropPart {
 #[derive(Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum DockItem {
-    #[live {axis: Axis::Vertical, align: SplitterAlign::Weighted(0.5), a: LiveId(0), b: LiveId(0)}]
+    #[live {axis: SplitterAxis::Vertical, align: SplitterAlign::Weighted(0.5), a: LiveId(0), b: LiveId(0)}]
     Splitter {
-        axis: Axis,
+        axis: SplitterAxis,
         align: SplitterAlign,
         a: LiveId,
         b: LiveId
@@ -196,6 +200,63 @@ pub enum DockItem {
         name: String,
         closable: bool,
         kind: LiveId
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveIdStore(pub LiveId);
+
+impl SerRon for LiveIdStore {
+    fn ser_ron(&self, _d: usize, s: &mut SerRonState) {
+        self.0.as_string(|v|{
+            if let Some(v) = v{
+                s.out.push_str(v);
+            }
+            else{
+                s.out.push_str(&self.0.0.to_string());
+            }
+        });
+    }
+}
+
+impl DeRon for LiveIdStore {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<LiveIdStore, DeRonErr> {
+        let liveid = match s.tok{
+            DeRonTok::U64(value)=>LiveId(value),
+            DeRonTok::I64(value)=>LiveId(value as u64),            DeRonTok::F64(value)=>LiveId(value as u64),
+            DeRonTok::Ident=>{
+                LiveId::from_str_with_lut(&s.identbuf).unwrap()
+            }
+            _=>{ // err
+                return Err(s.err_token("liveid"))
+            }
+        };
+        s.next_tok(i) ?;
+        Ok(LiveIdStore(liveid))
+    }
+}
+
+
+#[derive(Clone, Debug, SerRon, DeRon)]
+pub enum DockItemStore{
+    Splitter {
+        id: LiveIdStore,
+        axis: SplitterAxis,
+        align: SplitterAlign,
+        a: LiveIdStore,
+        b: LiveIdStore
+    },
+    Tabs{
+        id: LiveIdStore,
+        tabs: Vec<LiveIdStore>,
+        selected: usize,
+        closable: bool
+    },
+    Tab {
+        id: LiveIdStore,
+        name: String,
+        closable: bool,
+        kind: LiveIdStore
     }
 }
 
@@ -379,6 +440,57 @@ impl Dock {
         None
     }
     
+    pub fn to_store_items(&self)->Vec<DockItemStore>{
+        let mut out = Vec::new();
+        for (id, dock_item) in &self.dock_items{
+            match dock_item{
+                DockItem::Splitter {
+                    axis,
+                    align,
+                    a,
+                    b
+                }=>{
+                    out.push(DockItemStore::Splitter{
+                        id:LiveIdStore(*id),
+                        axis:*axis,
+                        align:*align, 
+                        a:LiveIdStore(*a),
+                        b:LiveIdStore(*b)
+                    });
+                }
+                DockItem::Tabs {
+                    tabs,
+                    selected,
+                    closable
+                }=>{
+                    out.push(DockItemStore::Tabs{
+                        id:LiveIdStore(*id),
+                        tabs: tabs.iter().map(|v| LiveIdStore(*v)).collect(),
+                        selected: *selected,
+                        closable: *closable
+                    });
+                }
+                DockItem:: Tab {
+                    name,
+                    closable,
+                    kind
+                }=>{
+                    out.push(DockItemStore::Tab{
+                        id:LiveIdStore(*id),
+                        name: name.clone(),
+                        closable: *closable,
+                        kind: LiveIdStore(*kind)
+                    });
+                }
+            }
+        }
+        out
+    }
+    
+    pub fn from_store_item(&mut self, _store:&[DockItemStore]){
+        
+    }
+    
     pub fn item(&mut self, entry_id: LiveId) -> Option<WidgetRef> {
         if let Some(entry) = self.items.get(&entry_id) {
             return Some(entry.1.clone())
@@ -443,6 +555,7 @@ impl Dock {
     }
     
     fn unsplit_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId) {
+        self.needs_save = true;        
         for (splitter_id, item) in self.dock_items.iter_mut() {
             match *item {
                 DockItem::Splitter {a, b, ..} => {
@@ -468,6 +581,7 @@ impl Dock {
     }
     
     fn select_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
+        self.needs_save = true;        
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
                 DockItem::Tabs {tabs, selected, ..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
@@ -484,6 +598,7 @@ impl Dock {
     
     
     fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name:String) {
+        self.needs_save = true;
         if let Some(DockItem::Tab{name, ..}) = self.dock_items.get_mut(&tab_id){
             *name = new_name;
             self.redraw_tab(cx, tab_id);
@@ -516,6 +631,7 @@ impl Dock {
     }
     
     fn close_tab(&mut self, cx: &mut Cx, tab_id: LiveId, keep_item: bool) -> Option<LiveId> {
+        self.needs_save = true;        
         // ok so we have to find the tab id in our tab bars / tabs and remove it
         // if we are the last tab we need to remove a splitter
         for (tabs_id, item) in self.dock_items.iter_mut() {
@@ -565,6 +681,7 @@ impl Dock {
     
     fn handle_drop(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, is_move: bool) -> bool {
         if let Some(pos) = self.find_drop_position(cx, abs) {
+            self.needs_save = true;                    
             // ok now what
             // we have a pos
             match pos.part {
@@ -580,25 +697,25 @@ impl Dock {
                     self.set_parent_split(pos.id, new_split);
                     self.dock_items.insert(new_split, match pos.part {
                         DropPart::Left => DockItem::Splitter {
-                            axis: Axis::Horizontal,
+                            axis: SplitterAxis::Horizontal,
                             align: SplitterAlign::Weighted(0.5),
                             a: new_tabs,
                             b: pos.id,
                         },
                         DropPart::Right => DockItem::Splitter {
-                            axis: Axis::Horizontal,
+                            axis: SplitterAxis::Horizontal,
                             align: SplitterAlign::Weighted(0.5),
                             a: pos.id,
                             b: new_tabs
                         },
                         DropPart::Top => DockItem::Splitter {
-                            axis: Axis::Vertical,
+                            axis: SplitterAxis::Vertical,
                             align: SplitterAlign::Weighted(0.5),
                             a: new_tabs,
                             b: pos.id,
                         },
                         DropPart::Bottom => DockItem::Splitter {
-                            axis: Axis::Vertical,
+                            axis: SplitterAxis::Vertical,
                             align: SplitterAlign::Weighted(0.5),
                             a: pos.id,
                             b: new_tabs,
@@ -673,8 +790,8 @@ impl Dock {
     
     fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
         // lets add a tab
-        
         if self.handle_drop(cx, abs, item, false) {
+            self.needs_save = true;
             self.dock_items.insert(item, DockItem::Tab {
                 name,
                 closable: closable.as_bool(),
@@ -692,6 +809,7 @@ impl Dock {
             let name = name.clone();
             let kind = kind.clone();
             if self.handle_drop(cx, abs, new_item, false) {
+                self.needs_save = true;
                 self.dock_items.insert(new_item, DockItem::Tab {
                     name,
                     closable: true,
@@ -711,6 +829,7 @@ impl Dock {
     fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
         if let Some(DockItem::Tabs {tabs, ..}) = self.dock_items.get_mut(&parent) {
             tabs.push(item);
+            self.needs_save = true;
             self.dock_items.insert(item, DockItem::Tab {
                 name,
                 closable: closable.as_bool(),
@@ -767,6 +886,7 @@ impl Widget for Dock {
                         DockAction::ShouldTabStartDrag(item).into_action(uid),
                     ),
                     TabBarAction::TabWasPressed(tab_id) => {
+                        self.needs_save = true;
                         if let Some(DockItem::Tabs {tabs, selected, ..}) = dock_items.get_mut(&panel_id) {
                             if let Some(sel) = tabs.iter().position( | v | *v == tab_id) {
                                 *selected = sel;
@@ -1090,6 +1210,29 @@ impl DockRef {
         if let Some(mut dock) = self.borrow_mut() {
             dock.redraw_tab(cx, tab_id);
         }
+    }
+    
+    pub fn unique_tab_id(&self, base:u64)->LiveId{
+        if let Some(dock) = self.borrow() {
+            let mut id = LiveId(base);
+            let mut i = 0u32;
+            while dock.dock_items.get(&id).is_some(){
+                id = id.bytes_append(&i.to_be_bytes());
+                i += 1;            
+            }
+            return id;
+        }
+        LiveId(0)
+    }
+        
+    pub fn needs_save(&self)->Option<Vec<DockItemStore>>{
+        if let Some(mut dock) = self.borrow_mut() {
+            if dock.needs_save{
+                dock.needs_save = false;
+                return Some(dock.to_store_items())
+            }
+        }
+        None
     }
     
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {

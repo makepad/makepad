@@ -209,14 +209,24 @@ live_design!{
         draw_bg: {
             shape: Solid,
             fill: Image
-            texture yuv_texture: texture2d
+            texture y_texture: texture2d
+            texture u_texture: texture2d
+            texture v_texture: texture2d
             instance image_scale: vec2(1.0, 1.0)
             instance image_pan: vec2(0.0, 0.0)
+
             uniform image_alpha: 1.0
             uniform texture_available: 0.0
             uniform is_last_frame: 0.0
+            uniform is_plannar: 0.0 
+            uniform video_width: 0.0
+            uniform video_height: 0.0
+
+            uniform y_stride: 0.0;
+            uniform u_stride: 0.0;
+            uniform v_stride: 0.0;
         
-            fn yuv_to_rgb(y: float, u: float, v: float) -> vec4 {
+            fn yuv_to_rgb(self, y: float, u: float, v: float) -> vec4 {
                 let c = y - 16.0;
                 let d = u - 128.0;
                 let e = v - 128.0;
@@ -227,29 +237,30 @@ live_design!{
         
                 return vec4(r, g, b, 1.0);
             }
-        
+
             fn get_color(self) -> vec4 {
-                if self.texture_available == 0.0 {
+                if (self.is_plannar > 0.5) {
+                    let y = sample2d(self.y_texture, self.pos).z;
+                    let u = sample2d(self.u_texture, self.pos).z;
+                    let v = sample2d(self.v_texture, self.pos).z;
+                    return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
+                } else {
+                    let uv_coord = self.pos / 2.0;
+                    let y = sample2d(self.y_texture, self.pos).z;
+                    let uv = sample2d(self.u_texture, uv_coord).zy;
+                    let u = uv.x;
+                    let v = uv.y;
+                    return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
+                }    
+            }
+    
+            fn pixel(self) -> vec4 {
+                if (self.texture_available < 0.5) {
                     return vec4(0.0, 0.0, 0.0, 1.0);
                 }
-
-                let sample = sample2d(self.yuv_texture, self.pos * self.image_scale + self.image_pan);
-                let y = sample.z * 255.0;
-                let u = sample.y * 255.0;
-                let v = sample.x * 255.0;
-
-                return yuv_to_rgb(y, u, v);
-            }
-            
-            fn pixel(self) -> vec4 {
+    
                 let color = self.get_color();
-                let premul_color = Pal::premul(vec4(color.xyz, color.w * self.image_alpha));
-
-                if (self.is_last_frame == 1.0) {
-                    return mix(premul_color, vec4(0.0, 0.0, 0.0, 1.0), 0.5);
-                } 
-
-                return premul_color;
+                return color * vec4(1.0, 1.0, 1.0, self.image_alpha);
             }
         }
     }

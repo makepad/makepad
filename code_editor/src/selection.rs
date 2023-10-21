@@ -136,7 +136,7 @@ impl SelectionSet {
         f: impl FnOnce(Selection) -> Selection,
     ) -> usize {
         self.selections[index] = f(self.selections[index]);
-        self.remove_overlapping_selections(index)
+        self.normalize_selection(index)
     }
 
     pub fn update_all_selections(
@@ -147,32 +147,11 @@ impl SelectionSet {
         for selection in &mut self.selections {
             *selection = f(*selection);
         }
-        let mut index = retained_index;
-        let mut current_index = 0;
-        while current_index + 1 < self.selections.len() {
-            let next_index = current_index + 1;
-            let current_selection = self.selections[current_index];
-            let next_selection = self.selections[next_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if let Some(merged_selection) = current_selection.merge_with(next_selection) {
-                self.selections[current_index] = merged_selection;
-                self.selections.remove(next_index);
-                if let Some(index) = &mut index {
-                    if next_index <= *index {
-                        *index -= 1;
-                    }
-                }
-            } else {
-                current_index += 1;
-            }
-        }
-        index
+        self.normalize_all_selections(retained_index)
     }
 
-    pub fn apply_edit(&mut self, edit: &Edit) {
-        for selection in &mut self.selections {
-            *selection = selection.apply_edit(edit);
-        }
+    pub fn apply_edit(&mut self, edit: &Edit, retained_index: Option<usize>) -> Option<usize> {
+        self.update_all_selections(retained_index, |selection| selection.apply_edit(edit))
     }
 
     pub fn add_selection(&mut self, selection: Selection) -> usize {
@@ -189,7 +168,7 @@ impl SelectionSet {
                 index
             }
         };
-        self.remove_overlapping_selections(index)
+        self.normalize_selection(index)
     }
 
     pub fn set_selection(&mut self, selection: Selection) {
@@ -197,7 +176,7 @@ impl SelectionSet {
         self.selections.push(selection);
     }
 
-    fn remove_overlapping_selections(&mut self, index: usize) -> usize {
+    fn normalize_selection(&mut self, index: usize) -> usize {
         let mut index = index;
         while index > 0 {
             let prev_index = index - 1;
@@ -215,6 +194,29 @@ impl SelectionSet {
             self.selections.remove(next_index);
         }
         index
+    }
+
+    fn normalize_all_selections(&mut self, retained_index: Option<usize>) -> Option<usize> {
+        let mut retained_index = retained_index;
+        let mut current_index = 0;
+        while current_index + 1 < self.selections.len() {
+            let next_index = current_index + 1;
+            let current_selection = self.selections[current_index];
+            let next_selection = self.selections[next_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if let Some(merged_selection) = current_selection.merge_with(next_selection) {
+                self.selections[current_index] = merged_selection;
+                self.selections.remove(next_index);
+                if let Some(retained_index) = &mut retained_index {
+                    if next_index <= *retained_index {
+                        *retained_index -= 1;
+                    }
+                }
+            } else {
+                current_index += 1;
+            }
+        }
+        retained_index
     }
 }
 
@@ -307,7 +309,7 @@ impl Cursor {
         if !self.is_at_first_line() {
             return self.move_to_last_row_of_prev_line(layout);
         }
-        self
+        self.move_to_start_of_line()
     }
 
     pub fn move_down(self, layout: &Layout<'_>) -> Self {
@@ -316,6 +318,44 @@ impl Cursor {
         }
         if !self.is_at_last_line(layout.as_text().as_lines().len()) {
             return self.move_to_first_row_of_next_line(layout);
+        }
+        self.move_to_end_of_line(layout.as_text().as_lines())
+    }
+
+    pub fn home(self, lines: &[String]) -> Self {
+        if !self.is_at_start_of_line() {
+            let indent_len = lines[self.position.line_index].indent().unwrap_or("").len();
+            if self.position.byte_index <= indent_len {
+                return self.move_to_start_of_line();
+            } else {
+                return Self {
+                    position: Position {
+                        line_index: self.position.line_index,
+                        byte_index: indent_len,
+                    },
+                    affinity: Affinity::Before,
+                    preferred_column_index: None,
+                };
+            }
+        }
+        self
+    }
+
+    pub fn end(self, lines: &[String]) -> Self {
+        if !self.is_at_end_of_line(lines) {
+            let indent_len = lines[self.position.line_index].indent().unwrap_or("").len();
+            if self.position.byte_index >= indent_len {
+                return self.move_to_end_of_line(lines);
+            } else {
+                return Self {
+                    position: Position {
+                        line_index: self.position.line_index,
+                        byte_index: indent_len,
+                    },
+                    affinity: Affinity::After,
+                    preferred_column_index: None,
+                };
+            }
         }
         self
     }
@@ -487,6 +527,28 @@ impl Cursor {
             },
             affinity,
             preferred_column_index: Some(column_index),
+        }
+    }
+
+    pub fn move_to_start_of_line(self) -> Self {
+        Self {
+            position: Position {
+                line_index: self.position.line_index,
+                byte_index: 0,
+            },
+            affinity: Affinity::Before,
+            preferred_column_index: None,
+        }
+    }
+
+    pub fn move_to_end_of_line(self, lines: &[String]) -> Self {
+        Self {
+            position: Position {
+                line_index: self.position.line_index,
+                byte_index: lines[self.position.line_index].len(),
+            },
+            affinity: Affinity::Before,
+            preferred_column_index: None,
         }
     }
 

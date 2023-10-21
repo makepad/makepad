@@ -20,7 +20,6 @@ use crate::{
     live_traits::*,
     texture::{
         Texture,
-        TextureId
     }
 };
 
@@ -161,7 +160,15 @@ impl Pass {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.pass_rect = Some(CxPassRect::Size(pass_size));
     }
-    
+
+    pub fn size(&self, cx: &mut Cx)->Option<DVec2> {
+        let cxpass = &mut cx.passes[self.pass_id()];
+        if let Some(CxPassRect::Size(size)) = &cxpass.pass_rect{
+            return Some(*size)
+        } 
+        None
+    }
+        
     pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.clear_color = clear_color;
@@ -175,14 +182,14 @@ impl Pass {
     pub fn add_color_texture(&self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.color_textures.push(CxPassColorTexture {
-            texture_id: texture.texture_id(),
+            texture: texture.clone(),
             clear_color: clear_color
         })
     }
     
     pub fn set_depth_texture(&self, cx: &mut Cx, texture: &Texture, clear_depth: PassClearDepth) {
         let cxpass = &mut cx.passes[self.pass_id()];
-        cxpass.depth_texture = Some(texture.texture_id());
+        cxpass.depth_texture = Some(texture.clone());
         cxpass.clear_depth = clear_depth;
     }
     
@@ -220,7 +227,7 @@ pub enum PassClearDepth {
 #[derive(Clone)]
 pub struct CxPassColorTexture {
     pub clear_color: PassClearColor,
-    pub texture_id: TextureId
+    pub texture: Texture
 }
 
 #[derive(Default, Clone)]
@@ -260,7 +267,7 @@ pub struct CxPass {
     pub debug_name: String,
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
-    pub depth_texture: Option<TextureId>,
+    pub depth_texture: Option<Texture>,
     pub clear_depth: PassClearDepth,
     pub dont_clear: bool,
     pub depth_init: f64,

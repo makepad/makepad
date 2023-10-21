@@ -148,7 +148,7 @@ impl From<char> for Text {
 impl From<&str> for Text {
     fn from(string: &str) -> Self {
         Self {
-            lines: string.lines().map(|string| string.to_owned()).collect(),
+            lines: string.split('\n').map(|string| string.to_owned()).collect(),
         }
     }
 }

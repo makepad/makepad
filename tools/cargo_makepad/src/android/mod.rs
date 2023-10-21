@@ -44,6 +44,15 @@ impl AndroidTarget {
             Self::i686 => "i686-linux-android",
         }
     }
+    fn unwind_dir(&self) -> &'static str {
+        match self {
+            Self::aarch64 => "aarch64",
+            Self::x86_64 => "x86_64",
+            Self::armv7 => "arm",
+            Self::i686 => "i386",
+        }
+    }
+    
     fn clang(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64-linux-android",

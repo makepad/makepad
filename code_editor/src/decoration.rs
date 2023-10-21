@@ -4,26 +4,30 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DecorationType {
+    Error,
+    Warning,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Decoration {
     pub id: usize,
+    pub ty: DecorationType,
     start: Position,
     end: Position,
 }
 
 impl Decoration {
-    pub fn new(id: usize, start: Position, end: Position) -> Self {
-        if start > end{
+    pub fn new(id: usize, start: Position, end: Position, ty: DecorationType) -> Self {
+        if start > end {
             return Self {
+                ty,
                 id,
-                start:end,
-                end:start,
-            }
+                start: end,
+                end: start,
+            };
         }
-        Self {
-            id,
-            start,
-            end,
-        }
+        Self { ty, id, start, end }
     }
 
     pub fn is_empty(self) -> bool {
@@ -57,7 +61,7 @@ impl Decoration {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DecorationSet {
-    decorations: Vec<Decoration>
+    decorations: Vec<Decoration>,
 }
 
 impl DecorationSet {
@@ -119,7 +123,7 @@ impl DecorationSet {
 impl Default for DecorationSet {
     fn default() -> Self {
         Self {
-            decorations: vec![]
+            decorations: vec![],
         }
     }
 }

@@ -17,8 +17,7 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::{Texture, TextureDesc, TextureFormat},
-        live_traits::LiveNew,
+        texture::{Texture, TextureFormat},
         thread::Signal,
         os::{
             apple_sys::*,
@@ -28,7 +27,7 @@ use {
                 fetch_xpc_service_texture,
             },
             metal::{MetalCx, DrawPassMode},
-            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
+            cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain, PollTimer},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
@@ -39,9 +38,6 @@ use {
 impl Cx {
     
     pub (crate) fn stdin_send_draw_complete(presentable_draw: PresentableDraw) {
-        //log!("image {} presented, sending message to host", presentable_draw.target_id.as_u64());
-
-        // send message
         let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
     }
     
@@ -64,7 +60,7 @@ impl Cx {
                         let pass = &mut self.passes[window.main_pass_id.unwrap()];
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: texture.texture_id(),
+                            texture: texture.clone(),
                         }];
 
                         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
@@ -179,9 +175,8 @@ impl Cx {
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx);
                 }
-                HostToStdin::Tick {frame: _, buffer_id: _, time} => if let Some(swapchain) = &mut swapchain {
+                HostToStdin::Tick {frame: _, buffer_id: _, time:_} => if let Some(swapchain) = &mut swapchain {
                     let [presentable_image] = &swapchain.presentable_images;
-
                     // lets fetch the framebuffers
                     if presentable_image.image.is_none() {
                         let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
@@ -192,15 +187,14 @@ impl Cx {
                         ); 
                         if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(1)) {
                             let texture = Texture::new(self);
-                            let desc = TextureDesc {
-                                format: TextureFormat::SharedBGRA(presentable_image.id),
-                                width: Some(swapchain.alloc_width as usize),
-                                height: Some(swapchain.alloc_height as usize),
+                            let format = TextureFormat::SharedBGRAu8 {
+                                id: presentable_image.id,
+                                width: swapchain.alloc_width as usize,
+                                height: swapchain.alloc_height as usize,
                             };
-                            texture.set_desc(self, desc);
-                            if self.textures[texture.texture_id()].os.update_from_shared_handle(
+                            texture.set_format(self, format);
+                            if self.textures[texture.texture_id()].update_from_shared_handle(
                                 metal_cx,
-                                &desc,
                                 fb.as_id(),
                             ) {
                                 let [presentable_image] = &mut swapchain.presentable_images;
@@ -214,6 +208,9 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    for event in self.os.stdin_timers.get_dispatch() {
+                        self.call_event_handler(&event);
+                    }                    
                     if self.handle_live_edit() {
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
@@ -223,7 +220,7 @@ impl Cx {
                     // alright a tick.
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(time);
+                        self.call_next_frame_event(self.os.stdin_timers.time_now());
                     }
                     
                     if self.need_redrawing() {
@@ -232,8 +229,9 @@ impl Cx {
                     }
 
                     let [presentable_image] = &swapchain.presentable_images;
+                   // log!("TICKIN");
                     if presentable_image.image.is_some() {
-                        self.stdin_handle_repaint(metal_cx, swapchain, time as f32);
+                        self.stdin_handle_repaint(metal_cx, swapchain, self.os.stdin_timers.time_now() as f32);
                     }
                 }
             }
@@ -319,8 +317,12 @@ impl Cx {
         let home = std::env::var("HOME").unwrap();
         let plist_path = format!("{}/Library/LaunchAgents/dev.makepad.xpc.plist", home);
         let cwd = std::env::current_dir().unwrap();
+        
         if let Ok(old) = fs::read_to_string(Path::new(&plist_path)){
             if old == plist_body{
+                return
+            }
+            if std::env::args().find( | v | v == "--stdin-loop").is_some() {
                 return
             }
         }
@@ -341,6 +343,12 @@ impl Cx {
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
+                },
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    self.os.stdin_timers.timers.insert(timer_id, PollTimer::new(interval, repeats));
+                },
+                CxOsOp::StopTimer(timer_id) => {
+                    self.os.stdin_timers.timers.remove(&timer_id);
                 },
                 _ => ()
                 /*
