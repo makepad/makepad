@@ -1381,10 +1381,10 @@ live_design!{
         padding: {left: 5.0, bottom: 0,},
         
         icon_walk: {
-            width: Fixed((THEME_DATA_ICON_WIDTH)),
+            width: Fixed((THEME_DATA_ICON_WIDTH - 2)),
             height: Fixed((THEME_DATA_ICON_HEIGHT)),
             margin: {
-                left: 1
+                left: 0
                 top: 0
                 right: 2
                 bottom: 0
@@ -2209,9 +2209,12 @@ live_design!{
     
     
     SlideBody = <Label> {
+        margin:{top:20}
         draw_text: {
             color: #D
             text_style: {
+                line_spacing:1.5
+                font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
                 font_size: 35
             }
         }
@@ -2227,6 +2230,8 @@ live_design!{
             draw_text: {
                 color: #f
                 text_style: {
+                    line_spacing:1.0
+                    font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
                     font_size: 84
                 }
             }
@@ -2243,7 +2248,9 @@ live_design!{
             draw_text: {
                 color: #x181818
                 text_style: {
-                    font_size: 120
+                    line_spacing:1.0
+                    font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
+                    font_size: 90
                 }
             }
             text: "SlideTitle"

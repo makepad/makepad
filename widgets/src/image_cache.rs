@@ -61,16 +61,15 @@ impl ImageBuffer {
         texture
     }
     
-    pub fn into_texture(mut self, cx:&mut Cx, texture:&Texture){
-        texture.set_desc(
+    pub fn into_texture(self, cx:&mut Cx, texture:&Texture){
+        texture.set_format(
             cx,
-            TextureDesc {
-                format: TextureFormat::ImageBGRA,
-                width: Some(self.width),
-                height: Some(self.height),
+            TextureFormat::VecBGRAu8_32 {
+                width: self.width,
+                height: self.height,
+                data: self.data
             },
         );
-        texture.swap_image_u32(cx, &mut self.data);
     }
     
     

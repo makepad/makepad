@@ -5,6 +5,8 @@ pub trait StrExt {
     fn indent_level(&self, indent_column_count: usize) -> usize;
     fn next_indent_level(&self, indent_column_count: usize) -> usize;
     fn prev_indent_level(&self, indent_column_count: usize) -> usize;
+    fn find_next_word_boundary(&self, index: usize, word_separators: &[char]) -> usize;
+    fn find_prev_word_boundary(&self, index: usize, word_separators: &[char]) -> usize;
     fn indent(&self) -> Option<&str>;
     fn longest_common_prefix(&self, other: &str) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
@@ -27,6 +29,29 @@ impl StrExt for str {
 
     fn prev_indent_level(&self, indent_column_count: usize) -> usize {
         self.indent().unwrap_or("").column_count().saturating_sub(1) / indent_column_count
+    }
+
+    fn find_next_word_boundary(&self, index: usize, word_separators: &[char]) -> usize {
+        if index == 0 {
+            return index;
+        }
+        let start = index;
+        self[index..]
+            .char_indices()
+            .find(|&(_, char)| word_separators.contains(&char))
+            .map(|(index, _)| start + index)
+            .unwrap_or_else(|| self.len())
+    }
+
+    fn find_prev_word_boundary(&self, index: usize, word_separators: &[char]) -> usize {
+        if index == self.len() {
+            return index;
+        }
+        self[..index]
+            .char_indices()
+            .rfind(|&(_, char)| word_separators.contains(&char))
+            .map(|(char_index, char)| char_index + char.len_utf8())
+            .unwrap_or(0)
     }
 
     fn indent(&self) -> Option<&str> {

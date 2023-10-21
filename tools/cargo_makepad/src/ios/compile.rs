@@ -61,10 +61,6 @@ impl Scent{
                     <string>{1}</string>
                     <key>get-task-allow</key>
                     <true/>
-                    <key>keychain-access-groups</key>
-                    <array>
-                        <string>{0}</string>
-                    </array>
                 </dict>
             </plist>
         "#, self.app_id, self.team_id)
@@ -296,6 +292,9 @@ impl ProvisionData {
                                 "ProvisionedDevices" => if stack.last().unwrap() == "string" {
                                     devices.push(data);
                                 }
+                                "com.apple.developer.team-identifier" => if stack.last().unwrap() == "string" {
+                                    team_ident = Some(data);
+                                }
                                 "TeamIdentifier" => if stack.last().unwrap() == "string" {
                                     team_ident = Some(data);
                                 }
@@ -310,6 +309,9 @@ impl ProvisionData {
                     }
                 }
             }
+        }
+        if team_ident.is_none(){
+            return None
         }
         Some(ProvisionData {
             devices,
@@ -374,13 +376,14 @@ pub struct SigningArgs {
     pub provisioning_profile: Option<String>,
     pub device_uuid: Option<String>,
     pub org: Option<String>,
+    pub org_id: Option<String>,
     pub app: Option<String>
 }
 
 pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
     
     if signing.org.is_none() || signing.app.is_none() {
-        return Err("Please set --org=org --app=app on the commandline inbetween ios and run-real, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
+        return Err("Please set --org=org --app=app on the commandline inbetween ios and run-device, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
     }
     let org = signing.org.unwrap();
     let app = signing.app.unwrap();
@@ -421,7 +424,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
         if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{app}")) {
             found_profiles.push(prov);
         }
-        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.*", org)) {
+        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", signing.org_id.clone().expect("Please set --org-id=<ID> to assist in finding the profile\nYou can lookt it up in the files in ~/Library/MobileDevice/Provisioning Profiles/"))) {
             found_profiles.push(prov);
         }
     }

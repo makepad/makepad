@@ -209,7 +209,7 @@ pub use {
             Texture,
             TextureId,
             TextureFormat,
-            TextureDesc
+            TextureSize
         },
         live_prims::{
             LiveDependency,

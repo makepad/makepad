@@ -5,13 +5,11 @@ import java.nio.ByteBuffer;
 public class VideoDecoderRunnable implements Runnable {
     private final VideoDecoder mVideoDecoder;
     private final byte[] mVideoData;
-    private final int mChunkSize;
     private int mMaxFramesToDecode;
     private boolean mIsInitialized = false;
 
-    public VideoDecoderRunnable(byte[] videoData, int chunkSize, VideoDecoder videoDecoder) {
+    public VideoDecoderRunnable(byte[] videoData, VideoDecoder videoDecoder) {
         mVideoData = videoData;
-        mChunkSize = chunkSize;
         mVideoDecoder = videoDecoder;
     }
 
@@ -22,7 +20,7 @@ public class VideoDecoderRunnable implements Runnable {
     @Override
     public void run() {
         if(!mIsInitialized) {
-            mVideoDecoder.initializeVideoDecoding(mVideoData, mChunkSize);
+            mVideoDecoder.initializeVideoDecoding(mVideoData);
             mIsInitialized = true;
         } else {
             mVideoDecoder.decodeVideoChunk(mMaxFramesToDecode);
