@@ -360,6 +360,47 @@ impl Cursor {
         self
     }
 
+    pub fn move_to_end_of_line(self, lines: &[String]) -> Self {
+        let mut me = self.clone();
+        while !me.is_at_end_of_line(lines) {
+            me = me.move_to_next_grapheme(lines);
+        }
+        me
+    }
+
+    pub fn move_to_start_of_line(self) -> Self {
+        Self {
+            position: Position {
+                line_index: self.position.line_index,
+                byte_index: 0,
+            },
+            affinity: Affinity::Before,
+            preferred_column_index: None,
+        }
+    }
+
+    pub fn move_to_file_start(self) -> Self {
+        Self {
+            position: Position {
+                line_index: 0,
+                byte_index: 0,
+            },
+            affinity: Affinity::Before,
+            preferred_column_index: None,
+        }
+    }
+
+    pub fn move_to_file_end(self, lines: &[String]) -> Self {
+        Self {
+            position: Position {
+                line_index: lines.len() - 1,
+                byte_index: lines[lines.len() - 1].len(),
+            },
+            affinity: Affinity::After,
+            preferred_column_index: None,
+        }
+    }
+
     pub fn move_to_prev_grapheme(self, lines: &[String]) -> Self {
         Self {
             position: Position {
