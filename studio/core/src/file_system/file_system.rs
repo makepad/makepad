@@ -1,5 +1,6 @@
 use {
     std::collections::{HashMap, hash_map},
+    std::path::Path,
     crate::{
         makepad_code_editor::{Document, decoration::{Decoration, DecorationSet}, Session},
         makepad_platform::*,
@@ -62,8 +63,8 @@ pub enum FileSystemAction {
 }
 
 impl FileSystem {
-    pub fn init(&mut self, cx: &mut Cx) {
-        self.file_client.init(cx);
+    pub fn init(&mut self, cx: &mut Cx, path:&Path) {
+        self.file_client.init(cx, path);
         self.reload_file_tree();
     }
     

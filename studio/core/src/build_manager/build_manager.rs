@@ -24,6 +24,8 @@ use {
         collections::HashMap,
         env,
         io::prelude::*,
+        path::PathBuf,
+        path::Path,
         fs::File,
     },
     std::sync::mpsc,
@@ -131,7 +133,7 @@ impl ActiveBuilds {
 
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
-    #[live] path: String,
+    #[rust] root_path: PathBuf,
     #[live(8001usize)] http_port: usize,
     #[rust] pub clients: Vec<BuildClient>,
     #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
@@ -161,9 +163,10 @@ pub enum BuildManagerAction {
 
 impl BuildManager {
     
-    pub fn init(&mut self, cx: &mut Cx) {
-        // not great but it will do.
-        self.clients = vec![BuildClient::new_with_local_server(&self.path)];
+    pub fn init(&mut self, cx: &mut Cx, path:&Path) {
+        self.root_path = path.to_path_buf();
+        self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
+        
         self.update_run_list(cx);
         //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
@@ -175,9 +178,8 @@ impl BuildManager {
     }
     
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
-        let cwd = std::env::current_dir().unwrap();
         self.binaries.clear();
-        match shell_env_cap(&[], &cwd, "cargo", &["run", "--bin"]) {
+        match shell_env_cap(&[], &self.root_path, "cargo", &["run", "--bin"]) {
             Ok(_) => {}
             // we expect it on stderr
             Err(e) => {
