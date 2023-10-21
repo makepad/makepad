@@ -666,7 +666,7 @@ impl CodeEditor {
                 ..
             }) => {
                 if control || logo {
-                    session.select_all();
+                    //session.select_all();
                     self.redraw(cx);
                 }
             }
@@ -682,7 +682,7 @@ impl CodeEditor {
                 ..
             }) => {
                 if control || logo {
-                    session.move_to_start_of_line(!shift);
+                    //session.move_to_start_of_line(!shift);
                 } else {
                     session.move_left(!shift);
                 }
@@ -701,7 +701,7 @@ impl CodeEditor {
                 ..
             }) => {
                 if control || logo {
-                    session.move_to_end_of_line(!shift);
+                    //session.move_to_end_of_line(!shift);
                 } else {
                     session.move_right(!shift);
                 }
