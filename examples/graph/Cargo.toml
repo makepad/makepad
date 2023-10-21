@@ -1,0 +1,12 @@
+[package]
+name = "makepad-example-graph"
+version = "0.4.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad Graph example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "OdPLY-BJBHsefskAAk9P-mwa-8o="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }
+
