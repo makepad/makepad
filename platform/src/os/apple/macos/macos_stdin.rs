@@ -183,9 +183,9 @@ impl Cx {
                         fetch_xpc_service_texture(
                             service_proxy.as_id(),
                             presentable_image.id,
-                            move |objcid| { let _ = tx_fb.send(objcid); },
+                            move |objcid| {let _ = tx_fb.send(objcid); },
                         ); 
-                        if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(1)) {
+                        if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
                             let texture = Texture::new(self);
                             let format = TextureFormat::SharedBGRAu8 {
                                 id: presentable_image.id,
