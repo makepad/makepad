@@ -1,7 +1,8 @@
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
     pub tab_column_count: usize,
     pub fold_level: usize,
+    pub word_separators: Vec<char>,
 }
 
 impl Default for Settings {
@@ -9,6 +10,10 @@ impl Default for Settings {
         Self {
             tab_column_count: 4,
             fold_level: 2,
+            word_separators: vec![
+                ' ', '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '=', '+',
+                '[', '{', ']', '}', '\\', '|', ';', ':', '\'', '"', '.', '<', '>', '/', '?', ',',
+            ],
         }
     }
 }

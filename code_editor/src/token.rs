@@ -17,6 +17,7 @@ pub enum TokenKind {
     Number,
     Punctuator,
     Typename,
+    Function,
     String,
     Whitespace,
 }

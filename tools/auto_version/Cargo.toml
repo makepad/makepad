@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "m8yBeDTFgP94sjS9iuzJbB6npak="
+metadata.makepad-check-platform = "desktop"
 
 [dependencies]
 makepad-digest = {path = "../../libs/digest", version = "0.4.0"}

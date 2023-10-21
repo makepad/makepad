@@ -13,8 +13,7 @@ use {
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::{Texture, TextureDesc, TextureFormat},
-        live_traits::LiveNew,
+        texture::{Texture,  TextureFormat},
         thread::Signal,
         os::{
             d3d11::D3d11Cx,
@@ -32,7 +31,7 @@ impl Cx {
     pub (crate) fn stdin_handle_repaint(
         &mut self,
         d3d11_cx: &mut D3d11Cx,
-        swapchain: Option<&Swapchain<Texture >>,
+        swapchain: Option<&Swapchain<Texture>>,
         present_index: &mut usize,
     ) {
         let mut passes_todo = Vec::new();
@@ -114,8 +113,13 @@ impl Cx {
         let mut present_index = 0;
         
         self.call_event_handler(&Event::Construct);
+
+        let mut previous_tick_time_s: Option<f64> = None;
+        let mut previous_elapsed_s = 0f64;
+        let mut allow_rendering = true;
         
         while let Ok(msg) = json_msg_rx.recv() {
+
             match msg {
                 HostToStdin::ReloadFile {file, contents} => {
                     // alright lets reload this file in our DSL system
@@ -166,14 +170,13 @@ impl Cx {
                         let handle = HANDLE(pi.image as isize);
                         
                         let texture = Texture::new(self);
-                        let desc = TextureDesc {
-                            format: TextureFormat::SharedBGRA(pi.id),
-                            width: Some(new_swapchain.alloc_width as usize),
-                            height: Some(new_swapchain.alloc_height as usize),
+                        let format = TextureFormat::SharedBGRAu8 {
+                            id: pi.id,
+                            width: new_swapchain.alloc_width as usize,
+                            height: new_swapchain.alloc_height as usize,
                         };
-                        texture.set_desc(self, desc);
-                        self.textures[texture.texture_id()]
-                            .os.update_from_shared_handle(d3d11_cx, handle);
+                        texture.set_format(self, format);
+                        self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);
                         texture
                     });
                     let swapchain = swapchain.insert(new_swapchain);
@@ -186,6 +189,9 @@ impl Cx {
                 }
                 HostToStdin::Tick {frame: _, time, ..} => if swapchain.is_some() {
                     
+                    // probe current time
+                    let start_time = ::std::time::SystemTime::now();
+
                     // poll the service for updates
                     // check signals
                     if Signal::check_and_clear_ui_signal() {
@@ -199,31 +205,49 @@ impl Cx {
                     self.handle_networking_events();
                     // we should poll our runloop
                     self.stdin_handle_platform_ops(swapchain.as_ref(), present_index);
-                    
+
                     // alright a tick.
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(time);
                     }
-                    
+
                     if self.need_redrawing() {
                         self.call_draw_event();
                         self.hlsl_compile_shaders(d3d11_cx);
                     }
-                    
+
                     // repaint
                     self.stdin_handle_repaint(d3d11_cx, swapchain.as_ref(), &mut present_index);
-                    
-                    
-                    // check if GPU is ready to flip frames
-                    if let Some(presentable_draw) = self.os.new_frame_being_rendered {
-                        while !d3d11_cx.is_gpu_done() {
-                            std::thread::sleep(std::time::Duration::from_millis(3));
+
+                    // only allow rendering if it didn't take too much time last time
+                    if allow_rendering {
+
+                        // check if GPU is ready to flip frames
+                        if let Some(presentable_draw) = self.os.new_frame_being_rendered {
+                            while !d3d11_cx.is_gpu_done() {
+                                std::thread::sleep(std::time::Duration::from_millis(3));
+                            }
+                            let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
+                            self.os.new_frame_being_rendered = None;
                         }
-                        let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
-                        self.os.new_frame_being_rendered = None;
                     }
-                    
+
+                    // probe how long this took
+                    let elapsed_s = (start_time.elapsed().unwrap().as_nanos() as f64) / 1000000000.0;
+
+                    if let Some(previous_tick_time_s) = previous_tick_time_s {
+
+                        // calculate time difference as dictated by the ticks
+                        let previous_dtick_s = time - previous_tick_time_s;
+
+                        // if this time difference is smaller than the elapsed time, disallow rendering
+                        allow_rendering = previous_dtick_s > previous_elapsed_s;
+                    }
+
+                    // store current tick time and elapsed time
+                    previous_tick_time_s = Some(time);
+                    previous_elapsed_s = elapsed_s;
                 }
             }
         }
@@ -248,7 +272,7 @@ impl Cx {
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: swapchain.presentable_images[present_index].image.texture_id(),
+                            texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
                     }
                 },

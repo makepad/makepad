@@ -24,10 +24,11 @@ pub struct Window {
     #[live] debug_view: DebugView,
     #[live] nav_control: NavControl,
     #[live] window: WindowHandle,
+    #[live] stdin_size: DrawColor,
     #[live] overlay: Overlay,
     #[live] main_draw_list: DrawList2d,
     #[live] pass: Pass,
-    #[live] depth_texture: Texture,
+    #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[deref] view: View,
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
@@ -59,6 +60,9 @@ impl LiveHook for Window {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
+        self.depth_texture.set_format(cx, TextureFormat::DepthD32{
+            size:TextureSize::Auto
+        });
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
@@ -74,6 +78,13 @@ impl LiveHook for Window {
                 }
             }
             OsType::Macos => {
+                /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
+                    self.apply_over(cx, live!{
+                        caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
+                    }); 
+                }*/
+                
+                //draw_bg: {color: (THEME_COLOR_BG_APP)}  
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
@@ -196,6 +207,7 @@ impl Window {
                 if self.button(id!(xr_on)).clicked(&actions) {
                     cx.xr_start_presenting();
                 }
+                
                 dispatch_action(cx, WindowAction::ViewActions(actions));
             }
         }
@@ -248,6 +260,24 @@ impl Window {
         }
         
         self.overlay.end(cx);
+        // lets get te pass size
+        fn encode_size(x: f64)->Vec4{
+            let x = x as usize;
+            let r = ((x >> 8)&0xff) as f32 / 255.0;
+            let b = ((x >> 0)&0xff) as f32 / 255.0;
+            vec4(r,0.0,b,1.0)
+        }
+        
+        // if we are running in stdin mode, write a tracking pixel with the pass size
+        if cx.in_makepad_studio(){
+            let df = cx.current_dpi_factor();
+            let size = self.pass.size(cx).unwrap() * df;
+            self.stdin_size.color = encode_size(size.x);
+            self.stdin_size.draw_abs(cx, Rect{pos:dvec2(0.0,0.0),size:dvec2(1.0/df,1.0/df)});
+            self.stdin_size.color = encode_size(size.y);
+            self.stdin_size.draw_abs(cx, Rect{pos:dvec2(1.0/df,0.0),size:dvec2(1.0/df,1.0/df)});
+        }
+        
         cx.end_pass_sized_turtle();
         
         self.main_draw_list.end(cx);
@@ -302,4 +332,3 @@ impl Widget for Window {
         WidgetDraw::done()
     }
 }
-

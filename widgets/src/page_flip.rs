@@ -14,7 +14,7 @@ pub struct PageFlip {
     #[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
-    #[live(true)] on_demand: bool,
+    #[live(false)] lazy_init: bool,
     #[live] active_page: LiveId,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[rust] pointers: ComponentMap<LiveId, LivePtr>,
@@ -31,6 +31,22 @@ impl LiveHook for PageFlip {
             self.pointers.clear();
         }
     }
+    
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        match from {
+            ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
+                if !self.lazy_init{
+                    for (page_id, ptr) in self.pointers.iter(){
+                        self.pages.get_or_insert(cx, *page_id, | cx | {
+                            WidgetRef::new_from_ptr(cx, Some(*ptr))
+                        });
+                    }
+                }
+            }
+            _=>()
+        }
+    }
+        
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -79,13 +95,16 @@ impl PageFlip {
 
 impl Widget for PageFlip {
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(page) = self.pages.get_mut(&self.active_page) {
-            page.find_widgets(path, cached, results);
-        }
-        for (key,page) in self.pages.iter_mut(){
-            if *key != self.active_page{
-                page.find_widgets(path, cached, results);
+        if let Some(page) = self.pages.get_mut(&path[0]) {
+            if path.len() == 1{
+                results.push(page.clone());
             }
+            else{
+                page.find_widgets(&path[1..], cached, results);
+            }
+        }
+        for page in self.pages.values_mut(){
+            page.find_widgets(path, cached, results);
         }
     }
     

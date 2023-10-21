@@ -427,7 +427,7 @@ impl LiveRegistry {
                     break;
                 }
                 state = next_state;
-                last_index = cursor.index();
+                last_index = cursor.index()+1;
             }
             line_count += 1;
         }
@@ -455,7 +455,7 @@ impl LiveRegistry {
             line_chars.clear();
             line_chars.extend(line_str.chars());
             let mut cursor = Cursor::new(&line_chars, &mut scratch);
-            let mut last_index = 0usize;
+            let mut last_index = 1usize;
             loop {
                 let (next_state, full_token) = state.next(&mut cursor);
                 if let Some(full_token) = full_token {
@@ -520,7 +520,7 @@ impl LiveRegistry {
                     break;
                 }
                 state = next_state;
-                last_index = cursor.index();
+                last_index = cursor.index()+1;
             }
             line_count += 1;
         }

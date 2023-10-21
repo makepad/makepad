@@ -44,10 +44,8 @@ live_design!{
     }
     
     DisplayAudio = {{DisplayAudio}} {
-        
-            width: Fill,
-            height: Fill
-        
+        width: Fill,
+        height: Fill
     }
 }
 
@@ -64,7 +62,7 @@ struct DrawWave {
 pub struct DisplayAudio {
     #[walk] walk: Walk,
     #[live] draw_wave: DrawWave,
-    #[live] wave_texture: Texture,
+    #[rust(Texture::new(cx))] wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
     #[rust([0; 32])] active: [usize; 32],
     #[rust([(0.0,0.0);32])] vu:[(f32,f32); 32],
@@ -109,29 +107,29 @@ impl LiveHook for DisplayAudio {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.wave_texture.set_desc(cx, TextureDesc {
-            format: TextureFormat::ImageBGRA,
-            width: Some(WAVE_SIZE_X),
-            height: Some(WAVE_SIZE_Y),
+        self.wave_texture.set_format(cx, TextureFormat::VecBGRAu8_32 {
+            data: {
+                let mut data = Vec::new();
+                data.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);
+                for j in 0..WAVE_SIZE_Y {
+                    for i in 0..WAVE_SIZE_X {
+                        let left_u16 = 32767;
+                        let right_u16 = 32767;
+                        data[j * WAVE_SIZE_X + i] = left_u16 << 16 | right_u16;
+                    }
+                }
+                data
+            },
+            width: WAVE_SIZE_X,
+            height: WAVE_SIZE_Y,
         });
-        let mut wave_buf = Vec::new();
-        self.wave_texture.swap_image_u32(cx, &mut wave_buf);
-        wave_buf.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);
-        for j in 0..WAVE_SIZE_Y {
-            for i in 0..WAVE_SIZE_X {
-                let left_u16 = 32767;
-                let right_u16 = 32767;
-                wave_buf[j * WAVE_SIZE_X + i] = left_u16 << 16 | right_u16;
-            }
-        }
-        self.wave_texture.swap_image_u32(cx, &mut wave_buf);
     }
 }
 
 impl DisplayAudio {
     pub fn process_buffer(&mut self, cx: &mut Cx, chan: Option<usize>, voice: usize, audio: &AudioBuffer, gain:f32) {
         let mut wave_buf = Vec::new();
-        self.wave_texture.swap_image_u32(cx, &mut wave_buf);
+        self.wave_texture.swap_vec_u32(cx, &mut wave_buf);
         let frames = audio.frame_count();
         let wave_off = self.data_offset[voice];
         let voice_offset = voice * WAVE_SIZE_X;
@@ -150,7 +148,7 @@ impl DisplayAudio {
             wave_buf[off] = left_u16 << 16 | right_u16;
         }
         self.draw_wave.gain = gain;
-        self.wave_texture.swap_image_u32(cx, &mut wave_buf);
+        self.wave_texture.swap_vec_u32(cx, &mut wave_buf);
         self.data_offset[voice] = (self.data_offset[voice] + frames) % (WAVE_SIZE_X);
         if is_active {
             self.active[voice] = 6

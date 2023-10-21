@@ -22,7 +22,7 @@ use {
             DRAW_CALL_USER_UNIFORMS,
             DRAW_CALL_TEXTURE_SLOTS
         },
-        texture::TextureId,
+        texture::Texture,
         geometry::{GeometryId}
     }
 };
@@ -178,7 +178,7 @@ pub struct CxDrawCall {
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
-    pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
 }
@@ -192,7 +192,7 @@ impl CxDrawCall {
             total_instance_slots: mapping.instances.total_slots,
             draw_uniforms: DrawUniforms::default(),
             user_uniforms: draw_vars.user_uniforms,
-            texture_slots: draw_vars.texture_slots,
+            texture_slots: draw_vars.texture_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
         }
@@ -323,7 +323,16 @@ impl CxDrawList {
                             }
                             if diff {continue}
                             for i in 0..sh.mapping.textures.len() {
-                                if draw_call.texture_slots[i] != draw_vars.texture_slots[i] {
+                                fn neq(a:&Option<Texture>, b:&Option<Texture>)->bool{
+                                    if let Some(a) = a{
+                                        if let Some(b) = b{
+                                            return a.texture_id() != b.texture_id()
+                                        }
+                                        return true
+                                    }
+                                    return false
+                                }
+                                if neq(&draw_call.texture_slots[i], &draw_vars.texture_slots[i]) {
                                     diff = true;
                                     break;
                                 }
