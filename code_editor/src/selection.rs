@@ -378,7 +378,7 @@ impl Cursor {
             preferred_column_index: None,
         }
     }
-
+    
     pub fn move_to_file_start(self) -> Self {
         Self {
             position: Position {
@@ -530,27 +530,6 @@ impl Cursor {
         }
     }
 
-    pub fn move_to_start_of_line(self) -> Self {
-        Self {
-            position: Position {
-                line_index: self.position.line_index,
-                byte_index: 0,
-            },
-            affinity: Affinity::Before,
-            preferred_column_index: None,
-        }
-    }
-
-    pub fn move_to_end_of_line(self, lines: &[String]) -> Self {
-        Self {
-            position: Position {
-                line_index: self.position.line_index,
-                byte_index: lines[self.position.line_index].len(),
-            },
-            affinity: Affinity::Before,
-            preferred_column_index: None,
-        }
-    }
 
     pub fn apply_edit(self, edit: &Edit) -> Self {
         Self {

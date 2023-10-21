@@ -6,19 +6,20 @@ use {
         makepad_file_server::{FileServerConnection, FileServer},
     },
     std::{
-        env,
+        //env,
         io::{Read, Write},
         net::{ TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
-        path::PathBuf
+        path::Path,
+        //path::PathBuf
     },
 };
 
 #[derive(Default)]
 pub struct FileClient {
 //    bind: Option<String>,
-    path: String,
+    //path: String,
     inner: Option<FileClientInner>
 }
 
@@ -29,9 +30,9 @@ pub struct FileClientInner {
 }
 
 impl FileClient {
-    pub fn init(&mut self, _cx:&mut Cx){
+    pub fn init(&mut self, _cx:&mut Cx, path:&Path){
         if self.inner.is_none() {
-            self.inner = Some(FileClientInner::new_with_local_server(&self.path))
+            self.inner = Some(FileClientInner::new_with_local_server(path))
         }
     }
     
@@ -69,11 +70,12 @@ impl FileClient {
 }
 
 impl FileClientInner {
-    pub fn new_with_local_server(subdir:&str) -> Self {
+    pub fn new_with_local_server(path:&Path) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         let action_signal = Signal::new();
         let (action_sender, action_receiver) = mpsc::channel();
-        let mut root = "./".to_string();
+        
+        /*let mut root = "./".to_string();
         for arg in std::env::args(){
             if let Some(prefix) = arg.strip_prefix("--root="){
                 root = prefix.to_string();
@@ -82,8 +84,9 @@ impl FileClientInner {
         }
 
         let base_path = env::current_dir().unwrap().join(root);
-        let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
-        let mut server = FileServer::new(final_path);
+        let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());*/
+        
+        let mut server = FileServer::new(path);
         spawn_local_request_handler(
             request_receiver,
             server.connect(Box::new({

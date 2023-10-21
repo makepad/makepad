@@ -22,6 +22,7 @@ use crate::{
 };
 use std::fs::File;
 use std::io::Write;
+use std::env;
 
 live_design!{
     import makepad_draw::shader::std::*;
@@ -273,8 +274,18 @@ impl LiveHook for App {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.file_system.init(cx);
-        self.build_manager.init(cx);
+        // not great but it will do.
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+        let root_path = env::current_dir().unwrap().join(root);
+        
+        self.file_system.init(cx, &root_path);
+        self.build_manager.init(cx, &root_path);
         self.build_manager.discover_external_ip(cx);
         self.build_manager.start_http_server();
         //self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
