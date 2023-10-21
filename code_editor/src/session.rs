@@ -296,6 +296,7 @@ impl Session {
     }
 
     pub fn insert(&self, text: Text) {
+
         let mut edit_kind = EditKind::Insert;
         let mut inject_char = None;
         let mut uninject_char = None;
