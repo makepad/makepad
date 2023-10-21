@@ -122,6 +122,7 @@ impl Cx {
         let mut swapchain = None;
 
         self.call_event_handler(&Event::Construct);
+        let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
 
         while let Ok(msg) =  json_msg_rx.recv(){
             match msg {
@@ -179,13 +180,15 @@ impl Cx {
                     let [presentable_image] = &swapchain.presentable_images;
                     // lets fetch the framebuffers
                     if presentable_image.image.is_none() {
-                        let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
+                        let tx_fb = tx_fb.clone();
                         fetch_xpc_service_texture(
                             service_proxy.as_id(),
                             presentable_image.id,
-                            move |objcid| { let _ = tx_fb.send(objcid); },
+                            move |objcid| {let _ = tx_fb.send(objcid); },
                         ); 
-                        if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(1)) {
+                        // this is still pretty bad at 100ms if the service is still starting up
+                        // we should 
+                        if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
                             let texture = Texture::new(self);
                             let format = TextureFormat::SharedBGRAu8 {
                                 id: presentable_image.id,
