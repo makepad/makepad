@@ -12,6 +12,7 @@ use {
         }
     },
     std::{
+        path::Path,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
@@ -93,11 +94,11 @@ impl BuildClient {
     }
     
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn new_with_local_server(subdir:&str) -> Self {
+    pub fn new_with_local_server(path:&Path) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
         let log_signal = Signal::new();
         let (log_sender, log_receiver) = mpsc::channel();
-        
+        /*
         let mut root = "./".to_string();
         for arg in std::env::args(){
             if let Some(prefix) = arg.strip_prefix("--root="){
@@ -107,8 +108,8 @@ impl BuildClient {
         }
         let base_path = env::current_dir().unwrap().join(root);
         let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
-        
-        let mut server = BuildServer::new(final_path);
+        */
+        let mut server = BuildServer::new(path);
         spawn_local_cmd_handler(
             cmd_receiver,
             server.connect(Box::new({
