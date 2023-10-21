@@ -157,8 +157,9 @@ impl LiveHook for App {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.file_system.init(cx);
-        self.build_manager.init(cx);
+        let root_path = std::env::current_dir().unwrap();
+        self.file_system.init(cx, &root_path);
+        self.build_manager.init(cx, &root_path);
         self.build_manager.run_app(live_id!(fractal_zoom),"makepad-example-fractal-zoom");
         self.build_manager.run_app(live_id!(ironfish),"makepad-example-ironfish");
     }
