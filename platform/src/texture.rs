@@ -23,7 +23,9 @@ impl Texture {
 pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
 impl CxTexturePool {
     pub fn alloc(&mut self) -> Texture {
-        Texture(Rc::new(self.0.alloc()))
+        let id = self.0.alloc();
+        self.0.pool[id.id].alloc = None;
+        Texture(Rc::new(id))
     }
 }
 
