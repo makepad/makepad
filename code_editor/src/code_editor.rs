@@ -661,20 +661,51 @@ impl CodeEditor {
                 }
             }
             Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowLeft,
-                modifiers: KeyModifiers { shift, .. },
+                key_code: KeyCode::KeyA,
+                modifiers: KeyModifiers {control, logo, ..},
                 ..
             }) => {
-                session.move_left(!shift);
+                if control || logo {
+                    session.select_all();
+                    self.redraw(cx);
+                }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowLeft,
+                modifiers:
+                    KeyModifiers {
+                        shift,
+                        control,
+                        logo,
+                        ..
+                    },
+                ..
+            }) => {
+                if control || logo {
+                    session.move_to_start_of_line(!shift);
+                } else {
+                    session.move_left(!shift);
+                }
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
-                modifiers: KeyModifiers { shift, .. },
+                modifiers:
+                    KeyModifiers {
+                        shift,
+                        control,
+                        logo,
+                        ..
+                    },
                 ..
             }) => {
-                session.move_right(!shift);
+                if control || logo {
+                    session.move_to_end_of_line(!shift);
+                } else {
+                    session.move_right(!shift);
+                }
+
                 keyboard_moved_cursor = true;
                 self.redraw(cx);
             }
