@@ -158,7 +158,6 @@ impl PerformanceView {
             let rect = Rect {
                 pos: DVec2 {
                     x: 0.,
-                    // + 1 to compensate the bar height
                     y: -(i * MS_INCREMENTS - graph_height as i64) as f64,
                 },
                 size: DVec2 {
