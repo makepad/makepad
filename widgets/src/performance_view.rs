@@ -30,7 +30,6 @@ live_design! {
             width: Fill,
             height: Fill,
 
-
             <LabelBase> {
                 width: Fit
                 align: {x: 0., y: 1.}
@@ -40,7 +39,9 @@ live_design! {
                 }
                 text: "Frame time (max in last second)"
             }
+
             <View> { width: Fill, height: Fit }
+
             frame_time = <LabelBase> {
                 width: Fit
                 align: {x: 1., y: 1}
@@ -140,7 +141,6 @@ impl PerformanceView {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // Draw graph
         let color_increment_lines = vec4(0.5, 0.5, 0.5, 1.);
         let color_ok = vec4(0.4, 1.0, 0.4, 1.0);
         let color_warning = vec4(0.9, 0.9, 0.4, 1.0);
@@ -158,6 +158,7 @@ impl PerformanceView {
             let rect = Rect {
                 pos: DVec2 {
                     x: 0.,
+                    // Negative so it draws to the positive side of the y axis.
                     y: -(i * MS_INCREMENTS - graph_height as i64) as f64,
                 },
                 size: DVec2 {
