@@ -40,7 +40,7 @@ live_design! {
                 text: "Frame time (max in last second)"
             }
 
-            <View> { width: Fill, height: Fit }
+            <ViewBase> { width: Fill, height: Fit }
 
             frame_time = <LabelBase> {
                 width: Fit
