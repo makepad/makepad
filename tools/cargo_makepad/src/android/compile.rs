@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    collections::HashSet,
-};
+use std::path::{Path, PathBuf};
 use crate::android::{HostOs, AndroidTarget};
 use crate::utils::*;
 use crate::makepad_shell::*;
@@ -286,7 +283,7 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args:&[String]) -> Result<(), String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let profile = get_profile_from_args(args);
     
@@ -314,7 +311,6 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
 }
 
 fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) -> Result<(), String> {
-    let cwd = std::env::current_dir().unwrap();
     let mut assets_to_add: Vec<String> = Vec::new();
 
     let build_crate_dir = get_crate_dir(build_crate) ?;
@@ -332,19 +328,8 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
         }
     }
 
-    let mut dependencies = HashSet::new();
-    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate]) {
-        for line in cargo_tree_output.lines().skip(1) {
-            if let Some((name, path)) = extract_dependency_info(line) {
-                let resources_path = Path::new(&path).join("resources");
-                if resources_path.is_dir() {
-                    dependencies.insert((name.replace('-',"_"), resources_path));
-                }
-            }
-        }
-    }
-
-    for (name, resources_path) in dependencies.iter() {
+    let resources = get_crate_resources(build_crate);
+    for (name, resources_path) in resources.iter() {
         let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{name}/resources"));
         mkdir(&dst_dir) ?;
         cp_all(resources_path, &dst_dir, false) ?;
