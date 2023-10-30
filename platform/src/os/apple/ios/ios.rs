@@ -36,14 +36,15 @@ use {
         cx::{Cx, OsType},
     }
 };
-#[cfg(not(ios_sim))]
+#[cfg(not(apple_sim))]
 use crate::makepad_live_compiler::LiveFileChange;
-#[cfg(not(ios_sim))]
+#[cfg(not(apple_sim))]
 use crate::event::{NetworkResponse, HttpRequest, HttpMethod};
 
 impl Cx {
     
-    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+    pub fn event_loop(cx:Rc<RefCell<Cx>>) { 
+        unsafe{NSLog(crate::apple::apple_util::str_to_nsstring("WHAAAT"))};
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
@@ -336,12 +337,12 @@ impl Cx {
         }
     }
 
-    #[cfg(ios_sim)]
+    #[cfg(apple_sim)]
     pub fn studio_http_connection(&mut self, _event: &mut Event) -> bool {
         true
     }
     
-    #[cfg(not(ios_sim))]
+    #[cfg(not(apple_sim))]
     pub fn studio_http_connection(&mut self, event: &mut Event) -> bool {
         if let Event::NetworkResponses(res) = event {
             res.retain( | res | {
@@ -375,7 +376,7 @@ impl Cx {
         }
         false
     }
-    #[cfg(not(ios_sim))]
+    #[cfg(not(apple_sim))]
     fn poll_studio_http(&self) {
         let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
         if studio_http.is_none() {
@@ -391,24 +392,24 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) { 
         
-        #[cfg(not(ios_sim))]{
+        #[cfg(not(apple_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         }
         
         self.live_expand();
 
-        #[cfg(ios_sim)]
+        #[cfg(apple_sim)]
         self.start_disk_live_file_watcher(50);
         
-        #[cfg(not(ios_sim))]
+        #[cfg(not(apple_sim))]
         self.poll_studio_http();
         
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
-        #[cfg(ios_sim)]
+        #[cfg(apple_sim)]
         self.native_load_dependencies();
         
-        #[cfg(not(ios_sim))]
+        #[cfg(not(apple_sim))]
         self.ios_load_dependencies();
     }
     

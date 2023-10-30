@@ -23,6 +23,16 @@ impl AppleTarget{
             _=>false 
         }
     }
+    fn os(&self)->AppleOs{
+        match self{
+            Self::aarch64_tvos |
+            Self::aarch64_tvos_sim|
+            Self::x86_64_tvos_sim=>AppleOs::Tvos,
+            Self::aarch64_ios |
+            Self::aarch64_ios_sim|
+            Self::x86_64_ios_sim=>AppleOs::Ios,
+        }
+    }
 }
 
 #[derive(Copy,Clone)]
@@ -54,9 +64,9 @@ impl AppleTarget {
             AppleOs::Ios=>Self::x86_64_ios_sim,
             AppleOs::Tvos=>Self::x86_64_tvos_sim
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(target_arch = "aarch64")] 
         match os{
-            AppleOs::Ios=>Self::aarch64_ios,
+            AppleOs::Ios=>Self::aarch64_ios_sim,
             AppleOs::Tvos=>Self::aarch64_tvos_sim
         }
         
