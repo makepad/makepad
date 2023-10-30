@@ -4,9 +4,9 @@ use {
         cell::{RefCell},
         io::prelude::*,
         fs::File,
-    },
-
-    crate::{
+    }, 
+ 
+    crate::{ 
         //makepad_live_id::*,
         makepad_objc_sys::runtime::{ObjcId},
         os::{
@@ -47,7 +47,7 @@ impl Cx {
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
         unsafe{NSLog(crate::apple::apple_util::str_to_nsstring("WHAAAT"))};
-        
+         
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
