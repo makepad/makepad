@@ -31,6 +31,14 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 [target.aarch64-apple-ios.dependencies]
 makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 
+[target.x86_64-apple-tvos.dependencies]
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
+
+[target.aarch64-apple-tvos-sim.dependencies]
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
+
+[target.aarch64-apple-tvos.dependencies]
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 

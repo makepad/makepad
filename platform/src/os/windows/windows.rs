@@ -18,6 +18,7 @@ use {
             },
             cx_native::EventFlow,
         },
+        makepad_math::*,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         window::CxWindowPool,

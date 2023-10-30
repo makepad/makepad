@@ -129,8 +129,6 @@ live_design!{
                     b: run_tabs
                 }
                 
-                
-                
                 file_tree_tabs = Tabs {
                     tabs: [file_tree, search, run_list],
                     selected: 2

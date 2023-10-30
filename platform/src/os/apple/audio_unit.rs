@@ -126,6 +126,9 @@ impl AudioUnitAccess {
         #[cfg(target_os = "ios")]
         Self::init_ios_access();
         
+        #[cfg(target_os = "tvos")]
+        Self::init_tvos_access();
+                
         Arc::new(Mutex::new(Self{
             failed_devices: Default::default(),
             change_signal,
@@ -160,7 +163,20 @@ impl AudioUnitAccess {
         }
     }
         
-    
+    #[cfg(target_os = "tvos")]
+    pub fn init_tvos_access(){
+        /*unsafe{
+            /*let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+            let mut error: ObjcId = nil;
+            let _success: bool = msg_send![
+                session, 
+                setCategory:AVAudioSessionCategoryPlay
+                withOptions:AVAudioSessionCategoryOption::DefaultToSpeaker as usize// | AVAudioSessionCategoryOption::AllowBluetooth as usize
+                error:&mut error
+            ];*/
+        }*/
+    }
+            
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
@@ -491,7 +507,7 @@ impl AudioUnitAccess {
         Ok(())
     }
     
-     #[cfg(target_os = "ios")]
+     #[cfg(any(target_os = "ios", target_os = "tvos"))]
     pub fn update_device_list(&mut self) -> Result<(), OSError> {
         self.device_descs.clear();
 
@@ -538,6 +554,13 @@ impl AudioUnitAccess {
                 )
             }
             #[cfg(target_os = "ios")]
+            AudioUnitQuery::Output => {
+                AudioComponentDescription::new_all_manufacturers(
+                    AudioUnitType::IO,
+                    AudioUnitSubType::RemoteIO, 
+                )
+            }
+            #[cfg(target_os = "tvos")]
             AudioUnitQuery::Output => {
                 AudioComponentDescription::new_all_manufacturers(
                     AudioUnitType::IO,
