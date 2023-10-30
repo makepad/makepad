@@ -1,5 +1,5 @@
 use crate::makepad_shell::*;
-use crate::ios::{IosTarget};
+use crate::apple::{AppleTarget, AppleOs};
 use std::path::{PathBuf, Path};
 use std::collections::HashSet;
 use crate::utils::*;
@@ -74,24 +74,29 @@ pub struct IosBuildResult {
 }
 
 
-pub fn build(org: &str, product: &str, args: &[String], ios_target: IosTarget) -> Result<IosBuildResult, String> {
+pub fn build(org: &str, product: &str, args: &[String], apple_target: AppleTarget) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args) ?;
     
     let cwd = std::env::current_dir().unwrap();
-    let target_opt = format!("--target={}", ios_target.toolchain());
+    let target_opt = format!("--target={}", apple_target.toolchain());
     
     let base_args = &[
         "run",
-        "nightly",
+        "nightly", 
         "cargo",
         "build",
-        &target_opt
+        &target_opt,
     ];
     
     let mut args_out = Vec::new();
     args_out.extend_from_slice(base_args);
     for arg in args {
         args_out.push(arg);
+    }
+    
+    if apple_target.needs_build_std(){
+        args_out.push("-Z");
+        args_out.push("build-std=std");
     }
     
     shell_env(&[("MAKEPAD", "lines"),], &cwd, "rustup", &args_out) ?;
@@ -106,13 +111,13 @@ pub fn build(org: &str, product: &str, args: &[String], ios_target: IosTarget) -
     };
     let profile = get_profile_from_args(args);
     
-    let app_dir =  cwd.join(format!("target/makepad-ios-app/{}/{profile}/{build_crate}.app", ios_target.toolchain()));
+    let app_dir =  cwd.join(format!("target/makepad-ios-app/{}/{profile}/{build_crate}.app", apple_target.toolchain()));
     mkdir(&app_dir) ?;
     
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file()) ?;
     
-    let src_bin = cwd.join(format!("target/{}/{profile}/{build_crate}", ios_target.toolchain()));
+    let src_bin = cwd.join(format!("target/{}/{profile}/{build_crate}", apple_target.toolchain()));
     let dst_bin = app_dir.join(build_crate.to_string());
     
     cp(&src_bin, &dst_bin, false) ?;
@@ -124,12 +129,12 @@ pub fn build(org: &str, product: &str, args: &[String], ios_target: IosTarget) -
     })
 }
 
-pub fn run_on_sim(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
-    if signing.org.is_none() || signing.app.is_none() {
+pub fn run_on_sim(apple_args: AppleArgs, args: &[String], apple_target: AppleTarget) -> Result<(), String> {
+    if apple_args.org.is_none() || apple_args.app.is_none() {
         return Err("Please set --org=org --app=app on the commandline inbetween ios and run-sim.".to_string());
     }
     
-    let result = build(&signing.org.unwrap_or("orgname".to_string()), &signing.app.unwrap_or("productname".to_string()), args, ios_target) ?;
+    let result = build(&apple_args.org.unwrap_or("orgname".to_string()), &apple_args.app.unwrap_or("productname".to_string()), args, apple_target) ?;
     
     let cwd = std::env::current_dir().unwrap();
     shell_env(&[], &cwd, "xcrun", &[
@@ -369,9 +374,8 @@ fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Default)]
-pub struct SigningArgs {
-    pub ios_version: Option<String>,
+pub struct AppleArgs {
+    pub apple_os: AppleOs,
     pub signing_identity: Option<String>,
     pub provisioning_profile: Option<String>,
     pub device_uuid: Option<String>,
@@ -380,16 +384,16 @@ pub struct SigningArgs {
     pub app: Option<String>
 }
 
-pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarget) -> Result<(), String> {
+pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: AppleTarget) -> Result<(), String> {
     
-    if signing.org.is_none() || signing.app.is_none() {
+    if apple_args.org.is_none() || apple_args.app.is_none() {
         return Err("Please set --org=org --app=app on the commandline inbetween ios and run-device, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
     }
-    let org = signing.org.unwrap();
-    let app = signing.app.unwrap();
+    let org = apple_args.org.unwrap();
+    let app = apple_args.app.unwrap();
     
     let build_crate = get_build_crate_from_args(args) ?;
-    let result = build(&org, &app, args, ios_target) ?;
+    let result = build(&org, &app, args, apple_target) ?;
     let cwd = std::env::current_dir().unwrap();
     
     // parse identities for code signing
@@ -402,7 +406,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
     
     // select signing identity
     let found_identities: Vec<&str> = security_result.split("\n").collect();
-    let selected_identity = if let Some(signing_identity) = &signing.signing_identity {
+    let selected_identity = if let Some(signing_identity) = &apple_args.signing_identity {
         // find passed in identity in security result
         &found_identities.iter().find( | i | i.contains(signing_identity)).unwrap()[5..45]
     } else if let Some(long_hex_id) = security_result.strip_prefix("  1) ") {
@@ -424,13 +428,13 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
         if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{app}")) {
             found_profiles.push(prov);
         }
-        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", signing.org_id.clone().expect("Please set --org-id=<ID> to assist in finding the profile\nYou can lookt it up in the files in ~/Library/MobileDevice/Provisioning Profiles/"))) {
+        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", apple_args.org_id.clone().expect("Please set --org-id=<ID> to assist in finding the profile\nYou can lookt it up in the files in ~/Library/MobileDevice/Provisioning Profiles/"))) {
             found_profiles.push(prov);
         }
     }
     
     // select provisioning profile
-    let provision = if let Some(provisioning_profile) = &signing.provisioning_profile {
+    let provision = if let Some(provisioning_profile) = &apple_args.provisioning_profile {
         // find passed in provisioning profile
         found_profiles.iter()
             .find( | i | i.path.to_str().unwrap().contains(provisioning_profile))
@@ -446,7 +450,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
     //println!("Selected provisioning profile {:?}, for team_ident {}", provision.path, provision.team_ident);
     
     // select device
-    let selected_device = if let Some(device_uuid) = &signing.device_uuid {
+    let selected_device = if let Some(device_uuid) = &apple_args.device_uuid {
         // find passed in device in selected profile
         provision.devices.iter()
             .find( | i | i.contains(device_uuid))
@@ -469,7 +473,7 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
         team_id: provision.team_ident.to_string()
     };
     
-    let scent_file = cwd.join(format!("target/makepad-ios-app/{}/release/{build_crate}.scent", ios_target.toolchain()));
+    let scent_file = cwd.join(format!("target/makepad-apple-app/{}/release/{build_crate}.scent", apple_target.toolchain()));
     write_text(&scent_file, &scent.to_scent_file()) ?;
     
     let dst_provision = result.app_dir.join("embedded.mobileprovision");
@@ -500,55 +504,32 @@ pub fn run_on_device(signing: SigningArgs, args: &[String], ios_target: IosTarge
     
     
     let cwd = std::env::current_dir().unwrap();
-    let ios_deploy = cwd.join(format!("{}/ios-deploy/build/Release/", env!("CARGO_MANIFEST_DIR")));
-    
-    // kill previous lldb
-    let ios_version = signing.ios_version.unwrap_or("17".to_string());
-    
-    if ios_version == "17"  {
-        let answer = shell_env_cap(&[], &cwd, "xcrun", &[
-            "devicectl",
-            "device",
-            "install",
-            "app",
-            "--device",
-            &selected_device,
-            &app_dir
-        ])?;
-        for line in answer.split("\n"){
-            if line.contains("installationURL:"){
-                let path = &line[21..line.len()-1];
-                shell_env(&[], &cwd, "xcrun", &[
-                    "devicectl",
-                    "device",
-                    "process",
-                    "launch",
-                    "--device",
-                    &selected_device,
-                    path
-                ])?;
-                return Ok(())
-            }
+
+    let answer = shell_env_cap(&[], &cwd, "xcrun", &[
+        "devicectl",
+        "device",
+        "install",
+        "app",
+        "--device",
+        &selected_device,
+        &app_dir
+    ])?;
+    for line in answer.split("\n"){
+        if line.contains("installationURL:"){
+            let path = &line[21..line.len()-1];
+            shell_env(&[], &cwd, "xcrun", &[
+                "devicectl",
+                "device",
+                "process",
+                "launch",                    
+                "--device",
+                &selected_device,
+                path
+            ])?;
+            return Ok(())
         }
-        println!("TODO: We need to fish out LONGID from the answer {}", answer);
     }
-    else {
-        let ps_result = shell_env_cap(&[], &ios_deploy, "ps", &[]) ?;
-        let lines = ps_result.lines();
-        for line in lines {
-            if line.contains("lldb") && line.contains("fruitstrap") {
-                shell_env_cap(&[], &ios_deploy, "kill", &["-9", line.split(" ").next().unwrap()]) ?;
-            }
-        }
-        println!("Installing application on device");
-        shell_env_filter("Makepad iOS application started.", vec![], &[], &ios_deploy, "./ios-deploy", &[
-            "-i",
-            &selected_device,
-            "-d",
-            "-u",
-            "-b",
-            &app_dir
-        ]) ?;
-    }
+    println!("TODO: We need to fish out LONGID from the answer {}", answer);
+
     Ok(())
 }

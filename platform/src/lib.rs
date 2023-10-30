@@ -48,7 +48,7 @@ mod app_main;
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]

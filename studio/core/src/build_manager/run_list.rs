@@ -164,7 +164,7 @@ impl BuildManager {
                     item.apply_over(cx, live!{
                         height: (height)
                         draw_bg: {is_even: (if is_even {1.0} else {0.0})}
-                        check = {text: (BuildTarget::name(i))}
+                        check = {text: (BuildTarget::from_id(i).name())}
                     });
                     item.check_box(id!(check)).set_selected(cx, self.active.item_id_active(item_id));
                     item.draw_widget_all(cx);
@@ -237,33 +237,8 @@ impl BuildManager {
         Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], LiveId(0), &binary_name, 0, run_view_id, &mut out);
     }
     
-    pub fn target_id_to_target(tgt:u64)->BuildTarget{
-        match tgt {
-            BuildTarget::RELEASE => BuildTarget::Release,
-            BuildTarget::DEBUG => BuildTarget::Debug,
-            BuildTarget::RELEASE_STUDIO => BuildTarget::ReleaseStudio,
-            BuildTarget::DEBUG_STUDIO => BuildTarget::DebugStudio,
-            BuildTarget::PROFILER => BuildTarget::Profiler,
-            BuildTarget::IOS_SIM => BuildTarget::IosSim {
-                org: "makepad".to_string(),
-                app: "example1".to_string()
-            },
-            BuildTarget::IOS_DEVICE => BuildTarget::IosDevice {
-                org: "makepad".to_string(),
-                app: "example1".to_string()
-            },
-            BuildTarget::ANDROID => BuildTarget::Android,
-            BuildTarget::WEBASSEMBLY => BuildTarget::WebAssembly,
-            BuildTarget::CHECK_MACOS => BuildTarget::CheckMacos,
-            BuildTarget::CHECK_WINDOWS => BuildTarget::CheckWindows,
-            BuildTarget::CHECK_LINUX => BuildTarget::CheckLinux,
-            BuildTarget::CHECK_ALL => BuildTarget::CheckAll,
-            _ => panic!()
-        }
-    }
-    
     pub fn start_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient, item_id: LiveId, binary: &str, tgt: u64, run_view_id: LiveId, actions:&mut Vec<RunListAction>) {
-        let target = Self::target_id_to_target(tgt);
+        let target = BuildTarget::from_id(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
             target
@@ -292,7 +267,7 @@ impl BuildManager {
     
     
     pub fn stop_active_build(active:&mut ActiveBuilds, client:&BuildClient, binary: &str, tgt: u64, actions:&mut Vec<RunListAction>) {
-        let target = Self::target_id_to_target(tgt);
+        let target = BuildTarget::from_id(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
             target

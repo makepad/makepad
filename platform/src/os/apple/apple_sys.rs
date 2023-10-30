@@ -86,15 +86,18 @@ extern "C" {
     pub static UIKeyboardWillChangeFrameNotification: ObjcId;
     pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
     pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
-    
-    pub fn UIApplicationMain(
+}
+
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
+#[link(name = "UIKit", kind = "framework")]
+extern "C" {
+pub fn UIApplicationMain(
         argc: i32,
         argv: *mut *mut i8,
         principal_class_name: ObjcId,
         delegate_class_name: ObjcId,
     );
 }
-
 
 #[link(name = "Foundation", kind = "framework")]
 extern {
