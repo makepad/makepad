@@ -7,7 +7,7 @@ use {
         makepad_math::*,
         makepad_objc_sys::runtime::{ObjcId, nil},
         os::{
-            //apple::apple_util::str_to_nsstring,
+            apple::apple_util::str_to_nsstring,
             apple::apple_sys::*,
             tvos::{
                 tvos_delegates::*,
@@ -241,6 +241,8 @@ impl TvosApp {
     
     pub fn event_loop() {
         unsafe {
+             
+                        
             let app_delegate = get_tvos_class_global().app_delegate;
             let class: ObjcId = msg_send!(app_delegate, class);
             let class_string = NSStringFromClass(class as _);

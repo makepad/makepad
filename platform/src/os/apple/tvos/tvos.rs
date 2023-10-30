@@ -46,6 +46,8 @@ use crate::makepad_live_id::*;
 impl Cx {
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+        unsafe{NSLog(crate::apple::apple_util::str_to_nsstring("WHAAAT"))};
+        
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
@@ -334,7 +336,7 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) { 
         
-        #[cfg(not(ios_sim))]{
+        #[cfg(not(apple_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         }
         

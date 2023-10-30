@@ -106,7 +106,8 @@ extern {
     pub fn dispatch_release(object: ObjcId);
     pub fn _NSGetExecutablePath(buf: *mut u8, buf_size: &mut u32);
 
-
+    pub fn NSLog(format: ObjcId, ...);
+    
     pub static NSNotificationCenter: ObjcId;
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
