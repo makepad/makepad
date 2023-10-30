@@ -41,7 +41,10 @@ use {
 };
 
 #[cfg(target_os = "macos")]
-use crate::metal_xpc::store_xpc_service_texture;
+use crate::{
+    metal_xpc::store_xpc_service_texture
+};
+
 
 impl Cx {
     
@@ -545,7 +548,7 @@ impl Cx {
         }
     }
     
-    #[cfg(target_os="ios")]
+    #[cfg(any(target_os="ios", target_os="tvos"))]
     pub fn share_texture_for_presentable_image(
         &mut self,
         _texture: &Texture,
@@ -1048,11 +1051,11 @@ pub fn get_default_metal_device() -> Option<ObjcId> {
 }
 
 pub fn get_all_metal_devices() -> Vec<ObjcId> {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     unsafe {
         vec![MTLCreateSystemDefaultDevice()]
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "macos")]
     unsafe {
         let array = MTLCopyAllDevices();
         let count: u64 = msg_send![array, count];

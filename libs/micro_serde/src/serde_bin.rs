@@ -374,7 +374,7 @@ impl SerBin for char {
         self.encode_utf8(&mut bytes).as_bytes().ser_bin(s);
     }
 }
-
+/*
 #[cfg(unix)]
 impl DeBin for PathBuf {
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
@@ -389,7 +389,7 @@ impl DeBin for OsString {
 
         Ok(OsString::from_vec(Vec::de_bin(o, d)?))
     }
-}
+}*/
 
 impl DeBin for char {
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
