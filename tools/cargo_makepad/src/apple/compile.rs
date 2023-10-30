@@ -12,7 +12,14 @@ pub struct PlistValues {
     version: String,
 }
 impl PlistValues{
-    fn to_plist_file(&self)->String{
+    fn to_plist_file(&self, os: AppleOs)->String{
+        match os{
+            AppleOs::Tvos=>self.to_tvos_plist_file(),
+            AppleOs::Ios=>self.to_ios_plist_file()
+        }
+    }
+    
+    fn to_ios_plist_file(&self)->String{
         format!(r#"
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -40,7 +47,81 @@ impl PlistValues{
             self.executable,
             self.version,
         )
-        }
+    }
+    fn to_tvos_plist_file(&self)->String{
+        format!(r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>BuildMachineOSBuild</key>
+                <string>23A344</string>
+                <key>CFBundleDevelopmentRegion</key>
+                <string>en</string>
+                <key>CFBundleExecutable</key>
+                <string>{3}</string>
+                <key>CFBundleIdentifier</key>
+                <string>{0}</string>
+                <key>CFBundleInfoDictionaryVersion</key>
+                <string>6.0</string>
+                <key>CFBundleDisplayName</key>
+                <string>{1}</string>
+                <key>CFBundleName</key>
+                <string>{2}</string>
+                <key>CFBundlePackageType</key>
+                <string>APPL</string>
+                <key>CFBundleShortVersionString</key>
+                <string>1.0</string>
+                <key>CFBundleSupportedPlatforms</key>
+                <array>
+                    <string>AppleTVOS</string>
+                </array>
+                <key>CFBundleVersion</key>
+                <string>{4}</string>
+                <key>DTCompiler</key>
+                <string>com.apple.compilers.llvm.clang.1_0</string>
+                <key>DTPlatformBuild</key>
+                <string>21J351</string>
+                <key>DTPlatformName</key>
+                <string>appletvos</string>
+                <key>DTPlatformVersion</key>
+                <string>17.0</string>
+                <key>DTSDKBuild</key>
+                <string>21J351</string>
+                <key>DTSDKName</key>
+                <string>appletvos17.0</string>
+                <key>DTXcode</key>
+                <string>1500</string>
+                <key>DTXcodeBuild</key>
+                <string>15A240d</string>
+                <key>LSRequiresIPhoneOS</key>
+                <true/>
+                <key>MinimumOSVersion</key>
+                <string>17.0</string>
+                <key>UIDeviceFamily</key>
+                <array>
+                    <integer>3</integer>
+                </array>
+                <key>UILaunchScreen</key>
+                <dict>
+                <key>UILaunchScreen</key>
+                <dict/>
+                </dict>
+                <key>UIRequiredDeviceCapabilities</key>
+                <array>
+                    <string>arm64</string>
+                </array>
+                <key>UIUserInterfaceStyle</key>
+                <string>Automatic</string>
+            </dict>
+            </plist>"#,
+            self.identifier,
+            self.display_name,
+            self.name,
+            self.executable,
+            self.version,
+        )
+    }
 }
 
 pub struct Scent{
@@ -111,11 +192,11 @@ pub fn build(org: &str, product: &str, args: &[String], apple_target: AppleTarge
     };
     let profile = get_profile_from_args(args);
     
-    let app_dir =  cwd.join(format!("target/makepad-ios-app/{}/{profile}/{build_crate}.app", apple_target.toolchain()));
+    let app_dir =  cwd.join(format!("target/makepad-apple-app/{}/{profile}/{build_crate}.app", apple_target.toolchain()));
     mkdir(&app_dir) ?;
     
     let plist_file = app_dir.join("Info.plist");
-    write_text(&plist_file, &plist.to_plist_file()) ?;
+    write_text(&plist_file, &plist.to_plist_file(apple_target.os())) ?;
     
     let src_bin = cwd.join(format!("target/{}/{profile}/{build_crate}", apple_target.toolchain()));
     let dst_bin = app_dir.join(build_crate.to_string());
@@ -475,7 +556,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     
     let scent_file = cwd.join(format!("target/makepad-apple-app/{}/release/{build_crate}.scent", apple_target.toolchain()));
     write_text(&scent_file, &scent.to_scent_file()) ?;
-    
+      
     let dst_provision = result.app_dir.join("embedded.mobileprovision");
     let app_dir = result.app_dir.into_os_string().into_string().unwrap();
     
