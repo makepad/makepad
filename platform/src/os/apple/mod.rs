@@ -9,6 +9,9 @@ pub mod macos;
 #[cfg(target_os = "ios")]
 pub mod ios;
 
+#[cfg(target_os = "tvos")]
+pub mod tvos;
+
 #[cfg(target_os = "macos")]
 pub mod metal_xpc;
 
@@ -24,5 +27,8 @@ pub(crate) use self::metal::*;
 pub(crate) use self::macos::*;
 #[cfg(target_os = "ios")]
 pub(crate) use self::ios::*;
+#[cfg(target_os = "tvos")]
+pub(crate) use self::tvos::*;
+
 pub(crate) use self::core_midi::{OsMidiInput, OsMidiOutput};
 

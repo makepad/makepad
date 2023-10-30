@@ -18,7 +18,7 @@ live_design!{
             body = {
                 <SlidesView> {
                     <Slide> {
-                        title = {text: "Hello"},
+                        title = {text: "Hello conference"},
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
