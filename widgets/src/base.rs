@@ -240,16 +240,16 @@ live_design!{
 
             fn get_color(self) -> vec4 {
                 if (self.is_plannar > 0.5) {
-                    let y = sample2d(self.y_texture, self.pos).z;
-                    let u = sample2d(self.u_texture, self.pos).z;
-                    let v = sample2d(self.v_texture, self.pos).z;
+                    let y = sample2d(self.y_texture, self.pos).r;
+                    let u = sample2d(self.u_texture, self.pos).r;
+                    let v = sample2d(self.v_texture, self.pos).r;
                     return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
                 } else {
                     let uv_coord = self.pos / 2.0;
-                    let y = sample2d(self.y_texture, self.pos).z;
-                    let uv = sample2d(self.u_texture, uv_coord).zy;
-                    let u = uv.x;
-                    let v = uv.y;
+                    let y = sample2d(self.y_texture, self.pos).r;
+                    let uv = sample2d(self.u_texture, uv_coord).rg;
+                    let u = uv.r;
+                    let v = uv.g;
                     return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
                 }    
             }
@@ -467,11 +467,11 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            if self.radius.x > 0.0 {
+            if self.radius > 0.0 {
                 sdf.circle(
                     self.rect_size.x * 0.5,
                     self.rect_size.y * 0.5,
-                    self.radius.x
+                    self.radius
                 )
             }
             else {
