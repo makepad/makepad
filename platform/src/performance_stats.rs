@@ -9,7 +9,6 @@ pub struct FrameStats {
 pub struct PerformanceStats {
     pub last_frame_time: Option<f64>,
     pub max_frame_times: VecDeque<FrameStats>,
-    //pub frame_times: VecDeque<FrameStats>
 }
 
 impl Default for PerformanceStats {
@@ -17,7 +16,6 @@ impl Default for PerformanceStats {
         Self {
             last_frame_time: None,
             max_frame_times: VecDeque::with_capacity(100),
-            //frame_times: VecDeque::with_capacity(100000),
         }
     }
 }
@@ -25,14 +23,6 @@ impl Default for PerformanceStats {
 impl PerformanceStats {
     pub fn process_frame_data(&mut self, time: f64) {
         if let Some(previous_time) = self.last_frame_time {
-            // if self.frame_times.len() >= 100000 {
-            //     self.frame_times.pop_back();
-            // }
-            // self.frame_times.push_front(FrameStats{
-            //     occurred_at: time,
-            //     time_spent: time - previous_time
-            // });
-
             if self.max_frame_times.len() == 0 {
                 self.max_frame_times.push_front(FrameStats{
                     occurred_at: time,
