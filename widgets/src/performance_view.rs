@@ -18,11 +18,12 @@ live_design! {
         data_increments: 16.
         bar_width: 3.
         graph_label: ""
-        data_y_subfix: ""
+        data_y_suffix: ""
 
         width: 300,
         height: 65,
 
+        margin: 30,
         abs_pos: vec2(0, 0)
 
         show_bg: true,
@@ -68,9 +69,8 @@ live_design! {
         abs_pos: vec2(0, 0)
 
         graph = <PerformanceLiveGraph> {
-            abs_pos: vec2(0, 20)
             graph_label: "Frame time (max in last second)"
-            data_y_subfix: "ms"
+            data_y_suffix: "ms"
         }
 
     }
@@ -156,7 +156,7 @@ pub struct PerformanceLiveGraph {
     #[live]
     data_increments: i64,
     #[live]
-    data_y_subfix: String,
+    data_y_suffix: String,
     #[live]
     graph_label: String,
 }
@@ -204,7 +204,7 @@ impl PerformanceLiveGraph {
         }
 
         self.label(id!(current_y_entry))
-            .set_text(&format!("{}{}", y_entry, self.data_y_subfix));
+            .set_text(&format!("{}{}", y_entry, self.data_y_suffix));
 
         self.redraw(cx);
     }
