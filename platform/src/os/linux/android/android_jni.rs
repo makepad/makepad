@@ -68,6 +68,10 @@ pub enum FromJavaMessage {
         headers: String,
         body: Vec<u8>
     },
+    WebSocketMessage {
+        request_id: u64,
+        message: Vec<u8>,
+    },
     HttpRequestError {
         request_id: u64,
         metadata_id: u64,
@@ -350,6 +354,22 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
         body
     });
 }
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    request_id: jni_sys::jlong,
+    message: jni_sys::jobject,
+) {
+    let message = unsafe { java_byte_array_to_vec(env, message) };
+
+    send_from_java_message(FromJavaMessage::WebSocketMessage {
+        request_id: request_id as u64,
+        message: message,
+    });
+}
+
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     env: *mut jni_sys::JNIEnv,
@@ -572,6 +592,22 @@ pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
         method,
         headers,
         java_body as jni_sys::jobject
+    );
+}
+
+pub unsafe fn to_java_websocket_open(request_id: LiveId, request: HttpRequest) {
+    let env = attach_jni_env();
+    let url = CString::new(request.url.clone()).unwrap();
+    let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "openWebSocket",
+        "(JLjava/lang/String;)V",
+        request_id.get_value() as jni_sys::jlong,
+        //request.metadata_id.get_value() as jni_sys::jlong,
+        url
     );
 }
 
