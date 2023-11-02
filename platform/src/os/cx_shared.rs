@@ -167,6 +167,9 @@ impl Cx {
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
+
+        self.performance_stats.process_frame_data(time);
+
         self.call_event_handler(&Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }
 }
