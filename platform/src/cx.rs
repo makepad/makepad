@@ -20,6 +20,7 @@ use {
         draw_matrix::CxDrawMatrixPool,
         os::{CxOs},
         debug::Debug,
+        performance_stats::PerformanceStats,
         event::{
             DrawEvent,
             CxFingers,
@@ -108,6 +109,8 @@ pub struct Cx {
     #[allow(dead_code)]
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
+
+    pub performance_stats: PerformanceStats,
 }
 
 #[derive(Clone)]
@@ -256,7 +259,8 @@ impl Cx {
             executor: Some(executor),
             spawner,
 
-            self_ref: None
+            self_ref: None,
+            performance_stats: Default::default(),
         }
     }
 }

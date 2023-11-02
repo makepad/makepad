@@ -1,6 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     debug_view::DebugView,
+    performance_view::PerformanceView,
     makepad_draw::*,
     nav_control::NavControl,
     button::*,
@@ -22,6 +23,7 @@ pub struct Window {
     #[live] cursor_draw_list: DrawList2d,
     #[live] draw_cursor: DrawQuad,
     #[live] debug_view: DebugView,
+    #[live] performance_view: PerformanceView,
     #[live] nav_control: NavControl,
     #[live] window: WindowHandle,
     #[live] stdin_size: DrawColor,
@@ -30,6 +32,7 @@ pub struct Window {
     #[live] pass: Pass,
     #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
+    #[live] show_performance_view: bool,
     #[deref] view: View,
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
     /*#[rust(Menu::main(vec![
@@ -117,8 +120,11 @@ pub enum WindowAction {
 
 impl Window {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WindowAction)) {
-        
         self.debug_view.handle_event(cx, event);
+        if self.show_performance_view {
+            self.performance_view.handle_widget(cx, event);
+        }
+
         self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
         if self.demo_next_frame.is_event(event).is_some(){
@@ -277,7 +283,11 @@ impl Window {
             self.stdin_size.color = encode_size(size.y);
             self.stdin_size.draw_abs(cx, Rect{pos:dvec2(1.0/df,0.0),size:dvec2(1.0/df,1.0/df)});
         }
-        
+
+        if self.show_performance_view {
+            self.performance_view.draw_widget(cx);
+        }
+
         cx.end_pass_sized_turtle();
         
         self.main_draw_list.end(cx);
