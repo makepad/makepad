@@ -20,6 +20,7 @@ use {
         gl_sys,
         //libc_sys,
     },
+    makepad_http::websocket::{WebSocket, WebSocketMessage},
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         cx_stdin::{PollTimers,PollTimer},
@@ -262,6 +263,27 @@ impl Cx {
                         if self.studio_http_connection(&mut e) {
                             self.call_event_handler(&e);
                         }
+                    }
+                    FromJavaMessage::WebSocketMessage {request_id, message} => {
+                        let mut ws_message_parser = WebSocket::new();
+                        ws_message_parser.parse(&message, | result | {
+                            match result {
+                                Ok(WebSocketMessage::Text(text_msg)) => {
+                                    let e = Event::NetworkResponses(vec![
+                                        NetworkResponseEvent {
+                                            request_id: LiveId(request_id),
+                                            response: NetworkResponse::WebSocketString(text_msg.to_string())
+                                        }
+                                    ]);
+            
+                                    self.call_event_handler(&e);
+                                },
+                                Err(e) => {
+                                    println!("Websocket message parse error {:?}", e);
+                                },
+                                _ => ()
+                            }
+                        });
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -682,6 +704,9 @@ impl Cx {
                 },
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
+                },
+                CxOsOp::WebSocketOpen {request_id, request} => {
+                    unsafe {android_jni::to_java_websocket_open(request_id, request);}
                 },
                 CxOsOp::InitializeVideoDecoding(video_id, video) => {
                     unsafe {

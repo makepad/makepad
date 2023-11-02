@@ -236,6 +236,8 @@ MidiManager.OnDeviceOpenedListener{
     private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 5; 
     private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
 
+    private HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
+
     static {
         System.loadLibrary("makepad");
     }
@@ -353,6 +355,10 @@ MidiManager.OnDeviceOpenedListener{
                 }
             }
         });
+    }
+
+    public void openWebSocket(long id, String url) {
+        runOnUiThread(new MakepadWebSocket(id, url));
     }
 
     public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {
