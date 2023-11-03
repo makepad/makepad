@@ -611,6 +611,27 @@ pub unsafe fn to_java_websocket_open(request_id: LiveId, request: HttpRequest) {
     );
 }
 
+pub unsafe fn to_java_websocket_send_message(request_id: LiveId, message: Vec<u8>) {
+    let env = attach_jni_env();
+    let message_bytes = (**env).NewByteArray.unwrap()(env, message.len() as i32);
+    (**env).SetByteArrayRegion.unwrap()(
+        env,
+        message_bytes,
+        0,
+        message.len() as i32,
+        message.as_ptr() as *const jni_sys::jbyte,
+    );
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "sendWebSocketMessage",
+        "(J[B)V",
+        request_id.get_value() as jni_sys::jlong,
+        message_bytes as jni_sys::jobject
+    );
+}
+
 pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
     unsafe {
         let env = attach_jni_env();
