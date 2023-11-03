@@ -8,9 +8,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
-import android.os.Handler;
-import android.os.HandlerThread;
-import android.os.Looper;
 
 import java.util.HashMap;
 import java.util.ArrayList;
@@ -49,6 +46,7 @@ import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 
 import android.graphics.Color;
@@ -236,6 +234,8 @@ MidiManager.OnDeviceOpenedListener{
     private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 5; 
     private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
 
+    // networking
+    Handler mWebSocketsHandler;
     private HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
 
     static {
@@ -260,6 +260,10 @@ MidiManager.OnDeviceOpenedListener{
         decoderThreadHandler.start(); // TODO: only start this if its needed.
         mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
         mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
+
+        // TODO only start this if its needed.
+        HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
+        mWebSocketsHandler = new Handler(decoderThreadHandler.getLooper());
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
@@ -357,10 +361,6 @@ MidiManager.OnDeviceOpenedListener{
         });
     }
 
-    public void openWebSocket(long id, String url) {
-        runOnUiThread(new MakepadWebSocket(id, url));
-    }
-
     public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {
         try {
             MakepadNetwork network = new MakepadNetwork();
@@ -375,6 +375,16 @@ MidiManager.OnDeviceOpenedListener{
             });
         } catch (Exception e) {
             MakepadNative.onHttpRequestError(id, metadataId, e.toString());
+        }
+    }
+
+    public void openWebSocket(long id, String url) {
+        MakepadWebSocket webSocket = new MakepadWebSocket(id, url);
+        mActiveWebsockets.put(id, webSocket);
+        webSocket.connect();
+    
+        if (webSocket.isConnected()) {
+            mWebSocketsHandler.post(new MakepadWebSocketReader(this, webSocket));
         }
     }
 
