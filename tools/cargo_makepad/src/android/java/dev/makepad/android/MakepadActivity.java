@@ -388,6 +388,13 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
+    public void sendWebSocketMessage(long id, byte[] message) {
+        MakepadWebSocket webSocket = mActiveWebsockets.get(id);
+        if (webSocket != null) {
+            webSocket.sendMessage(message);
+        }
+    }
+
     public String[] getAudioDevices(long flag){
         try{
           

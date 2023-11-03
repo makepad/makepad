@@ -76,6 +76,18 @@ public class MakepadWebSocket {
         }
     }
 
+    public void sendMessage(byte[] message) {
+        try {
+            OutputStream ostream = mSocket.getOutputStream();
+            byte[] frame = createTextFrame(message);
+            ostream.write(frame, 0, frame.length);
+            ostream.flush();
+        } catch(Exception e) {
+            Log.e("Makepad", "exception: " + e.getMessage());
+            Log.e("Makepad", "exception: " + e.toString());
+        }
+    }
+
     public boolean isConnected() {
         return mIsConnected;
     }
@@ -86,5 +98,33 @@ public class MakepadWebSocket {
 
     public long getMakepadRequestId() {
         return mMakepadRequestId;
+    }
+
+
+    private byte[] createTextFrame(byte[] payload) {
+        int payloadLength = payload.length;
+
+        // 2 bytes for FIN, Opcode, Mask, Payload length + 4 bytes for masking-key + payload
+        byte[] frame = new byte[6 + payloadLength];
+        //byte[] frame = new byte[2 + payloadLength];
+
+        frame[0] = (byte) 0x81;  // FIN = 1, Opcode = 1 for text
+        frame[1] = (byte) (0x80 | payloadLength);  // Mask = 1, Payload length = 5 for "Hello"
+        //frame[1] = (byte) (0x0 | payloadLength);
+
+        // Generate a random masking-key
+        byte[] maskingKey = new byte[4];
+        new java.util.Random().nextBytes(maskingKey);
+        System.arraycopy(maskingKey, 0, frame, 2, 4);
+
+        // Mask the payload data
+        for (int i = 0; i < payloadLength; i++) {
+            frame[6 + i] = (byte) (payload[i] ^ maskingKey[i % 4]);
+        }
+
+        Log.d("Makepad", "Frame: " + frame[0]);
+        Log.d("Makepad", "Frame: " + frame[1]);
+
+        return frame;
     }
 }
