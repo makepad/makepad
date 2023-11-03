@@ -708,6 +708,10 @@ impl Cx {
                 CxOsOp::WebSocketOpen {request_id, request} => {
                     unsafe {android_jni::to_java_websocket_open(request_id, request);}
                 },
+                CxOsOp::WebSocketSendString{request_id, data} => {
+                    let frame = data.into_bytes();
+                    unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
+                },
                 CxOsOp::InitializeVideoDecoding(video_id, video) => {
                     unsafe {
                         let env = attach_jni_env();
