@@ -163,6 +163,11 @@ impl Cx {
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
+            Win32Event::MouseLeave(e) => {
+                self.call_event_handler(&Event::MouseLeave(e.into()));
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.fingers.switch_captures();
+            }
             Win32Event::Scroll(e) => {
                 self.call_event_handler(&Event::Scroll(e.into()))
             }

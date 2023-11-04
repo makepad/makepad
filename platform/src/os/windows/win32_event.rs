@@ -5,6 +5,7 @@ use {
             MouseDownEvent,
             MouseUpEvent,
             MouseMoveEvent,
+            MouseLeaveEvent,
             ScrollEvent,
             WindowGeomChangeEvent,
             WindowDragQueryEvent,
@@ -33,6 +34,7 @@ pub enum Win32Event {
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
+    MouseLeave(MouseLeaveEvent),
     Scroll(ScrollEvent),
     
     WindowDragQuery(WindowDragQueryEvent),
