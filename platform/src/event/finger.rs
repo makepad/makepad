@@ -70,6 +70,15 @@ pub struct MouseUpEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct MouseLeaveEvent {
+    pub abs: DVec2,
+    pub window_id: WindowId,
+    pub modifiers: KeyModifiers,
+    pub time: f64,
+    pub handled: Cell<Area>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ScrollEvent {
     pub window_id: WindowId,
     pub scroll: DVec2,
