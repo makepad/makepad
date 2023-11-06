@@ -70,6 +70,15 @@ pub struct MouseUpEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct MouseLeaveEvent {
+    pub abs: DVec2,
+    pub window_id: WindowId,
+    pub modifiers: KeyModifiers,
+    pub time: f64,
+    pub handled: Cell<Area>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ScrollEvent {
     pub window_id: WindowId,
     pub scroll: DVec2,
@@ -1013,6 +1022,29 @@ impl Event {
                         cx.fingers.new_hover_area(digit_id, area);
                     }
                     return event
+                }
+            },
+            Event::MouseLeave(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    return Hit::Nothing;
+                }
+                let device = DigitDevice::Mouse { button: 0 };
+                let digit_id = live_id!(mouse).into();
+                let rect = area.get_clipped_rect(&cx);
+                let hover_last = cx.fingers.get_hover_area(digit_id);
+                let handled_area = e.handled.get();
+                
+                let fhe = FingerHoverEvent {
+                    window_id: e.window_id,
+                    abs: e.abs,
+                    digit_id,
+                    device,
+                    modifiers: e.modifiers.clone(),
+                    time: e.time,
+                    rect,
+                };
+                if hover_last == area {
+                    return Hit::FingerHoverOut(fhe);
                 }
             },
             _ => ()
