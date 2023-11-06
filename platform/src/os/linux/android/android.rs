@@ -20,7 +20,7 @@ use {
         gl_sys,
         //libc_sys,
     },
-    makepad_http::websocket::{WebSocket, WebSocketMessage},
+    makepad_http::websocket::{WebSocket, WebSocketMessage, MessageHeader, MessageFormat},
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         cx_stdin::{PollTimers,PollTimer},
@@ -709,7 +709,14 @@ impl Cx {
                     unsafe {android_jni::to_java_websocket_open(request_id, request);}
                 },
                 CxOsOp::WebSocketSendString{request_id, data} => {
-                    let frame = data.into_bytes();
+                    let mut header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
+                    let mut frame = header.as_slice().to_vec();
+
+                    let mask = header.mask().unwrap();
+                    for (i, byte) in data.into_bytes().iter().enumerate() {
+                        frame.push(byte ^ mask[i % 4]);
+                    }
+
                     unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
                 },
                 CxOsOp::InitializeVideoDecoding(video_id, video) => {

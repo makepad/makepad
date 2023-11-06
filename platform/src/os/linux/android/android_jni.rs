@@ -606,7 +606,6 @@ pub unsafe fn to_java_websocket_open(request_id: LiveId, request: HttpRequest) {
         "openWebSocket",
         "(JLjava/lang/String;)V",
         request_id.get_value() as jni_sys::jlong,
-        //request.metadata_id.get_value() as jni_sys::jlong,
         url
     );
 }
