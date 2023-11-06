@@ -2,11 +2,19 @@ package dev.makepad.android;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
-
 import java.net.Socket;
 import java.net.InetSocketAddress;
-import java.io.*;
+import java.net.URI;
+import java.net.URISyntaxException;
 
+import java.io.BufferedWriter;
+import java.io.BufferedReader;
+import java.io.OutputStream;
+import java.io.InputStream;
+import java.io.OutputStreamWriter;
+import java.io.InputStreamReader;
+import java.io.IOException;
+import java.util.Random;
 import android.util.Log;
 
 import dev.makepad.android.MakepadNative;
@@ -27,10 +35,11 @@ public class MakepadWebSocket {
 
     public void connect() {
         try {
-            InetSocketAddress address = new InetSocketAddress(
-                "socketsbay.com",
-                443
-                );
+            URI uri = new URI(mUrl);
+            String host = uri.getHost();
+            int port = uri.getPort() == -1 ? 443 : uri.getPort();
+
+            InetSocketAddress address = new InetSocketAddress(host, port);
 
             mSocket = new Socket();
             mSocket.setSoTimeout(0);
@@ -44,7 +53,7 @@ public class MakepadWebSocket {
             SSLContext sslContext = SSLContext.getInstance("TLSv1.2");
             sslContext.init(null, null, null);
             SSLSocketFactory factory = sslContext.getSocketFactory();
-            mSocket = factory.createSocket(mSocket, "socketsbay.com", 443, true);
+            mSocket = factory.createSocket(mSocket, host, port, true);
             Log.d("Makepad", "SSL Socket connected");
 
             doHandshake();
@@ -59,15 +68,14 @@ public class MakepadWebSocket {
         BufferedReader socketReader = new BufferedReader(new InputStreamReader(mSocket.getInputStream()));
 
         try {
-            String data = "GET /wss/v2/1/demo/ HTTP/1.1\r\nHost: socketsbay.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dtaSo/23Job/Yr4kcBZlng==\r\nSec-WebSocket-Version: 13\r\nAccept-Encoding: gzip, deflate\r\nAccept-Language: en-US,en;q=0.9,es;q=0.8\r\nCache-Control: no-cache\r\nOrigin: localhost\r\n\r\n";
-            socketWriter.write(data);
+            String request = this.buildHandshakeRequest();
+            socketWriter.write(request);
             socketWriter.flush();
 
             char[] dataArray = new char[1024];
             int length;
             do {
                 String responseLine = socketReader.readLine();
-                Log.d("Makepad", "Handshake response: " + responseLine);
                 length = responseLine.length();
             } while (length > 0);
         } catch(Exception e) {
@@ -76,10 +84,9 @@ public class MakepadWebSocket {
         }
     }
 
-    public void sendMessage(byte[] message) {
+    public void sendMessage(byte[] frame) {
         try {
             OutputStream ostream = mSocket.getOutputStream();
-            byte[] frame = createTextFrame(message);
             ostream.write(frame, 0, frame.length);
             ostream.flush();
         } catch(Exception e) {
@@ -100,31 +107,42 @@ public class MakepadWebSocket {
         return mMakepadRequestId;
     }
 
+    private String buildHandshakeRequest() throws URISyntaxException {
+        URI uri = new URI(mUrl);
+        String host = uri.getHost();
+        String path = uri.getPath();
+        String query = uri.getQuery() == null ? "" : uri.getQuery();
+        int port =  uri.getPort() == -1 ? 443 : uri.getPort();
 
-    private byte[] createTextFrame(byte[] payload) {
-        int payloadLength = payload.length;
+        String content = "GET " + path + (query.isEmpty() ? "" : "?" + query) + " HTTP/1.1\r\n" +
+            "Host: " + host + "\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Sec-WebSocket-Key: " + this.randomStringKey(22) + "==\r\n" +
+            "Sec-WebSocket-Version: 13\r\n" +
+            "Accept-Encoding: gzip, deflate\r\n" +
+            "Accept-Language: en-US,en;q=0.9,es;q=0.8\r\n" +
+            "Cache-Control: no-cache\r\n" +
+            "Origin: localhost\r\n" +
+            "\r\n";
 
-        // 2 bytes for FIN, Opcode, Mask, Payload length + 4 bytes for masking-key + payload
-        byte[] frame = new byte[6 + payloadLength];
-        //byte[] frame = new byte[2 + payloadLength];
+            Log.d("Makepad", "content: " + content);
 
-        frame[0] = (byte) 0x81;  // FIN = 1, Opcode = 1 for text
-        frame[1] = (byte) (0x80 | payloadLength);  // Mask = 1, Payload length = 5 for "Hello"
-        //frame[1] = (byte) (0x0 | payloadLength);
+        return content;
+    }
 
-        // Generate a random masking-key
-        byte[] maskingKey = new byte[4];
-        new java.util.Random().nextBytes(maskingKey);
-        System.arraycopy(maskingKey, 0, frame, 2, 4);
+    private static final String ALLOWED_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-        // Mask the payload data
-        for (int i = 0; i < payloadLength; i++) {
-            frame[6 + i] = (byte) (payload[i] ^ maskingKey[i % 4]);
+    public static String randomStringKey(int length) {
+        Random generator = new Random();
+        StringBuilder randomStringBuilder = new StringBuilder();
+        char tempChar;
+        int ramdomIndex;
+        for (int i = 0; i < length; i++){
+            ramdomIndex = generator.nextInt(ALLOWED_CHARACTERS.length());
+            tempChar = ALLOWED_CHARACTERS.charAt(ramdomIndex);
+            randomStringBuilder.append(tempChar);
         }
-
-        Log.d("Makepad", "Frame: " + frame[0]);
-        Log.d("Makepad", "Frame: " + frame[1]);
-
-        return frame;
+        return randomStringBuilder.toString();
     }
 }
