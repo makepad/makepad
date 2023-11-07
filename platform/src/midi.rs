@@ -62,6 +62,7 @@ impl MidiInput {
     }
 }
 
+#[derive(Default)]
 pub struct MidiOutput(pub (crate) Option<OsMidiOutput>);
 unsafe impl Send for MidiOutput {}
 
