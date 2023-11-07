@@ -44,23 +44,26 @@ public class MakepadWebSocket {
             mSocket = new Socket();
             mSocket.setSoTimeout(0);
             mSocket.connect(address, ONE_MIN);
-            Log.d("Makepad", "Socket connected");
+            Log.d("Makepad", "Socket connected " + uri.getScheme());
 
             mSocket.setKeepAlive(true);
 
-            // TODO Check if the url is wss before doing the following
-
-            SSLContext sslContext = SSLContext.getInstance("TLSv1.2");
-            sslContext.init(null, null, null);
-            SSLSocketFactory factory = sslContext.getSocketFactory();
-            mSocket = factory.createSocket(mSocket, host, port, true);
-            Log.d("Makepad", "SSL Socket connected");
-
+            if (uri.getScheme().equals("wss")) {
+                this.convertToSSLSocket(host, port);
+            }
             doHandshake();
-            mIsConnected = true;
         } catch (Exception e) {
+            MakepadNative.onWebSocketError(mMakepadRequestId, e.toString());
             throw new RuntimeException(e);
         }
+    }
+
+    private void convertToSSLSocket(String host, int port) throws Exception {
+        SSLContext sslContext = SSLContext.getInstance("TLSv1.2");
+        sslContext.init(null, null, null);
+        SSLSocketFactory factory = sslContext.getSocketFactory();
+        mSocket = factory.createSocket(mSocket, host, port, true);
+        Log.d("Makepad", "SSL Socket connected");
     }
 
     private void doHandshake() throws IOException {
@@ -75,10 +78,13 @@ public class MakepadWebSocket {
             char[] dataArray = new char[1024];
             int length;
             do {
-                String responseLine = socketReader.readLine();
-                length = responseLine.length();
+                String line = socketReader.readLine();
+                length = line.length();
             } while (length > 0);
+
+            mIsConnected = true;
         } catch(Exception e) {
+            MakepadNative.onWebSocketError(mMakepadRequestId, e.toString());
             Log.e("Makepad", "exception: " + e.getMessage());             
             Log.e("Makepad", "exception: " + e.toString());
         }
@@ -90,6 +96,7 @@ public class MakepadWebSocket {
             ostream.write(frame, 0, frame.length);
             ostream.flush();
         } catch(Exception e) {
+            MakepadNative.onWebSocketError(mMakepadRequestId, e.toString());
             Log.e("Makepad", "exception: " + e.getMessage());
             Log.e("Makepad", "exception: " + e.toString());
         }
@@ -101,6 +108,10 @@ public class MakepadWebSocket {
  
     public InputStream getInputStream() throws IOException {
         return mSocket.getInputStream();
+    }
+
+    public OutputStream getOutputStream() throws IOException {
+        return mSocket.getOutputStream();
     }
 
     public long getMakepadRequestId() {

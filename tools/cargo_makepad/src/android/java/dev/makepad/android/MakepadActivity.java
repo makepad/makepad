@@ -261,9 +261,9 @@ MidiManager.OnDeviceOpenedListener{
         mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
         mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
 
-        // TODO only start this if its needed.
         HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
-        mWebSocketsHandler = new Handler(decoderThreadHandler.getLooper());
+        webSocketsThreadHandler.start();
+        mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
@@ -393,6 +393,11 @@ MidiManager.OnDeviceOpenedListener{
         if (webSocket != null) {
             webSocket.sendMessage(message);
         }
+    }
+
+    public void webSocketConnectionDone(long id) {
+        mActiveWebsockets.remove(id);
+        MakepadNative.onWebSocketClosed(id);
     }
 
     public String[] getAudioDevices(long flag){
