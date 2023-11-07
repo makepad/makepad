@@ -278,6 +278,16 @@ impl Cx {
             
                                     self.call_event_handler(&e);
                                 },
+                                Ok(WebSocketMessage::Binary(data)) => {
+                                    let e = Event::NetworkResponses(vec![
+                                        NetworkResponseEvent {
+                                            request_id: LiveId(request_id),
+                                            response: NetworkResponse::WebSocketBinary(data.to_vec())
+                                        }
+                                    ]);
+
+                                    self.call_event_handler(&e);
+                                },
                                 Err(e) => {
                                     println!("Websocket message parse error {:?}", e);
                                 },
@@ -727,13 +737,14 @@ impl Cx {
                     unsafe {android_jni::to_java_websocket_open(request_id, request);}
                 },
                 CxOsOp::WebSocketSendString{request_id, data} => {
-                    let mut header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
-                    let mut frame = header.as_slice().to_vec();
+                    let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
+                    let frame = WebSocket::build_message(header, &data.into_bytes());
 
-                    let mask = header.mask().unwrap();
-                    for (i, byte) in data.into_bytes().iter().enumerate() {
-                        frame.push(byte ^ mask[i % 4]);
-                    }
+                    unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
+                },
+                CxOsOp::WebSocketSendBinary{request_id, data} => {
+                    let header = MessageHeader::from_len(data.len(), MessageFormat::Binary, true);
+                    let frame = WebSocket::build_message(header, &data);
 
                     unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
                 },

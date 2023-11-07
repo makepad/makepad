@@ -172,6 +172,18 @@ impl WebSocket {
         );
         response_ack
     }
+
+    pub fn build_message(mut header: MessageHeader, data: &[u8])->Vec<u8>{
+        let mut frame = header.as_slice().to_vec();
+        if let Some(mask) = header.mask(){
+            for (i, &byte) in data.iter().enumerate() {
+                frame.push(byte ^ mask[i % 4]);
+            }
+        } else {
+            frame.extend_from_slice(data);
+        }
+        frame
+    }
     
     fn parse_head(&mut self, input: &[u8]) -> bool {
         while self.head_expected > 0
