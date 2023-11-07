@@ -68,13 +68,20 @@ pub enum FromJavaMessage {
         headers: String,
         body: Vec<u8>
     },
+    HttpRequestError {
+        request_id: u64,
+        metadata_id: u64,
+        error: String,
+    },
     WebSocketMessage {
         request_id: u64,
         message: Vec<u8>,
     },
-    HttpRequestError {
+    WebSocketClosed {
         request_id: u64,
-        metadata_id: u64,
+    },
+    WebSocketError {
+        request_id: u64,
         error: String,
     },
     MidiDeviceOpened{
@@ -356,21 +363,6 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
 }
 
 #[no_mangle]
-extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
-    env: *mut jni_sys::JNIEnv,
-    _: jni_sys::jobject,
-    request_id: jni_sys::jlong,
-    message: jni_sys::jobject,
-) {
-    let message = unsafe { java_byte_array_to_vec(env, message) };
-
-    send_from_java_message(FromJavaMessage::WebSocketMessage {
-        request_id: request_id as u64,
-        message: message,
-    });
-}
-
-#[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
@@ -383,6 +375,47 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     send_from_java_message(FromJavaMessage::HttpRequestError {
         request_id: request_id as u64,
         metadata_id: metadata_id as u64,
+        error,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    request_id: jni_sys::jlong,
+    message: jni_sys::jobject,
+) {
+    let message = unsafe { java_byte_array_to_vec(env, message) };
+
+    send_from_java_message(FromJavaMessage::WebSocketMessage {
+        request_id: request_id as u64,
+        message,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    request_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::WebSocketClosed {
+        request_id: request_id as u64,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    request_id: jni_sys::jlong,
+    error: jni_sys::jstring,
+) {
+    let error = unsafe { jstring_to_string(env, error) };
+
+    send_from_java_message(FromJavaMessage::WebSocketError {
+        request_id: request_id as u64,
         error,
     });
 }
