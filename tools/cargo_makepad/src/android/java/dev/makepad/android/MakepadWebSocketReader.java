@@ -10,9 +10,9 @@ import dev.makepad.android.MakepadNative;
 
 public class MakepadWebSocketReader implements Runnable {
     private MakepadWebSocket mWebSocket;
-    private WeakReference<Activity> mActivityReference;
+    private WeakReference<MakepadActivity> mActivityReference;
     
-    public MakepadWebSocketReader(Activity activity, MakepadWebSocket webSocket) {
+    public MakepadWebSocketReader(MakepadActivity activity, MakepadWebSocket webSocket) {
         mActivityReference = new WeakReference<>(activity);
         mWebSocket = webSocket;
     }
@@ -22,26 +22,44 @@ public class MakepadWebSocketReader implements Runnable {
         readMessages();
     }
 
-    public void readMessages() {
-        try {
-            Activity activity = mActivityReference.get();
-            if (activity == null) {
-                Log.e("Makepad", "Activity not found");
-                return;
-            }
+    private static final byte[] CLOSE = {(byte) 0x88, 0};
+    private static final byte[] PING = {(byte) 0x89, 0};
+    private static final byte[] PONG = {(byte) 0x8A, 0};
 
+    public void readMessages() {
+        MakepadActivity activity = mActivityReference.get();
+        if (activity == null) {
+            Log.e("Makepad", "Activity not found");
+            return;
+        }
+
+        long requestId = mWebSocket.getMakepadRequestId();
+        
+        try {
             byte[] rawbuffer = new byte[16384];
             int readBytes;
 
             while ((readBytes = mWebSocket.getInputStream().read(rawbuffer)) != -1) {
-                // TODO intercept PONG and other special messages
+                if (readBytes == 2 && rawbuffer[0] == PING[0] && rawbuffer[1] == PING[1]) {
+                    OutputStream ostream = mWebSocket.getOutputStream();
+                    ostream.write(PONG, 0, 1);
+                    ostream.flush();
+                    continue;
+                }
+
                 byte[] message = Arrays.copyOfRange(rawbuffer, 0, readBytes);
                 activity.runOnUiThread(() -> {
-                    MakepadNative.onWebSocketMessage(mWebSocket.getMakepadRequestId(), message);
+                    MakepadNative.onWebSocketMessage(requestId, message);
                 });
             }
-            Log.i("Makepad", "Websocket connection was closed by server.");     
+            activity.runOnUiThread(() -> {
+                activity.webSocketConnectionDone(requestId);
+            });
         } catch(Exception e) {
+            activity.runOnUiThread(() -> {
+                MakepadNative.onWebSocketError(requestId, e.toString());
+            });
+
             Log.e("Makepad", "exception: " + e.getMessage());             
             Log.e("Makepad", "exception: " + e.toString());
         }

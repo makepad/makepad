@@ -285,6 +285,24 @@ impl Cx {
                             }
                         });
                     }
+                    FromJavaMessage::WebSocketClosed {request_id} => {
+                        let e = Event::NetworkResponses(vec![
+                            NetworkResponseEvent {
+                                request_id: LiveId(request_id),
+                                response: NetworkResponse::WebSocketClose
+                            }
+                        ]);
+                        self.call_event_handler(&e);
+                    }
+                    FromJavaMessage::WebSocketError {request_id, error} => {
+                        let e = Event::NetworkResponses(vec![
+                            NetworkResponseEvent {
+                                request_id: LiveId(request_id),
+                                response: NetworkResponse::WebSocketError(error)
+                            }
+                        ]);
+                        self.call_event_handler(&e);
+                    }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
                     }
