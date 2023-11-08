@@ -39,8 +39,9 @@ struct DrawLineSegment {
 pub struct LineChart {
     #[walk] walk: Walk,
     #[live] draw_ls: DrawLineSegment,
-    #[rust] screen_view: Rect,
-    #[rust] data_view: Rect
+    #[rust] area: Area,
+    #[rust] _screen_view: Rect,
+    #[rust] _data_view: Rect
 }
 
 impl Widget for LineChart {
@@ -59,7 +60,7 @@ impl Widget for LineChart {
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_cs.redraw(cx)
+        self.area.redraw(cx)
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
@@ -78,24 +79,21 @@ impl LiveHook for LineChart {
         register_widget!(cx, LineChart)
     }
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-    }
-}
-
-impl LineChart {
-    pub fn process_buffer(&mut self, cx: &mut Cx) {
- 
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
     }
 }
 
 impl LineChart {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // lets draw a bunch of quads
-        
+        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         for i in 0..10{
-            self.draw_ls.draw_abs(cx);
+            let r = Rect{
+                pos: rect.pos + dvec2(10.0,0.0) * i as f64,
+                size: dvec2(10.0,10.0)
+            };
+            self.draw_ls.draw_abs(cx, r);
         }
-        self.draw_cs.draw_walk(cx, walk);
     }
     
     pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, LineChartAction),) {
