@@ -33,7 +33,7 @@ struct DrawCandleStick {
     #[calc] close: f32
 }
 
-struct CandleStickData{
+struct _CandleStickData{
     min: f64,
     max: f64,
     open: f64,
@@ -44,9 +44,9 @@ struct CandleStickData{
 pub struct CandleStick {
     #[walk] walk: Walk,
     #[live] draw_cs: DrawCandleStick,
-    #[rust(Texture::new(cx))] data_texture: Texture,
-    #[rust] screen_view: Rect,
-    #[rust] data_view: Rect
+    #[rust(Texture::new(cx))] _data_texture: Texture,
+    #[rust] _screen_view: Rect,
+    #[rust] _data_view: Rect
 }
 
 impl Widget for CandleStick {
@@ -84,13 +84,13 @@ impl LiveHook for CandleStick {
         register_widget!(cx, CandleStick)
     }
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
 
     }
 }
 
 impl CandleStick {
-    pub fn process_buffer(&mut self, cx: &mut Cx) {
+    pub fn process_buffer(&mut self, _cx: &mut Cx) {
  
     }
 }
