@@ -145,6 +145,10 @@ impl Vec2 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
+    pub fn lengthsquared(&self) -> f32 {
+        self.x * self.x + self.y * self.y
+    }
+
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: 0.0}
     }
