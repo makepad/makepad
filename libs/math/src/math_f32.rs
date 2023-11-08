@@ -148,6 +148,12 @@ impl Vec2 {
     pub fn lengthsquared(&self) -> f32 {
         self.x * self.x + self.y * self.y
     }
+    pub fn normalize(&self) -> Vec2
+    {
+        let l  = self.length();
+        if l == 0.0 {return vec2(0.,0.);}
+        return vec2(self.x/l, self.y/l);
+    }
 
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: 0.0}
