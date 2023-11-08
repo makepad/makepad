@@ -81,7 +81,7 @@ live_design!{
     ICO_PLAT_MOBILE = dep("crate://self/resources/icons/Icon_Platform_Mobile.svg")
     ICO_PLAT_DESKTOP = dep("crate://self/resources/icons/Icon_Platform_Desktop.svg")
     ICO_PLAY = dep("crate://self/resources/icons/Icon_Play.svg")
-    ICO_PRESET = dep("crate://self/resources/icons/Icon_Presets.svg")
+    ICO_PRESET = dep("crate://self/resources/icons/Icon_Presets2.svg")
     ICO_PREV = dep("crate://self/resources/icons/Icon_Prev.svg")
     ICO_REDO = dep("crate://self/resources/icons/Icon_Redo.svg")
     ICO_SAVE = dep("crate://self/resources/icons/Icon_Save.svg")
