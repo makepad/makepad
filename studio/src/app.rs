@@ -34,6 +34,8 @@ live_design!{
     import makepad_studio_core::build_manager::log_list::LogList;
     import makepad_studio_core::build_manager::run_list::RunList;
     
+    ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
+
     Logo = <Button> {
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
@@ -128,6 +130,8 @@ live_design!{
                     a: edit_tabs,
                     b: run_tabs
                 }
+                
+                
                 
                 file_tree_tabs = Tabs {
                     tabs: [file_tree, search, run_list],
@@ -243,6 +247,36 @@ live_design!{
                 }
                 Search = <RectView> {
                     draw_bg: {color: #2}
+                  //  margin:{left: 0, top: 0}
+                    <View> {
+                        margin:10
+                        flow: Down
+                        <View> 
+                        {
+                            flow: Right
+                            height: Fit
+                            <TextInput>{
+                                width: Fill,
+                             empty_message:"Search here.."                           
+                            }
+                            //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
+                        <Button> {
+                            text:"Search!"
+                            
+                            draw_icon: {
+                                svg_file: (ICO_SEARCH)
+                                fn get_color(self) -> vec4 {
+                                    return #f;
+                                }
+                            } 
+                            icon_walk: {width: Fit, height: 17.0} 
+                        }
+                    }
+                        <Label>
+                        {
+                            text: "this does not work yet."
+                        }
+                    }
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
