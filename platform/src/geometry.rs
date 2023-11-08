@@ -112,8 +112,6 @@ impl Cx{
         self.geometries_refs.insert(fingerprint, weak);
         GeometryRef(geometry)
     }
-    
-   
 }
 
 impl Geometry{

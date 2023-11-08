@@ -2,7 +2,7 @@
 use {
     std::{
         ptr,
-        sync::mpsc::Sender,
+        sync::mpsc::{self, Receiver,Sender, TryRecvError, RecvError},
         sync::Arc,
     },
     crate::{
@@ -18,6 +18,7 @@ use {
                 str_to_nsstring,
             },
         },
+        web_socket::WebSocketMessage,
         event::{
             NetworkResponseEvent,
             NetworkResponse,
@@ -51,15 +52,6 @@ pub fn define_web_socket_delegate() -> *const Class {
     return decl.register();
 }
 
-/*
-pub unsafe fn lazy_init_ns_url_session(&mut self){
-    if self.ns_url_session.is_none(){
-        let config: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
-        let web_socket_delegate_instance: ObjcId = msg_send![get_macos_class_global().web_socket_delegate, new];
-        let () = msg_send![ns_session, setDelegate: web_socket_delegate_instance];
-    }
-}*/
-
 unsafe fn make_ns_request(request: &HttpRequest) -> ObjcId {
     // Prepare the NSMutableURLRequest instance
     let url: ObjcId =
@@ -82,58 +74,103 @@ unsafe fn make_ns_request(request: &HttpRequest) -> ObjcId {
     ns_request
 }
 
+pub struct OsWebSocket{
+    recv: Receiver<WebSocketMessage>,
+    data_task: Arc<ObjcId>,
+    sender: Sender<WebSocketMessage>
+}
 
-pub fn web_socket_open(request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
+impl OsWebSocket{
+    pub fn try_recv(&mut self)->Result<WebSocketMessage,TryRecvError>{
+        self.recv.try_recv()
+    }
     
-    unsafe {
-        //self.lazy_init_ns_url_session();
-        let ns_request = make_ns_request(&request);
-        let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
-        //let session  = self.ns_url_session.unwrap();
-        let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
-        let web_socket_delegate_instance: ObjcId = msg_send![get_apple_class_global().web_socket_delegate, new];
-        
-        unsafe fn set_message_receive_handler(data_task2: Arc<ObjcId>, request_id: LiveId, networking_sender: Sender<NetworkResponseEvent>) {
-            let data_task = data_task2.clone();
-            let handler = objc_block!(move | message: ObjcId, error: ObjcId | {
+    pub fn recv(&mut self)->Result<WebSocketMessage,RecvError>{
+        self.recv.recv()
+    }
+    
+    pub fn send_binary(&mut self, data:&[u8])->Result<(),()>{
+        unsafe{
+            let sender = self.sender.clone();
+            let handler = objc_block!(move | error: ObjcId | {
                 if error != ptr::null_mut() {
                     let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
-                    let message = NetworkResponseEvent {
-                        request_id,
-                        response: NetworkResponse::WebSocketError(error_str)
-                    };
-                    networking_sender.send(message).unwrap();
-                    return;
+                    sender.send(WebSocketMessage::Error(error_str)).unwrap();
                 }
-                let ty: usize = msg_send![message, type];
-                if ty == 0 { // binary
-                    let data: ObjcId = msg_send![message, data];
-                    let bytes: *const u8 = msg_send![data, bytes];
-                    let length: usize = msg_send![data, length];
-                    let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
-                    let message = NetworkResponseEvent {
-                        request_id,
-                        response: NetworkResponse::WebSocketBinary(data_bytes.to_vec())
-                    };
-                    networking_sender.send(message).unwrap();
-                }
-                else { // string
-                    let string: ObjcId = msg_send![message, string];
-                     let message = NetworkResponseEvent {
-                        request_id,
-                        response: NetworkResponse::WebSocketString(nsstring_to_string(string))
-                    };
-                    networking_sender.send(message).unwrap();
-                }
-                set_message_receive_handler(data_task.clone(), request_id, networking_sender.clone())
             });
-            let () = msg_send![*Arc::as_ptr(&data_task2), receiveMessageWithCompletionHandler: handler];
-        }
-        let () = msg_send![data_task, setDelegate: web_socket_delegate_instance];
-        set_message_receive_handler(Arc::new(data_task), request_id, networking_sender);
-        let () = msg_send![data_task, resume];
+            let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: data.as_ptr() length: data.len()];
+            let msg: ObjcId = msg_send![class!(NSURLSessionWebSocketMessage), initWithData: nsdata];
+            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler:handler];
+            Ok(())
+        } 
     }
+        
+    pub fn send_string(&mut self, data:&str)->Result<(),()>{
+        unsafe{
+            let sender = self.sender.clone();
+            let handler = objc_block!(move | error: ObjcId | {
+                if error != ptr::null_mut() {
+                    let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
+                    sender.send(WebSocketMessage::Error(error_str)).unwrap();
+                }
+            });
+            let nsstring = str_to_nsstring(data);
+            let msg: ObjcId = msg_send![class!(NSURLSessionWebSocketMessage), initWithString: nsstring];
+            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler:handler];
+            Ok(())
+        } 
+    }
+    
+    pub fn open(request: HttpRequest)->OsWebSocket{
+        unsafe {
+            let (sender,recv) = mpsc::channel();
+            //self.lazy_init_ns_url_session();
+            let ns_request = make_ns_request(&request);
+            let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
+            //let session  = self.ns_url_session.unwrap();
+            let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
+            let web_socket_delegate_instance: ObjcId = msg_send![get_apple_class_global().web_socket_delegate, new];
+                    
+            unsafe fn set_message_receive_handler(data_task2: Arc<ObjcId>,  sender: Sender<WebSocketMessage>) {
+                let data_task = data_task2.clone();
+                let handler = objc_block!(move | message: ObjcId, error: ObjcId | {
+                    if error != ptr::null_mut() {
+                        let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
+                        sender.send(WebSocketMessage::Error(error_str)).unwrap();
+                        return;
+                    }
+                    let ty: usize = msg_send![message, type];
+                    if ty == 0 { // binary
+                        let data: ObjcId = msg_send![message, data];
+                        let bytes: *const u8 = msg_send![data, bytes];
+                        let length: usize = msg_send![data, length];
+                        let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                        let message = WebSocketMessage::Binary(data_bytes.to_vec());
+                        sender.send(message).unwrap();
+                    }
+                    else { // string
+                        let string: ObjcId = msg_send![message, string];
+                        let message = WebSocketMessage::String(nsstring_to_string(string));
+                        sender.send(message).unwrap();
+                    }
+                    set_message_receive_handler(data_task.clone(), sender.clone())
+                });
+                let () = msg_send![*Arc::as_ptr(&data_task2), receiveMessageWithCompletionHandler: handler];
+            }
+            let () = msg_send![data_task, setDelegate: web_socket_delegate_instance];
+            let data_task = Arc::new(data_task);
+            set_message_receive_handler(data_task.clone(), sender.clone());
+            let () = msg_send![*Arc::as_ptr(&data_task), resume];
+            OsWebSocket{
+                sender,
+                recv,
+                data_task
+            }
+        }
+    }
+    
 }
+
 
 pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
     unsafe {
