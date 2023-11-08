@@ -132,6 +132,8 @@ impl DrawIcon {
         let icon_atlas_rc = cx.icon_atlas_rc.clone();
         let mut icon_atlas = icon_atlas_rc.0.borrow_mut();
         let icon_atlas = &mut*icon_atlas;
+       
+            
         if let Some((path_hash, bounds)) = icon_atlas.get_icon_bounds(cx, &self.svg_path, self.svg_file.as_ref()) {
             let width_is_fit = walk.width.is_fit();
             let height_is_fit = walk.height.is_fit();
