@@ -5,6 +5,7 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
+    import crate::linechart::LineChart;
     
     App = {{App}} {
         ui: <Window> {
@@ -49,10 +50,9 @@ live_design!{
                     width: Fill
                 }
                         
-                GraphView = <RectView> {
+                GraphView = <LineChart> {
                     height: Fill,
                     width: Fill
-                    draw_bg: {color: #2}
                 }
                         
                 ListView = <RectView> {
@@ -75,6 +75,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
+        crate::linechart::live_design(cx);
     }
     
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
