@@ -898,7 +898,8 @@ struct Machine {
     ip: String,
     id: LiveId,
     running: Option<RunningPrompt>,
-    fetching: Option<RunningPrompt>
+    fetching: Option<RunningPrompt>,
+    web_socket: Option<WebSocket>
 }
 
 struct RunningPrompt {
@@ -912,7 +913,8 @@ impl Machine {
         ip: ip.to_string(),
         id,
         running: None,
-        fetching: None
+        fetching: None,
+        web_socket: None
     }}
 }
 
@@ -957,7 +959,7 @@ impl LiveHook for App {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.open_web_socket(cx);
+        self.open_web_socket();
         let _ = self.db.load_database();
         self.filtered.filter_db(&self.db, "", false);
         let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
@@ -1047,11 +1049,11 @@ impl App {
         cx.http_request(live_id!(image), request);
     }
     
-    fn open_web_socket(&self, cx: &mut Cx) {
-        for machine in &self.machines {
+    fn open_web_socket(&mut self) {
+        for machine in &mut self.machines {
             let url = format!("ws://{}/ws?clientId={}", machine.ip, "1234");
             let request = HttpRequest::new(url, HttpMethod::GET);
-            cx.web_socket_open(machine.id, request);
+            machine.web_socket = Some(WebSocket::open(request));
         }
     }
     
@@ -1259,64 +1261,63 @@ impl App {
     
     fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
         let image_list = self.ui.portal_list(id!(image_list));
-        for event in event.network_responses() {
-            match &event.response {
-                NetworkResponse::WebSocketString(s) => {
-                    if s.contains("execution_interrupted") {
-                        
-                    }
-                    else if s.contains("execution_error") { // i dont care to expand the json def for this one
-                        log!("Got execution error for {} {}", event.request_id, s);
-                    }
-                    else {
-                        match ComfyUIMessage::deserialize_json(&s) {
-                            Ok(data) => {
-                                if data._type == "status" {
-                                    if let Some(status) = data.data.status {
-                                        if status.exec_info.queue_remaining == 0 {
-                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
-                                                machine.running = None;
-                                                Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
+        for m in 0..self.machines.len(){
+            if let Some(socket) = self.machines[m].web_socket.as_mut(){
+                match socket.try_recv(){
+                    Ok(WebSocketMessage::String(s))=>{
+                        if s.contains("execution_interrupted") {
+                                                    
+                        }
+                        else if s.contains("execution_error") { // i dont care to expand the json def for this one
+                            log!("Got execution error for {} {}", self.machines[m].id, s);
+                        }
+                        else {
+                            match ComfyUIMessage::deserialize_json(&s) {
+                                Ok(data) => {
+                                    if data._type == "status" {
+                                        if let Some(status) = data.data.status {
+                                            if status.exec_info.queue_remaining == 0 {
+                                                self.machines[m].running = None;
+                                                Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
                                             }
-                                            self.update_render_todo(cx);
                                         }
                                     }
-                                }
-                                else if data._type == "executed" {
-                                    if let Some(output) = &data.data.output {
-                                        if let Some(image) = output.images.first() {
-                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
-                                                if let Some(running) = machine.running.take() {
+                                    else if data._type == "executed" {
+                                        if let Some(output) = &data.data.output {
+                                            if let Some(image) = output.images.first() {
+                                                if let Some(running) = self.machines[m].running.take() {
                                                     self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
-                                                    machine.fetching = Some(running);
-                                                    Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
-                                                    self.fetch_image(cx, event.request_id, &image.filename);
+                                                    self.machines[m].fetching = Some(running);
+                                                    Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
+                                                    self.fetch_image(cx, self.machines[m].id, &image.filename);
                                                 }
                                                 self.update_render_todo(cx);
                                             }
                                         }
                                     }
-                                }
-                                else if data._type == "progress" {
-                                    // draw the progress bar / progress somewhere
-                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
-                                        if let Some(running) = &mut machine.running {
+                                    else if data._type == "progress" {
+                                        // draw the progress bar / progress somewhere
+                                        let id =self.machines[m].id;
+                                        if let Some(running) = &mut self.machines[m].running {
                                             running.steps_counter += 1;
-                                            Self::update_progress(cx, &self.ui, event.request_id, true, running.steps_counter, running.prompt_state.prompt.preset.total_steps as usize);
+                                            Self::update_progress(cx, &self.ui, id, true, running.steps_counter, running.prompt_state.prompt.preset.total_steps as usize);
                                         }
+                                        //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
                                     }
-                                    //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
                                 }
-                            }
-                            Err(err) => {
-                                log!("Error parsing JSON {:?} {:?}", err, s);
+                                Err(err) => {
+                                    log!("Error parsing JSON {:?} {:?}", err, s);
+                                }
                             }
                         }
                     }
+                    _=>()
                 }
-                NetworkResponse::WebSocketBinary(bin) => {
-                    log!("Got Binary {}", bin.len());
-                }
+            }
+        }
+        
+        for event in event.network_responses() {
+            match &event.response {
                 NetworkResponse::HttpResponse(res) => {
                     // alright we got an image back
                     match event.request_id {
@@ -1446,7 +1447,7 @@ impl AppMain for App {
         }
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyR, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
-                self.open_web_socket(cx);
+                self.open_web_socket();
             }
         }
         

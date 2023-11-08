@@ -31,4 +31,5 @@ pub(crate) use self::ios::*;
 pub(crate) use self::tvos::*;
 
 pub(crate) use self::core_midi::{OsMidiInput, OsMidiOutput};
+pub(crate) use self::ns_url_session::{OsWebSocket};
 

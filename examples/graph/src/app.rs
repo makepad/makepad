@@ -91,7 +91,6 @@ impl AppMain for App {
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            
             while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
                 
             }

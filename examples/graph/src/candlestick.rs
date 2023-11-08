@@ -29,8 +29,8 @@ live_design!{
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawCandleStick {
     #[deref] draw_super: DrawQuad,
-    open: f32,
-    close: f32
+    #[calc] open: f32,
+    #[calc] close: f32
 }
 
 struct CandleStickData{

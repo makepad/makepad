@@ -229,6 +229,7 @@ impl Cx {
             let mut errs = Vec::new();
             live_registry.process_file_changes(all_changes, &mut errs);
             for err in errs {
+                
                 // alright we need to output the correct error
                 if std::env::args().find(|v| v == "--message-format=json").is_some(){
                     let err = live_registry.live_error_to_live_file_error(err);
