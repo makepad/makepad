@@ -269,7 +269,8 @@ live_design!{
                                     return #f;
                                 }
                             } 
-                            icon_walk: {width: Fit, height: 17.0} 
+                            icon_walk:  {
+                                width: Fit, height: 17.0} 
                         }
                     }
                         <Label>

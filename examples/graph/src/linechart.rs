@@ -35,13 +35,23 @@ struct DrawLineSegment {
     #[calc] end_y: f32
 }
 
+enum DraggingSide {
+    LineStartNOTDragging,
+    LineStartIsDragging,
+    LineEndIsDragging,
+}
+
 #[derive(Live)]
 pub struct LineChart {
     #[walk] walk: Walk,
     #[live] draw_ls: DrawLineSegment,
     #[rust] area: Area,
     #[rust] _screen_view: Rect,
-    #[rust] _data_view: Rect
+    #[rust] _data_view: Rect,
+    #[rust(dvec2(10.,10.))] line_start: DVec2,
+    #[rust(dvec2(100.,40.))] line_end: DVec2,
+    #[rust(dvec2(100.,40.))] line_dragstart: DVec2,
+    #[rust(DraggingSide::LineStartNOTDragging)] draggingside: DraggingSide
 }
 
 impl Widget for LineChart {
@@ -89,7 +99,7 @@ impl LineChart {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         for i in 0..10{
             let r = Rect{
-                pos: rect.pos + dvec2(10.0,0.0) * i as f64,
+                pos: self.line_start + (self.line_end - self.line_start) * (i as f64)*0.1,
                 size: dvec2(10.0,10.0)
             };
             self.draw_ls.draw_abs(cx, r);
@@ -99,15 +109,38 @@ impl LineChart {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, LineChartAction),) {
         match event.hits(cx, self.area) {
             
-            Hit::FingerDown(_fe) => {
-              
+            Hit::FingerDown(fe) => {
+              let l1 = (fe.abs - self.line_start).lengthsquared();
+              let l2 = (fe.abs - self.line_end).lengthsquared();
+                if l2<l1 {
+                    self.draggingside = DraggingSide::LineEndIsDragging;
+                    self.line_dragstart = self.line_end;
+
+                }
+                else {
+                    self.draggingside = DraggingSide::LineStartIsDragging;
+                    self.line_dragstart = self.line_start;
+                }
+
             },
             Hit::FingerUp(_fe) => {
-                
+                self.draggingside = DraggingSide::LineStartNOTDragging;
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
                 log!("{:?}", rel);
+                if let DraggingSide::LineStartIsDragging = self.draggingside 
+                {
+
+                    self.line_start = self.line_dragstart + rel;
+                }
+                if let DraggingSide::LineEndIsDragging = self.draggingside 
+                {
+
+                    self.line_end = self.line_dragstart + rel;
+                    
+                }
+                self.area.redraw(cx);
             }
             _ => ()
         }

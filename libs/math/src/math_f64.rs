@@ -204,6 +204,10 @@ impl DVec2 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
     
+    pub fn lengthsquared(&self) -> f64 {
+        self.x * self.x + self.y * self.y
+    }
+
     pub fn is_nan(&self)->bool{
         self.x.is_nan() || self.y.is_nan()
     }
