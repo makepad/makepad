@@ -449,13 +449,11 @@ impl BuildManager {
                 // only store last change, fix later
                 match message {
                     HttpServerRequest::ConnectWebSocket {web_socket_id: _, response_sender: _,headers: _} => {
-                        
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id: _} => {
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id: _, response_sender: _, data: _} => {
                         // new incombing message from client
-                        
                     }
                     HttpServerRequest::Get {headers, response_sender} => {
                         let path = &headers.path;
