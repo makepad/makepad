@@ -9,47 +9,41 @@ use {
 live_design!{
     import makepad_draw::shader::std::*;
     
-    DrawCandleStick = {{DrawCandleStick}} {
+    DrawLineSegment = {{DrawLineSegment}} {
         fn pixel(self) -> vec4 {
             //return mix(#f00,#0f0, left+0.5);
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             // first we darw a line from min to max
             // then we draw a box from open to close
-            
+            sdf.move_to(0.0,0.0);
+            sdf.line_to(self.rect_size.x, self.rect_size.y);
+            sdf.stroke(#f00,1);
             return sdf.result
         }
     }
     
-    CandleStick = {{CandleStick}} {
+    LineChart = {{LineChart}} {
         width: Fill,
         height: Fill
     }
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawCandleStick {
+struct DrawLineSegment {
     #[deref] draw_super: DrawQuad,
-    #[calc] open: f32,
-    #[calc] close: f32
-}
-
-struct CandleStickData{
-    min: f64,
-    max: f64,
-    open: f64,
-    close: f64,
+    #[calc] start_y: f32,
+    #[calc] end_y: f32
 }
 
 #[derive(Live)]
-pub struct CandleStick {
+pub struct LineChart {
     #[walk] walk: Walk,
-    #[live] draw_cs: DrawCandleStick,
-    #[rust(Texture::new(cx))] data_texture: Texture,
+    #[live] draw_ls: DrawLineSegment,
     #[rust] screen_view: Rect,
     #[rust] data_view: Rect
 }
 
-impl Widget for CandleStick {
+impl Widget for LineChart {
     fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
@@ -75,58 +69,42 @@ impl Widget for CandleStick {
 }
 
 #[derive(Clone, WidgetAction)]
-pub enum CandleStickAction {
+pub enum LineChartAction {
     None
 }
 
-impl LiveHook for CandleStick {
+impl LiveHook for LineChart {
     fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, CandleStick)
+        register_widget!(cx, LineChart)
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-
     }
 }
 
-impl CandleStick {
+impl LineChart {
     pub fn process_buffer(&mut self, cx: &mut Cx) {
  
     }
 }
 
-impl CandleStick {
+impl LineChart {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        // lets draw a bunch of quads
+        
+        for i in 0..10{
+            self.draw_ls.draw_abs(cx);
+        }
         self.draw_cs.draw_walk(cx, walk);
     }
     
-    pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, CandleStickAction),) {
+    pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, LineChartAction),) {
     }
 }
 
 // ImGUI convenience API for Piano
 #[derive(Clone, PartialEq, WidgetRef)]
-pub struct CandleStickRef(WidgetRef);
+pub struct LineChartRef(WidgetRef);
 
-impl CandleStickRef {
-    pub fn process_buffer(&self, cx: &mut Cx ){
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.process_buffer(cx);
-        }
-    }
-    
-    pub fn voice_off(&self, _cx: &mut Cx, _voice: usize) {
-    }
-}
-
-// ImGUI convenience API for Piano
-#[derive(Clone, WidgetSet)]
-pub struct CandleStickSet(WidgetSet);
-
-impl CandleStickSet {
-    pub fn process_buffer(&self, cx: &mut Cx) {
-        for item in self.iter(){
-            item.process_buffer(cx);
-        }
-    }
+impl LineChartRef {
 }
