@@ -209,6 +209,13 @@ impl DVec2 {
         if l == 0.0 {return dvec2(0.,0.);}
         return dvec2(self.x/l, self.y/l);
     }
+    pub fn normalize_to_x(&self) -> DVec2
+    {
+        let l  = self.x;
+        if l == 0.0 {return dvec2(1.,0.);}
+        return dvec2(1., self.y/l);
+    }
+
     pub fn lengthsquared(&self) -> f64 {
         self.x * self.x + self.y * self.y
     }

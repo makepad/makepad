@@ -65,7 +65,7 @@ pub struct LineChart {
     #[rust] area: Area,
     #[rust] _screen_view: Rect,
     #[rust] _data_view: Rect,
-    #[live(5.0)] line_width: f64,
+    #[live(15.0)] line_width: f64,
     #[rust(dvec2(10.,10.))] line_start: DVec2,
     #[rust(dvec2(1000.,240.))] line_end: DVec2,
     #[rust(dvec2(1000.,140.))] line_dragstart: DVec2,
@@ -117,7 +117,7 @@ impl LineChart {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
 
         let r = Rect{
-            pos: dvec2(3.,3.),
+            pos: dvec2(0.,0.),
             size: dvec2(2000.,2000.)
         };
         let mut actualstart =self.line_start;
@@ -138,13 +138,13 @@ impl LineChart {
         if (self.line_start.y - self.line_end.y).abs().floor() == 0.0 || (self.line_start.x - self.line_end.x).abs().floor() == 0.0 {
             
             let r = Rect{
-                pos: dvec2(min(self.line_start.x , self.line_end.x) -hw*2. ,min(self.line_start.y, self.line_end.y) -hw ),
-                size: dvec2(linerect.x.abs() + self.line_width, linerect.y.abs() + self.line_width)
+                pos: dvec2(min(self.line_start.x , self.line_end.x) -self.line_width ,min(self.line_start.y, self.line_end.y) -self.line_width ),
+                size: dvec2(linerect.x.abs() + self.line_width*2., linerect.y.abs() + self.line_width*2.)
             };
             self.draw_ls.line_start = (self.line_start - r.pos).into_vec2();
             self.draw_ls.line_end = (self.line_end - r.pos).into_vec2();
             self.draw_ls.width = self.line_width as f32;
-            self.draw_ls.color = vec4(0.5,0.4,0.8,1.0);
+            self.draw_ls.color = vec4(1.,1.,0.2,1.0);
             
             self.draw_ls.draw_abs(cx, r);
 
@@ -162,19 +162,20 @@ impl LineChart {
             {
                 std::mem::swap(&mut actualstart, &mut actualend);
             }
-            
-            let abslinerect = dvec2(linerect.x.abs(), linerect.y.abs());
+            let delta = actualend - actualstart;
+
+            let abslinerect = dvec2(delta.x.abs(), delta.y.abs());
             
             let numblocks = (abslinerect.x / self.line_width).ceil();
-            let blockwidth = abslinerect.x / (numblocks as f64);
+            let blockwidth = (abslinerect.x / (numblocks as f64));
 
-            let normalizedir = linerect.normalize();
+            let normalizedelta = delta.normalize_to_x();
             
-            let step = dvec2(blockwidth, normalizedir.y * blockwidth);
-            let blockheight  = normalizedir.y.abs() * blockwidth * 2. + self.line_width;
+            let step = dvec2(blockwidth, normalizedelta.y*blockwidth);
+            let blockheight  = normalizedelta.y.abs() * blockwidth * 2. + self.line_width;
             for i in 0..numblocks.ceil() as i32{
                 let r = Rect{
-                    pos: self.line_start + step* (i as f64),
+                    pos:actualstart + dvec2(step.x * (i as f64),step.y * (i as f64) +self.line_width/2.),
                     size: dvec2(blockwidth,blockheight)
                 
                 };
