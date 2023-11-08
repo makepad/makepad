@@ -195,10 +195,12 @@ impl CxIconAtlas {
                     if let Some(data) = find_path_str(&data){
                         return self.parse_and_cache_path(path_hash, data)
                     }
+                    println!("No SVG path tag found in svg file {}",path_str);
                     return None
                     
                 }
                 Err(_err)=>{
+                    println!("Error in SVG file {}: {}",path_str, _err);
                     return None
                 }
             }
