@@ -96,7 +96,21 @@ impl LineChart {
         }
     }
     
-    pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, LineChartAction),) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, LineChartAction),) {
+        match event.hits(cx, self.area) {
+            
+            Hit::FingerDown(_fe) => {
+              
+            },
+            Hit::FingerUp(_fe) => {
+                
+            }
+            Hit::FingerMove(fe) => {
+                let rel = fe.abs - fe.abs_start;
+                log!("{:?}", rel);
+            }
+            _ => ()
+        }
     }
 }
 
