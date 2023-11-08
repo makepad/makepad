@@ -203,7 +203,12 @@ impl DVec2 {
     pub fn length(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
-    
+    pub fn normalize(&self) -> DVec2
+    {
+        let l  = self.length();
+        if l == 0.0 {return dvec2(0.,0.);}
+        return dvec2(self.x/l, self.y/l);
+    }
     pub fn lengthsquared(&self) -> f64 {
         self.x * self.x + self.y * self.y
     }
