@@ -26,7 +26,7 @@ use {
                     macos_window::MacosWindow
                 },
                 apple_classes::init_apple_classes_global,
-                ns_url_session::{make_http_request, web_socket_open},
+                ns_url_session::{make_http_request},
             },
             metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,
@@ -519,7 +519,7 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::WebSocketOpen {request_id, request} => {
+                /*CxOsOp::WebSocketOpen {request_id, request} => {
                     web_socket_open(request_id, request, self.os.network_response.sender.clone());
                 }
                 CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
@@ -527,7 +527,7 @@ impl Cx {
                 }
                 CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     todo!()
-                }
+                }*/
                 CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
                 CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
@@ -565,6 +565,7 @@ impl CxOsApi for Cx {
     fn start_stdin_service(&mut self) {
         self.start_xpc_service()
     }
+    
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()

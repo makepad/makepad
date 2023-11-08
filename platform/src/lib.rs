@@ -37,6 +37,7 @@ mod geometry;
 mod debug;
 mod component_map;
 mod performance_stats;
+mod web_socket;
 
 pub mod audio_stream;
 
@@ -141,6 +142,7 @@ pub use {
         audio::*,
         thread::*,
         video::*,
+        web_socket::{WebSocket,WebSocketMessage},
         event::{
             VirtualKeyboardEvent,
             HttpRequest,
