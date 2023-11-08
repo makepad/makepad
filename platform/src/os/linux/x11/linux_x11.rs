@@ -321,15 +321,6 @@ impl Cx {
                 CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
                 },
-                CxOsOp::WebSocketOpen{request_id:_, request:_}=>{
-                    todo!()
-                }
-                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
-                    todo!()
-                }
-                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
-                    todo!()
-                },
                 CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
                 CxOsOp::FetchNextVideoFrames(_, _) => todo!(),

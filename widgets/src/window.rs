@@ -285,7 +285,7 @@ impl Window {
         }
 
         if self.show_performance_view {
-            self.performance_view.draw_widget(cx);
+            self.performance_view.draw_widget(cx).unwrap();
         }
 
         cx.end_pass_sized_turtle();

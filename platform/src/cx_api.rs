@@ -41,6 +41,7 @@ pub trait CxOsApi {
     
     fn start_stdin_service(&mut self){}
     fn pre_start()->bool{false}
+    
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -73,9 +74,9 @@ pub enum CxOsOp {
 
     HttpRequest{request_id: LiveId, request:HttpRequest},
 
-    WebSocketOpen{request_id: LiveId, request:HttpRequest},
-    WebSocketSendString{request_id: LiveId, data:String},
-    WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
+    //WebSocketOpen{request_id: LiveId, request:HttpRequest},
+    //WebSocketSendString{request_id: LiveId, data:String},
+    //WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
 
     InitializeVideoDecoding(LiveId, Rc<Vec<u8>>),
     DecodeNextVideoChunk(LiveId, usize),
@@ -446,7 +447,7 @@ impl Cx {
     pub fn http_request(&mut self, request_id: LiveId, request: HttpRequest) {
         self.platform_ops.push(CxOsOp::HttpRequest{request_id, request});
     }
-           
+           /*
     pub fn web_socket_open(&mut self, request_id: LiveId, request: HttpRequest) {
         self.platform_ops.push(CxOsOp::WebSocketOpen{
             request,
@@ -460,7 +461,7 @@ impl Cx {
             data,
         });
     }
-
+*/
     pub fn initialize_video_decoding(&mut self, video_id: LiveId, video: Rc<Vec<u8>>) {
         self.platform_ops.push(CxOsOp::InitializeVideoDecoding(video_id, video));
     }

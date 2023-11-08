@@ -357,6 +357,7 @@ impl LiveHook for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.handle_live_edit(cx, event);
         let news_feeds = self.ui.portal_list_set(ids!(news_feed));
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);

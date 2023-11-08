@@ -414,42 +414,13 @@ impl BuildManager {
         });
         
         let rx_file_change = self.send_file_change.receiver();
-        let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
+        //let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
         
         // livecoding observer
         std::thread::spawn(move || {
-            loop {
-                let mut last_change = None;
-                let mut addrs = Vec::new();
-                if let Ok(change) = rx_file_change.recv_timeout(Duration::from_millis(5000)) {
-                    last_change = Some(change);
-                    addrs.clear();
-                }
-                while let Ok(change) = rx_file_change.try_recv() {
-                    last_change = Some(change);
-                    addrs.clear();
-                }
-                while let Ok(HttpServerRequest::Get {headers, response_sender}) = rx_live_file.try_recv() {
-                    let body = if addrs.contains(&headers.addr) {
-                        vec![]
-                    }
-                    else if let Some(last_change) = &last_change {
-                        addrs.push(headers.addr);
-                        format!("{}$$$makepad_live_change$$${}", last_change.file_name, last_change.content).as_bytes().to_vec()
-                    }
-                    else {
-                        vec![]
-                    };
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\n\
-                            Content-Type: application/json\r\n\
-                            Content-encoding: none\r\n\
-                            Cache-Control: max-age:0\r\n\
-                            Content-Length: {}\r\n\
-                            Connection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = response_sender.send(HttpServerResponse {header, body});
+            loop{
+                if let Ok(_change) = rx_file_change.recv() {
+                    // lets send this change to all our websocket connections
                 }
             }
         });
@@ -477,19 +448,23 @@ impl BuildManager {
             while let Ok(message) = rx_request.recv() {
                 // only store last change, fix later
                 match message {
-                    HttpServerRequest::ConnectWebSocket {web_socket_id: _, response_sender: _, headers: _} => {
+                    HttpServerRequest::ConnectWebSocket {web_socket_id: _, response_sender: _,headers: _} => {
+                        
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id: _} => {
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id: _, response_sender: _, data: _} => {
+                        // new incombing message from client
+                        
                     }
                     HttpServerRequest::Get {headers, response_sender} => {
                         let path = &headers.path;
+                        // ok so this live connection.. where do we do it
+                        // i mean its just a network event msg. we can ignore that
+                        // we could just handle this in 'window'
+                        // or where shall we handle it
+                        // lets give live edit an api so you can codegen/live edit shaders?
                         
-                        if path == "/$live_file_change" {
-                            let _ = tx_live_file.send(HttpServerRequest::Get {headers, response_sender});
-                            continue
-                        }
                         // alright wasm http server
                         if path == "/$watch" {
                             let header = "HTTP/1.1 200 OK\r\n\
