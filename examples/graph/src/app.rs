@@ -1,6 +1,6 @@
 use crate::{makepad_live_id::*};
 use makepad_widgets::*;
-
+use crate::linechart::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -48,6 +48,11 @@ live_design!{
                     draw_bg: {color: #2}
                     height: Fill,
                     width: Fill
+                    slider1 = <Slider> {
+                        margin:20
+                        height: 20 
+                        width: 150
+                    }
                 }
                         
                 GraphView = <LineChart> {
@@ -98,6 +103,9 @@ impl AppMain for App {
             return
         }
         
-        let _actions = self.ui.handle_widget_event(cx, event);
+        let actions = self.ui.handle_widget_event(cx, event);
+        if let Some(v) = self.ui.slider(id!(slider1)).slided(&actions){
+            self.ui.line_chart(id!(graph_view)).set_slider_value(cx, v);
+        }
     }
 }
