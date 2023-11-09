@@ -160,6 +160,13 @@ impl Vec2 {
         if l == 0.0 {return vec2(1.,0.);}
         return vec2(1., self.y/l);
     }
+   
+    pub fn normalize_to_y(&self) -> Vec2
+    {
+        let l  = self.y;
+        if l == 0.0 {return vec2(1.,0.);}
+        return vec2(self.x/l, 1.);
+    }
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: 0.0}
     }
