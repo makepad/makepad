@@ -20,12 +20,12 @@ live_design!{
             // then we draw a box from open to close
 
             
-            sdf.move_to(0.0,0.0);
-            sdf.line_to(self.rect_size.x, 0);
-            sdf.line_to(self.rect_size.x, self.rect_size.y);
-            sdf.line_to(0, self.rect_size.y);
-            sdf.line_to(0, 0);
-            sdf.fill(#0001);
+            //sdf.move_to(0.0,0.0);
+            //sdf.line_to(self.rect_size.x, 0);
+            //sdf.line_to(self.rect_size.x, self.rect_size.y);
+            //sdf.line_to(0, self.rect_size.y);
+            //sdf.line_to(0, 0);
+            //sdf.fill(#0001);
             sdf.move_to(self.line_start.x , self.line_start.y);
             sdf.line_to(self.line_end.x , self.line_end.y);
             sdf.stroke(self.color,self.width);
@@ -154,14 +154,15 @@ impl LineChart {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
 
             
+       self.line_width = self.slider_value.powf(2.0) * 60. + 0.5;
 
-        if true{
+
+        /*if true{
         let r = Rect{
             pos: dvec2(0.,0.),
             size: dvec2(2000.,2000.)
         };
-       
-       
+
         let mut actualstart =self.line_start;
         let mut actualend =self.line_end;
 
@@ -175,7 +176,7 @@ impl LineChart {
        
         self.draw_ls.draw_abs(cx, r);
     }
-
+*/
     if self.start_hover {
 
         let r = Rect{
@@ -420,6 +421,8 @@ impl LineChartRef {
         if let Some(mut inner) = self.borrow_mut(){
             inner.slider_value = val;
             log!("SLIDER VALUE {}", val)
+            
+            
         }
     }
 }
