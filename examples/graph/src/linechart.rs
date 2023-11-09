@@ -25,10 +25,32 @@ live_design!{
             sdf.line_to(self.rect_size.x, self.rect_size.y);
             sdf.line_to(0, self.rect_size.y);
             sdf.line_to(0, 0);
-            sdf.stroke(#222,1);
+            sdf.fill(#0001);
             sdf.move_to(self.line_start.x , self.line_start.y);
             sdf.line_to(self.line_end.x , self.line_end.y);
             sdf.stroke(self.color,self.width);
+            
+            return sdf.result
+
+            //return #ff0
+        }
+    }
+
+    Ball = {{Ball}} {
+        fn pixel(self) -> vec4 {
+            //return mix(#f00,#0f0, left+0.5);
+            let pixelpos = self.pos * self.rect_size;
+            let sdf = Sdf2d::viewport(pixelpos);
+            // first we darw a line from min to max
+            // then we draw a box from open to close
+
+            
+            sdf.move_to(0.0,0.0);
+            sdf.line_to(self.rect_size.x, 0);
+            sdf.line_to(self.rect_size.x, self.rect_size.y);
+            sdf.line_to(0, self.rect_size.y);
+            sdf.line_to(0, 0);
+            sdf.fill(#0001);
             
             return sdf.result
 
@@ -52,6 +74,15 @@ struct DrawLineSegment {
   
 }
 
+
+#[derive(Live, LiveHook)]#[repr(C)]
+struct Ball {
+    #[deref] draw_super: DrawQuad,
+   
+  
+}
+
+
 enum DraggingSide {
     LineStartNOTDragging,
     LineStartIsDragging,
@@ -62,6 +93,7 @@ enum DraggingSide {
 pub struct LineChart {
     #[walk] walk: Walk,
     #[live] draw_ls: DrawLineSegment,
+    #[live] draw_ball: Ball,
     #[rust] area: Area,
     #[rust] _screen_view: Rect,
     #[rust] _data_view: Rect,
@@ -69,7 +101,12 @@ pub struct LineChart {
     #[rust(dvec2(10.,10.))] line_start: DVec2,
     #[rust(dvec2(1000.,240.))] line_end: DVec2,
     #[rust(dvec2(1000.,140.))] line_dragstart: DVec2,
-    #[rust(DraggingSide::LineStartNOTDragging)] draggingside: DraggingSide
+    #[rust(DraggingSide::LineStartNOTDragging)] draggingside: DraggingSide,
+    #[rust(false)] start_hover: bool,
+    
+    #[rust(false)] end_hover: bool,
+    
+
 }
 
 impl Widget for LineChart {
@@ -116,35 +153,63 @@ impl LineChart {
         // lets draw a bunch of quads
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
 
+            
+
+        if true{
         let r = Rect{
             pos: dvec2(0.,0.),
             size: dvec2(2000.,2000.)
         };
+       
+       
         let mut actualstart =self.line_start;
         let mut actualend =self.line_end;
+
         self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
         self.draw_ls.line_end = (actualend - r.pos).into_vec2();
         self.draw_ls.width = (self.line_width as f32)*1.3;
-        self.draw_ls.color = vec4(0.8,0.0,0.0,1.0);
+        self.draw_ls.color = vec4(0.6,0.6,0.0,0.30);
 
 
         
        
         self.draw_ls.draw_abs(cx, r);
+    }
 
+    if self.start_hover {
+
+        let r = Rect{
+            pos: self.line_start - dvec2(30.,30.),
+            size: dvec2(60.,60.)
+        };
+        self.draw_ball.draw_abs(cx, r);
+
+    }
+
+    if self.end_hover {
+
+        let r = Rect{
+            pos: self.line_end - dvec2(30.,30.),
+            size: dvec2(60.,60.)
+        };
+        self.draw_ball.draw_abs(cx, r);
+
+    }
+
+        let hw = self.line_width / 2.;
+        self.draw_ls.width = hw as f32;
+        self.draw_ls.color = vec4(1.,1.,0.2,1.0);
+       
 
         let linerect = self.line_end - self.line_start;
-        let hw = self.line_width / 2.;
         if (self.line_start.y - self.line_end.y).abs().floor() == 0.0 || (self.line_start.x - self.line_end.x).abs().floor() == 0.0 {
             
             let r = Rect{
-                pos: dvec2(min(self.line_start.x , self.line_end.x) -self.line_width ,min(self.line_start.y, self.line_end.y) -self.line_width ),
-                size: dvec2(linerect.x.abs() + self.line_width*2., linerect.y.abs() + self.line_width*2.)
+                pos: dvec2(min(self.line_start.x , self.line_end.x) -hw ,min(self.line_start.y, self.line_end.y) -hw ),
+                size: dvec2(linerect.x.abs() + self.line_width, linerect.y.abs() + self.line_width)
             };
             self.draw_ls.line_start = (self.line_start - r.pos).into_vec2();
             self.draw_ls.line_end = (self.line_end - r.pos).into_vec2();
-            self.draw_ls.width = self.line_width as f32;
-            self.draw_ls.color = vec4(1.,1.,0.2,1.0);
             
             self.draw_ls.draw_abs(cx, r);
 
@@ -163,39 +228,130 @@ impl LineChart {
                 std::mem::swap(&mut actualstart, &mut actualend);
             }
             let delta = actualend - actualstart;
-
+            let normalizedelta = delta.normalize_to_x();
+          
             let abslinerect = dvec2(delta.x.abs(), delta.y.abs());
+            let maxpixels = 300.0;
             
-            let numblocks = (abslinerect.x / self.line_width).ceil();
+            let normalizedarea =( normalizedelta.x * normalizedelta.y).abs();
+
+            let scaledup = (maxpixels / normalizedarea).sqrt();
+
+            let numblocks = (abslinerect.x / scaledup).ceil();
             let blockwidth = (abslinerect.x / (numblocks as f64));
 
-            let normalizedelta = delta.normalize_to_x();
             
             let step = dvec2(blockwidth, normalizedelta.y*blockwidth);
-            let blockheight  = normalizedelta.y.abs() * blockwidth * 2. + self.line_width;
-            for i in 0..numblocks.ceil() as i32{
+            let mut adjust = self.line_width/2. + 3.;
+            if step.y<0. { adjust = adjust -step.y;}
+            let blockheight  = step.y.abs() + self.line_width + 6.;
+           
+            self.draw_ls.color = vec4(0.9,0.9,0.0,1.0);
+           self.draw_ls.width = hw as f32;
+       
+            for i in 0..(numblocks.ceil() as i32) as i32{
                 let r = Rect{
-                    pos:actualstart + dvec2(step.x * (i as f64),step.y * (i as f64) +self.line_width/2.),
+                    pos:actualstart + dvec2(step.x * (i as f64),step.y * (i as f64)  - adjust),
                     size: dvec2(blockwidth,blockheight)
                 
                 };
-                self.draw_ls.color = vec4(0.9,0.9,0.0,1.0);
-       
                 self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
                 self.draw_ls.line_end = (actualend - r.pos).into_vec2();
-                self.draw_ls.width = self.line_width as f32;
+                
+                self.draw_ls.draw_abs(cx, r);
+            }
+            {
+                let r = Rect{
+                    pos:actualstart - dvec2(hw + 3.,hw + 3. ),
+                    size: dvec2(hw+3.,self.line_width+6.)
+                
+                };
+                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
+                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
+                
+                self.draw_ls.draw_abs(cx, r);
+            }
+            {
+                let r = Rect{
+                    pos:actualend - dvec2(0.,hw + 3. ),
+                    size: dvec2(hw+3.,self.line_width+6.)
+                
+                };
+                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
+                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
+                
                 self.draw_ls.draw_abs(cx, r);
             }
         }
         else {
-            for i in 0..10{
+            let mut actualstart =self.line_start;
+            let mut actualend =self.line_end;
+
+            if actualend.y < actualstart.y
+            {
+                std::mem::swap(&mut actualstart, &mut actualend);
+            }
+
+
+            let delta = actualend - actualstart;
+            let normalizedelta = delta.normalize_to_y();
+          
+            let abslinerect = dvec2(delta.x.abs(), delta.y.abs());
+            let maxpixels = 300.0;
+            
+            let normalizedarea =( normalizedelta.x * normalizedelta.y).abs();
+
+            let scaledup = (maxpixels / normalizedarea).sqrt();
+
+           
+            
+            let numblocks = (abslinerect.y / scaledup).ceil();
+            let blockheight = (abslinerect.y / (numblocks as f64));
+
+            
+            let step = dvec2( normalizedelta.x*blockheight, blockheight);
+            let mut adjust = self.line_width/2. + 3.;
+            if step.x<0. { adjust = adjust -step.x;}
+            let blockwidth  = step.x.abs() + self.line_width + 6.;
+           
+            self.draw_ls.color = vec4(0.9,0.9,0.0,1.0);
+           self.draw_ls.width = hw as f32;
+       
+            for i in 0..(numblocks.ceil() as i32) as i32{
                 let r = Rect{
-                    pos: self.line_start + (self.line_end - self.line_start) * (i as f64)*0.1,
-                    size: dvec2(10.0,10.0)
+                    pos:actualstart + dvec2(step.x * (i as f64) - adjust,step.y * (i as f64)  ),
+                    size: dvec2(blockwidth,blockheight)
+                
                 };
+                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
+                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
                 
                 self.draw_ls.draw_abs(cx, r);
             }
+
+            {
+                let r = Rect{
+                    pos:actualstart - dvec2(hw + 3.,hw + 3. ),
+                    size: dvec2(self.line_width+6., hw + 3.)
+                
+                };
+                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
+                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
+                
+                self.draw_ls.draw_abs(cx, r);
+            }
+            {
+                let r = Rect{
+                    pos:actualend - dvec2(hw+3.,0. ),
+                    size: dvec2(self.line_width+6., hw+3.)
+                
+                };
+                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
+                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
+                
+                self.draw_ls.draw_abs(cx, r);
+            }
+
         }
 
       
@@ -210,14 +366,19 @@ impl LineChart {
               let l1 = (fe.abs - self.line_start).lengthsquared();
               let l2 = (fe.abs - self.line_end).lengthsquared();
                 if l2<l1 {
+                 //   if (l2<250.)
+                  //  {
                     self.draggingside = DraggingSide::LineEndIsDragging;
                     self.line_dragstart = self.line_end;
-
+                   // }
                 }
                 else {
+                   // if (l1<250.)
+                  //  {
                     self.draggingside = DraggingSide::LineStartIsDragging;
                     self.line_dragstart = self.line_start;
-                }
+                    // }
+                     }
 
             },
             Hit::FingerUp(_fe) => {
@@ -225,7 +386,13 @@ impl LineChart {
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
-                log!("{:?}", rel);
+              //  log!("{:?}", rel);
+              let l1 = (fe.abs - self.line_start).lengthsquared();
+              let l2 = (fe.abs - self.line_end).lengthsquared();
+                
+                if l1<250. {self.start_hover = true;} else {self.start_hover = false;}
+                if l2<250. {self.end_hover = true;} else {self.end_hover = false;}
+
                 if let DraggingSide::LineStartIsDragging = self.draggingside 
                 {
 
