@@ -238,3 +238,17 @@ impl Widget for Slider {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct SliderRef(WidgetRef);
+
+impl SliderRef{
+    pub fn slided(&self, actions:&WidgetActions)->Option<f64>{
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            match item.action(){
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
+                    return Some(v)
+                }
+                _=>()
+            }
+        }
+        None
+    }
+}
