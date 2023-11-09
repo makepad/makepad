@@ -105,7 +105,7 @@ pub struct LineChart {
     #[rust(false)] start_hover: bool,
     
     #[rust(false)] end_hover: bool,
-    
+    #[rust(0.0)] slider_value: f64
 
 }
 
@@ -416,4 +416,10 @@ impl LineChart {
 pub struct LineChartRef(WidgetRef);
 
 impl LineChartRef {
+    pub fn set_slider_value(&self, _cx:&mut Cx, val:f64){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.slider_value = val;
+            log!("SLIDER VALUE {}", val)
+        }
+    }
 }
