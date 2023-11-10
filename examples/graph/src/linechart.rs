@@ -15,21 +15,28 @@ live_design!{
         fn pixel(self) -> vec4 {
             //return mix(#f00,#0f0, left+0.5);
             let pixelpos = self.pos * self.rect_size;
+
+
+
             let sdf = Sdf2d::viewport(pixelpos);
             // first we darw a line from min to max
             // then we draw a box from open to close
-
             
-            //sdf.move_to(0.0,0.0);
-            //sdf.line_to(self.rect_size.x, 0);
-            //sdf.line_to(self.rect_size.x, self.rect_size.y);
-            //sdf.line_to(0, self.rect_size.y);
-            //sdf.line_to(0, 0);
-            //sdf.fill(#0001);
+            
+
+            sdf.move_to(0.0,0.0);
+            sdf.line_to(self.rect_size.x, 0);
+            sdf.line_to(self.rect_size.x, self.rect_size.y);
+            sdf.line_to(0, self.rect_size.y);
+            sdf.line_to(0, 0);
+            sdf.fill(#0002);
+           
             sdf.move_to(self.line_start.x , self.line_start.y);
             sdf.line_to(self.line_end.x , self.line_end.y);
             sdf.stroke(self.color,self.width);
             
+
+
             return sdf.result
 
             //return #ff0
@@ -94,6 +101,7 @@ pub struct LineChart {
     #[walk] walk: Walk,
     #[live] draw_ls: DrawLineSegment,
     #[live] draw_ball: Ball,
+    #[live] draw_text: Label,
     #[rust] area: Area,
     #[rust] _screen_view: Rect,
     #[rust] _data_view: Rect,
@@ -105,7 +113,8 @@ pub struct LineChart {
     #[rust(false)] start_hover: bool,
     
     #[rust(false)] end_hover: bool,
-    #[rust(0.0)] slider_value: f64
+    #[rust(0.0)] width_slider_value: f64,
+    #[rust(0.0)] pixel_slider_value: f64
 
 }
 
@@ -153,9 +162,9 @@ impl LineChart {
         // lets draw a bunch of quads
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
 
-            
-       self.line_width = self.slider_value.powf(2.0) * 60. + 0.5;
 
+        self.line_width = self.width_slider_value.powf(2.0) * 160. + 0.5;
+        let maxpixels = self.pixel_slider_value * 2000.0+10.;
 
         /*if true{
         let r = Rect{
@@ -171,8 +180,6 @@ impl LineChart {
         self.draw_ls.width = (self.line_width as f32)*1.3;
         self.draw_ls.color = vec4(0.6,0.6,0.0,0.30);
 
-
-        
        
         self.draw_ls.draw_abs(cx, r);
     }
@@ -196,8 +203,8 @@ impl LineChart {
         self.draw_ball.draw_abs(cx, r);
 
     }
-
-        let hw = self.line_width / 2.;
+    
+         let hw = self.line_width / 2.;
         self.draw_ls.width = hw as f32;
         self.draw_ls.color = vec4(1.,1.,0.2,1.0);
        
@@ -209,6 +216,8 @@ impl LineChart {
                 pos: dvec2(min(self.line_start.x , self.line_end.x) -hw ,min(self.line_start.y, self.line_end.y) -hw ),
                 size: dvec2(linerect.x.abs() + self.line_width, linerect.y.abs() + self.line_width)
             };
+
+         
             self.draw_ls.line_start = (self.line_start - r.pos).into_vec2();
             self.draw_ls.line_end = (self.line_end - r.pos).into_vec2();
             
@@ -229,60 +238,86 @@ impl LineChart {
                 std::mem::swap(&mut actualstart, &mut actualend);
             }
             let delta = actualend - actualstart;
-            let normalizedelta = delta.normalize_to_x();
+            let normalizedelta = delta.normalize();
+          
+            let xnormalizedelta = delta.normalize_to_x();
           
             let abslinerect = dvec2(delta.x.abs(), delta.y.abs());
-            let maxpixels = 300.0;
+           
             
-            let normalizedarea =( normalizedelta.x * normalizedelta.y).abs();
-
+            let normalizedarea =(xnormalizedelta.x * xnormalizedelta.y).abs();
             let scaledup = (maxpixels / normalizedarea).sqrt();
+          
 
-            let numblocks = (abslinerect.x / scaledup).ceil();
-            let blockwidth = (abslinerect.x / (numblocks as f64));
+            let angle = delta.angle_in_radians();
+            let tanangle = angle.tan();
+
+            let clocktang = normalizedelta.clockwise_tangent();
+
+            let circlepoint = clocktang * hw;
+            let overside = hw - circlepoint.y;
+            let aanliggend = overside / tanangle;
+            let backoffset = circlepoint.x.abs() -aanliggend.abs();
+
+//println!("{} {:.1} {:.1} {:.1} {:.1}", angle, clocktang.x, clocktang.y, self.line_start + clocktan * hw, self.line_start);
+
+
+let rectstart = Rect{
+    pos:actualstart - dvec2(hw ,hw ),
+    size: dvec2(hw  - backoffset,self.line_width)                
+};
+let rectend = Rect{
+    pos:actualend - dvec2(-backoffset,hw  ),
+    size: dvec2(hw - backoffset,self.line_width)
+
+};
+let miny =min( rectstart.pos.y, rectend.pos.y);
+let maxy =max(rectend.pos.y + rectend.size.y, rectstart.pos.y + rectstart.size.y);
+
+
+
+let innerwidth =  rectend.pos.x  - (rectstart.pos.x + rectstart.size.x);  
+let numblocks = (innerwidth / scaledup).ceil();
+            let blockwidth = innerwidth / (numblocks as f64);
 
             
-            let step = dvec2(blockwidth, normalizedelta.y*blockwidth);
-            let mut adjust = self.line_width/2. + 3.;
-            if step.y<0. { adjust = adjust -step.y;}
-            let blockheight  = step.y.abs() + self.line_width + 6.;
+            let step = dvec2(blockwidth, xnormalizedelta.y*blockwidth);
+            let mut adjust = -backoffset*2. * xnormalizedelta.y;
+            if step.y<0. { adjust = step.y;}
+            let blockheight  = self.line_width  / angle.cos() + step.y.abs() ;
            
             self.draw_ls.color = vec4(0.9,0.9,0.0,1.0);
            self.draw_ls.width = hw as f32;
-       
-            for i in 0..(numblocks.ceil() as i32) as i32{
-                let r = Rect{
-                    pos:actualstart + dvec2(step.x * (i as f64),step.y * (i as f64)  - adjust),
+       let segmentstart = dvec2(rectstart.pos.x + rectstart.size.x, rectstart.pos.y  + adjust);
+            for i in 0..(numblocks as i32) as i32{
+                let mut r = Rect{
+                    pos:segmentstart + dvec2(step.x * (i as f64),step.y * (i as f64) ),
                     size: dvec2(blockwidth,blockheight)
                 
                 };
+                r.clip_y_between(miny, maxy);
+
                 self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
                 self.draw_ls.line_end = (actualend - r.pos).into_vec2();
                 
                 self.draw_ls.draw_abs(cx, r);
             }
-            {
-                let r = Rect{
-                    pos:actualstart - dvec2(hw + 3.,hw + 3. ),
-                    size: dvec2(hw+3.,self.line_width+6.)
+            
+              
+            
+
+                self.draw_ls.line_start = (actualstart - rectstart.pos).into_vec2();
+                self.draw_ls.line_end = (actualend - rectstart.pos).into_vec2();
+             
+                self.draw_ls.draw_abs(cx, rectstart);
+            
+            
                 
-                };
-                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
-                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
+                self.draw_ls.line_start = (actualstart - rectend.pos).into_vec2();
+                self.draw_ls.line_end = (actualend - rectend.pos).into_vec2();
                 
-                self.draw_ls.draw_abs(cx, r);
-            }
-            {
-                let r = Rect{
-                    pos:actualend - dvec2(0.,hw + 3. ),
-                    size: dvec2(hw+3.,self.line_width+6.)
-                
-                };
-                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
-                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
-                
-                self.draw_ls.draw_abs(cx, r);
-            }
+                self.draw_ls.draw_abs(cx, rectend);
+            
         }
         else {
             let mut actualstart =self.line_start;
@@ -298,8 +333,6 @@ impl LineChart {
             let normalizedelta = delta.normalize_to_y();
           
             let abslinerect = dvec2(delta.x.abs(), delta.y.abs());
-            let maxpixels = 300.0;
-            
             let normalizedarea =( normalizedelta.x * normalizedelta.y).abs();
 
             let scaledup = (maxpixels / normalizedarea).sqrt();
@@ -417,10 +450,19 @@ impl LineChart {
 pub struct LineChartRef(WidgetRef);
 
 impl LineChartRef {
-    pub fn set_slider_value(&self, _cx:&mut Cx, val:f64){
+    pub fn set_width_slider_value(&self, _cx:&mut Cx, val:f64){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.slider_value = val;
-            log!("SLIDER VALUE {}", val)
+            inner.width_slider_value = val;
+         
+            
+            
+        }
+    }
+
+    pub fn set_pixel_slider_value(&self, _cx:&mut Cx, val:f64){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.pixel_slider_value = val;
+          
             
             
         }
