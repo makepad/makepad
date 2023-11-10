@@ -130,6 +130,23 @@ impl Rect {
         }
     }
 
+    pub fn clip_x_between(&mut self, x1: f64, x2: f64)
+    {
+        if self.pos.x < x1
+        {
+            let diff = x1 - self.pos.x;
+            self.pos.x = x1;
+            self.size.x = self.size.x - diff;
+        }
+
+        if (self.pos.x + self.size.x) > x2
+        {
+            let diff = x2 - (self.pos.x + self.size.x);
+            self.size.x  = self.size.x + diff; 
+        }
+    }
+
+
     pub fn is_nan(&self)->bool{
         self.pos.is_nan() || self.size.is_nan()
     }
