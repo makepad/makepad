@@ -1,3 +1,5 @@
+use std::f64::consts::PI;
+
 use {
     std::{fmt, ops},
     crate::math_f32::*,
@@ -105,6 +107,29 @@ impl Rect {
         }
     }
     
+    pub fn grow(&mut self, amt:f64){
+        self.pos.x = self.pos.x - amt;
+        self.pos.y = self.pos.y - amt;
+        self.size.x = self.size.x + amt * 2.;
+        self.size.y = self.size.y + amt * 2.;
+    }
+
+    pub fn clip_y_between(&mut self, y1: f64, y2: f64)
+    {
+        if self.pos.y < y1
+        {
+            let diff = y1 - self.pos.y;
+            self.pos.y = y1;
+            self.size.y = self.size.y - diff;
+        }
+
+        if (self.pos.y + self.size.y) > y2
+        {
+            let diff = y2 - (self.pos.y + self.size.y);
+            self.size.y  = self.size.y + diff; 
+        }
+    }
+
     pub fn is_nan(&self)->bool{
         self.pos.is_nan() || self.size.is_nan()
     }
@@ -200,6 +225,14 @@ impl DVec2 {
         (dx * dx + dy * dy).sqrt()
     }
     
+    pub fn angle_in_radians(&self) -> f64 {
+        self.y.atan2(self.x)
+    }
+    
+    pub fn angle_in_degrees(&self) -> f64 {
+        self.y.atan2(self.x) * (360.0 / (2.* std::f64::consts::PI))
+    }
+
     pub fn length(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
@@ -209,6 +242,17 @@ impl DVec2 {
         if l == 0.0 {return dvec2(0.,0.);}
         return dvec2(self.x/l, self.y/l);
     }
+
+    pub fn clockwise_tangent(&self) -> DVec2
+   {
+        return dvec2(-self.y, self.x)
+    }
+
+    pub fn counterclockwise_tangent(&self) -> DVec2
+    {
+         return dvec2(self.y, -self.x)
+     }
+
     pub fn normalize_to_x(&self) -> DVec2
     {
         let l  = self.x;
