@@ -141,6 +141,15 @@ impl Vec2 {
         (dx * dx + dy * dy).sqrt()
     }
     
+    pub fn angle_in_radians(&self) -> f32 {
+        self.y.atan2(self.x)
+    }
+    
+    pub fn angle_in_degrees(&self) -> f32 {
+        self.y.atan2(self.x) * (360.0 / (2. * std::f32::consts::PI))
+    }
+
+
     pub fn length(&self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
