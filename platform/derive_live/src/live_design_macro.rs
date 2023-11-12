@@ -190,7 +190,28 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                         let start = lc_from_start(span);
                         delta_whitespace(last_end.unwrap(), start, out);
                     }
-                    out.push_str(&tt.to_string());
+                    let is_string = {
+                        let mut is_string = false;
+                        if let TokenTree::Literal(lit) = tt {
+                            if let Some('"') = lit.to_string().chars().next() {
+                                is_string = true;
+                            }
+                        }
+                        is_string
+                    };
+                    if is_string {
+                        let content = tt.to_string();
+                        let re = regex::Regex::new(r"\\u\{([0-9a-fA-F]+)\}").unwrap();
+
+                        let replaced = re.replace_all(&content, |caps: &regex::Captures| {
+                            let hex = &caps[1];
+                            let codepoint = u32::from_str_radix(hex, 16).unwrap();
+                            std::char::from_u32(codepoint).unwrap().to_string()
+                        });
+                        out.push_str(&replaced);
+                    } else {
+                        out.push_str(&tt.to_string());
+                    }
                     
                     *last_end = Some(lc_from_end(span));
                 }

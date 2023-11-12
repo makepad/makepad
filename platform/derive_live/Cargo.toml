@@ -15,4 +15,4 @@ proc-macro = true
 [dependencies]
 makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "0.4.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "0.4.0" }
-
+regex = "1.10.2"
