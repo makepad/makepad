@@ -38,7 +38,7 @@ mod debug;
 mod component_map;
 mod performance_stats;
 mod web_socket;
-
+pub mod studio;
 pub mod audio_stream;
 
 mod media_api;

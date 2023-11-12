@@ -30,7 +30,9 @@ pub struct PromptPreset {
     pub width: u32,
     pub height: u32,
     pub steps: u32,
-    pub base_cfg: f64,
+    pub cfg: f64,
+    pub denoise: f64,
+    /*
     pub refiner_cfg: f64,
     pub positive_score: f64,
     pub negative_score: f64,
@@ -42,7 +44,7 @@ pub struct PromptPreset {
     pub upscale_start_step: u32,
     pub upscale_end_step: u32,
     pub scale: f64,
-    pub total_steps: u32
+    pub total_steps: u32*/
 }
 
 
@@ -61,9 +63,9 @@ impl Prompt {
             .bytes_append(&self.preset.width.to_be_bytes())
             .bytes_append(&self.preset.height.to_be_bytes())
             .bytes_append(&self.preset.steps.to_be_bytes())
-            .bytes_append(&self.preset.base_cfg.to_be_bytes())
-            .bytes_append(&self.preset.refiner_cfg.to_be_bytes())
-            .bytes_append(&self.preset.positive_score.to_be_bytes())
+            .bytes_append(&self.preset.cfg.to_be_bytes())
+            .bytes_append(&self.preset.denoise.to_be_bytes())
+            /*.bytes_append(&self.preset.positive_score.to_be_bytes())
             .bytes_append(&self.preset.negative_score.to_be_bytes())
             .bytes_append(&self.preset.base_start_step.to_be_bytes())
             .bytes_append(&self.preset.base_end_step.to_be_bytes())
@@ -72,7 +74,7 @@ impl Prompt {
             .bytes_append(&self.preset.upscale_steps.to_be_bytes())
             .bytes_append(&self.preset.upscale_start_step.to_be_bytes())
             .bytes_append(&self.preset.upscale_end_step.to_be_bytes())
-            .bytes_append(&self.preset.scale.to_be_bytes())
+            .bytes_append(&self.preset.scale.to_be_bytes())*/
     }
 }
 
