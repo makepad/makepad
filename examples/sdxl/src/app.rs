@@ -134,8 +134,6 @@ live_design!{
         }
     }
     
-    
-    
     BarButton = <Button> {
         padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
         margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
@@ -592,8 +590,8 @@ live_design!{
                                     text: "Batch size"
                                 }
                                 batch_mode_dropdown = <SdxlDropDown> {
-                                    selected_item: 5
-                                    labels: ["1", "2", "3", "4", "5", "6", "10000"]
+                                    selected_item: 0
+                                    labels: ["0", "1", "2", "3", "4", "5", "6", "10000"]
                                 }
                                 
                                 <BarLabel> {
@@ -693,11 +691,11 @@ live_design!{
                                         flow: Down
                                         settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
                                         settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
-                                        settings_steps = <SettingsInput> {label = {text: "steps:"}, input = {text: "20"}}
-                                        settings_scale = <SettingsInput> {label = {text: "scale:"}, input = {text: "0.5"}}
-                                        settings_total_steps = <SettingsInput> {label = {text: "total(0):"}, input = {text: "32"}}
+                                        settings_steps = <SettingsInput> {label = {text: "steps:"}, input = {text: "4"}}
+                                        settings_cfg = <SettingsInput> {label = {text: "cfg:"}, input = {text: "1.8"}}
+                                        settings_denoise = <SettingsInput> {label = {text: "denoise:"}, input = {text: "0.85"}}
                                     }
-                                    <View> {
+                                   /* <View> {
                                         width: Fit,
                                         height: Fit,
                                         margin: {top: 10},
@@ -725,7 +723,7 @@ live_design!{
                                         settings_upscale_steps = <SettingsInput> {label = {text: "upscale_steps:"}, input = {text: "31"}}
                                         settings_upscale_start_step = <SettingsInput> {label = {text: "upscale_start_step:"}, input = {text: "29"}}
                                         settings_upscale_end_step = <SettingsInput> {label = {text: "upscale_end_step:"}, input = {text: "1000"}}
-                                    }
+                                    }*/
                                     /*
                                     <View> {
                                         width: Fill, height: Fit, margin: {top: 10},
@@ -929,16 +927,16 @@ impl Workflow {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-        Machine::new("DESKTOP-1:8188", id_lut!(m1)),
+        /*Machine::new("DESKTOP-1:8188", id_lut!(m1)),
         Machine::new("DESKTOP-2:8188", id_lut!(m2)),
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
-        Machine::new("DESKTOP-4:8188", id_lut!(m4)),
-        Machine::new("DESKTOP-7:8188", id_lut!(m5)),
-        Machine::new("DESKTOP-8:8188", id_lut!(m6))
+        Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
+        Machine::new("DESKTOP-7:8188", id_lut!(m1)),
+       /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
-        Workflow::new("hd")
+        Workflow::new("lcm")
     ])] workflows: Vec<Workflow>,
     
     #[rust] todo: Vec<PromptState>,
@@ -984,29 +982,16 @@ impl App {
             
             let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.prompt.preset.workflow)).unwrap();
             let ws = ws.replace("CLIENT_ID", "1234");
-            let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
-            let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
+            let ws = ws.replace("POSITIVE_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
             let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
             let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
             
-            let ws = ws.replace("1344", &format!("{}", prompt_state.prompt.preset.width));
-            let ws = ws.replace("768", &format!("{}", prompt_state.prompt.preset.height));
+            //let ws = ws.replace("1344x768_gray.png", "1344x768_gray.png");
+            //let ws = ws.replace("768", &format!("{}", prompt_state.prompt.preset.height)); 
             
-            let ws = ws.replace("\"steps\": 23", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
-            let ws = ws.replace("\"scale_by\": 0.7117466517857182", &format!("\"scale_by\": {}", prompt_state.prompt.preset.scale));
-            let ws = ws.replace("\"cfg\": 8.5", &format!("\"cfg\": {}", prompt_state.prompt.preset.base_cfg));
-            let ws = ws.replace("\"ascore\": 6", &format!("\"ascore\": {}", prompt_state.prompt.preset.positive_score));
-            let ws = ws.replace("\"ascore\": 2", &format!("\"ascore\": {}", prompt_state.prompt.preset.negative_score));
-            
-            let ws = ws.replace("\"start_at_step\": 0", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.base_start_step));
-            let ws = ws.replace("\"end_at_step\": 27", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.base_end_step));
-            let ws = ws.replace("\"start_at_step\": 27", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.refiner_start_step));
-            let ws = ws.replace("\"end_at_step\": 1000", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.refiner_end_step));
-            
-            let ws = ws.replace("\"steps\": 30", &format!("\"steps\": {}", prompt_state.prompt.preset.upscale_steps));
-            let ws = ws.replace("\"start_at_step\": 29", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.upscale_start_step));
-            let ws = ws.replace("\"end_at_step\": 999", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.upscale_end_step));
-            
+            let ws = ws.replace("\"steps\": 4", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
+            let ws = ws.replace("\"cfg\": 1.7", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
+             let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
             request.set_metadata_id(machine.id);
             request.set_body(ws.as_bytes().to_vec());
             Self::update_progress(cx, &self.ui, machine.id, true, 0, 1);
@@ -1161,19 +1146,8 @@ impl App {
             width: self.ui.text_input(id!(settings_width.input)).text().parse::<u32>().unwrap_or(1344),
             height: self.ui.text_input(id!(settings_height.input)).text().parse::<u32>().unwrap_or(768),
             steps: self.ui.text_input(id!(settings_steps.input)).text().parse::<u32>().unwrap_or(20),
-            base_cfg: self.ui.text_input(id!(settings_base_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
-            refiner_cfg: self.ui.text_input(id!(settings_refiner_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
-            positive_score: self.ui.text_input(id!(settings_pos_score.input)).text().parse::<f64>().unwrap_or(6.0),
-            negative_score: self.ui.text_input(id!(settings_neg_score.input)).text().parse::<f64>().unwrap_or(2.0),
-            base_start_step: self.ui.text_input(id!(settings_base_start_step.input)).text().parse::<u32>().unwrap_or(0),
-            base_end_step: self.ui.text_input(id!(settings_base_end_step.input)).text().parse::<u32>().unwrap_or(20),
-            refiner_start_step: self.ui.text_input(id!(settings_refiner_start_step.input)).text().parse::<u32>().unwrap_or(20),
-            refiner_end_step: self.ui.text_input(id!(settings_refiner_end_step.input)).text().parse::<u32>().unwrap_or(1000),
-            upscale_start_step: self.ui.text_input(id!(settings_upscale_start_step.input)).text().parse::<u32>().unwrap_or(20),
-            upscale_end_step: self.ui.text_input(id!(settings_upscale_end_step.input)).text().parse::<u32>().unwrap_or(1000),
-            upscale_steps: self.ui.text_input(id!(settings_upscale_steps.input)).text().parse::<u32>().unwrap_or(31),
-            scale: self.ui.text_input(id!(settings_scale.input)).text().parse::<f64>().unwrap_or(0.5),
-            total_steps: self.ui.text_input(id!(settings_total_steps.input)).text().parse::<u32>().unwrap_or(20),
+            cfg: self.ui.text_input(id!(settings_cfg.input)).text().parse::<f64>().unwrap_or(1.8),
+            denoise: self.ui.text_input(id!(settings_denoise.input)).text().parse::<f64>().unwrap_or(1.0),
         }
     }
     
@@ -1182,7 +1156,9 @@ impl App {
         self.ui.text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
         self.ui.text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
         self.ui.text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
-        self.ui.text_input(id!(settings_base_cfg.input)).set_text(&format!("{}", preset.base_cfg));
+        self.ui.text_input(id!(settings_cfg.input)).set_text(&format!("{}", preset.cfg));
+        self.ui.text_input(id!(settings_denoise.input)).set_text(&format!("{}", preset.denoise));
+        /*
         self.ui.text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
         self.ui.text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
         self.ui.text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
@@ -1194,7 +1170,7 @@ impl App {
         self.ui.text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
         self.ui.text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
         self.ui.text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
-        self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));
+        self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));*/
     }
     
     fn render(&mut self, cx: &mut Cx, batch_size: usize) {
@@ -1202,11 +1178,11 @@ impl App {
         let negative = self.ui.text_input(id!(negative)).text();
         
         //self.todo.clear();
-        if batch_size != 1 {
+        if batch_size != 0 {
             self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
             self.update_seed_display(cx);
         }
-        for i in 0..batch_size {
+        for i in 0..batch_size.max(1) {
             self.send_prompt(cx, PromptState {
                 //total_steps: self.ui.get_text_input(id!(settings_total.input)).get_text().parse::<usize>().unwrap_or(32),
                 prompt: Prompt {
@@ -1217,7 +1193,7 @@ impl App {
                 //workflow: workflow.clone(),
                 seed: self.last_seed as u64
             });
-            if batch_size != 1 {
+            if batch_size != 0 {
                 self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0 + i as u64;
                 self.update_seed_display(cx);
             }
@@ -1300,7 +1276,7 @@ impl App {
                                         let id =self.machines[m].id;
                                         if let Some(running) = &mut self.machines[m].running {
                                             running.steps_counter += 1;
-                                            Self::update_progress(cx, &self.ui, id, true, running.steps_counter, running.prompt_state.prompt.preset.total_steps as usize);
+                                            //Self::update_progress(cx, &self.ui, id, true, running.steps_counter, //running.prompt_state.prompt.preset.total_steps as usize);
                                         }
                                         //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
                                     }
@@ -1329,7 +1305,7 @@ impl App {
                                     
                                     // lets write our image to disk properly
                                     //self.current_image = Some(
-                                    fetching.prompt_state.prompt.preset.total_steps = fetching.steps_counter as u32;
+                                    //fetching.prompt_state.prompt.preset.total_steps = fetching.steps_counter as u32;
                                     let image_id = self.db.add_png_and_prompt(fetching.prompt_state, data);
                                     // scroll by one item
                                     let first_id = image_list.first_id();
