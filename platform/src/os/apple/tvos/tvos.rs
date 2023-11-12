@@ -18,7 +18,7 @@ use {
                     tvos_event::TvosEvent,
                     tvos_app::{TvosApp, init_tvos_app_global,get_tvos_app_global}
                 },
-                ns_url_session::{make_http_request},
+                url_session::{make_http_request},
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
