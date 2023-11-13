@@ -5,11 +5,12 @@ use {
     std::ffi::CString,
     std::os::raw::{c_void},
     std::time::{Instant, Duration},
-    std::sync::mpsc,
+    std::sync::{Arc, Mutex, mpsc},
     std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
         android_decoding::CxAndroidDecoding,
+        android_web_socket::CxWebSockets,
         jni_sys::jobject,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
@@ -57,6 +58,7 @@ use {
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
+        web_socket::CxWebSocketsApi,
     }
 };
 
@@ -267,26 +269,36 @@ impl Cx {
                     FromJavaMessage::WebSocketMessage {request_id, message} => {
                         let mut ws_message_parser = WebSocket::new();
                         ws_message_parser.parse(&message, | result | {
+                            crate::log!("Hay algo!");
                             match result {
                                 Ok(WebSocketMessage::Text(text_msg)) => {
-                                    let e = Event::NetworkResponses(vec![
-                                        NetworkResponseEvent {
-                                            request_id: LiveId(request_id),
-                                            response: NetworkResponse::WebSocketString(text_msg.to_string())
-                                        }
-                                    ]);
+                                    crate::log!("Hay texto! {}", text_msg);
+                                    self.put_received_message_for_websocket(
+                                        LiveId(request_id),
+                                        crate::web_socket::WebSocketMessage::String(text_msg.to_string())
+                                    );
+                                    // let e = Event::NetworkResponses(vec![
+                                    //     NetworkResponseEvent {
+                                    //         request_id: LiveId(request_id),
+                                    //         response: NetworkResponse::WebSocketString(text_msg.to_string())
+                                    //     }
+                                    // ]);
             
-                                    self.call_event_handler(&e);
+                                    // self.call_event_handler(&e);
                                 },
                                 Ok(WebSocketMessage::Binary(data)) => {
-                                    let e = Event::NetworkResponses(vec![
-                                        NetworkResponseEvent {
-                                            request_id: LiveId(request_id),
-                                            response: NetworkResponse::WebSocketBinary(data.to_vec())
-                                        }
-                                    ]);
+                                    self.put_received_message_for_websocket(
+                                        LiveId(request_id),
+                                        crate::web_socket::WebSocketMessage::Binary(data.to_vec())
+                                    );
+                                    // let e = Event::NetworkResponses(vec![
+                                    //     NetworkResponseEvent {
+                                    //         request_id: LiveId(request_id),
+                                    //         response: NetworkResponse::WebSocketBinary(data.to_vec())
+                                    //     }
+                                    // ]);
 
-                                    self.call_event_handler(&e);
+                                    // self.call_event_handler(&e);
                                 },
                                 Err(e) => {
                                     println!("Websocket message parse error {:?}", e);
@@ -296,22 +308,22 @@ impl Cx {
                         });
                     }
                     FromJavaMessage::WebSocketClosed {request_id} => {
-                        let e = Event::NetworkResponses(vec![
-                            NetworkResponseEvent {
-                                request_id: LiveId(request_id),
-                                response: NetworkResponse::WebSocketClose
-                            }
-                        ]);
-                        self.call_event_handler(&e);
+                        // let e = Event::NetworkResponses(vec![
+                        //     NetworkResponseEvent {
+                        //         request_id: LiveId(request_id),
+                        //         response: NetworkResponse::WebSocketClose
+                        //     }
+                        // ]);
+                        // self.call_event_handler(&e);
                     }
                     FromJavaMessage::WebSocketError {request_id, error} => {
-                        let e = Event::NetworkResponses(vec![
-                            NetworkResponseEvent {
-                                request_id: LiveId(request_id),
-                                response: NetworkResponse::WebSocketError(error)
-                            }
-                        ]);
-                        self.call_event_handler(&e);
+                        // let e = Event::NetworkResponses(vec![
+                        //     NetworkResponseEvent {
+                        //         request_id: LiveId(request_id),
+                        //         response: NetworkResponse::WebSocketError(error)
+                        //     }
+                        // ]);
+                        // self.call_event_handler(&e);
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -412,6 +424,10 @@ impl Cx {
     
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
         let (from_java_tx, from_java_rx) = mpsc::channel();
+
+        std::panic::set_hook(Box::new(|info| {
+            crate::makepad_error_log::log!("Custom panic hook: {}", info);
+        }));
         
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
         
@@ -733,21 +749,21 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
-                CxOsOp::WebSocketOpen {request_id, request} => {
-                    unsafe {android_jni::to_java_websocket_open(request_id, request);}
-                },
-                CxOsOp::WebSocketSendString{request_id, data} => {
-                    let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
-                    let frame = WebSocket::build_message(header, &data.into_bytes());
+                // CxOsOp::WebSocketOpen {request_id, request} => {
+                //     unsafe {android_jni::to_java_websocket_open(request_id, request);}
+                // },
+                // CxOsOp::WebSocketSendString{request_id, data} => {
+                //     let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
+                //     let frame = WebSocket::build_message(header, &data.into_bytes());
 
-                    unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
-                },
-                CxOsOp::WebSocketSendBinary{request_id, data} => {
-                    let header = MessageHeader::from_len(data.len(), MessageFormat::Binary, true);
-                    let frame = WebSocket::build_message(header, &data);
+                //     unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
+                // },
+                // CxOsOp::WebSocketSendBinary{request_id, data} => {
+                //     let header = MessageHeader::from_len(data.len(), MessageFormat::Binary, true);
+                //     let frame = WebSocket::build_message(header, &data);
 
-                    unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
-                },
+                //     unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
+                // },
                 CxOsOp::InitializeVideoDecoding(video_id, video) => {
                     unsafe {
                         let env = attach_jni_env();
@@ -777,7 +793,14 @@ impl Cx {
         }
         EventFlow::Poll
     }
-    
+
+    fn put_received_message_for_websocket(&mut self, request_id: LiveId, message: crate::web_socket::WebSocketMessage) {
+        if let Some(sender_mutex) = self.os.web_sockets.active_websocket_senders.get(&request_id) {
+            if let Ok(mut sender) = sender_mutex.lock() {
+                sender.send(message).unwrap();
+            }
+        }
+    }
 }
 
 impl CxOsApi for Cx {
@@ -799,11 +822,9 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             keyboard_closed: 0.0,
-            //keyboard_visible: false,
-            //keyboard_trigger_position: DVec2::default(),
-            //keyboard_panning_offset: 0,
             media: CxAndroidMedia::default(),
             decoding: CxAndroidDecoding::default(),
+            web_sockets: CxWebSockets::default(),
             display: None,
             quit: false,
             fullscreen: false,
@@ -824,15 +845,10 @@ pub struct CxAndroidDisplay {
 
 
 pub struct CxOs {
-//    pub time_start: Instant,
-//    pub last_time: Instant,
     pub first_after_resize: bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub keyboard_closed: f64,
-    //pub keyboard_visible: bool,
-    //pub keyboard_trigger_position: DVec2,
-    //pub keyboard_panning_offset: i32,
     
     pub quit: bool,
     pub fullscreen: bool,
@@ -840,6 +856,7 @@ pub struct CxOs {
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
     pub (crate) decoding: CxAndroidDecoding,
+    pub (crate) web_sockets: CxWebSockets,
 }
 
 impl CxAndroidDisplay {
@@ -880,5 +897,21 @@ impl CxAndroidDisplay {
         );
         
         assert!(res != 0);
+    }
+}
+
+impl CxWebSocketsApi for Cx {
+    // TODO improve crate::web_socket::WebSocket
+    fn websocket_open(&mut self, request: HttpRequest)->crate::web_socket::WebSocket{
+        let web_socket = crate::web_socket::WebSocket::open(request);
+
+        let sender = Arc::new(Mutex::new(web_socket.os.sender.clone()));
+
+        self.os.web_sockets.active_websocket_senders.insert(
+            web_socket.os.request_id,
+            sender
+        );
+
+        web_socket
     }
 }

@@ -122,6 +122,12 @@ fn send_from_java_message(message: FromJavaMessage) {
     MESSAGES_TX.with(|tx| {
         let mut tx = tx.borrow_mut();
         tx.as_mut().unwrap().send(message).unwrap();
+        // match tx.as_mut().unwrap().send(message) {
+        //     Ok(res) => res,
+        //     Err(e) => {
+        //         crate::log!("Error sending message to java: {:?}", e);
+        //     }
+        // };
     })
 }
 
