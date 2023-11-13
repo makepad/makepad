@@ -256,7 +256,7 @@ impl Cx {
                         response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
                     });
                 }
-                
+                /*
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
@@ -293,7 +293,7 @@ impl Cx {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
-                }
+                }*/
                 live_id!(ToWasmLiveFileChange)=>{
                     let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
                     // live file change. lets do it.
@@ -471,6 +471,7 @@ impl Cx {
                         body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
                     });
                 },
+                /*
                 CxOsOp::WebSocketOpen{request_id, request}=>{
                     let headers = request.get_headers_string();
                     self.os.from_wasm(FromWasmWebSocketOpen {
@@ -495,7 +496,7 @@ impl Cx {
                         request_id_hi: request_id.hi(),
                         data
                     });
-                },
+                },*/
                 CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
                 CxOsOp::CleanupVideoDecoding(_) => todo!(),
@@ -536,11 +537,11 @@ impl CxOsApi for Cx {
             ToWasmHttpRequestError::to_js_code(),
             ToWasmHttpResponseProgress::to_js_code(),
             ToWasmHttpUploadProgress::to_js_code(),
-            ToWasmWebSocketOpen::to_js_code(),
+            /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
             ToWasmWebSocketString::to_js_code(),
-            ToWasmWebSocketBinary::to_js_code(),
+            ToWasmWebSocketBinary::to_js_code(),*/
             ToWasmSignal::to_js_code(),
             ToWasmMidiInputData::to_js_code(),
             ToWasmMidiPortList::to_js_code(),
@@ -562,9 +563,9 @@ impl CxOsApi for Cx {
             FromWasmHideTextIME::to_js_code(),
             FromWasmCreateThread::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
-            FromWasmWebSocketOpen::to_js_code(),
+            /*FromWasmWebSocketOpen::to_js_code(),
             FromWasmWebSocketSendString::to_js_code(),
-            FromWasmWebSocketSendBinary::to_js_code(),
+            FromWasmWebSocketSendBinary::to_js_code(),*/
             FromWasmXrStartPresenting::to_js_code(),
             FromWasmXrStopPresenting::to_js_code(),
             

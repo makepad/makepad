@@ -140,6 +140,12 @@ impl ImageRef {
             inner.texture = texture
         }
     }
+    
+    pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.draw_bg.set_uniform(cx, uniform, value);
+        }
+    }    
 }
 
 #[derive(Clone, Default, WidgetSet)]
