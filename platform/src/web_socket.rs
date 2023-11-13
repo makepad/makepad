@@ -2,8 +2,12 @@ use crate::os::OsWebSocket;
 use crate::event::HttpRequest;
 use std::sync::mpsc::{TryRecvError,RecvError};
 
+pub trait CxWebSocketsApi {
+    fn websocket_open(&mut self, request: HttpRequest)->WebSocket;
+}
+
 pub struct WebSocket{
-    os: OsWebSocket
+    pub os: OsWebSocket
 }
 
 pub enum WebSocketMessage{
