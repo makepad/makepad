@@ -6,44 +6,31 @@ live_design! {
     import makepad_draw::shader::std::*;
 
     DrawLineSegment = {{DrawLineSegment}} {
-        fn pixel(self) -> vec4 {
-            //return mix(#f00,#0f0, left+0.5);
+        fn pixel(self) -> vec4 
+        {
+            
             let pixelpos = self.pos * self.rect_size;
+            let b = self.line_end;
+            let a = self.line_start;
+            let p = pixelpos;
 
+            let ba = b-a;
+            let pa = p-a;
+            let h =clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
+            let dist= length(pa-h*ba)
+         
+            let linemult = smoothstep(self.width-1., self.width, dist);
 
-
-            let sdf = Sdf2d::viewport(pixelpos);
-            // first we darw a line from min to max
-            // then we draw a box from open to close
-
-
-
-            sdf.move_to(0.0,0.0);
-            sdf.line_to(self.rect_size.x, 0);
-            sdf.line_to(self.rect_size.x, self.rect_size.y);
-            sdf.line_to(0, self.rect_size.y);
-            sdf.line_to(0, 0);
-            sdf.fill(#0002);
-
-            sdf.move_to(self.line_start.x , self.line_start.y);
-            sdf.line_to(self.line_end.x , self.line_end.y);
-            sdf.stroke(self.color,self.width);
-
-
-
-            return sdf.result
-
-            //return #ff0
+            return vec4(self.color.xyz*abs(smoothstep(-0.1,0.1,sin(h*6.283*8.)))*(1.-linemult),1.0-linemult);
         }
     }
 
     Ball = {{Ball}} {
         fn pixel(self) -> vec4 {
-            //return mix(#f00,#0f0, left+0.5);
+           
             let pixelpos = self.pos * self.rect_size;
             let sdf = Sdf2d::viewport(pixelpos);
-            // first we darw a line from min to max
-            // then we draw a box from open to close
+           
 
 
             sdf.move_to(0.0,0.0);
@@ -111,9 +98,9 @@ pub struct LineChart {
     _data_view: Rect,
     #[live(15.0)]
     line_width: f64,
-    #[rust(dvec2(10., 10.))]
+    #[rust(dvec2(1050., 10.))]
     line_start: DVec2,
-    #[rust(dvec2(1000., 240.))]
+    #[rust(dvec2(1000., 440.))]
     line_end: DVec2,
     #[rust(dvec2(1000., 140.))]
     line_dragstart: DVec2,
@@ -175,7 +162,7 @@ impl LineChart {
         // lets draw a bunch of quads
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
 
-        self.line_width = self.width_slider_value.powf(2.0) * 160. + 0.5;
+        self.line_width = self.width_slider_value.powf(2.0) * 160. + 10.5;
         let maxpixels = self.pixel_slider_value * 2000.0 + 10.;
 
         /*if true{
@@ -327,32 +314,25 @@ impl LineChart {
             if actualend.y < actualstart.y {
                 std::mem::swap(&mut actualstart, &mut actualend);
             }
-
             let delta = actualend - actualstart;
             let normalizedelta = delta.normalize();
             let ynormalizedelta = delta.normalize_to_y();
             let normalizedarea = (ynormalizedelta.x * ynormalizedelta.y).abs();
             let scaledup = (maxpixels / normalizedarea).sqrt();
-            
-            let angle = delta.angle_in_radians();
-            let tanangle = angle.tan();
-
-            let clocktang = normalizedelta.clockwise_tangent();
-
-            let circlepoint = clocktang * hw;
-            let aanliggend = hw - circlepoint.x;
-            let overstaand = aanliggend / tanangle;
-            let backoffset = circlepoint.y.abs() - overstaand.abs();
-
-            //println!("{} {:.1} {:.1} {:.1} {:.1}", angle, clocktang.x, clocktang.y, self.line_start + clocktan * hw, self.line_start);
+            let angle =  delta.angle_in_radians() - std::f64::consts::PI/2.;
+            let tanangle = angle.tan();  
+            let circlepoint = normalizedelta * hw;
+            let overside = hw - circlepoint.y;
+            let aanliggend = overside / tanangle;
+            let backoffset = circlepoint.x.abs() - aanliggend.abs();
 
             let rectstart = Rect {
                 pos: actualstart - dvec2(hw, hw),
-                size: dvec2( self.line_width,hw - backoffset),
+                size: dvec2(self.line_width, hw - backoffset),
             };
             let rectend = Rect {
-                pos: actualend - dvec2( hw,-backoffset),
-                size: dvec2( self.line_width, hw - backoffset),
+                pos: actualend - dvec2(hw, -backoffset),
+                size: dvec2(self.line_width, hw - backoffset),
             };
             let minx = min(rectstart.pos.x, rectend.pos.x);
             let maxx = max(
@@ -364,16 +344,18 @@ impl LineChart {
             let numblocks = (innerheight / scaledup).ceil();
             let blockheight = innerheight / (numblocks as f64);
 
-            let step = dvec2(ynormalizedelta.x * blockheight, blockheight);
+            let step = dvec2( ynormalizedelta.x * blockheight, blockheight);
             let mut adjust = -backoffset * 2. * ynormalizedelta.x;
             if step.x < 0. {
                 adjust = step.x;
             }
-            let blockwidth = self.line_width / -angle.sin() + step.x.abs();
+            let blockwidth = self.line_width / angle.cos() + step.x.abs();
 
+            
             self.draw_ls.color = vec4(0.9, 0.9, 0.0, 1.0);
             self.draw_ls.width = hw as f32;
-            let segmentstart = dvec2(rectstart.pos.x + adjust,rectstart.pos.y+ rectstart.size.y);
+            let segmentstart = dvec2(rectstart.pos.x + adjust, rectstart.pos.y + rectstart.size.y);
+
 
             for i in 0..(numblocks as i32) as i32 {
                 let mut r = Rect {
