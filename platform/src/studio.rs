@@ -1,5 +1,6 @@
-
+use crate::makepad_micro_serde::*;
 // communication enums for studio
+#[derive(SerBin, DeBin)]
 pub enum AppToStudio{
     Log{
         body:String,
@@ -8,6 +9,7 @@ pub enum AppToStudio{
     }
 }
 
+#[derive(SerBin, DeBin)]
 pub enum StudioToApp{
     LiveChange{
         file_name: String,

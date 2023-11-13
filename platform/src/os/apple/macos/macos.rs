@@ -26,7 +26,7 @@ use {
                     macos_window::MacosWindow
                 },
                 apple_classes::init_apple_classes_global,
-                ns_url_session::{make_http_request},
+                url_session::{make_http_request},
             },
             metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,

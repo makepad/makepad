@@ -18,7 +18,7 @@ use {
                     ios_event::IosEvent,
                     ios_app::{IosApp, init_ios_app_global,get_ios_app_global}
                 },
-                ns_url_session::{make_http_request},
+                url_session::{make_http_request},
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,

@@ -30,7 +30,9 @@ pub struct PromptPreset {
     pub width: u32,
     pub height: u32,
     pub steps: u32,
-    pub base_cfg: f64,
+    pub cfg: f64,
+    pub denoise: f64,
+    /*
     pub refiner_cfg: f64,
     pub positive_score: f64,
     pub negative_score: f64,
@@ -42,7 +44,7 @@ pub struct PromptPreset {
     pub upscale_start_step: u32,
     pub upscale_end_step: u32,
     pub scale: f64,
-    pub total_steps: u32
+    pub total_steps: u32*/
 }
 
 
@@ -61,9 +63,9 @@ impl Prompt {
             .bytes_append(&self.preset.width.to_be_bytes())
             .bytes_append(&self.preset.height.to_be_bytes())
             .bytes_append(&self.preset.steps.to_be_bytes())
-            .bytes_append(&self.preset.base_cfg.to_be_bytes())
-            .bytes_append(&self.preset.refiner_cfg.to_be_bytes())
-            .bytes_append(&self.preset.positive_score.to_be_bytes())
+            .bytes_append(&self.preset.cfg.to_be_bytes())
+            .bytes_append(&self.preset.denoise.to_be_bytes())
+            /*.bytes_append(&self.preset.positive_score.to_be_bytes())
             .bytes_append(&self.preset.negative_score.to_be_bytes())
             .bytes_append(&self.preset.base_start_step.to_be_bytes())
             .bytes_append(&self.preset.base_end_step.to_be_bytes())
@@ -72,7 +74,7 @@ impl Prompt {
             .bytes_append(&self.preset.upscale_steps.to_be_bytes())
             .bytes_append(&self.preset.upscale_start_step.to_be_bytes())
             .bytes_append(&self.preset.upscale_end_step.to_be_bytes())
-            .bytes_append(&self.preset.scale.to_be_bytes())
+            .bytes_append(&self.preset.scale.to_be_bytes())*/
     }
 }
 
@@ -281,7 +283,7 @@ impl Database {
                 let name = if let Some(name) = name.strip_prefix("star_") {starred = true; name}else {name};
                 
                 let parts = name.split("_").collect::<Vec<&str >> ();
-                if parts.len() == 2{
+                if parts.len() >= 2{
                     if let Ok(prompt_hash) = parts[0].parse::<u64>() {
                         let prompt_hash = LiveId(prompt_hash);
                         if let Ok(seed) = parts[1].parse::<u64>() {
@@ -308,11 +310,11 @@ impl Database {
         self.image_files.sort_by( | a, b | b.modified.cmp(&a.modified));
     }
     
-    pub fn add_png_and_prompt(&mut self, state: PromptState, image: &[u8]) -> ImageId {
+    pub fn add_png_and_prompt(&mut self, state: PromptState, image_name:String, image: &[u8]) -> ImageId {
         let prompt_hash = state.prompt.hash();
         let prompt_file = format!("{}/{:#016}.json", self.image_path, prompt_hash.0);
         let _ = fs::write(&prompt_file, state.prompt.serialize_json());
-        let file_name = format!("{:#016}_{}.png", prompt_hash.0, state.seed);
+        let file_name = format!("{:#016}_{}_{}.png", prompt_hash.0, state.seed, image_name);
         let full_path = format!("{}/{}", self.image_path, file_name);
         let _ = fs::write(&full_path, &image);
         // ok lets see if we need to add a group, or an image
