@@ -37,6 +37,96 @@ impl VideoPixelFormat{
             Self::Unsupported(_)=>0
         }
     }
+    
+    //TODO make SIMD version of this
+    pub fn buffer_to_bgra_32(&self, input:&[u32], width:usize, height:usize, rgba:&mut Vec<u32>){
+        fn yuv_to_rgb(y: i32, u: i32, v: i32)->u32{
+            fn clip(a: i32) -> u32 {
+                if a< 0 {
+                    return 0
+                }
+                if a > 255 {
+                    return 255
+                }
+                return a as u32
+            }
+            let c = y as i32 - 16;
+            let d = v as i32 - 128;
+            let e = u as i32 - 128;
+            return (clip((298 * c + 516 * d + 128) >> 8) << 16)
+            | (clip((298 * c - 100 * d - 208 * e + 128) >> 8) << 8)
+            | (clip((298 * c + 409 * e + 128) >> 8) << 0)
+            | (255 << 24);
+        }
+        
+        match self{
+            Self::NV12=>{
+                rgba.resize(width * height,0u32);
+                for y in 0..height{
+                    for x in (0..width).step_by(2){
+                        let d = input[y*(width>>1) + (x>>1)];
+                        let y1 = (d>>16)&0xff;
+                        let y2 = (d>>0)&0xff ;
+                        let u = (d>>8)&0xff;
+                        let v = (d>>24)&0xff;
+                        rgba[y*width + x] = yuv_to_rgb(y1 as i32, u as i32, v as i32);
+                        rgba[y*width + x + 1] = yuv_to_rgb(y2 as i32, u as i32, v as i32);
+                    }
+                }
+            }
+            _=>{
+                crate::error!("convert to bgra not supported");
+            }
+        }
+    }
+    
+    pub fn buffer_to_rgb_8(&self, input:&[u32], rgb:&mut Vec<u8>, in_width:usize, in_height:usize, left:usize, top:usize, out_width:usize, out_height:usize){
+        fn yuv_to_rgb(y: i32, u: i32, v: i32)->(u8,u8,u8){
+            fn clip(a: i32) -> u32 {
+                if a< 0 {
+                    return 0
+                }
+                if a > 255 {
+                    return 255
+                }
+                return a as u32
+            }
+            let c = y as i32 - 16;
+            let d = v as i32 - 128;
+            let e = u as i32 - 128;
+            let r = clip((298 * c + 516 * d + 128) >> 8) as u8;
+            let g = clip((298 * c - 100 * d - 208 * e + 128) >> 8) as u8;
+            let b = clip((298 * c + 409 * e + 128) >> 8) as u8;
+            (r,g,b)
+        }
+                
+        match self{
+            Self::NV12=>{
+                rgb.clear();
+                rgb.reserve(out_width * out_height * 3);
+                for y in top..top+out_height{
+                    for x in (left..left+out_width).step_by(2){
+                        let d = input[y*(in_width>>1) + (x>>1)];
+                        let y1 = (d>>16)&0xff;
+                        let y2 = (d>>0)&0xff ;
+                        let u = (d>>8)&0xff;
+                        let v = (d>>24)&0xff;
+                        let (r,g,b) = yuv_to_rgb(y1 as i32, u as i32, v as i32);
+                        rgb.push(r);
+                        rgb.push(g);
+                        rgb.push(b);
+                        let (r,g,b) = yuv_to_rgb(y2 as i32, u as i32, v as i32);
+                        rgb.push(r);
+                        rgb.push(g);
+                        rgb.push(b);
+                    }
+                }
+            }
+            _=>{
+                crate::error!("convert to bgra not supported");
+            }
+        }
+    }
 }
 
 pub enum VideoBufferRefData<'a>{
@@ -98,6 +188,7 @@ impl VideoBuffer{
             _=>return None
         }
     }
+    
 }
 
 impl VideoBuffer{

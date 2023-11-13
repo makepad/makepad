@@ -521,7 +521,7 @@ impl DrawVars {
     }
     
     pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
-        if let Some(draw_shader) = self.draw_shader {
+        if let Some(draw_shader) = self.draw_shader { 
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
             for input in &sh.mapping.user_uniforms.inputs {
                 let offset = input.offset;
