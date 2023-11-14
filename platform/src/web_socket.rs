@@ -5,7 +5,7 @@ use crate::LiveId;
 
 pub trait CxWebSocketsApi {
     fn websocket_open(&mut self, request: HttpRequest)->WebSocket;
-    fn websocket_close(&mut self, websocket: WebSocket);
+    fn websocket_close(&mut self, websocket: &WebSocket);
 }
 
 pub struct WebSocket{
