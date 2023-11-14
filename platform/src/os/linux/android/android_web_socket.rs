@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, *};
 use std::collections::HashMap;
 use self::super::android_jni;
 use crate::LiveId;
+use makepad_http::websocket::{MessageHeader, MessageFormat, WebSocket};
 
 pub struct OsWebSocket{
     pub recv: Receiver<WebSocketMessage>,
@@ -22,12 +23,22 @@ impl OsWebSocket{
         self.recv.recv()
     }
             
-    pub fn send_binary(&mut self, _data:&[u8])->Result<(),()>{
-        todo!()
+    pub fn send_binary(&mut self, data:&[u8])->Result<(),()>{
+        let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
+        let frame = WebSocket::build_message(header, &data);
+
+        unsafe {android_jni::to_java_websocket_send_message(self.request_id, frame);}
+
+        Ok(())
     }
                 
-    pub fn send_string(&mut self, _data:&str)->Result<(),()>{
-        todo!()
+    pub fn send_string(&mut self, data:&str)->Result<(),()>{
+        let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
+        let frame = WebSocket::build_message(header, &data.to_string().into_bytes());
+
+        unsafe {android_jni::to_java_websocket_send_message(self.request_id, frame);}
+
+        Ok(())
     }
             
     pub fn open(request: HttpRequest)->OsWebSocket{

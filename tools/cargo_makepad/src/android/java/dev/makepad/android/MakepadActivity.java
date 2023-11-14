@@ -237,6 +237,7 @@ MidiManager.OnDeviceOpenedListener{
     // networking
     Handler mWebSocketsHandler;
     private HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
+    private HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
 
     static {
         System.loadLibrary("makepad");
@@ -384,7 +385,9 @@ MidiManager.OnDeviceOpenedListener{
         webSocket.connect();
     
         if (webSocket.isConnected()) {
-            mWebSocketsHandler.post(new MakepadWebSocketReader(this, webSocket));
+            MakepadWebSocketReader reader = new MakepadWebSocketReader(this, webSocket);
+            mWebSocketsHandler.post(reader);
+            mActiveWebsocketsReaders.put(id, reader);
         }
     }
 
@@ -393,6 +396,15 @@ MidiManager.OnDeviceOpenedListener{
         if (webSocket != null) {
             webSocket.sendMessage(message);
         }
+    }
+
+    public void closeWebSocket(long id) {
+        MakepadWebSocketReader reader = mActiveWebsocketsReaders.get(id);
+        if (reader != null) {
+            mWebSocketsHandler.removeCallbacks(reader);
+        }
+        mActiveWebsocketsReaders.remove(id);
+        mActiveWebsockets.remove(id);
     }
 
     public void webSocketConnectionDone(long id) {
