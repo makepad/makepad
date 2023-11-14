@@ -1,9 +1,11 @@
 use crate::os::OsWebSocket;
 use crate::event::HttpRequest;
 use std::sync::mpsc::{TryRecvError,RecvError};
+use crate::LiveId;
 
 pub trait CxWebSocketsApi {
     fn websocket_open(&mut self, request: HttpRequest)->WebSocket;
+    fn websocket_close(&mut self, websocket: WebSocket);
 }
 
 pub struct WebSocket{

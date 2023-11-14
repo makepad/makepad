@@ -277,28 +277,12 @@ impl Cx {
                                         LiveId(request_id),
                                         crate::web_socket::WebSocketMessage::String(text_msg.to_string())
                                     );
-                                    // let e = Event::NetworkResponses(vec![
-                                    //     NetworkResponseEvent {
-                                    //         request_id: LiveId(request_id),
-                                    //         response: NetworkResponse::WebSocketString(text_msg.to_string())
-                                    //     }
-                                    // ]);
-            
-                                    // self.call_event_handler(&e);
                                 },
                                 Ok(WebSocketMessage::Binary(data)) => {
                                     self.put_received_message_for_websocket(
                                         LiveId(request_id),
                                         crate::web_socket::WebSocketMessage::Binary(data.to_vec())
                                     );
-                                    // let e = Event::NetworkResponses(vec![
-                                    //     NetworkResponseEvent {
-                                    //         request_id: LiveId(request_id),
-                                    //         response: NetworkResponse::WebSocketBinary(data.to_vec())
-                                    //     }
-                                    // ]);
-
-                                    // self.call_event_handler(&e);
                                 },
                                 Err(e) => {
                                     println!("Websocket message parse error {:?}", e);
@@ -308,22 +292,13 @@ impl Cx {
                         });
                     }
                     FromJavaMessage::WebSocketClosed {request_id} => {
-                        // let e = Event::NetworkResponses(vec![
-                        //     NetworkResponseEvent {
-                        //         request_id: LiveId(request_id),
-                        //         response: NetworkResponse::WebSocketClose
-                        //     }
-                        // ]);
-                        // self.call_event_handler(&e);
+                        // TODO
                     }
                     FromJavaMessage::WebSocketError {request_id, error} => {
-                        // let e = Event::NetworkResponses(vec![
-                        //     NetworkResponseEvent {
-                        //         request_id: LiveId(request_id),
-                        //         response: NetworkResponse::WebSocketError(error)
-                        //     }
-                        // ]);
-                        // self.call_event_handler(&e);
+                        self.put_received_message_for_websocket(
+                            LiveId(request_id),
+                            crate::web_socket::WebSocketMessage::Error(error)
+                        );
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -749,21 +724,6 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
-                // CxOsOp::WebSocketOpen {request_id, request} => {
-                //     unsafe {android_jni::to_java_websocket_open(request_id, request);}
-                // },
-                // CxOsOp::WebSocketSendString{request_id, data} => {
-                //     let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
-                //     let frame = WebSocket::build_message(header, &data.into_bytes());
-
-                //     unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
-                // },
-                // CxOsOp::WebSocketSendBinary{request_id, data} => {
-                //     let header = MessageHeader::from_len(data.len(), MessageFormat::Binary, true);
-                //     let frame = WebSocket::build_message(header, &data);
-
-                //     unsafe {android_jni::to_java_websocket_send_message(request_id, frame);}
-                // },
                 CxOsOp::InitializeVideoDecoding(video_id, video) => {
                     unsafe {
                         let env = attach_jni_env();
@@ -796,7 +756,7 @@ impl Cx {
 
     fn put_received_message_for_websocket(&mut self, request_id: LiveId, message: crate::web_socket::WebSocketMessage) {
         if let Some(sender_mutex) = self.os.web_sockets.active_websocket_senders.get(&request_id) {
-            if let Ok(mut sender) = sender_mutex.lock() {
+            if let Ok(sender) = sender_mutex.lock() {
                 sender.send(message).unwrap();
             }
         }
@@ -902,7 +862,7 @@ impl CxAndroidDisplay {
 
 impl CxWebSocketsApi for Cx {
     // TODO improve crate::web_socket::WebSocket
-    fn websocket_open(&mut self, request: HttpRequest)->crate::web_socket::WebSocket{
+    fn websocket_open(&mut self, request: HttpRequest) -> crate::web_socket::WebSocket {
         let web_socket = crate::web_socket::WebSocket::open(request);
 
         let sender = Arc::new(Mutex::new(web_socket.os.sender.clone()));
@@ -913,5 +873,13 @@ impl CxWebSocketsApi for Cx {
         );
 
         web_socket
+    }
+
+    fn websocket_close(&mut self, web_socket: crate::web_socket::WebSocket) {
+        let request_id = web_socket.os.request_id;
+        crate::log!("Closing websocket {}", request_id);
+        self.os.web_sockets.active_websocket_senders.remove(&request_id);
+
+        unsafe {android_jni::to_java_websocket_close(request_id);}
     }
 }

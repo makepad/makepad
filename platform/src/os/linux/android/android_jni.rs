@@ -122,12 +122,6 @@ fn send_from_java_message(message: FromJavaMessage) {
     MESSAGES_TX.with(|tx| {
         let mut tx = tx.borrow_mut();
         tx.as_mut().unwrap().send(message).unwrap();
-        // match tx.as_mut().unwrap().send(message) {
-        //     Ok(res) => res,
-        //     Err(e) => {
-        //         crate::log!("Error sending message to java: {:?}", e);
-        //     }
-        // };
     })
 }
 
@@ -667,6 +661,18 @@ pub unsafe fn to_java_websocket_send_message(request_id: LiveId, message: Vec<u8
         "(J[B)V",
         request_id.get_value() as jni_sys::jlong,
         message_bytes as jni_sys::jobject
+    );
+}
+
+pub unsafe fn to_java_websocket_close(request_id: LiveId) {
+    let env = attach_jni_env();
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "closeWebSocket",
+        "(J)V",
+        request_id.get_value() as jni_sys::jlong
     );
 }
 
