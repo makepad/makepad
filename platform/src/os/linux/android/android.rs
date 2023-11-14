@@ -21,7 +21,6 @@ use {
         gl_sys,
         //libc_sys,
     },
-    makepad_http::websocket::{WebSocket, WebSocketMessage, MessageHeader, MessageFormat},
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         cx_stdin::{PollTimers,PollTimer},
@@ -58,8 +57,10 @@ use {
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
-        web_socket::CxWebSocketsApi,
-    }
+        web_socket::{CxWebSocketsApi, WebSocket, WebSocketMessage},
+    },
+    makepad_http::websocket::WebSocket as WebSocketImpl,
+    makepad_http::websocket::WebSocketMessage as WebSocketMessageImpl
 };
 
 impl Cx {
@@ -267,21 +268,19 @@ impl Cx {
                         }
                     }
                     FromJavaMessage::WebSocketMessage {request_id, message} => {
-                        let mut ws_message_parser = WebSocket::new();
+                        let mut ws_message_parser = WebSocketImpl::new();
                         ws_message_parser.parse(&message, | result | {
-                            crate::log!("Hay algo!");
                             match result {
-                                Ok(WebSocketMessage::Text(text_msg)) => {
-                                    crate::log!("Hay texto! {}", text_msg);
+                                Ok(WebSocketMessageImpl::Text(text_msg)) => {
                                     self.put_received_message_for_websocket(
                                         LiveId(request_id),
-                                        crate::web_socket::WebSocketMessage::String(text_msg.to_string())
+                                        WebSocketMessage::String(text_msg.to_string())
                                     );
                                 },
-                                Ok(WebSocketMessage::Binary(data)) => {
+                                Ok(WebSocketMessageImpl::Binary(data)) => {
                                     self.put_received_message_for_websocket(
                                         LiveId(request_id),
-                                        crate::web_socket::WebSocketMessage::Binary(data.to_vec())
+                                        WebSocketMessage::Binary(data.to_vec())
                                     );
                                 },
                                 Err(e) => {
@@ -297,7 +296,7 @@ impl Cx {
                     FromJavaMessage::WebSocketError {request_id, error} => {
                         self.put_received_message_for_websocket(
                             LiveId(request_id),
-                            crate::web_socket::WebSocketMessage::Error(error)
+                            WebSocketMessage::Error(error)
                         );
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
@@ -754,7 +753,7 @@ impl Cx {
         EventFlow::Poll
     }
 
-    fn put_received_message_for_websocket(&mut self, request_id: LiveId, message: crate::web_socket::WebSocketMessage) {
+    fn put_received_message_for_websocket(&mut self, request_id: LiveId, message: WebSocketMessage) {
         if let Some(sender_mutex) = self.os.web_sockets.active_websocket_senders.get(&request_id) {
             if let Ok(sender) = sender_mutex.lock() {
                 sender.send(message).unwrap();
@@ -861,9 +860,8 @@ impl CxAndroidDisplay {
 }
 
 impl CxWebSocketsApi for Cx {
-    // TODO improve crate::web_socket::WebSocket
-    fn websocket_open(&mut self, request: HttpRequest) -> crate::web_socket::WebSocket {
-        let web_socket = crate::web_socket::WebSocket::open(request);
+    fn websocket_open(&mut self, request: HttpRequest) -> WebSocket {
+        let web_socket = WebSocket::open(request);
 
         let sender = Arc::new(Mutex::new(web_socket.os.sender.clone()));
 
@@ -875,9 +873,8 @@ impl CxWebSocketsApi for Cx {
         web_socket
     }
 
-    fn websocket_close(&mut self, web_socket: crate::web_socket::WebSocket) {
-        let request_id = web_socket.os.request_id;
-        crate::log!("Closing websocket {}", request_id);
+    fn websocket_close(&mut self, websocket: &WebSocket) {
+        let request_id = websocket.os.request_id;
         self.os.web_sockets.active_websocket_senders.remove(&request_id);
 
         unsafe {android_jni::to_java_websocket_close(request_id);}
