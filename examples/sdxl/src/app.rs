@@ -959,7 +959,7 @@ impl LiveHook for App {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.open_web_socket(cx);
+        self.open_web_socket();
         let _ = self.db.load_database();
         self.filtered.filter_db(&self.db, "", false);
         let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
@@ -1049,11 +1049,11 @@ impl App {
         cx.http_request(live_id!(image), request);
     }
     
-    fn open_web_socket(&mut self, cx: &mut Cx) {
+    fn open_web_socket(&mut self) {
         for machine in &mut self.machines {
             let url = format!("ws://{}/ws?clientId={}", machine.ip, "1234");
             let request = HttpRequest::new(url, HttpMethod::GET);
-            machine.web_socket = Some(cx.websocket_open(request));
+            machine.web_socket = Some(WebSocket::open(request));
         }
     }
     
@@ -1447,7 +1447,7 @@ impl AppMain for App {
         }
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyR, modifiers, ..}) = event {
             if modifiers.control || modifiers.logo {
-                self.open_web_socket(cx);
+                self.open_web_socket();
             }
         }
         
