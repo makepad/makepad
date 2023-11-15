@@ -11,6 +11,7 @@ use {
         area::Area,
         event::{
             Event,
+            TextInputEvent,
             TimerEvent,
             KeyEvent,
             ScrollEvent,
@@ -351,6 +352,14 @@ pub struct StdinMouseUp{
    pub y: f64
 }
 
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct StdinTextInput{
+    pub time: f64,
+    pub button: usize,
+    pub x: f64,
+    pub y: f64
+}
+
 impl From<StdinMouseUp> for MouseUpEvent {
     fn from(v: StdinMouseUp) -> Self {
         Self{
@@ -409,6 +418,7 @@ pub enum HostToStdin{
     MouseMove(StdinMouseMove),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
+    TextInput(TextInputEvent),
     Scroll(StdinScroll),
     ReloadFile{
         file:String,

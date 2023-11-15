@@ -48,11 +48,23 @@ live_design!{
                     draw_bg: {color: #2}
                     height: Fill,
                     width: Fill
+                    <View>
+                    {
+                        <Labe>{text:"Stroke width"}
                     slider1 = <Slider> {
                         margin:20
                         height: 20 
                         width: 150
+                    }}
+                    <View>
+                    {
+                    slider2 = <Slider> {
+                        margin:20
+                        height: 20 
+                        width: 150
+                       
                     }
+                }
                 }
                         
                 GraphView = <LineChart> {
@@ -105,7 +117,11 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         if let Some(v) = self.ui.slider(id!(slider1)).slided(&actions){
-            self.ui.line_chart(id!(graph_view)).set_slider_value(cx, v);
+            self.ui.line_chart(id!(graph_view)).set_width_slider_value(cx, v);
+        }   
+       
+        if let Some(v) = self.ui.slider(id!(slider2)).slided(&actions){
+            self.ui.line_chart(id!(graph_view)).set_pixel_slider_value(cx, v);
         }
     }
 }

@@ -131,6 +131,9 @@ impl RunView {
             Hit::FingerDown(_) => {
                 cx.set_key_focus(self.draw_app.area());
             }
+            Hit::TextInput(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
+            }
             Hit::KeyDown(e) => {
                 manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
             }
