@@ -193,6 +193,11 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    if self.handle_live_edit() {
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
+                    self.handle_networking_events();
                 }
                 else{
                     self.call_event_handler(&Event::Timer(e))
@@ -343,6 +348,9 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.live_expand();
+        if std::env::args().find( | v | v == "--stdin-loop").is_none() {
+            self.start_disk_live_file_watcher(100);
+        }
         self.live_scan_dependencies();
         self.native_load_dependencies();
     }
