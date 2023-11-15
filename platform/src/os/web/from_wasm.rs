@@ -107,7 +107,7 @@ pub struct FromWasmShowTextIME {
 #[derive(FromWasm)]
 pub struct FromWasmHideTextIME {
 }
-
+/*
 #[derive(FromWasm)]
 pub struct FromWasmWebSocketOpen {
     pub request_id_lo: u32,
@@ -131,7 +131,7 @@ pub struct FromWasmWebSocketSendString{
     pub request_id_hi: u32,
     pub data: String
 }
-
+*/
 #[derive(FromWasm)]
 pub struct WTextureInput {
     pub ty: String,
