@@ -379,8 +379,8 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void openWebSocket(long id, String url) {
-        MakepadWebSocket webSocket = new MakepadWebSocket(id, url);
+    public void openWebSocket(long id, String url, long callback) {
+        MakepadWebSocket webSocket = new MakepadWebSocket(id, url, callback);
         mActiveWebsockets.put(id, webSocket);
         webSocket.connect();
     
@@ -407,9 +407,9 @@ MidiManager.OnDeviceOpenedListener{
         mActiveWebsockets.remove(id);
     }
 
-    public void webSocketConnectionDone(long id) {
+    public void webSocketConnectionDone(long id, long callback) {
         mActiveWebsockets.remove(id);
-        MakepadNative.onWebSocketClosed(id);
+        MakepadNative.onWebSocketClosed(callback);
     }
 
     public String[] getAudioDevices(long flag){

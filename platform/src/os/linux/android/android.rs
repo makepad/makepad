@@ -5,12 +5,11 @@ use {
     std::ffi::CString,
     std::os::raw::{c_void},
     std::time::{Instant, Duration},
-    std::sync::{Arc, Mutex, mpsc},
+    std::sync::{Arc, Mutex, mpsc, mpsc::Sender},
     std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
         android_decoding::CxAndroidDecoding,
-        android_web_socket::CxWebSockets,
         jni_sys::jobject,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
@@ -57,7 +56,7 @@ use {
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
-        web_socket::{CxWebSocketsApi, WebSocket, WebSocketMessage},
+        web_socket::{WebSocket, WebSocketMessage},
     },
     makepad_http::websocket::WebSocket as WebSocketImpl,
     makepad_http::websocket::WebSocketMessage as WebSocketMessageImpl
@@ -267,21 +266,17 @@ impl Cx {
                             self.call_event_handler(&e);
                         }
                     }
-                    FromJavaMessage::WebSocketMessage {request_id, message} => {
+                    FromJavaMessage::WebSocketMessage {message, sender} => {
                         let mut ws_message_parser = WebSocketImpl::new();
                         ws_message_parser.parse(&message, | result | {
                             match result {
                                 Ok(WebSocketMessageImpl::Text(text_msg)) => {
-                                    self.put_received_message_for_websocket(
-                                        LiveId(request_id),
-                                        WebSocketMessage::String(text_msg.to_string())
-                                    );
+                                    let message = WebSocketMessage::String(text_msg.to_string());
+                                    sender.send(message).unwrap();
                                 },
                                 Ok(WebSocketMessageImpl::Binary(data)) => {
-                                    self.put_received_message_for_websocket(
-                                        LiveId(request_id),
-                                        WebSocketMessage::Binary(data.to_vec())
-                                    );
+                                    let message = WebSocketMessage::Binary(data.to_vec());
+                                    sender.send(message).unwrap();
                                 },
                                 Err(e) => {
                                     println!("Websocket message parse error {:?}", e);
@@ -290,14 +285,13 @@ impl Cx {
                             }
                         });
                     }
-                    FromJavaMessage::WebSocketClosed {request_id} => {
-                        // TODO
+                    FromJavaMessage::WebSocketClosed {sender} => {
+                        let message = WebSocketMessage::Closed;
+                        sender.send(message).unwrap();
                     }
-                    FromJavaMessage::WebSocketError {request_id, error} => {
-                        self.put_received_message_for_websocket(
-                            LiveId(request_id),
-                            WebSocketMessage::Error(error)
-                        );
+                    FromJavaMessage::WebSocketError {error, sender} => {
+                        let message = WebSocketMessage::Error(error);
+                        sender.send(message).unwrap();
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -753,12 +747,13 @@ impl Cx {
         EventFlow::Poll
     }
 
-    fn put_received_message_for_websocket(&mut self, request_id: LiveId, message: WebSocketMessage) {
-        if let Some(sender_mutex) = self.os.web_sockets.active_websocket_senders.get(&request_id) {
-            if let Ok(sender) = sender_mutex.lock() {
-                sender.send(message).unwrap();
-            }
-        }
+    fn put_received_message_for_websocket(
+        &mut self,
+        request_id: LiveId,
+        message: WebSocketMessage,
+        sender: Box<Sender<WebSocketMessage>>
+    ) {
+        sender.send(message).unwrap();
     }
 }
 
@@ -783,7 +778,6 @@ impl Default for CxOs {
             keyboard_closed: 0.0,
             media: CxAndroidMedia::default(),
             decoding: CxAndroidDecoding::default(),
-            web_sockets: CxWebSockets::default(),
             display: None,
             quit: false,
             fullscreen: false,
@@ -815,7 +809,6 @@ pub struct CxOs {
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
     pub (crate) decoding: CxAndroidDecoding,
-    pub (crate) web_sockets: CxWebSockets,
 }
 
 impl CxAndroidDisplay {
@@ -859,24 +852,9 @@ impl CxAndroidDisplay {
     }
 }
 
-impl CxWebSocketsApi for Cx {
-    fn websocket_open(&mut self, request: HttpRequest) -> WebSocket {
-        let web_socket = WebSocket::open(request);
+    // fn websocket_close(&mut self, websocket: &WebSocket) {
+    //     let request_id = websocket.os.request_id;
+    //     self.os.web_sockets.active_websocket_senders.remove(&request_id);
 
-        let sender = Arc::new(Mutex::new(web_socket.os.sender.clone()));
-
-        self.os.web_sockets.active_websocket_senders.insert(
-            web_socket.os.request_id,
-            sender
-        );
-
-        web_socket
-    }
-
-    fn websocket_close(&mut self, websocket: &WebSocket) {
-        let request_id = websocket.os.request_id;
-        self.os.web_sockets.active_websocket_senders.remove(&request_id);
-
-        unsafe {android_jni::to_java_websocket_close(request_id);}
-    }
-}
+    //     unsafe {android_jni::to_java_websocket_close(request_id);}
+    // }
