@@ -1,18 +1,19 @@
 
 use crate::event::HttpRequest;
-use crate::web_socket::{WebSocketMessage};
-use std::sync::{Arc, Mutex};
+use crate::web_socket::WebSocketMessage;
+use std::sync::Arc;
 use std::sync::mpsc::{self, *};
-use std::collections::HashMap;
 use self::super::android_jni;
 use crate::LiveId;
 use makepad_http::websocket::{MessageHeader, MessageFormat, WebSocket};
 
 pub struct OsWebSocket{
     pub recv: Receiver<WebSocketMessage>,
-    pub sender: Sender<WebSocketMessage>,
+    pub sender_ref: Arc<Box<Sender<WebSocketMessage>>>,
     pub request_id: LiveId,
 }
+
+pub type WebsocketIncomingMessageFn = Box<dyn FnMut(WebSocketMessage) + Send  + 'static>;
 
 impl OsWebSocket{
     pub fn try_recv(&mut self)->Result<WebSocketMessage,TryRecvError>{
@@ -43,19 +44,17 @@ impl OsWebSocket{
             
     pub fn open(request: HttpRequest)->OsWebSocket{
         let request_id = LiveId::unique();
-        unsafe {android_jni::to_java_websocket_open(request_id, request);}
-
         let (sender,recv) = mpsc::channel();
+
+        let sender_ref = Arc::new(Box::new(sender));
+        let pointer = Arc::as_ptr(&sender_ref);
+
+        unsafe {android_jni::to_java_websocket_open(request_id, request, pointer);}
 
         OsWebSocket{
             recv,
-            sender,
+            sender_ref,
             request_id
         }
     }
-}
-
-#[derive(Default)]
-pub struct CxWebSockets {
-    pub (crate) active_websocket_senders: HashMap<LiveId,Arc<Mutex<Sender<WebSocketMessage>>>>
 }

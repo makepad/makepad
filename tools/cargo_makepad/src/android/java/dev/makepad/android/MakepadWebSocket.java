@@ -21,6 +21,7 @@ import dev.makepad.android.MakepadNative;
 
 public class MakepadWebSocket {
     private long mMakepadRequestId;
+    private long mCallback;
     private String mUrl;
 
     private Socket mSocket;
@@ -28,9 +29,10 @@ public class MakepadWebSocket {
 
     private static final int ONE_MIN = 60 * 1000;
     
-    public MakepadWebSocket(long makepadRequestId, String url) {
+    public MakepadWebSocket(long makepadRequestId, String url, long callback) {
         mMakepadRequestId = makepadRequestId;
         mUrl = url;
+        mCallback = callback;
     }
 
     public void connect() {
@@ -53,7 +55,7 @@ public class MakepadWebSocket {
             }
             doHandshake();
         } catch (Exception e) {
-            MakepadNative.onWebSocketError(mMakepadRequestId, e.toString());
+            MakepadNative.onWebSocketError(e.toString(), mCallback);
             throw new RuntimeException(e);
         }
     }
@@ -84,7 +86,7 @@ public class MakepadWebSocket {
 
             mIsConnected = true;
         } catch(Exception e) {
-            MakepadNative.onWebSocketError(mMakepadRequestId, e.toString());
+            MakepadNative.onWebSocketError(e.toString(), mCallback);
             Log.e("Makepad", "exception: " + e.getMessage());             
             Log.e("Makepad", "exception: " + e.toString());
         }
@@ -96,7 +98,7 @@ public class MakepadWebSocket {
             ostream.write(frame, 0, frame.length);
             ostream.flush();
         } catch(Exception e) {
-            MakepadNative.onWebSocketError(mMakepadRequestId, e.toString());
+            MakepadNative.onWebSocketError(e.toString(), mCallback);
             Log.e("Makepad", "exception: " + e.getMessage());
             Log.e("Makepad", "exception: " + e.toString());
         }
@@ -116,6 +118,10 @@ public class MakepadWebSocket {
 
     public long getMakepadRequestId() {
         return mMakepadRequestId;
+    }
+
+    public long getMakepadCallback() {
+        return mCallback;
     }
 
     private String buildHandshakeRequest() throws URISyntaxException {
