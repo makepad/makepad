@@ -49,7 +49,6 @@ public class MakepadWebSocketReader implements Runnable {
                 }
 
                 byte[] message = Arrays.copyOfRange(rawbuffer, 0, readBytes);
-                Log.e("Makepad", "reading message ");
                 activity.runOnUiThread(() -> {
                     MakepadNative.onWebSocketMessage(message, callback);
                 });
