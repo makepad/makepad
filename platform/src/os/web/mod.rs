@@ -7,7 +7,8 @@ pub mod web_media;
 pub mod web_decoding;
 pub mod web_audio;
 pub mod web_midi;
-
+mod web_socket;
+pub use crate::os::web::web_socket::OsWebSocket;
 pub use crate::os::web::web::*;
 pub use crate::os::web::web_gl::*;
 pub use crate::os::web::web_midi::*;
