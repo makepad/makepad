@@ -5,7 +5,7 @@ use {
     std::ffi::CString,
     std::os::raw::{c_void},
     std::time::{Instant, Duration},
-    std::sync::{Arc, Mutex, mpsc, mpsc::Sender},
+    std::sync::{mpsc, mpsc::Sender},
     std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
@@ -56,7 +56,7 @@ use {
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
-        web_socket::{WebSocket, WebSocketMessage},
+        web_socket::WebSocketMessage,
     },
     makepad_http::websocket::WebSocket as WebSocketImpl,
     makepad_http::websocket::WebSocketMessage as WebSocketMessageImpl
@@ -746,15 +746,6 @@ impl Cx {
         }
         EventFlow::Poll
     }
-
-    fn put_received_message_for_websocket(
-        &mut self,
-        request_id: LiveId,
-        message: WebSocketMessage,
-        sender: Box<Sender<WebSocketMessage>>
-    ) {
-        sender.send(message).unwrap();
-    }
 }
 
 impl CxOsApi for Cx {
@@ -851,10 +842,3 @@ impl CxAndroidDisplay {
         assert!(res != 0);
     }
 }
-
-    // fn websocket_close(&mut self, websocket: &WebSocket) {
-    //     let request_id = websocket.os.request_id;
-    //     self.os.web_sockets.active_websocket_senders.remove(&request_id);
-
-    //     unsafe {android_jni::to_java_websocket_close(request_id);}
-    // }
