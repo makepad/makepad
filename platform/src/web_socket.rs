@@ -3,13 +3,14 @@ use crate::event::HttpRequest;
 use std::sync::mpsc::{TryRecvError,RecvError};
 
 pub struct WebSocket{
-    os: OsWebSocket
+    pub os: OsWebSocket
 }
 
 pub enum WebSocketMessage{
     Error(String),
     Binary(Vec<u8>),
-    String(String)
+    String(String),
+    Closed
 }
 
 impl WebSocket{    
