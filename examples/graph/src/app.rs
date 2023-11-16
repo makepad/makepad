@@ -90,6 +90,13 @@ live_design!{
                         <VectorLine>{line_width: 55., color: #08f, line_align: DiagonalBottomLeftTopRight}
                         <VectorLine>{line_width: 60., color: #f08, line_align: DiagonalTopLeftBottomRight}
                     }
+                    <View>
+                    {
+                        <VectorLine>{line_width: 60., color: #fff, line_align: HorizontalCenter, draw_ls:{ fn stroke(self, side:float, progress: float) -> vec4
+                            {
+                                return vec4(sin(side+self.time), sin(progress),0,1);
+                            }}}
+                    }
                  }
                 
                         
