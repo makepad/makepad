@@ -6,22 +6,29 @@ live_design! {
     import makepad_draw::shader::std::*;
 
     DrawLineSegment = {{DrawLineSegment}} {
+       
+        fn stroke(self, side:float, progress: float) -> vec4
+        {
+            return self.color;
+        }
+
         fn pixel(self) -> vec4 
         {
             
             let pixelpos = self.pos * self.rect_size;
             let b = self.line_end;
             let a = self.line_start;
-            let l  = length(a-b);
+            let l = length(a-b);
             let p = pixelpos;
 
             let ba = b-a;
             let pa = p-a;
-            let h =clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
+            let h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
             let dist= length(pa-h*ba)
          
             let linemult = smoothstep(self.width-1., self.width, dist);
-            return vec4(self.color.xyz*(1.-linemult),1.0-linemult);
+            let C = self.stroke(dist, h);
+            return vec4(C.xyz*(1.-linemult),(1.0-linemult)*C.a);
 
  //           return vec4(self.color.xyz*abs(smoothstep(-0.1,0.1,sin(h*60.283/(self.width/4.))*self.width))*(1.-linemult),1.0-linemult);
         }
