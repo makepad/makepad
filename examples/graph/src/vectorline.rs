@@ -12,6 +12,7 @@ live_design! {
             let pixelpos = self.pos * self.rect_size;
             let b = self.line_end;
             let a = self.line_start;
+            let l  = length(a-b);
             let p = pixelpos;
 
             let ba = b-a;
@@ -20,8 +21,9 @@ live_design! {
             let dist= length(pa-h*ba)
          
             let linemult = smoothstep(self.width-1., self.width, dist);
+            return vec4(self.color.xyz*(1.-linemult),1.0-linemult);
 
-            return vec4(self.color.xyz*abs(smoothstep(-0.1,0.1,sin(h*6.283*8.)))*(1.-linemult),1.0-linemult);
+ //           return vec4(self.color.xyz*abs(smoothstep(-0.1,0.1,sin(h*60.283/(self.width/4.))*self.width))*(1.-linemult),1.0-linemult);
         }
     }
 
@@ -48,6 +50,21 @@ struct DrawLineSegment {
     color: Vec4,
 }
 
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum LineAlign
+{
+    Custom,
+    Left,
+    #[pick] Top,
+    DiagonalBottomLeftTopRight,
+    DiagonalTopLeftBottomRight,
+    Right,
+    Bottom,
+    VerticalCenter,
+    HorizontalCenter
+}
+
 #[derive(Live)]
 pub struct VectorLine{
     #[walk] walk: Walk,
@@ -56,6 +73,8 @@ pub struct VectorLine{
     #[rust] _screen_view: Rect,
     #[rust] _data_view: Rect,
     #[live(15.0)] line_width: f64,
+    #[live] color: Vec4,
+    #[live(LineAlign::Top)] line_align: LineAlign,
     #[rust(dvec2(350., 10.))] line_start: DVec2,
     #[rust(dvec2(1000., 1440.))] line_end: DVec2,
    
@@ -104,23 +123,61 @@ impl VectorLine {
         // lets draw a bunch of quads
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
 
-        self.line_width = 10.5;
-        let maxpixels = 300.;
-
-        println!("layout called!");
-
+       // self.line_width = 10.5;
+        let maxpixels = 300. as f64;
+        let mut line_start = self.line_start;
+        let mut line_end = self.line_end;
         let hw = self.line_width / 2.;
-        self.draw_ls.width = hw as f32;
-        self.draw_ls.color = vec4(1., 1., 0.2, 1.0);
+       
+        //println!("layout called!");
+        match self.line_align 
+        {
+            LineAlign::Top =>{
+                 line_start = dvec2(rect.pos.x+hw, rect.pos.y+hw); 
+                 line_end = dvec2(rect.pos.x + rect.size.x - hw, rect.pos.y +hw);
+            }
+            LineAlign::Bottom =>{
+                line_start = dvec2(rect.pos.x+hw, rect.pos.y+rect.size.y - hw); 
+                line_end = dvec2(rect.pos.x + rect.size.x - hw, rect.pos.y + rect.size.y - hw);
+            }
+            LineAlign::Right =>{
+                line_start = dvec2(rect.pos.x+rect.size.x-hw, rect.pos.y + hw); 
+                line_end = dvec2(rect.pos.x +rect.size.x -hw, rect.pos.y + rect.size.y - hw);
+            }
+            LineAlign::Left =>{
+                line_start = dvec2(rect.pos.x+hw, rect.pos.y + hw); 
+                line_end = dvec2(rect.pos.x +hw, rect.pos.y + rect.size.y - hw);
+            }
+            LineAlign::HorizontalCenter =>{
+                line_start = dvec2(rect.pos.x+hw, rect.pos.y + rect.size.y/2.); 
+                line_end = dvec2(rect.pos.x +rect.size.x - hw, rect.pos.y + rect.size.y/2.);
+            } 
+            LineAlign::VerticalCenter =>{
+                line_start = dvec2(rect.pos.x+rect.size.x/2., rect.pos.y + hw); 
+                line_end = dvec2(rect.pos.x +rect.size.x/2., rect.pos.y + rect.size.y - hw);
+            }
+            LineAlign::DiagonalTopLeftBottomRight=>{
+                line_start = dvec2(rect.pos.x+hw, rect.pos.y + hw); 
+                line_end = dvec2(rect.pos.x +rect.size.x -hw, rect.pos.y + rect.size.y - hw);
+            }
+            LineAlign::DiagonalBottomLeftTopRight=>{
+                line_start = dvec2(rect.pos.x+hw, rect.pos.y + rect.size.y- hw); 
+                line_end = dvec2(rect.pos.x +rect.size.x-hw, rect.pos.y +  hw);
+            }
+            _ => {}
+        }
 
-        let linerect = self.line_end - self.line_start;
-        if (self.line_start.y - self.line_end.y).abs().floor() == 0.0
-            || (self.line_start.x - self.line_end.x).abs().floor() == 0.0
+        self.draw_ls.width = hw as f32;
+        self.draw_ls.color = self.color;
+
+        let linerect = line_end - line_start;
+        if (line_start.y - line_end.y).abs().floor() == 0.0
+            || (line_start.x - line_end.x).abs().floor() == 0.0
         {
             let r = Rect {
                 pos: dvec2(
-                    min(self.line_start.x, self.line_end.x) - hw,
-                    min(self.line_start.y, self.line_end.y) - hw,
+                    min(line_start.x, line_end.x) - hw,
+                    min(line_start.y, line_end.y) - hw,
                 ),
                 size: dvec2(
                     linerect.x.abs() + self.line_width,
@@ -128,8 +185,8 @@ impl VectorLine {
                 ),
             };
 
-            self.draw_ls.line_start = (self.line_start - r.pos).into_vec2();
-            self.draw_ls.line_end = (self.line_end - r.pos).into_vec2();
+            self.draw_ls.line_start = (line_start - r.pos).into_vec2();
+            self.draw_ls.line_end = (line_end - r.pos).into_vec2();
 
             self.draw_ls.draw_abs(cx, r);
 
@@ -139,8 +196,8 @@ impl VectorLine {
         if linerect.x.abs() > linerect.y.abs()
         // more horizontal than vertical
         {
-            let mut actualstart = self.line_start;
-            let mut actualend = self.line_end;
+            let mut actualstart = line_start;
+            let mut actualend = line_end;
 
             if actualend.x < actualstart.x {
                 std::mem::swap(&mut actualstart, &mut actualend);
@@ -162,16 +219,17 @@ impl VectorLine {
             let aanliggend = overside / tanangle;
             let backoffset = circlepoint.x.abs() - aanliggend.abs();
 
-            //println!("{} {:.1} {:.1} {:.1} {:.1}", angle, clocktang.x, clocktang.y, self.line_start + clocktan * hw, self.line_start);
 
             let rectstart = Rect {
                 pos: actualstart - dvec2(hw, hw),
                 size: dvec2(hw - backoffset, self.line_width),
             };
+
             let rectend = Rect {
                 pos: actualend - dvec2(-backoffset, hw),
                 size: dvec2(hw - backoffset, self.line_width),
             };
+            
             let miny = min(rectstart.pos.y, rectend.pos.y);
             let maxy = max(
                 rectend.pos.y + rectend.size.y,
@@ -218,8 +276,8 @@ impl VectorLine {
 
 
         } else {
-             let mut actualstart = self.line_start;
-            let mut actualend = self.line_end;
+             let mut actualstart = line_start;
+            let mut actualend: DVec2 = line_end;
 
             if actualend.y < actualstart.y {
                 std::mem::swap(&mut actualstart, &mut actualend);

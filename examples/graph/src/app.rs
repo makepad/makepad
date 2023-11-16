@@ -1,11 +1,11 @@
 use crate::makepad_live_id::*;
 use makepad_widgets::*;
-use crate::linechart::*;
+use crate::vectorline::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    import crate::linechart::VectorLine;
+    import crate::vectorline::VectorLine;
     
     App = {{App}} {
         ui: <Window> {
@@ -36,7 +36,7 @@ live_design!{
                         
                 graph_view = Tab {
                     name: ""
-                    kind: GraphView
+                    kind: Line1
                 }
                         
                 log_view = Tab {
@@ -51,10 +51,46 @@ live_design!{
                    
                 }
                         
-                Line1 = <VectorLine> {
+                Line1 = <View>{
                     height: Fill,
-                    width: Fill
-                }
+                    flow: Down,
+                    <View>{
+                    <VectorLine> {width: Fill, line_width:10., color: #f00, line_align: Bottom}
+                    <VectorLine> {width: Fill, line_width:20., color: #ff0, line_align: Top}
+                    <VectorLine> {width: Fill, line_width:30., color: #0f0, line_align: Left}
+                    <VectorLine> {width: Fill, line_width:40., color: #00f, line_align: Right}
+                    }
+                    <View>
+                    {
+                        <VectorLine>{line_width: 5., color: #0ff, line_align: HorizontalCenter}
+                        <VectorLine>{line_width: 10., color: #ff0, line_align: VerticalCenter}
+                        <VectorLine>{line_width: 15., color: #f0f, line_align: HorizontalCenter}
+                        <VectorLine>{line_width: 20., color: #8f0, line_align: VerticalCenter}
+                        <VectorLine>{line_width: 25., color: #08f, line_align: HorizontalCenter}
+                        <VectorLine>{line_width: 30., color: #f08, line_align: VerticalCenter}
+                        <VectorLine>{line_width: 35., color: #0ff, line_align: HorizontalCenter}
+                        <VectorLine>{line_width: 40., color: #ff0, line_align: VerticalCenter}
+                        <VectorLine>{line_width: 45., color: #f0f, line_align: HorizontalCenter}
+                        <VectorLine>{line_width: 50., color: #8f0, line_align: VerticalCenter}
+                        <VectorLine>{line_width: 55., color: #08f, line_align: HorizontalCenter}
+                        <VectorLine>{line_width: 60., color: #f08, line_align: VerticalCenter}
+                    }
+                    <View>
+                    {
+                        <VectorLine>{line_width:  5., color: #0ff, line_align: DiagonalBottomLeftTopRight}
+                        <VectorLine>{line_width: 10., color: #ff0, line_align: DiagonalTopLeftBottomRight}
+                        <VectorLine>{line_width: 15., color: #f0f, line_align: DiagonalBottomLeftTopRight}
+                        <VectorLine>{line_width: 20., color: #8f0, line_align: DiagonalTopLeftBottomRight}
+                        <VectorLine>{line_width: 25., color: #08f, line_align: DiagonalBottomLeftTopRight}
+                        <VectorLine>{line_width: 30., color: #f08, line_align: DiagonalTopLeftBottomRight}
+                        <VectorLine>{line_width: 35., color: #0ff, line_align: DiagonalBottomLeftTopRight}
+                        <VectorLine>{line_width: 40., color: #ff0, line_align: DiagonalTopLeftBottomRight}
+                        <VectorLine>{line_width: 45., color: #f0f, line_align: DiagonalBottomLeftTopRight}
+                        <VectorLine>{line_width: 50., color: #8f0, line_align: DiagonalTopLeftBottomRight}
+                        <VectorLine>{line_width: 55., color: #08f, line_align: DiagonalBottomLeftTopRight}
+                        <VectorLine>{line_width: 60., color: #f08, line_align: DiagonalTopLeftBottomRight}
+                    }
+                 }
                 
                         
                 ListView = <RectView> {
@@ -77,7 +113,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        crate::linechart::live_design(cx);
+        crate::vectorline::live_design(cx);
         
     }
     
