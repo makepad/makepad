@@ -247,7 +247,6 @@ impl VectorLine {
             }
             let blockheight = self.line_width / angle.cos() + step.y.abs();
 
-            self.draw_ls.color = vec4(0.9, 0.9, 0.0, 1.0);
             self.draw_ls.width = hw as f32;
             let segmentstart = dvec2(rectstart.pos.x + rectstart.size.x, rectstart.pos.y + adjust);
 
@@ -320,7 +319,6 @@ impl VectorLine {
             let blockwidth = self.line_width / angle.cos() + step.x.abs();
 
             
-            self.draw_ls.color = vec4(0.9, 0.9, 0.0, 1.0);
             self.draw_ls.width = hw as f32;
             let segmentstart = dvec2(rectstart.pos.x + adjust, rectstart.pos.y + rectstart.size.y);
 
