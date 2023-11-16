@@ -6,5 +6,5 @@ pub use makepad_widgets::makepad_micro_serde;
 pub use makepad_widgets::makepad_live_id;
 pub use makepad_platform::makepad_error_log;
 pub mod candlestick;
-pub mod linechart; 
+pub mod vectorline; 
 pub mod app;
