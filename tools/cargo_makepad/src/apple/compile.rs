@@ -1,7 +1,6 @@
 use crate::makepad_shell::*;
 use crate::apple::{AppleTarget, AppleOs};
 use std::path::{PathBuf, Path};
-use std::collections::HashSet;
 use crate::utils::*;
 
 pub struct PlistValues {
@@ -408,7 +407,6 @@ impl ProvisionData {
 }
 
 fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
-    let cwd = std::env::current_dir().unwrap();
     let mut assets_to_add: Vec<String> = Vec::new();
     
     let build_crate_dir = get_crate_dir(build_crate) ?;
@@ -427,20 +425,9 @@ fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
             assets_to_add.push(format!("makepad/{underscore_build_crate}/resources/{path}"));
         }
     }
-    
-    let mut dependencies = HashSet::new();
-    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate]) {
-        for line in cargo_tree_output.lines().skip(1) {
-            if let Some((name, path)) = extract_dependency_info(line) {
-                let resources_path = Path::new(&path).join("resources");
-                if resources_path.is_dir() {
-                    dependencies.insert((name.replace('-', "_"), resources_path));
-                }
-            }
-        }
-    }
-    
-    for (name, resources_path) in dependencies.iter() {
+
+    let resources = get_crate_resources(build_crate);
+    for (name, resources_path) in resources.iter() {
         let dst_dir = app_dir.join(format!("makepad/{name}/resources"));
         mkdir(&dst_dir) ?;
         cp_all(resources_path, &dst_dir, false) ?;

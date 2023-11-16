@@ -287,8 +287,9 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], profile: &String) -> Result<(), String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
+    let profile = get_profile_from_args(args);
     
     for android_target in android_targets {
         let abi = android_target.abi_identifier();
@@ -313,11 +314,8 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
     Ok(())
 }
 
-fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], profile: &String) -> Result<(), String> {
-    let cwd = std::env::current_dir().unwrap();
+fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
-
-    // Host app resouces
 
     let build_crate_dir = get_crate_dir(build_crate) ?;
     let local_resources_path = build_crate_dir.join("resources");
@@ -334,21 +332,16 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, an
         }
     }
 
-    // Dependencies resources
-    // Note: Let's assume that resources files are the same for all targets
+    let resources = get_crate_resources(build_crate);
+    for (name, resources_path) in resources.iter() {
+        let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{name}/resources"));
+        mkdir(&dst_dir) ?;
+        cp_all(resources_path, &dst_dir, false) ?;
 
-    let dependencies_build_dir = cwd.join(format!("target/{}/{}/build/", android_targets[0].sys_dir(), profile));
-    if dependencies_build_dir.is_dir() {
-        let paths = ls(&dependencies_build_dir) ?;
-        for path in paths {
-            let path_str = path.display().to_string();
-            if let Some((dep_path, dep_filename)) = path_str.split_once("out/resources/") {
-                if let Some((dep_name, _)) = dep_path.rsplit_once("-") {
-                    let dep_name = dep_name.replace('-',"_");
-                    cp(&dependencies_build_dir.join(path), &build_paths.out_dir.join(format!("assets/makepad/{dep_name}/resources/{dep_filename}")), false) ?;
-                    assets_to_add.push(format!("assets/makepad/{dep_name}/resources/{dep_filename}"));
-                }
-            }
+        let assets = ls(&dst_dir) ?;
+        for path in &assets {
+            let path = path.display().to_string();
+            assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
         }
     }
 
@@ -421,11 +414,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     println!("Building APK");
     build_dex(sdk_dir, &build_paths)?;
     build_unaligned_apk(sdk_dir, &build_paths)?;
-
-    let profile = get_profile_from_args(args);
-    add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, &profile)?;
-    add_resources(sdk_dir, build_crate, &build_paths, android_targets, &profile)?;
-
+    add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args)?;
+    add_resources(sdk_dir, build_crate, &build_paths)?;
     build_zipaligned_apk(sdk_dir, &build_paths)?;
     sign_apk(sdk_dir, &build_paths)?;
 
