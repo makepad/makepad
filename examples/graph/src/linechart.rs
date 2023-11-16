@@ -25,28 +25,9 @@ live_design! {
         }
     }
 
-    Ball = {{Ball}} {
-        fn pixel(self) -> vec4 {
-           
-            let pixelpos = self.pos * self.rect_size;
-            let sdf = Sdf2d::viewport(pixelpos);
-           
 
 
-            sdf.move_to(0.0,0.0);
-            sdf.line_to(self.rect_size.x, 0);
-            sdf.line_to(self.rect_size.x, self.rect_size.y);
-            sdf.line_to(0, self.rect_size.y);
-            sdf.line_to(0, 0);
-            sdf.fill(#0001);
-
-            return sdf.result
-
-            //return #ff0
-        }
-    }
-
-    LineChart = {{LineChart}} {
+    VectorLine = {{VectorLine}} {
         width: Fill,
         height: Fill
     }
@@ -67,67 +48,28 @@ struct DrawLineSegment {
     color: Vec4,
 }
 
-#[derive(Live, LiveHook)]
-#[repr(C)]
-struct Ball {
-    #[deref]
-    draw_super: DrawQuad,
-}
-
-enum DraggingSide {
-    LineStartNOTDragging,
-    LineStartIsDragging,
-    LineEndIsDragging,
-}
-
 #[derive(Live)]
-pub struct LineChart {
-    #[walk]
-    walk: Walk,
-    #[live]
-    draw_ls: DrawLineSegment,
-    #[live]
-    draw_ball: Ball,
-    #[live]
-    draw_text: Label,
-    #[rust]
-    area: Area,
-    #[rust]
-    _screen_view: Rect,
-    #[rust]
-    _data_view: Rect,
-    #[live(15.0)]
-    line_width: f64,
-    #[rust(dvec2(1050., 10.))]
-    line_start: DVec2,
-    #[rust(dvec2(1000., 440.))]
-    line_end: DVec2,
-    #[rust(dvec2(1000., 140.))]
-    line_dragstart: DVec2,
-    #[rust(DraggingSide::LineStartNOTDragging)]
-    draggingside: DraggingSide,
-    #[rust(false)]
-    start_hover: bool,
-
-    #[rust(false)]
-    end_hover: bool,
-    #[rust(0.0)]
-    width_slider_value: f64,
-    #[rust(0.0)]
-    pixel_slider_value: f64,
+pub struct VectorLine{
+    #[walk] walk: Walk,
+    #[live] draw_ls: DrawLineSegment,
+    #[rust] area: Area,
+    #[rust] _screen_view: Rect,
+    #[rust] _data_view: Rect,
+    #[live(15.0)] line_width: f64,
+    #[rust(dvec2(350., 10.))] line_start: DVec2,
+    #[rust(dvec2(1000., 1440.))] line_end: DVec2,
+   
 }
 
-impl Widget for LineChart {
+impl Widget for VectorLine {
     fn handle_widget_event_with(
         &mut self,
-        cx: &mut Cx,
+        _cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
     ) {
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut |cx, action| {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+       
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -145,59 +87,27 @@ impl Widget for LineChart {
 }
 
 #[derive(Clone, WidgetAction)]
-pub enum LineChartAction {
+pub enum LineAction {
     None,
 }
 
-impl LiveHook for LineChart {
+impl LiveHook for VectorLine {
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, LineChart)
+        register_widget!(cx, VectorLine)
     }
 
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
 }
 
-impl LineChart {
+impl VectorLine {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // lets draw a bunch of quads
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
 
-        self.line_width = self.width_slider_value.powf(2.0) * 160. + 10.5;
-        let maxpixels = self.pixel_slider_value * 2000.0 + 10.;
+        self.line_width = 10.5;
+        let maxpixels = 300.;
 
-        /*if true{
-                let r = Rect{
-                    pos: dvec2(0.,0.),
-                    size: dvec2(2000.,2000.)
-                };
-
-                let mut actualstart =self.line_start;
-                let mut actualend =self.line_end;
-
-                self.draw_ls.line_start = (actualstart - r.pos).into_vec2();
-                self.draw_ls.line_end = (actualend - r.pos).into_vec2();
-                self.draw_ls.width = (self.line_width as f32)*1.3;
-                self.draw_ls.color = vec4(0.6,0.6,0.0,0.30);
-
-
-                self.draw_ls.draw_abs(cx, r);
-            }
-        */
-        if self.start_hover {
-            let r = Rect {
-                pos: self.line_start - dvec2(30., 30.),
-                size: dvec2(60., 60.),
-            };
-            self.draw_ball.draw_abs(cx, r);
-        }
-
-        if self.end_hover {
-            let r = Rect {
-                pos: self.line_end - dvec2(30., 30.),
-                size: dvec2(60., 60.),
-            };
-            self.draw_ball.draw_abs(cx, r);
-        }
+        println!("layout called!");
 
         let hw = self.line_width / 2.;
         self.draw_ls.width = hw as f32;
@@ -384,77 +294,13 @@ impl LineChart {
         }
     }
 
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, LineChartAction),
-    ) {
-        match event.hits(cx, self.area) {
-            Hit::FingerDown(fe) => {
-                let l1 = (fe.abs - self.line_start).lengthsquared();
-                let l2 = (fe.abs - self.line_end).lengthsquared();
-                if l2 < l1 {
-                    //   if (l2<250.)
-                    //  {
-                    self.draggingside = DraggingSide::LineEndIsDragging;
-                    self.line_dragstart = self.line_end;
-                    // }
-                } else {
-                    // if (l1<250.)
-                    //  {
-                    self.draggingside = DraggingSide::LineStartIsDragging;
-                    self.line_dragstart = self.line_start;
-                    // }
-                }
-            }
-            Hit::FingerUp(_fe) => {
-                self.draggingside = DraggingSide::LineStartNOTDragging;
-            }
-            Hit::FingerMove(fe) => {
-                let rel = fe.abs - fe.abs_start;
-                //  log!("{:?}", rel);
-                let l1 = (fe.abs - self.line_start).lengthsquared();
-                let l2 = (fe.abs - self.line_end).lengthsquared();
 
-                if l1 < 250. {
-                    self.start_hover = true;
-                } else {
-                    self.start_hover = false;
-                }
-                if l2 < 250. {
-                    self.end_hover = true;
-                } else {
-                    self.end_hover = false;
-                }
-
-                if let DraggingSide::LineStartIsDragging = self.draggingside {
-                    self.line_start = self.line_dragstart + rel;
-                }
-                if let DraggingSide::LineEndIsDragging = self.draggingside {
-                    self.line_end = self.line_dragstart + rel;
-                }
-                self.area.redraw(cx);
-            }
-            _ => (),
-        }
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.draw_walk(cx, walk);
+        WidgetDraw::done()
     }
+
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct LineChartRef(WidgetRef);
-
-impl LineChartRef {
-    pub fn set_width_slider_value(&self, _cx: &mut Cx, val: f64) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.width_slider_value = val;
-        }
-    }
-
-    pub fn set_pixel_slider_value(&self, _cx: &mut Cx, val: f64) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.pixel_slider_value = val;
-        }
-    }
-}

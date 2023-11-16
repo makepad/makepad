@@ -1,11 +1,11 @@
-use crate::{makepad_live_id::*};
+use crate::makepad_live_id::*;
 use makepad_widgets::*;
 use crate::linechart::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    import crate::linechart::LineChart;
+    import crate::linechart::VectorLine;
     
     App = {{App}} {
         ui: <Window> {
@@ -48,29 +48,14 @@ live_design!{
                     draw_bg: {color: #2}
                     height: Fill,
                     width: Fill
-                    <View>
-                    {
-                        <Labe>{text:"Stroke width"}
-                    slider1 = <Slider> {
-                        margin:20
-                        height: 20 
-                        width: 150
-                    }}
-                    <View>
-                    {
-                    slider2 = <Slider> {
-                        margin:20
-                        height: 20 
-                        width: 150
-                       
-                    }
-                }
+                   
                 }
                         
-                GraphView = <LineChart> {
+                Line1 = <VectorLine> {
                     height: Fill,
                     width: Fill
                 }
+                
                         
                 ListView = <RectView> {
                     draw_bg: {color: #2}
@@ -93,10 +78,11 @@ impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::linechart::live_design(cx);
+        
     }
     
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-       
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+
     }
 }
 
@@ -115,13 +101,6 @@ impl AppMain for App {
             return
         }
         
-        let actions = self.ui.handle_widget_event(cx, event);
-        if let Some(v) = self.ui.slider(id!(slider1)).slided(&actions){
-            self.ui.line_chart(id!(graph_view)).set_width_slider_value(cx, v);
-        }   
        
-        if let Some(v) = self.ui.slider(id!(slider2)).slided(&actions){
-            self.ui.line_chart(id!(graph_view)).set_pixel_slider_value(cx, v);
-        }
     }
 }
