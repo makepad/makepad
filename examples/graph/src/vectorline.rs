@@ -70,7 +70,7 @@ live_design! {
             let dist= self.doarc(pixelpos-self.arc_center, self.arc_a0,self.arc_a1, self.arc_radius);
             let linemult = smoothstep(self.width-1., self.width, dist);
             let C = self.stroke(dist, 0);
-          return self.color * (1.-linemult);
+            return self.color * (1. - linemult);
         //    return vec4(C.xyz*(1.-linemult),(1.0-linemult)*C.a);
 
  //           return vec4(self.color.xyz*abs(smoothstep(-0.1,0.1,sin(h*60.283/(self.width/4.))*self.width))*(1.-linemult),1.0-linemult);
@@ -101,29 +101,24 @@ struct DrawArc {
     #[calc] arc_a0: f32,
     #[calc] arc_a1: f32,
     #[calc] arc_radius: f32,
-    #[calc]  color: Vec4,
+    #[calc] color: Vec4,
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 struct DrawLineSegment {
-    #[deref]
-    draw_super: DrawQuad,
-    #[calc]
-    line_start: Vec2,
-    #[calc]
-    line_end: Vec2,
-    #[calc]
-    width: f32,
-    #[calc]
-    color: Vec4,
+    #[deref]   draw_super: DrawQuad,
+    #[calc]    line_start: Vec2,
+    #[calc]    line_end: Vec2,
+    #[calc]    width: f32,
+    #[calc]    color: Vec4,
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum LineAlign
 {
-    Custom,
+    Free,
     Left,
     #[pick] Top,
     DiagonalBottomLeftTopRight,
@@ -139,14 +134,11 @@ pub struct VectorLine{
     #[walk] walk: Walk,
     #[live] draw_ls: DrawLineSegment,
     #[rust] area: Area,
-    #[rust] _screen_view: Rect,
-    #[rust] _data_view: Rect,
     #[live(15.0)] line_width: f64,
     #[live] color: Vec4,
     #[live(LineAlign::Top)] line_align: LineAlign,
     #[rust(dvec2(350., 10.))] line_start: DVec2,
     #[rust(dvec2(1000., 1440.))] line_end: DVec2,
-   
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
@@ -174,8 +166,7 @@ pub struct VectorArc{
     #[walk] walk: Walk,
     #[live] draw_arc: DrawArc,
     #[rust] area: Area,
-    #[rust] _screen_view: Rect,
-    #[rust] _data_view: Rect,
+   
     #[live(15.0)] line_width: f64,
     #[live] color: Vec4,
    
@@ -539,15 +530,20 @@ impl VectorArc {
          
             _ => {}
         }
-        let mut arc_center = rect.size/2.;
 
-        self.draw_arc.arc_radius = (min(rect.size.x, rect.size.y)/2. - self.line_width)as f32;
-        self.draw_arc.arc_a0 = 0.;
-        self.draw_arc.arc_a1 = 3.1415;
+    
+
+        let mut arc_center = self.arc_center;
+
+
+        self.draw_arc.arc_radius = (arc_start - arc_center).length() as f32;
+        self.draw_arc.arc_a0 = (arc_start - arc_center).angle_in_radians() as f32;
+        self.draw_arc.arc_a1 = (arc_end - arc_center).angle_in_radians() as f32;
+        self.draw_arc.arc_center = (arc_center - rect.pos).into_vec2();        
+        
         self.draw_arc.color = self.color;
-        self.draw_arc.arc_center = (arc_center).into_vec2();        
-        self.draw_arc.draw_abs(cx, rect);
         self.draw_arc.width = self.line_width as f32;
+        self.draw_arc.draw_abs(cx, rect);
             
         
     }
