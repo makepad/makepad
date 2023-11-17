@@ -6,6 +6,7 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
     import crate::vectorline::VectorLine;
+    import crate::vectorline::VectorArc;
     
     App = {{App}} {
         ui: <Window> {
@@ -54,6 +55,16 @@ live_design!{
                 Line1 = <View>{
                     height: Fill,
                     flow: Down,
+                    <View>{
+                        <VectorArc> {width: Fill, line_width:10., color: #f00, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, line_width:20., color: #ff0, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, line_width:30., color: #0f0, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, line_width:40., color: #00f, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, line_width:10., color: #f00, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, line_width:20., color: #ff0, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, line_width:30., color: #0f0, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, line_width:40., color: #00f, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        }
                     <View>{
                     <VectorLine> {width: Fill, line_width:10., color: #f00, line_align: Bottom}
                     <VectorLine> {width: Fill, line_width:20., color: #ff0, line_align: Top}
