@@ -1,6 +1,6 @@
 use crate::makepad_live_id::*;
 use makepad_widgets::*;
-use crate::vectorline::*;
+
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -37,7 +37,7 @@ live_design!{
                         
                 graph_tabs = Tabs {
                     tabs: [arctest, linesoverview],
-                    selected: 0
+                    selected: 1
                 }
 
                 linesoverview = Tab {
@@ -67,15 +67,34 @@ live_design!{
                     flow: Down,
                     <View>{
                         height: Fill,
-                        width: Fill;
-                        <VectorArc> {width: Fill, height: Fill, line_width:30., color: #f00f, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
-                        <VectorArc> {width: Fill, height: Fill, line_width:30., color: #f00f, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        width: Fill,
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #8f0, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #08f, arc_start_corner: TopRight, arc_end_corner: BottomLeft}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f08, arc_start_corner: BottomRight, arc_end_corner: TopLeft}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f80, arc_start_corner: BottomLeft, arc_end_corner: TopRight}
                         
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #8f0, arc_start_corner: TopLeft, arc_end_corner: TopRight}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #08f, arc_start_corner: TopRight, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f08, arc_start_corner: BottomRight, arc_end_corner: BottomLeft}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f80, arc_start_corner: BottomLeft, arc_end_corner: TopLeft}
+                   }
+                    <View>{
+                        height: Fill,
+                        width: Fill;
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #8f0, arc_start_corner: TopLeft, arc_end_corner: BottomRight, arc_winding: CounterClockWise}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #08f, arc_start_corner: TopRight, arc_end_corner: BottomLeft, arc_winding: CounterClockWise}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f08, arc_start_corner: BottomRight, arc_end_corner: TopLeft, arc_winding: CounterClockWise}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f80, arc_start_corner: BottomLeft, arc_end_corner: TopRight, arc_winding: CounterClockWise}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #8f0, arc_start_corner: TopLeft, arc_end_corner: TopRight, arc_winding: CounterClockWise}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #08f, arc_start_corner: TopRight, arc_end_corner: BottomRight, arc_winding: CounterClockWise}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f08, arc_start_corner: BottomRight, arc_end_corner: BottomLeft, arc_winding: CounterClockWise}
+                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f80, arc_start_corner: BottomLeft, arc_end_corner: TopLeft, arc_winding: CounterClockWise}
+                    
                     }
                     <VectorLine>{line_width: 60., color: #fff, line_align: HorizontalCenter, draw_ls:{ fn stroke(self, side:float, progress: float) -> vec4
-                        {
-                            return vec4(sin(side+self.time), sin(progress),0,1);
-                        }}}
+                    {
+                        return vec4(1., sin(progress),0,1)* (0.5+0.5*sin(side/(6.283/3.)-self.time*6.283)) + vec4(0.1,0.1,0.1,1.);
+                    }}}
                 }
                 Line1 = <View>{
                     height: Fill,
@@ -113,24 +132,25 @@ live_design!{
                     }
                     <View>
                     {
-                        <VectorLine>{line_width:  5., color: #0ff, line_align: DiagonalBottomLeftTopRight}
-                        <VectorLine>{line_width: 10., color: #ff0, line_align: DiagonalTopLeftBottomRight}
-                        <VectorLine>{line_width: 15., color: #f0f, line_align: DiagonalBottomLeftTopRight}
-                        <VectorLine>{line_width: 20., color: #8f0, line_align: DiagonalTopLeftBottomRight}
-                        <VectorLine>{line_width: 25., color: #08f, line_align: DiagonalBottomLeftTopRight}
-                        <VectorLine>{line_width: 30., color: #f08, line_align: DiagonalTopLeftBottomRight}
-                        <VectorLine>{line_width: 35., color: #0ff, line_align: DiagonalBottomLeftTopRight}
-                        <VectorLine>{line_width: 40., color: #ff0, line_align: DiagonalTopLeftBottomRight}
-                        <VectorLine>{line_width: 45., color: #f0f, line_align: DiagonalBottomLeftTopRight}
-                        <VectorLine>{line_width: 50., color: #8f0, line_align: DiagonalTopLeftBottomRight}
-                        <VectorLine>{line_width: 55., color: #08f, line_align: DiagonalBottomLeftTopRight}
-                        <VectorLine>{line_width: 60., color: #f08, line_align: DiagonalTopLeftBottomRight}
+                        padding: 30,
+                        <VectorLine>{line_width:  5., color: #0ff, line_align: DiagonalBottomLeftTopRight, contained: false}
+                        <VectorLine>{line_width: 10., color: #ff0, line_align: DiagonalTopLeftBottomRight, contained: false}
+                        <VectorLine>{line_width: 15., color: #f0f, line_align: DiagonalBottomLeftTopRight, contained: false}
+                        <VectorLine>{line_width: 20., color: #8f0, line_align: DiagonalTopLeftBottomRight, contained: false}
+                        <VectorLine>{line_width: 25., color: #08f, line_align: DiagonalBottomLeftTopRight, contained: false}
+                        <VectorLine>{line_width: 30., color: #f08, line_align: DiagonalTopLeftBottomRight, contained: false}
+                        <VectorLine>{line_width: 35., color: #0ff, line_align: DiagonalBottomLeftTopRight, contained: false}
+                        <VectorLine>{line_width: 40., color: #ff0, line_align: DiagonalTopLeftBottomRight, contained: false}
+                        <VectorLine>{line_width: 45., color: #f0f, line_align: DiagonalBottomLeftTopRight, contained: false}
+                        <VectorLine>{line_width: 50., color: #8f0, line_align: DiagonalTopLeftBottomRight, contained: false}
+                        <VectorLine>{line_width: 55., color: #08f, line_align: DiagonalBottomLeftTopRight, contained: false}
+                        <VectorLine>{line_width: 60., color: #f08, line_align: DiagonalTopLeftBottomRight, contained: false}
                     }
                     <View>
                     {
                         <VectorLine>{line_width: 60., color: #fff, line_align: HorizontalCenter, draw_ls:{ fn stroke(self, side:float, progress: float) -> vec4
                             {
-                                return vec4(sin(side+self.time), sin(progress),0,1);
+                                return vec4(1., sin(progress),0,1)* sin(side/6.283+self.time);
                             }}}
                     }
                  }

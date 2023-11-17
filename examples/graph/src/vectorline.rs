@@ -70,7 +70,7 @@ live_design! {
             let dist= self.doarc(pixelpos-self.arc_center, self.arc_a0,self.arc_a1, self.arc_radius);
             let linemult = smoothstep(self.width-1., self.width, dist);
             let C = self.stroke(dist, 0);
-            return self.color * (1. - linemult);
+            return self.color * (1. - linemult) + vec4((1.-self.color.x)*0.1,(1.-self.color.y)*0.1,(1.-self.color.z)*0.1, 0);
         //    return vec4(C.xyz*(1.-linemult),(1.0-linemult)*C.a);
 
  //           return vec4(self.color.xyz*abs(smoothstep(-0.1,0.1,sin(h*60.283/(self.width/4.))*self.width))*(1.-linemult),1.0-linemult);
@@ -112,6 +112,7 @@ struct DrawLineSegment {
     #[calc]    line_end: Vec2,
     #[calc]    width: f32,
     #[calc]    color: Vec4,
+    
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
@@ -136,6 +137,7 @@ pub struct VectorLine{
     #[rust] area: Area,
     #[live(15.0)] line_width: f64,
     #[live] color: Vec4,
+    #[live(true)] contained: bool,
     #[live(LineAlign::Top)] line_align: LineAlign,
     #[rust(dvec2(350., 10.))] line_start: DVec2,
     #[rust(dvec2(1000., 1440.))] line_end: DVec2,
@@ -152,8 +154,54 @@ pub enum QuadCorner
     UnspecifiedCorner
 }
 
+impl QuadCorner {
+    fn from_u32(value: u32) -> QuadCorner {
+        match value {
+            0 => QuadCorner::TopLeft,
+            1 => QuadCorner::TopRight,
+            2 => QuadCorner::BottomRight,
+            3 => QuadCorner::BottomLeft,
+           
+            _ => QuadCorner::UnspecifiedCorner
+        }
+    }
+}
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+fn get_rect_corner( input:Rect, corner:QuadCorner) -> DVec2
+{
+    match corner{
+        QuadCorner::TopLeft => input.pos,
+        QuadCorner::TopRight => dvec2(input.pos.x + input.size.x, input.pos.y),
+        QuadCorner::BottomRight => input.pos+input.size,
+        QuadCorner::BottomLeft => dvec2(input.pos.x , input.pos.y+ input.size.y),
+        _ => {dvec2(0.,0.)}
+    }
+}
+
+fn get_rect_corner_i32( input:Rect, corner:i32) -> DVec2
+{
+    match corner{
+        0 /*topleft  */  => input.pos,
+        1 /*topright */  => dvec2(input.pos.x + input.size.x, input.pos.y),
+        2 /*bottomright */=> input.pos+input.size,
+        3 /*bottomleft */=> dvec2(input.pos.x , input.pos.y+ input.size.y),
+_ => {dvec2(0.,0.)}
+    }
+}
+
+
+fn get_rect_corner_u32( input:Rect, corner:u32) -> DVec2
+{
+    match corner{
+        0 /*topleft  */  => input.pos,
+        1 /*topright */  => dvec2(input.pos.x + input.size.x, input.pos.y),
+        2 /*bottomright */=> input.pos+input.size,
+        3 /*bottomleft */=> dvec2(input.pos.x , input.pos.y+ input.size.y),
+_ => {dvec2(0.,0.)}
+    }
+}
+
+#[derive(Copy, Clone, Debug, Live, LiveHook, PartialEq)]
 #[live_ignore]
 pub enum Winding
 {
@@ -166,7 +214,8 @@ pub struct VectorArc{
     #[walk] walk: Walk,
     #[live] draw_arc: DrawArc,
     #[rust] area: Area,
-   
+    #[live(true)] contained: bool,
+    
     #[live(15.0)] line_width: f64,
     #[live] color: Vec4,
    
@@ -222,15 +271,23 @@ impl LiveHook for VectorLine {
 impl VectorLine {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // lets draw a bunch of quads
-        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
+        let mut rect = fullrect;
+        let hw = self.line_width / 2.;
+        if self.contained == false
+        {
+            rect.size.x += self.line_width;
+            rect.size.y += self.line_width;
+            rect.pos.x -= hw;
+            rect.pos.y -= hw;
+        }
        // self.line_width = 10.5;
         let maxpixels = 300. as f64;
         let mut line_start = self.line_start;
         let mut line_end = self.line_end;
-        let hw = self.line_width / 2.;
        
-        //println!("layout called!");
+        
         match self.line_align 
         {
             LineAlign::Top =>{
@@ -503,14 +560,29 @@ impl LiveHook for VectorArc {
 impl VectorArc {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // lets draw a bunch of quads
-        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
+        let mut rect = fullrect;
+        let hw = self.line_width / 2.;
+        
+        if self.contained{
+            rect.size.x -= self.line_width;
+            rect.size.y -= self.line_width;
+            rect.pos.x += hw;
+            rect.pos.y += hw;
+            
+        } else {
+            fullrect.size.x+= self.line_width;
+            fullrect.size.y += self.line_width;
+            fullrect.pos.x -= hw;
+            fullrect.pos.y -= hw;
+        }
       
         let maxpixels = 300. as f64;
         let mut arc_start = self.arc_start;
         let mut arc_end = self.arc_end;
-        let hw = self.line_width / 2.;
-       
+        let mut usecomputedcenter = true;
+
         match self.arc_start_corner
         {
             QuadCorner::TopLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y )}
@@ -518,7 +590,7 @@ impl VectorArc {
             QuadCorner::BottomRight => {arc_start = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
             QuadCorner::BottomLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
          
-            _ => {}
+            _ => {usecomputedcenter = false;}
         }
         
         match self.arc_end_corner
@@ -528,22 +600,50 @@ impl VectorArc {
             QuadCorner::BottomRight => {arc_end = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
             QuadCorner::BottomLeft => {arc_end = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
          
-            _ => {}
+            _ => {usecomputedcenter = false;}
         }
 
-    
-
+        let shortedge = min(rect.size.x, rect.size.y);
+        let mut computedradius = shortedge;
         let mut arc_center = self.arc_center;
 
+            if usecomputedcenter
+            {
+                    let endcornerid = self.arc_end_corner as u32;
+                    let startcornerid = self.arc_start_corner as u32;
+                    
+                     let cornerdelta = ((self.arc_end_corner as i32 - self.arc_start_corner as i32 + 4) as u32)%4;
+                     match cornerdelta
+                     {
+                        0 => {}
+                        1 => {computedradius*=0.5;arc_center = (get_rect_corner_u32(rect, startcornerid) +  get_rect_corner_u32(rect, (startcornerid+1)%4)) /2.}
+                        2 => {arc_center = 
+                                match self.arc_winding
+                                { 
+                                    Winding::ClockWise => get_rect_corner_u32(rect, (startcornerid+3)%4), 
+                                    Winding::CounterClockWise => get_rect_corner_u32(rect, (startcornerid+1)%4)  
+                                
+                                }
+                            }
+                        3 => {computedradius*=0.5;arc_center = (get_rect_corner_u32(rect, startcornerid) +  get_rect_corner_u32(rect, (startcornerid+3)%4)) /2.}
+                        _ => {}
+                     }
 
-        self.draw_arc.arc_radius = (arc_start - arc_center).length() as f32;
+            }
+        
+        if  Winding::CounterClockWise == self.arc_winding
+        {
+            std::mem::swap(&mut arc_start, &mut arc_end);
+          
+        }
+        self.draw_arc.arc_radius = computedradius as f32;//(arc_start - arc_center).length() as f32;
         self.draw_arc.arc_a0 = (arc_start - arc_center).angle_in_radians() as f32;
         self.draw_arc.arc_a1 = (arc_end - arc_center).angle_in_radians() as f32;
-        self.draw_arc.arc_center = (arc_center - rect.pos).into_vec2();        
+        self.draw_arc.arc_center = (arc_center - fullrect.pos).into_vec2();        
         
         self.draw_arc.color = self.color;
-        self.draw_arc.width = self.line_width as f32;
-        self.draw_arc.draw_abs(cx, rect);
+        self.draw_arc.width = (self.line_width/2.) as f32;
+        self.draw_arc.draw_abs(cx,fullrect);
             
         
     }
