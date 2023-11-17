@@ -26,7 +26,7 @@ live_design!{
                 split1 = Splitter {
                     axis: Vertical,
                     align: FromB(200.0),
-                    a: graph_view,
+                    a: graph_tabs,
                     b: log_view
                 }
                         
@@ -35,11 +35,21 @@ live_design!{
                     kind: ListView
                 }
                         
-                graph_view = Tab {
-                    name: ""
+                graph_tabs = Tabs {
+                    tabs: [arctest, linesoverview],
+                    selected: 0
+                }
+
+                linesoverview = Tab {
+                    name: "Overview"
                     kind: Line1
                 }
-                        
+
+                arctest = Tab {
+                    name: "Arc Test"
+                    kind: Line2
+                }   
+
                 log_view = Tab {
                     name: ""
                     kind: LogView
@@ -51,7 +61,22 @@ live_design!{
                     width: Fill
                    
                 }
+                Line2 = <View>{
+                    height: Fill,
+                    width: Fill;
+                    flow: Down,
+                    <View>{
+                        height: Fill,
+                        width: Fill;
+                        <VectorArc> {width: Fill, height: Fill, line_width:30., color: #f00f, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc> {width: Fill, height: Fill, line_width:30., color: #f00f, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
                         
+                    }
+                    <VectorLine>{line_width: 60., color: #fff, line_align: HorizontalCenter, draw_ls:{ fn stroke(self, side:float, progress: float) -> vec4
+                        {
+                            return vec4(sin(side+self.time), sin(progress),0,1);
+                        }}}
+                }
                 Line1 = <View>{
                     height: Fill,
                     flow: Down,
