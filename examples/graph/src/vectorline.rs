@@ -15,12 +15,10 @@ live_design! {
         fn pixel(self) -> vec4 
         {
             
-            let pixelpos = self.pos * self.rect_size;
+            let p = self.pos * self.rect_size;
             let b = self.line_end;
             let a = self.line_start;
-            let l = length(a-b);
-            let p = pixelpos;
-
+          
             let ba = b-a;
             let pa = p-a;
             let h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
@@ -34,12 +32,76 @@ live_design! {
         }
     }
 
+    DrawArc = {{DrawArc}} {
+       
+        fn stroke(self, side:float, progress: float) -> vec4
+        {
+            return self.color;
+        }
+
+        fn doarc (self, p:vec2, a0:float, a1:float, r:float ) -> float
+        {
+            let a = mod(atan(p.y, p.x), 6.283);
+
+            let  ap = a - a0;
+            if (ap < 0.)  
+            {
+               ap+=6.283;
+            }
+            let  a1p = a1 - a0;
+            if (a1p < 0.) 
+            {
+                a1p += 6.283;
+            }
+
+            if (ap >= a1p)  
+            {
+                let q0 = vec2(r * cos(a0), r * sin(a0));
+                let q1 = vec2(r * cos(a1), r * sin(a1));
+                return min(length(p - q0), length(p - q1));
+            }
+
+            return abs(length(p) - r);
+        }
+
+        fn pixel(self) -> vec4 
+        {
+            let pixelpos = self.pos * self.rect_size;
+            let dist= self.doarc(pixelpos-self.arc_center, self.arc_a0,self.arc_a1, self.arc_radius);
+            let linemult = smoothstep(self.width-1., self.width, dist);
+            let C = self.stroke(dist, 0);
+          return self.color * (1.-linemult);
+        //    return vec4(C.xyz*(1.-linemult),(1.0-linemult)*C.a);
+
+ //           return vec4(self.color.xyz*abs(smoothstep(-0.1,0.1,sin(h*60.283/(self.width/4.))*self.width))*(1.-linemult),1.0-linemult);
+        }
+    }
 
 
     VectorLine = {{VectorLine}} {
         width: Fill,
         height: Fill
     }
+
+    VectorArc = {{VectorArc}} {
+        width: Fill,
+        height: Fill
+    }
+}
+
+#[derive(Live, LiveHook)]
+#[repr(C)]
+struct DrawArc {
+    #[deref]
+    draw_super: DrawQuad,
+    #[calc] arc_start: Vec2,
+    #[calc] arc_end: Vec2,
+    #[calc] arc_center: Vec2,
+    #[calc] width: f32,
+    #[calc] arc_a0: f32,
+    #[calc] arc_a1: f32,
+    #[calc] arc_radius: f32,
+    #[calc]  color: Vec4,
 }
 
 #[derive(Live, LiveHook)]
@@ -86,6 +148,47 @@ pub struct VectorLine{
     #[rust(dvec2(1000., 1440.))] line_end: DVec2,
    
 }
+
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum QuadCorner
+{
+    TopLeft,
+    TopRight,
+    #[pick] BottomRight,
+    BottomLeft,
+    UnspecifiedCorner
+}
+
+
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum Winding
+{
+    #[pick]ClockWise,
+    CounterClockWise
+}
+
+#[derive(Live)]
+pub struct VectorArc{
+    #[walk] walk: Walk,
+    #[live] draw_arc: DrawArc,
+    #[rust] area: Area,
+    #[rust] _screen_view: Rect,
+    #[rust] _data_view: Rect,
+    #[live(15.0)] line_width: f64,
+    #[live] color: Vec4,
+   
+   #[live(QuadCorner::UnspecifiedCorner)] arc_start_corner: QuadCorner,
+   #[live(QuadCorner::UnspecifiedCorner)] arc_end_corner: QuadCorner,
+   #[live(Winding::ClockWise)] arc_winding: Winding,
+   
+    #[rust(dvec2(350., 10.))] arc_start: DVec2,
+    #[rust(dvec2(1000., 1440.))] arc_end: DVec2,
+    #[rust(dvec2(1000., 1440.))] arc_center: DVec2,
+   
+}
+
 
 impl Widget for VectorLine {
     fn handle_widget_event_with(
@@ -355,6 +458,98 @@ impl VectorLine {
 
             
         }
+    }
+
+
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
+
+}
+
+
+impl Widget for VectorArc {
+    fn handle_widget_event_with(
+        &mut self,
+        _cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
+    ) {
+        let uid = self.widget_uid();
+       
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx)
+    }
+
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
+}
+
+#[derive(Clone, WidgetAction)]
+pub enum ArcAction {
+    None,
+}
+
+impl LiveHook for VectorArc {
+    fn before_live_design(cx: &mut Cx) {
+        register_widget!(cx, VectorArc)
+    }
+
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
+}
+
+impl VectorArc {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        // lets draw a bunch of quads
+        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+
+      
+        let maxpixels = 300. as f64;
+        let mut arc_start = self.arc_start;
+        let mut arc_end = self.arc_end;
+        let hw = self.line_width / 2.;
+       
+        match self.arc_start_corner
+        {
+            QuadCorner::TopLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y )}
+            QuadCorner::TopRight => {arc_start = dvec2(rect.pos.x + rect.size.x, rect.pos.y )}
+            QuadCorner::BottomRight => {arc_start = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
+            QuadCorner::BottomLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
+         
+            _ => {}
+        }
+        
+        match self.arc_end_corner
+        {
+            QuadCorner::TopLeft => {arc_end = dvec2(rect.pos.x, rect.pos.y )}
+            QuadCorner::TopRight => {arc_end = dvec2(rect.pos.x + rect.size.x, rect.pos.y )}
+            QuadCorner::BottomRight => {arc_end = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
+            QuadCorner::BottomLeft => {arc_end = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
+         
+            _ => {}
+        }
+        let mut arc_center = rect.size/2.;
+
+        self.draw_arc.arc_radius = (min(rect.size.x, rect.size.y)/2. - self.line_width)as f32;
+        self.draw_arc.arc_a0 = 0.;
+        self.draw_arc.arc_a1 = 3.1415;
+        self.draw_arc.color = self.color;
+        self.draw_arc.arc_center = (arc_center).into_vec2();        
+        self.draw_arc.draw_abs(cx, rect);
+        self.draw_arc.width = self.line_width as f32;
+            
+        
     }
 
 
