@@ -295,7 +295,8 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        
+       
+
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
@@ -303,6 +304,8 @@ impl AppMain for App {
             }
             return
         }
+
+        let _actions = self.ui.handle_widget_event(cx, event);
         
        
     }
