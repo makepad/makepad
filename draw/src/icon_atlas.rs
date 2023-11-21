@@ -484,6 +484,9 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         }
         
         fn add_min(&mut self) -> Result<(), String> {
+            if self.num_state.is_some() {
+                self.finalize_num();
+            }
             if self.expect_nums == self.num_count {
                 self.finalize_cmd() ?;
             }
@@ -513,12 +516,16 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         fn add_dot(&mut self) -> Result<(), String> {
             if let Some(num_state) = &mut self.num_state {
                 if num_state.has_dot {
-                    return Err(format!("Unexpected ."));
+                    self.finalize_num();
+                    self.add_digit(0.0) ?;
+                    self.add_dot() ?;
+                    return Ok(());
                 }
                 num_state.has_dot = true;
             }
             else {
-                return Err(format!("Unexpected ."));
+                self.add_digit(0.0) ?;
+                self.add_dot() ?;
             }
             Ok(())
         }
