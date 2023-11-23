@@ -9,6 +9,9 @@ mod live_prims;
 mod cx;
 mod cx_api;
 
+#[macro_use]
+pub mod log;
+
 pub mod live_traits;
 pub mod live_cx;
 pub mod live_atomic;
@@ -66,10 +69,9 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
-    makepad_shader_compiler::makepad_error_log,
     //makepad_image_formats::image,
     makepad_derive_live::*,
-    makepad_error_log::*,
+    log::*,
     makepad_math::*,
     makepad_live_id::*,
     app_main::AppMain,

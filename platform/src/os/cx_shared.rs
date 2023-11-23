@@ -2,7 +2,6 @@
 use {
     std::collections::{HashSet, HashMap},
     crate::{
-        makepad_error_log::*,
         cx::Cx,
         pass::{
             PassId,
@@ -136,7 +135,7 @@ impl Cx {
             }));
             self.inner_key_focus_change();
             if counter > 100 {
-                error!("Trigger feedback loop detected");
+                crate::error!("Trigger feedback loop detected");
                 break
             }
         }
