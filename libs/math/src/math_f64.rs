@@ -245,7 +245,9 @@ impl DVec2 {
     pub fn angle_in_radians(&self) -> f64 {
         self.y.atan2(self.x)
     }
-    
+    pub fn swapxy(&self) -> DVec2{
+        dvec2(self.y,self.x)
+    }
     pub fn angle_in_degrees(&self) -> f64 {
         self.y.atan2(self.x) * (360.0 / (2.* std::f64::consts::PI))
     }
