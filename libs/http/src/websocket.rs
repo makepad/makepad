@@ -64,7 +64,7 @@ pub enum MessageFormat {
 }
 
 pub struct MessageHeader {
-    format: MessageFormat,
+    pub format: MessageFormat,
     len: usize,
     masked: bool,
     data: [u8;14]
