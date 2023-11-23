@@ -76,7 +76,7 @@ live_design!{
                         height: 40.
 
 <VectorCornerArc> { line_width:10., color: #ff0, corner: TopLeft}
-<VectorLine>{Width:Fill, line_width:10. color: #ff0, line_align:Top}
+<VectorLine>{line_width:10. color: #ff0, line_align:Top}
 <VectorCornerArc> { line_width:10., color: #ff0, corner: TopRight}
                     }
                     <View>{
@@ -90,7 +90,7 @@ live_design!{
                         width:Fill
                         height: 40.
 <VectorCornerArc> {width: Fill, line_width:10., color: #ff0, corner: BottomLeft}
-<VectorLine>{Width:Fill, line_width:10. color: #ff0, line_align:Bottom  }
+<VectorLine>{width:Fill, line_width:10. color: #ff0, line_align:Bottom  }
 <VectorCornerArc> {width: Fill, line_width:10., color: #ff0, corner: BottomRight}
                     }
                 }
@@ -101,7 +101,47 @@ live_design!{
                     <View>{
                         height: Fill,
                         width: Fill,
-                        <VectorArc> {width: Fill, height: Fill, line_width:20., color: #8f0, arc_start_corner: TopLeft, arc_end_corner: BottomRight}
+                        <VectorArc>
+                         {
+
+                            <Animator> {
+                                hover = {
+                                    default: off
+                                    off = {
+                                        from: {all: Snap}
+                                        apply: {
+                                            line_width: 10.0
+                                            
+                                        }
+                                    }
+                                    on = {
+                                        cursor: Hand
+                                        from: {all: Snap}
+                                        apply: {
+                                            line_width: 20.0
+                                        }
+                                    }
+                                }
+                                
+                                select = {
+                                    default: off
+                                    off = {
+                                        from: {all: Snap}
+                                        apply: {
+                                            line_width: 10.0
+                                        }
+                                    }
+                                    on = {
+                                        from: {all: Snap}
+                                        apply: {
+                                            line_width: 50.0
+                                        }
+                                    }
+                                }
+                            }
+
+                            width: Fill, height: Fill, line_width:20., color: #8f0, arc_start_corner: TopLeft, arc_end_corner: BottomRight
+                        }
                         <VectorArc> {width: Fill, height: Fill, line_width:20., color: #08f, arc_start_corner: TopRight, arc_end_corner: BottomLeft}
                         <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f08, arc_start_corner: BottomRight, arc_end_corner: TopLeft}
                         <VectorArc> {width: Fill, height: Fill, line_width:20., color: #f80, arc_start_corner: BottomLeft, arc_end_corner: TopRight}
