@@ -1,5 +1,6 @@
 use std::convert::TryInto;
 use crate::digest::{Sha1, base64_encode};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, PartialEq)]
 enum State {
@@ -57,41 +58,86 @@ pub enum WebSocketError<'a> {
 pub const PING_MESSAGE:[u8;2] = [128 | 9,0];
 pub const PONG_MESSAGE:[u8;2] = [128 | 10,0];
 
-pub struct BinaryMessageHeader{
-    len: usize,
-    data:[u8;10]
+pub enum MessageFormat {
+    Binary,
+    Text
 }
 
-impl BinaryMessageHeader{
-    pub fn from_len(len:usize)->Self{
-        let mut data = [0u8;10];
+pub struct MessageHeader {
+    format: MessageFormat,
+    len: usize,
+    masked: bool,
+    data: [u8;14]
+}
+
+impl MessageHeader {
+    pub fn from_len(len: usize, format: MessageFormat, masked: bool)->Self{
+        let mut data = [0u8;14];
         
-        data[0] = 128 | 2; // binary single message
-        
+        match format {
+            MessageFormat::Binary => data[0] = 128 | 2,
+            MessageFormat::Text => data[0] = 128 | 1,
+        }
+
+        if masked {
+            data[1] = 128;
+        } else {
+            data[1] = 0;
+        }
+
+        let header_len;
         if len < 126{
-            data[1] = len as u8;
-            BinaryMessageHeader{len:2, data}
+            data[1] |= len as u8;
+            header_len = 2;
         }
         else if len < 65536{
-            data[1] = 126; 
+            data[1] |= 126;
             let bytes = &(len as u16).to_be_bytes();
             for (i, &byte) in bytes.iter().enumerate() {
                 data[i + 2] = byte;
             }
-            return BinaryMessageHeader{len:4, data}
+            header_len = 4;
         }
         else{
-            data[1] = 127;
+            data[1] |= 127;
             let bytes = &(len as u64).to_be_bytes();
             for (i, &byte) in bytes.iter().enumerate() {
                 data[i + 2] = byte;
             }
-            return BinaryMessageHeader{len:10, data}
+            header_len = 10;
+        }
+
+        if masked {
+            for i in header_len..header_len + 4 {
+                data[i] = Self::random_byte();
+            }
+            return MessageHeader{len: header_len + 4, data, format, masked}
+        } else {
+            return MessageHeader{len: header_len, data, format, masked}
         }
     }
     
     pub fn as_slice(&self)->&[u8]{
         &self.data[0..self.len]
+    }
+
+    pub fn mask(&mut self)->Option<&[u8]> {
+        if self.masked {
+            match self.len {
+                6 => Some(&self.data[2..6]),
+                10 => Some(&self.data[6..10]),
+                14 => Some(&self.data[10..14]),
+                _ => None
+            }
+        } else {
+            None
+        }
+    }
+
+    // TODO Improve this using a proper random number generator
+    fn random_byte() -> u8 {
+        let num = SystemTime::now().duration_since(UNIX_EPOCH).expect("duration_since failed").subsec_nanos();
+        num as u8
     }
 }
 
@@ -125,6 +171,18 @@ impl WebSocket {
             base64
         );
         response_ack
+    }
+
+    pub fn build_message(mut header: MessageHeader, data: &[u8])->Vec<u8>{
+        let mut frame = header.as_slice().to_vec();
+        if let Some(mask) = header.mask(){
+            for (i, &byte) in data.iter().enumerate() {
+                frame.push(byte ^ mask[i % 4]);
+            }
+        } else {
+            frame.extend_from_slice(data);
+        }
+        frame
     }
     
     fn parse_head(&mut self, input: &[u8]) -> bool {
