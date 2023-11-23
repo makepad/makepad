@@ -11,7 +11,6 @@ pub mod audio_stream;
 
 use makepad_platform::Cx;
 pub use makepad_platform;
-pub use makepad_platform::makepad_error_log;
 pub use makepad_platform::makepad_math;
 pub use crate::audio_graph::*;
 pub use crate::audio_traits::*;
