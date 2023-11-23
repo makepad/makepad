@@ -200,8 +200,9 @@ impl AvCaptureAccess {
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInUltraWideCamera")];
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInTelephotoCamera")];
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInTrueDepthCamera")];
-            let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeExternalUnknown")];
-            
+            let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeExternal")];
+            let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeContinuityCamera")];
+                        
             let session: ObjcId = msg_send![
                 class!(AVCaptureDeviceDiscoverySession),
                 discoverySessionWithDeviceTypes: types

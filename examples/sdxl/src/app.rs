@@ -37,14 +37,15 @@ struct Machine {
     fetching: Option<(String,PromptState)>,
     web_socket: Option<WebSocket>
 }
+#[derive(Debug)]
 enum MachineRunning{
     Stopped,
     UploadingImage{
-        image_name: String,
+        photo_name: String,
         prompt_state: PromptState,
     },
     RunningPrompt {
-        image_name: String,
+        photo_name: String,
         prompt_state: PromptState,
     }
 }
@@ -91,7 +92,7 @@ pub struct App {
         Workflow::new("lcm")
     ])] workflows: Vec<Workflow>,
     
-    #[rust] todo: Vec<PromptState>,
+    #[rust] todo: Vec<(bool, PromptState)>,
     
     #[rust(Database::new(cx))] db: Database,
     
@@ -99,13 +100,15 @@ pub struct App {
     #[rust(10000u64)] last_seed: u64,
     
     #[rust] current_image: Option<ImageId>,
-    
+    #[rust] current_photo_name: Option<String>,
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
-    
-    #[rust(Instant::now())] last_flip: Instant
+    #[rust(cx.midi_input())] midi_input: MidiInput,
+    #[rust(true, true)] last_render:(bool, bool)
+    //#[rust(Instant::now())] last_flip: Instant
 }
 
+     
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
@@ -135,16 +138,18 @@ impl App {
     
     fn get_camera_frame_jpeg(&mut self,  cx: &mut Cx, width:usize, height: usize)->Vec<u8>{
         let mut buf = Vec::new();
+        let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
+        let img_width = img_width * 2;
         self.video_input[0].swap_vec_u32(cx, &mut buf);
         // alright we have the buffer // now lets cut a 1344x768 out of the center
         let mut out = Vec::new();
         VideoPixelFormat::NV12.buffer_to_rgb_8(
             &buf,
             &mut out,
-            1920,
-            1080,
-            (1920-width)/2,
-            (1080-height) / 2,
+            img_width,
+            img_height,
+            (img_width-width)/2,
+            (img_height-height) / 2,
             width,
             height
         );
@@ -173,11 +178,11 @@ impl App {
         let mut request = HttpRequest::new(url, HttpMethod::POST);
                         
         request.set_header("Content-Type".to_string(), "multipart/form-data; boundary=Boundary".to_string());
-        let image_name = format!("{}", LiveId::from_str(&format!("{:?}", Instant::now())).0);
+        let photo_name = format!("{}", LiveId::from_str(&format!("{:?}", Instant::now())).0);
         // alright lets write things
-        let form_top = format!("--Boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n", image_name);
+        let form_top = format!("--Boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n", photo_name);
         let form_bottom = format!("\r\n--Boundary--");
-         println!("{}", form_top); 
+
         request.set_metadata_id(machine.id);
         let mut body = Vec::new();
         body.extend_from_slice(form_top.as_bytes());
@@ -187,25 +192,27 @@ impl App {
                  
         request.set_body(body);
         cx.http_request(live_id!(camera), request);
+        self.current_photo_name = Some(photo_name.clone());
+        
         machine.running = MachineRunning::UploadingImage{
-            image_name,
+            photo_name,
             prompt_state: prompt_state.clone(),
         };
     }
     
-    fn send_prompt_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, image_name:String, prompt_state: PromptState) {
+    fn send_prompt_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, photo_name:String, prompt_state: PromptState) {
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
         let url = format!("http://{}/prompt", machine.ip);
         let mut request = HttpRequest::new(url, HttpMethod::POST);
-            
+             
         request.set_header("Content-Type".to_string(), "application/json".to_string());
-            
+
         let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.prompt.preset.workflow)).unwrap();
         let ws = ws.replace("CLIENT_ID", "1234");
         let ws = ws.replace("POSITIVE_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
         let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
         let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
-        let ws = ws.replace("1344x768_gray.png", &format!("{}.jpg",image_name));
+        let ws = ws.replace("1344x768_gray.png", &format!("{}.jpg",photo_name));
         let ws = ws.replace("\"steps\": 4", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
         let ws = ws.replace("\"cfg\": 1.7", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
             let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
@@ -216,7 +223,7 @@ impl App {
         cx.http_request(live_id!(prompt), request);
             
         machine.running = MachineRunning::RunningPrompt{
-            image_name,
+            photo_name,
             prompt_state: prompt_state.clone(),
         };
     }
@@ -239,6 +246,9 @@ impl App {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        for machine in &mut self.machines {
+            machine.running = MachineRunning::Stopped;
+        }
     }
     
     fn fetch_image(&self, cx: &mut Cx, machine_id: LiveId, image_name: &str) {
@@ -257,14 +267,9 @@ impl App {
         }
     }
     
-    fn update_progress(cx: &mut Cx, ui: &WidgetRef, machine: LiveId, active: bool, steps: usize, total: usize) {
+    fn update_progress(cx: &mut Cx, ui: &WidgetRef, machine: LiveId, active: bool, steps: usize, total: usize) { 
         let progress_id = match machine {
             live_id!(m1) => id!(progress1),
-            live_id!(m2) => id!(progress2),
-            live_id!(m3) => id!(progress3),
-            live_id!(m4) => id!(progress4),
-            live_id!(m5) => id!(progress5),
-            live_id!(m6) => id!(progress6),
             _ => panic!()
         };
         ui.view(progress_id).apply_over_and_redraw(cx, live!{
@@ -318,7 +323,7 @@ impl App {
             if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos + 1 < self.filtered.flat.len() {
                     self.set_current_image(cx, self.filtered.flat[pos + 1].clone());
-                    self.last_flip = Instant::now();
+                    //self.last_flip = Instant::now();
                 }
             }
         }
@@ -330,7 +335,7 @@ impl App {
             if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos > 0 {
                     self.set_current_image(cx, self.filtered.flat[pos - 1].clone());
-                    self.last_flip = Instant::now();
+                    //self.last_flip = Instant::now();
                 }
             }
         }
@@ -340,18 +345,12 @@ impl App {
         self.ui.redraw(cx);
         if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
             self.set_current_image(cx, image_files[row.min(*image_count)].clone());
-            self.last_flip = Instant::now();
+            //self.last_flip = Instant::now();
         }
     }
     
     fn update_todo_display(&mut self, cx: &mut Cx) {
-        let mut todo = 0;
-        for machine in &self.machines {
-            if machine.running.is_running() {
-                todo += 1;
-            }
-        }
-        todo += self.todo.len();
+        let todo = self.todo.len();
         self.ui.label(id!(todo_label)).set_text_and_redraw(cx, &format!("Todo {}", todo));
     }
     
@@ -373,66 +372,52 @@ impl App {
         self.ui.text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
         self.ui.text_input(id!(settings_cfg.input)).set_text(&format!("{}", preset.cfg));
         self.ui.text_input(id!(settings_denoise.input)).set_text(&format!("{}", preset.denoise));
-        /*
-        self.ui.text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
-        self.ui.text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
-        self.ui.text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
-        self.ui.text_input(id!(settings_base_start_step.input)).set_text(&format!("{}", preset.base_start_step));
-        self.ui.text_input(id!(settings_base_end_step.input)).set_text(&format!("{}", preset.base_end_step));
-        self.ui.text_input(id!(settings_refiner_start_step.input)).set_text(&format!("{}", preset.refiner_start_step));
-        self.ui.text_input(id!(settings_refiner_end_step.input)).set_text(&format!("{}", preset.refiner_end_step));
-        self.ui.text_input(id!(settings_upscale_start_step.input)).set_text(&format!("{}", preset.upscale_start_step));
-        self.ui.text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
-        self.ui.text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
-        self.ui.text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
-        self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));*/
     }
     
-    fn render(&mut self, cx: &mut Cx, batch_size: usize) {
+    fn render(&mut self, cx: &mut Cx, photo:bool, randomise: bool) {
+        self.last_render = (photo, randomise);
         let positive = self.ui.text_input(id!(positive)).text();
         let negative = self.ui.text_input(id!(negative)).text();
-
-        if batch_size != 0 {
+        if randomise {
             self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
             self.update_seed_display(cx);
         }
-        for i in 0..batch_size.max(1) {
-            let prompt_state = PromptState {
-                //total_steps: self.ui.get_text_input(id!(settings_total.input)).get_text().parse::<usize>().unwrap_or(32),
-                prompt: Prompt {
-                    positive: positive.clone(),
-                    negative: negative.clone(),
-                    preset: self.save_preset()
-                },
-                //workflow: workflow.clone(),
-                seed: self.last_seed as u64
-            };
-            if let Some(machine_id) = self.get_free_machine(){
+        let prompt_state = PromptState {
+            //total_steps: self.ui.get_text_input(id!(settings_total.input)).get_text().parse::<usize>().unwrap_or(32),
+            prompt: Prompt {
+                positive: positive.clone(),
+                negative: negative.clone(),
+                preset: self.save_preset()
+            },
+            //workflow: workflow.clone(),
+            seed: self.last_seed as u64
+        };
+        if let Some(machine_id) = self.get_free_machine(){
+            if photo || self.current_photo_name.is_none(){
                 self.send_camera_to_machine(cx, machine_id, prompt_state);
             }
             else{
-                self.todo.insert(0, prompt_state);
+                self.send_prompt_to_machine(cx, machine_id, self.current_photo_name.clone().unwrap_or("".to_string()), prompt_state); 
             }
-            if batch_size != 0 {
-                self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0 + i as u64;
-                self.update_seed_display(cx);
-            }
+        }
+        else{
+            self.todo.insert(0, (photo, prompt_state));
         }
         // lets update the queuedisplay
         self.update_todo_display(cx);
     }
-    
+    /*
     fn set_slide_show(&mut self, cx: &mut Cx, check: bool) {
         let check_box = self.ui.check_box(id!(slide_show_check_box));
         check_box.set_selected(cx, check);
         if check {
             self.last_flip = Instant::now();
         }
-    }
-    
+    }*/
+    /*
     fn handle_slide_show(&mut self, cx: &mut Cx) {
         // lets get the slideshow values
-        if self.ui.check_box(id!(slide_show_check_box)).selected(cx) {
+        if self.ui.check_box(id!(slide_show_check_box)).selected(cx) { 
             let time = self.ui.drop_down(id!(slide_show_dropdown)).selected_label().parse::<f64>().unwrap_or(0.0);
             // ok lets check our last-change instant
             if Instant::now() - self.last_flip > Duration::from_millis((time * 1000.0)as u64) {
@@ -440,13 +425,23 @@ impl App {
             }
         }
     }
-    
+    */
     fn update_render_todo(&mut self, cx: &mut Cx) {
+        
+        if self.todo.len() == 0 && self.ui.check_box(id!(auto_check_box)).selected(cx) {
+            self.render(cx, self.last_render.0, self.last_render.1);
+            return
+        }
         while self.todo.len()>0{
-            if let Some(_machine) = self.machines.iter().find( | v | !v.running.is_running()) {
-                let _prompt = self.todo.pop().unwrap();
+            if let Some(machine) = self.machines.iter().find( | v | !v.running.is_running()) {
                 
-                //self.send_prompt_to_machine(cx, machine.id, prompt);
+                let (photo, prompt_state) = self.todo.pop().unwrap();
+                if photo{
+                    self.send_camera_to_machine(cx, machine.id, prompt_state);
+                }
+                else{
+                    self.send_prompt_to_machine(cx, machine.id, self.current_photo_name.clone().unwrap_or("".to_string()), prompt_state); 
+                }
             }
             else{
                 break;
@@ -454,12 +449,12 @@ impl App {
         }
         self.update_todo_display(cx);
     }
-    
+    /*
     fn play(&mut self, cx: &mut Cx) {
         self.set_current_image_by_item_id_and_row(cx, 0, 0);
         self.ui.portal_list(id!(image_list)).set_first_id_and_scroll(0, 0.0);
         self.set_slide_show(cx, true);
-    }
+    }*/
     
     fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
         let image_list = self.ui.portal_list(id!(image_list));
@@ -468,7 +463,7 @@ impl App {
                 match socket.try_recv(){
                     Ok(WebSocketMessage::String(s))=>{
                         if s.contains("execution_interrupted") {
-                                                    
+                             
                         }
                         else if s.contains("execution_error") { // i dont care to expand the json def for this one
                             log!("Got execution error for {} {}", self.machines[m].id, s);
@@ -479,16 +474,19 @@ impl App {
                                     if data._type == "status" {
                                         if let Some(status) = data.data.status {
                                             if status.exec_info.queue_remaining == 0 {
-                                                self.machines[m].running = MachineRunning::Stopped;
-                                                Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
+                                                /*if let MachineRunning::RunningPrompt{..} = &self.machines[m].running{
+                                                    self.machines[m].running = MachineRunning::Stopped;
+                                                    Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
+                                                                                                        
+                                                }*/
                                             }
                                         }
                                     }
                                     else if data._type == "executed" {
                                         if let Some(output) = &data.data.output {
                                             if let Some(image) = output.images.first() {
-                                                if let MachineRunning::RunningPrompt{prompt_state, image_name} = &self.machines[m].running{
-                                                    self.machines[m].fetching = Some((image_name.clone(), prompt_state.clone()));
+                                                if let MachineRunning::RunningPrompt{prompt_state, photo_name} = &self.machines[m].running{
+                                                    self.machines[m].fetching = Some((photo_name.clone(), prompt_state.clone()));
                                                     self.machines[m].running = MachineRunning::Stopped;
                                                     //self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
                                                     Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
@@ -528,7 +526,7 @@ impl App {
                         }
                         live_id!(image) => if let Some(data) = res.get_body() {
                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
-                                if let Some((image_name,mut prompt_state)) = machine.fetching.take() {
+                                if let Some((image_name, prompt_state)) = machine.fetching.take() {
                                     
                                     // lets write our image to disk properly
                                     //self.current_image = Some(
@@ -541,11 +539,11 @@ impl App {
                                     }
                                     
                                     self.filtered.filter_db(&self.db, "", false);
-                                    
                                     if self.db.image_texture(&image_id).is_some() {
                                         self.ui.redraw(cx);
                                     }
-                                    
+                                    self.set_current_image(cx, image_id);
+                                    // lets select the first image 
                                 }
                             }
                         }
@@ -554,11 +552,12 @@ impl App {
                         live_id!(camera) => {
                              // move to next step
                              if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
-                                if let MachineRunning::UploadingImage{image_name, prompt_state} = &machine.running{
-                                    let image_name = image_name.clone();
+                                if let MachineRunning::UploadingImage{photo_name, prompt_state} = &machine.running{
+                                    
+                                    let photo_name = photo_name.clone();
                                     let prompt_state = prompt_state.clone();
                                     let machine_id = machine.id;
-                                    self.send_prompt_to_machine(cx, machine_id, image_name, prompt_state)
+                                    self.send_prompt_to_machine(cx, machine_id, photo_name, prompt_state)
                                 }
                              }
                          }
@@ -581,9 +580,9 @@ impl AppMain for App {
             self.ui.redraw(cx);
         }
         
-        if let Event::Timer(_te) = event {
-            self.handle_slide_show(cx);
-        }
+        //if let Event::Timer(_te) = event {
+        //   self.handle_slide_show(cx);
+        //}
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             
@@ -633,16 +632,15 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         match event{
-            Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..})=>{
+            Event::KeyDown(KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..})=>{
                 if modifiers.logo || modifiers.control {
-                    self.clear_todo(cx);
+                    self.render(cx, true, false);
                 }
-                if modifiers.shift {
-                    self.render(cx, 1);
+                else if modifiers.shift {
+                    self.render(cx, false, false);
                 }
                 else {
-                    let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
-                    self.render(cx, batch_size);
+                    self.render(cx, false, true);
                 }
             }
             Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Backspace, modifiers, ..})=>{
@@ -675,52 +673,60 @@ impl AppMain for App {
                 }
             }
             Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) => {
-                let big_image = self.ui.view(id!(big_image));
-                if big_image.visible() {
-                    big_image.set_visible_and_redraw(cx, false);
-                }
-                else {
-                    //cx.set_cursor(MouseCursor::Hidden);
-                    big_image.set_visible_and_redraw(cx, true);
-                }
+                self.clear_todo(cx);
             }
-                        
+                /*        
             Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) => {
                 if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                     self.play(cx);
                 }
-            }
+            }*/
             Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..}) => {
                 if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                     self.select_next_image(cx);
-                    self.set_slide_show(cx, false);
+                    //self.set_slide_show(cx, false);
                 }
             }
             Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..}) => {
                 if self.ui.view(id!(big_image)).visible() || modifiers.logo {
                     self.select_prev_image(cx);
-                    self.set_slide_show(cx, false);
+                    //self.set_slide_show(cx, false);
                 }
             }
-                            
+                        /*    
             Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) => {
                 if self.ui.view(id!(big_image)).visible() || modifiers.logo {
-                    self.set_slide_show(cx, false);
+                    //self.set_slide_show(cx, false);
                 }
             }
             Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, modifiers, ..}) => {
                 if self.ui.view(id!(big_image)).visible() || modifiers.logo {
-                    self.set_slide_show(cx, true);
+                    //self.set_slide_show(cx, true);
                 }
-            }
+            }*/
             
             Event::VideoInputs(devices) => {
-                log!("{:?}", devices);
-                let input = devices.find_highest_at_res(devices.find_device("FaceTime HD Camera"), 1920, 1080, 30.0);
+                let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 30.0);
                 cx.use_video_input(&input);
             }
                     
             Event::Signal=>{
+                while let Some((_, data)) = self.midi_input.receive() {
+                    match data.decode() {
+                        MidiEvent::ControlChange(cc) => {
+                            match cc.param{
+                                20=>{
+                                    self.ui.widget(id!(todo_label)).set_text_and_redraw(cx, &format!("Todo {}", cc.value as f32 / 127.0));
+                                }
+                                _=>()
+                            }
+                            log!("{:?}", cc)
+                        }
+                        e=>{
+                            log!("{:?}", e);
+                        }
+                    }
+                }
                 while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
                     self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8_32{
                         data: vec![],
@@ -738,38 +744,44 @@ impl AppMain for App {
                     v.redraw(cx);
                 }
             }
+            
+            Event::MidiPorts(ports)=> {
+                cx.use_midi_inputs(&ports.all_inputs());
+            }
             _=>()
         }
-        
+        /*
         if self.ui.button(id!(play_button)).clicked(&actions) {
             self.play(cx);
-        }
+        }*/
         
         if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.select_next_image(cx);
-                    self.set_slide_show(cx, false);
+                    //self.set_slide_show(cx, false);
                 }
                 KeyCode::ArrowUp => {
                     self.select_prev_image(cx);
-                    self.set_slide_show(cx, false);
+                    //self.set_slide_show(cx, false);
                 }
                 _ => ()
             }
         }
         
-        
-        if self.ui.button(id!(render_batch)).clicked(&actions) {
-            let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
-            self.render(cx, batch_size);
+        if self.ui.button(id!(take_photo)).clicked(&actions) {
+            self.render(cx, true, false);
         }
         
         if self.ui.button(id!(render_single)).clicked(&actions) {
-            self.render(cx, 1);
+            self.render(cx, false, false);
         }
         
-        if self.ui.button(id!(cancel_todo)).clicked(&actions) {
+        if self.ui.button(id!(random)).clicked(&actions) {
+            self.render(cx, false, true);
+        }
+                
+        if self.ui.button(id!(clear_toodo)).clicked(&actions) {
             self.clear_todo(cx);
         }
         
@@ -779,17 +791,17 @@ impl AppMain for App {
             image_list.set_first_id_and_scroll(0, 0.0);
         }
         
-        if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
+        /*if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
             if e.tap_count >1 {
                 self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
             }
-        }
+        }*/
         
-        if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
+        /*if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
             if e.tap_count >1 {
                 self.ui.view(id!(big_image)).set_visible_and_redraw(cx, false);
             }
-        }
+        }*/
         
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
