@@ -6,7 +6,7 @@ use {
         iter
     },
     crate::{
-        makepad_error_log::*,
+        //makepad_error_log::*,
         makepad_derive_live::{
             live_object
         },
@@ -622,7 +622,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
     }
     
     fn debug_print(&self, parent_index: usize, max_depth: usize) {
-        log!("{}", self.to_string(parent_index, max_depth));
+        println!("{}", self.to_string(parent_index, max_depth));
     }
     
     fn to_string(&self, parent_index: usize, max_depth: usize) -> String {
