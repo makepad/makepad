@@ -61,6 +61,7 @@ pub enum LineAlign
 
 #[derive(Live)]
 pub struct VectorLine{
+    #[animator] animator: Animator,
     #[walk] walk: Walk,
     #[live] draw_ls: DrawLineSegment,
     #[rust] area: Area,
@@ -72,17 +73,24 @@ pub struct VectorLine{
     #[rust(dvec2(1000., 1440.))] line_end: DVec2,
 }
 
+#[derive(Clone, WidgetAction)]
+pub enum LineAction {
+    None,
+    Pressed,
+    Clicked,
+    Released
+}
 
 
 impl Widget for VectorLine {
     fn handle_widget_event_with(
         &mut self,
-        _cx: &mut Cx,
+        cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
     ) {
         let uid = self.widget_uid();
-       
+        self.animator_handle_event(cx, event);
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -99,10 +107,6 @@ impl Widget for VectorLine {
     }
 }
 
-#[derive(Clone, WidgetAction)]
-pub enum LineAction {
-    None,
-}
 
 
 
