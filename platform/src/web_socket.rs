@@ -5,15 +5,20 @@ use std::sync::{
 };
 
 pub struct WebSocket{
-    os: OsWebSocket,
+//<<<<<<< HEAD
+//    os: OsWebSocket,
     pub tx_sender: Sender<WebSocketMessage>,
     pub rx_receiver: Receiver<WebSocketMessage>,
+//=======
+    pub os: OsWebSocket
+//>>>>>>> ae07639328ccef40ccee8aefe7d7734f8b5003ae
 }
 
 pub enum WebSocketMessage{
     Error(String),
     Binary(Vec<u8>),
-    String(String)
+    String(String),
+    Closed
 }
 
 impl WebSocket{    
