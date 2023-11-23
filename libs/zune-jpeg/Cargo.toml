@@ -17,8 +17,7 @@ description = "A fast, correct and safe jpeg decoder"
 x86 = []
 neon = []
 std = ["makepad-zune-core/std"]
-default = ["x86", "neon", "std"]
-
+default = [ "std"]
 
 [dependencies]
 #log = "0.4.11" # logging facilities
