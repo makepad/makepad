@@ -5,7 +5,7 @@ use {
     std::ffi::CString,
     std::os::raw::{c_void},
     std::time::{Instant, Duration},
-    std::sync::mpsc,
+    std::sync::{mpsc, mpsc::Sender},
     std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
@@ -56,7 +56,10 @@ use {
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
-    }
+        web_socket::WebSocketMessage,
+    },
+    makepad_http::websocket::WebSocket as WebSocketImpl,
+    makepad_http::websocket::WebSocketMessage as WebSocketMessageImpl
 };
 
 impl Cx {
@@ -263,6 +266,33 @@ impl Cx {
                             self.call_event_handler(&e);
                         }
                     }
+                    FromJavaMessage::WebSocketMessage {message, sender} => {
+                        let mut ws_message_parser = WebSocketImpl::new();
+                        ws_message_parser.parse(&message, | result | {
+                            match result {
+                                Ok(WebSocketMessageImpl::Text(text_msg)) => {
+                                    let message = WebSocketMessage::String(text_msg.to_string());
+                                    sender.send(message).unwrap();
+                                },
+                                Ok(WebSocketMessageImpl::Binary(data)) => {
+                                    let message = WebSocketMessage::Binary(data.to_vec());
+                                    sender.send(message).unwrap();
+                                },
+                                Err(e) => {
+                                    println!("Websocket message parse error {:?}", e);
+                                },
+                                _ => ()
+                            }
+                        });
+                    }
+                    FromJavaMessage::WebSocketClosed {sender} => {
+                        let message = WebSocketMessage::Closed;
+                        sender.send(message).unwrap();
+                    }
+                    FromJavaMessage::WebSocketError {error, sender} => {
+                        let message = WebSocketMessage::Error(error);
+                        sender.send(message).unwrap();
+                    }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
                     }
@@ -362,6 +392,10 @@ impl Cx {
     
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
         let (from_java_tx, from_java_rx) = mpsc::channel();
+
+        std::panic::set_hook(Box::new(|info| {
+            crate::makepad_error_log::log!("Custom panic hook: {}", info);
+        }));
         
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
         
@@ -712,7 +746,6 @@ impl Cx {
         }
         EventFlow::Poll
     }
-    
 }
 
 impl CxOsApi for Cx {
@@ -734,9 +767,6 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             keyboard_closed: 0.0,
-            //keyboard_visible: false,
-            //keyboard_trigger_position: DVec2::default(),
-            //keyboard_panning_offset: 0,
             media: CxAndroidMedia::default(),
             decoding: CxAndroidDecoding::default(),
             display: None,
@@ -759,15 +789,10 @@ pub struct CxAndroidDisplay {
 
 
 pub struct CxOs {
-//    pub time_start: Instant,
-//    pub last_time: Instant,
     pub first_after_resize: bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub keyboard_closed: f64,
-    //pub keyboard_visible: bool,
-    //pub keyboard_trigger_position: DVec2,
-    //pub keyboard_panning_offset: i32,
     
     pub quit: bool,
     pub fullscreen: bool,
