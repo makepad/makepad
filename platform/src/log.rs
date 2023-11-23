@@ -1,14 +1,14 @@
-use crate::web_socket::WebSocket;
-use crate::studio::*;
+//use crate::web_socket::WebSocket;
+//use crate::studio::*;
 
 
 
 
 // lets make a global websocket with a mutex
-pub(crate) fn init_websocket(){
+//pub(crate) fn init_websocket(){
     // lets spawn a sender thread
     
-}
+//}
 
 #[macro_export]
 macro_rules!log {
@@ -30,7 +30,7 @@ pub enum LogType {
     Panic
 }
 
-pub fn log_with_type(file:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:&str, ty:LogType){
+pub fn log_with_type(file:&str, line_start:u32, column_start:u32, _line_end:u32, _column_end:u32, message:&str, _ty:LogType){
     /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
         let out = ty.make_json(file, line_start, column_start, line_end, column_end, message);
         println!("{}", out);
