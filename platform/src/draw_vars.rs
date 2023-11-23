@@ -19,7 +19,6 @@ use {
         makepad_math::*,
         cx::Cx,
         texture::{Texture},
-        makepad_error_log::*,
         geometry::GeometryId,
         area::Area,
         geometry::{GeometryFields},
@@ -277,14 +276,14 @@ impl DrawVars {
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
                     if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                        crate::makepad_error_log::log_with_type(
+                        crate::log::log_with_type(
                             &err.file,
                             err.span.start.line,
                             err.span.start.column,
                             err.span.end.line,
                             err.span.end.column,
                             &err.message,
-                            LogType::Error
+                            crate::log::LogType::Error
                         );
                     }
                     else{
