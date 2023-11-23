@@ -1,7 +1,6 @@
 use {
     crate::{
         id_pool::*,
-        makepad_error_log::*,
         cx::Cx,
         os::CxOsTexture,
     },
