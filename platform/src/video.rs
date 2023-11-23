@@ -80,7 +80,7 @@ impl VideoPixelFormat{
         }
     }
     
-    pub fn buffer_to_rgb_8(&self, input:&[u32], rgb:&mut Vec<u8>, in_width:usize, in_height:usize, left:usize, top:usize, out_width:usize, out_height:usize){
+    pub fn buffer_to_rgb_8(&self, input:&[u32], rgb:&mut Vec<u8>, in_width:usize, _in_height:usize, left:usize, top:usize, out_width:usize, out_height:usize){
         fn yuv_to_rgb(y: i32, u: i32, v: i32)->(u8,u8,u8){
             fn clip(a: i32) -> u32 {
                 if a< 0 {
