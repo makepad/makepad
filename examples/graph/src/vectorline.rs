@@ -1,47 +1,15 @@
 
 use crate::{makepad_draw::*, makepad_widgets::*};
 
-live_design! {
-    import makepad_draw::shader::std::*;
-    DrawLineSegment = {{DrawLineSegment}} {
-       
-        fn stroke(self, side:float, progress: float) -> vec4{
-            return self.color;
-        }
-
-        fn pixel(self) -> vec4 {
-            let p = self.pos * self.rect_size;
-            let b = self.line_end;
-            let a = self.line_start;
-            
-            let ba = b-a;
-            let pa = p-a;
-            let h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
-            let dist= length(pa-h*ba)
-            
-            let linemult = smoothstep(self.width-1., self.width, dist);
-            let C = self.stroke(dist, h);
-            return vec4(C.xyz*(1.-linemult),(1.0-linemult)*C.a);
-        }
-    }
-
-
+live_design!
+{
     VectorLine = {{VectorLine}} {
         width: Fill,
-        height: Fill
+        height: Fill,
+        line_align: Top,
+        color: #f,
+        line_width: 10
     }
-
-}
-
-
-#[derive(Live, LiveHook)]
-#[repr(C)]
-struct DrawLineSegment {
-    #[deref]   draw_super: DrawQuad,
-    #[calc]    line_start: Vec2,
-    #[calc]    line_end: Vec2,
-    #[calc]    width: f32,
-    #[calc]    color: Vec4,    
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
@@ -63,7 +31,7 @@ pub enum LineAlign
 pub struct VectorLine{
     #[animator] animator: Animator,
     #[walk] walk: Walk,
-    #[live] draw_ls: DrawLineSegment,
+    #[live] draw_ls: DrawLine,
     #[rust] area: Area,
     #[live(15.0)] line_width: f64,
     #[live] color: Vec4,
