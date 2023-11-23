@@ -18,13 +18,13 @@ impl ImageId {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PromptState {
     pub prompt: Prompt,
     pub seed: u64
 }
 
-#[derive(Default, Clone, DeJson, SerJson)]
+#[derive(Default, Debug, Clone, DeJson, SerJson)]
 pub struct PromptPreset {
     pub workflow: String,
     pub width: u32,
@@ -48,7 +48,7 @@ pub struct PromptPreset {
 }
 
 
-#[derive(Default, Clone, DeJson, SerJson)]
+#[derive(Default, Debug, Clone, DeJson, SerJson)]
 pub struct Prompt {
     pub positive: String,
     pub negative: String,
