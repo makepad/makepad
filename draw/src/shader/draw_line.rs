@@ -37,11 +37,11 @@ live_design! {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawLine {
-    #[deref]  pub draw_super: DrawQuad,
-    #[calc]   pub line_start: Vec2,
-    #[calc]   pub line_end: Vec2,
-    #[calc]   pub half_line_width: f32,
-    #[calc]   pub color: Vec4,    
+    #[deref] pub draw_super: DrawQuad,
+    #[calc]  pub line_start: Vec2,
+    #[calc]  pub line_end: Vec2,
+    #[calc]  pub half_line_width: f32,
+    #[calc]  pub color: Vec4,    
 }
 
 impl DrawLine
