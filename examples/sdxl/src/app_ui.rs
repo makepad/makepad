@@ -609,15 +609,7 @@ live_design!{
                     }
                                                     
                     workflow_dropdown = <SdxlDropDown> {}
-                                                    
-                    <BarLabel> {
-                        text: "Batch size"
-                    }
-                    batch_mode_dropdown = <SdxlDropDown> {
-                        selected_item: 0
-                        labels: ["0", "1", "2", "3", "4", "5", "6", "10000"]
-                    }
-                                                    
+                   
                     <BarLabel> {
                         text: "Seed"
                     }
@@ -628,52 +620,31 @@ live_design!{
                         margin: {bottom: 0, left: 0}
                     }
                                                     
-                    render_batch = <BarButton> {
-                        text: "Batch"
+                    take_photo = <BarButton> {
+                        text: "Photo"
                     }
                     render_single = <BarButton> {
-                        text: "Single"
+                        text: "Render"
                     }
-                    cancel_todo = <BarButton> {
-                        text: "Cancel"
-                    }
-                                                    
-                    <DividerH> {}
-                    play_button = <BarButton> {
-                        text: "Play"
-                    }
-                    slide_show_check_box = <SdxlCheckBox> {
-                        text: "Slideshow"
-                    }
-                                                    
-                    slide_show_dropdown = <SdxlDropDown> {
-                        selected_item: 5
-                        margin: 0
-                        labels: ["0", "1", "2", "3", "4", "5", "7", "10"]
+                    random = <BarButton> {
+                        text: "Random"
                     }
                                                     
                     <DividerH> {}
-                                                    
-                                                    
+                    auto_check_box = <SdxlCheckBox> {
+                        text: "Auto"
+                    }
+                          
+                    <DividerH> {}
+                    clear_toodo = <BarButton> {
+                        text: "Clear Todo"
+                    }
                     <FillerH> {}
-                    cluster_dropdown = <SdxlDropDown> {
-                        selected_item: 0
-                        margin: 0
-                        labels: ["All nodes", "Part 1", "Part 2"]
-                    }
+                    progress1 = <ProgressCircle> {}
                     todo_label = <BarLabel> {
                         margin: {right: 5.0}
                         text: "Todo 0"
                     }
-                    progress1 = <ProgressCircle> {}
-                    progress2 = <ProgressCircle> {}
-                    progress3 = <ProgressCircle> {}
-                    progress4 = <ProgressCircle> {}
-                    progress5 = <ProgressCircle> {}
-                    progress6 = <ProgressCircle> {
-                        margin: {right: 5.0}
-                    }
-                                                    
                 }
                 <View> {
                     positive = <TextInput> {
@@ -724,6 +695,7 @@ live_design!{
                             height: Fit,
                             margin: {top: 10},
                             video_input0 = <VideoFrame>{}
+                            video_input1 = <VideoFrame>{}
                         }
                         /* <View> {
                             width: Fit,
