@@ -11,6 +11,8 @@ live_design!{
     
     App = {{App}} {
         ui: <Window> {
+            margin: 0
+            padding: 0
             window: {inner_size: vec2(2000, 1024)},
             caption_bar = {visible: true, caption_label = {label = {text: "Graph"}}},
             body = <Dock> {
