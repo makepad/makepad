@@ -76,10 +76,11 @@ pub enum Event {
     VideoInputs(VideoInputsEvent),
     NetworkResponses(Vec<NetworkResponseEvent>),
 
-    VideoStream(VideoStreamEvent),
-    VideoDecodingInitialized(VideoDecodingInitializedEvent),
+    VideoTextureUpdated(VideoTextureUpdatedEvent),
+    VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoChunkDecoded(LiveId),
     VideoDecodingError(VideoDecodingErrorEvent),
+    TextureHandleReady(TextureHandleReadyEvent),
  
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
