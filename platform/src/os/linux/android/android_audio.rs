@@ -9,7 +9,6 @@ use {
         android_jni::*,
     },
     crate::{
-        makepad_error_log::*,
         makepad_live_id::*,
         thread::Signal,
         audio::*,
@@ -124,7 +123,7 @@ impl AndroidAudioStreamData {
     unsafe fn verify_channel_count(&mut self, stream: *mut AAudioStream) {
         self.actual_channel_count = AAudioStream_getChannelCount(stream) as usize;
         if self.actual_channel_count != self.channel_count {
-            log!("Android audio device channel count does not match, todo add handling here");
+            crate::log!("Android audio device channel count does not match, todo add handling here");
         }
     }
     
@@ -443,7 +442,7 @@ impl AndroidAudioAccess {
                     self.audio_inputs.push(new_input);
                 }
                 Err(e) => {
-                    log!("AAaudio error {}", e.0);
+                    crate::log!("AAaudio error {}", e.0);
                     self.failed_devices.insert(device_desc.desc.device_id);
                     self.change_signal.set();
                 }
@@ -483,7 +482,7 @@ impl AndroidAudioAccess {
                     self.audio_outputs.push(new_output);
                 }
                 Err(e) => {
-                    log!("AAaudio error {}", e.0);
+                    crate::log!("AAaudio error {}", e.0);
                     self.failed_devices.insert(device_desc.desc.device_id);
                     self.change_signal.set();
                 }

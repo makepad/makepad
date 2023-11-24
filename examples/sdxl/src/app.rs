@@ -498,7 +498,7 @@ impl App {
                                     }
                                     else if data._type == "progress" {
                                         // draw the progress bar / progress somewhere
-                                        let id =self.machines[m].id;
+                                        //let id =self.machines[m].id;
                                         //if let Some(running) = &mut self.machines[m].running {
                                         //    running.steps_counter += 1;
                                             //Self::update_progress(cx, &self.ui, id, true, running.steps_counter, //running.prompt_state.prompt.preset.total_steps as usize);
