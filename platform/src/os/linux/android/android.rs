@@ -50,6 +50,7 @@ use {
             HttpRequest,
             HttpMethod,
         },
+        web_socket::WebSocket,
         window::CxWindowPool,
         pass::CxPassParent,
         cx::{Cx, OsType, AndroidParams},
@@ -64,7 +65,7 @@ use {
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
-        
+        WebSocket::run_websocket_thread(self);
         //elf.android_load_dependencies();
         self.gpu_info.performance = GpuPerformance::Tier1;
         
@@ -394,7 +395,7 @@ impl Cx {
         let (from_java_tx, from_java_rx) = mpsc::channel();
 
         std::panic::set_hook(Box::new(|info| {
-            crate::makepad_error_log::log!("Custom panic hook: {}", info);
+            crate::log!("Custom panic hook: {}", info);
         }));
         
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
@@ -582,7 +583,7 @@ impl Cx {
             }
             else {
                 let message = format!("cannot load dependency {}", path);
-                crate::makepad_error_log::error!("Android asset failed: {}", message);
+                crate::error!("Android asset failed: {}", message);
                 dep.data = Some(Err(message));
             }
         }
