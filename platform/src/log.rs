@@ -31,6 +31,8 @@ pub enum LogType {
 }
 
 pub fn log_with_type(file:&str, line_start:u32, column_start:u32, _line_end:u32, _column_end:u32, message:&str, _ty:LogType){
+    // lets send out our log message on the studio websocket 
+    
     /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
         let out = ty.make_json(file, line_start, column_start, line_end, column_end, message);
         println!("{}", out);
