@@ -32,6 +32,7 @@ pub mod pulse_audio;
 #[cfg(not(target_os="android"))]
 pub mod pulse_sys;
 
+#[cfg(not(target_os="android"))]
 mod web_socket;
 
 #[cfg(target_os="android")]

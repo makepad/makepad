@@ -1,10 +1,10 @@
 use {
     crate::{
         makepad_platform::*,
-        draw_list_2d::ManyInstances,
-        geometry::GeometryQuad2D,
+        //draw_list_2d::ManyInstances,
+        //geometry::GeometryQuad2D,
         cx_2d::Cx2d,
-        turtle::{Walk, Layout},
+        //turtle::{Walk, Layout},
         DrawQuad
     },
 };
