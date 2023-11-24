@@ -77,17 +77,15 @@ pub enum FromJavaMessage {
         name: String,
         midi_device: jni_sys::jobject
     },
-    VideoDecodingInitialized {
+    VideoPlaybackPrepared {
         video_id: u64,
-        frame_rate: usize,
         video_width: u32,
         video_height: u32,
-        color_format: String,
         duration: u128,
+        surface_texture: jni_sys::jobject,
     },
-    VideoStream {
+    VideoTextureUpdated {
         video_id: u64,
-        frames_group: Vec<u8>,
     },
     VideoChunkDecoded {
         video_id: u64,
@@ -368,50 +366,37 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoDecodingInitialized(
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackPrepared(
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     video_id: jni_sys::jlong,
-    frame_rate: jni_sys::jint,
     video_width: jni_sys::jint,
     video_height: jni_sys::jint,
-    color_format: jni_sys::jstring,
     duration: jni_sys::jlong,
+    surface_texture: jni_sys::jobject
 ) {
-    let color_format = unsafe { jstring_to_string(env, color_format) };
+    let env = attach_jni_env();    
 
-    send_from_java_message(FromJavaMessage::VideoDecodingInitialized {
+    let global_ref = (**env).NewGlobalRef.unwrap()(env, surface_texture);
+
+    send_from_java_message(FromJavaMessage::VideoPlaybackPrepared {
         video_id: video_id as u64,
-        frame_rate: frame_rate as usize,
         video_width: video_width as u32,
         video_height: video_height as u32,
-        color_format,
         duration: duration as u128,
+        surface_texture: global_ref
     });
 }
 
+// TODO: REMOVE
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoStream(
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoTextureUpdated(
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     video_id: jni_sys::jlong,
-    frames_group: jni_sys::jobject,
+    timestamp: jni_sys::jlong,
 ) {
-    let frames_group = unsafe { java_byte_buffer_to_vec(env, frames_group) };
-
-    send_from_java_message(FromJavaMessage::VideoStream {
-        video_id: video_id as u64,
-        frames_group,
-    });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoChunkDecoded(
-    _: *mut jni_sys::JNIEnv,
-    _: jni_sys::jobject,
-    video_id: jni_sys::jlong,
-) {
-    send_from_java_message(FromJavaMessage::VideoChunkDecoded {
+    send_from_java_message(FromJavaMessage::VideoTextureUpdated {
         video_id: video_id as u64,
     });
 }
@@ -590,7 +575,7 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>) {
+pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>, external_texture_handle: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
     let video_data = &*video;
 
     let java_body = (**env).NewByteArray.unwrap()(env, video_data.len() as i32);
@@ -605,41 +590,58 @@ pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
-        "initializeVideoDecoding",
-        "(J[B)V",
+        "prepareVideoPlayback",
+        "(J[BIZZZ)V",
         video_id.get_value() as jni_sys::jlong,
-        java_body as jni_sys::jobject
+        java_body as jni_sys::jobject,
+        external_texture_handle as jni_sys::jint,
+        autoplay as jni_sys::jboolean as std::ffi::c_uint,
+        should_loop as jni_sys::jboolean as std::ffi::c_uint,
+        pause_on_first_frame as jni_sys::jboolean as std::ffi::c_uint
     );
 }
 
-pub unsafe fn to_java_decode_next_video_chunk(env: *mut jni_sys::JNIEnv, video_id: LiveId, max_frames_to_decode: usize) {
-    ndk_utils::call_void_method!(
-        env,
-        ACTIVITY,
-        "decodeNextVideoChunk",
-        "(JI)V",
-        video_id.get_value() as jni_sys::jlong,
-        max_frames_to_decode as jni_sys::jint
+pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_ref: jni_sys::jobject) -> bool {
+    let class = (**env).GetObjectClass.unwrap()(env, video_decoder_ref);
+    let update_tex_image_cstring = CString::new("maybeUpdateTexImage").unwrap();
+    let signature_cstring = CString::new("()Z").unwrap();
+    let mid_update_tex_image = (**env).GetMethodID.unwrap()(
+        env, 
+        class, 
+        update_tex_image_cstring.as_ptr(), 
+        signature_cstring.as_ptr()
     );
+
+    let updated = (**env).CallBooleanMethod.unwrap()(env, video_decoder_ref, mid_update_tex_image);
+    updated != 0
 }
 
-pub unsafe fn to_java_fetch_next_video_frames(env: *mut jni_sys::JNIEnv, video_id: LiveId, number_frames: usize) {
+pub unsafe fn to_java_pause_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
-        "fetchNextVideoFrames",
-        "(JI)V",
-        video_id.get_value() as jni_sys::jlong,
-        number_frames as jni_sys::jint
-    );
-}
-
-pub unsafe fn to_java_cleanup_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
-    ndk_utils::call_void_method!(
-        env,
-        ACTIVITY,
-        "cleanupVideoDecoding",
+        "pauseVideoPlayback",
         "(J)V",
         video_id
     );
 }    
+
+pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "resumeVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}    
+
+pub unsafe fn to_java_end_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "endVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}

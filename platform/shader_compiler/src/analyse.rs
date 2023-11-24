@@ -328,7 +328,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             DrawShaderFieldKind::Texture {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
                 match ty {
-                    Ty::Texture2D => {}
+                    Ty::Texture2D | Ty::TextureOES => {}
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),

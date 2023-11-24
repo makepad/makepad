@@ -5,34 +5,31 @@ import java.nio.ByteBuffer;
 public class VideoDecoderRunnable implements Runnable {
     private final VideoDecoder mVideoDecoder;
     private final byte[] mVideoData;
-    private int mMaxFramesToDecode;
-    private boolean mIsInitialized = false;
+    private boolean mIsPrepared = false;
 
     public VideoDecoderRunnable(byte[] videoData, VideoDecoder videoDecoder) {
         mVideoData = videoData;
         mVideoDecoder = videoDecoder;
     }
 
-    public void setMaxFramesToDecode(int maxFramesToDecode) {
-        mMaxFramesToDecode = maxFramesToDecode;
-    }
-
     @Override
     public void run() {
-        if(!mIsInitialized) {
-            mVideoDecoder.initializeVideoDecoding(mVideoData);
-            mIsInitialized = true;
-        } else {
-            mVideoDecoder.decodeVideoChunk(mMaxFramesToDecode);
+        if(!mIsPrepared) {
+            mVideoDecoder.prepareVideoPlayback(mVideoData);
+            mIsPrepared = true;
         }
     }
 
-    public void cleanup() {
-        mVideoDecoder.cleanup();
+    public void pausePlayback() {
+        mVideoDecoder.pausePlayback();
     }
 
-    public void releaseBuffer(ByteBuffer buffer) {
-        mVideoDecoder.releaseBuffer(buffer);
+    public void resumePlayback() {
+        mVideoDecoder.resumePlayback();
+    }
+
+    public void endPlayback() {
+        mVideoDecoder.endPlayback();
     }
 }
 
