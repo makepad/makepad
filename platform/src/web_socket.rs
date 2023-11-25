@@ -1,14 +1,22 @@
-use crate::os::OsWebSocket;
-use crate::cx_api::*;
-use crate::Cx;
-use crate::event::HttpRequest;
-use std::collections::HashMap;
-use std::sync::{
-    Mutex,
-    atomic::{AtomicU64, Ordering},
-    mpsc::{channel, Sender, Receiver, TryRecvError,RecvError}
+use crate::{
+    os::OsWebSocket,
+    cx_api::*,
+    Cx,
+    studio::AppToStudio,
+    event::HttpMethod,
+    event::HttpRequest,
+    makepad_micro_serde::*
 };
 
+use std::{
+    collections::HashMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{channel, Sender, Receiver, TryRecvError,RecvError}
+    }
+};
+    
 pub enum WebSocketThreadMsg{
     Open{
         socket_id: u64,
@@ -37,7 +45,7 @@ pub enum WebSocketMessage{
 }
 
 pub (crate) static WEB_SOCKET_THREAD_SENDER: Mutex<Option<Sender<WebSocketThreadMsg>>> = Mutex::new(None);
-pub (crate) static WEB_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
+pub (crate) static WEB_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 
 impl Drop for WebSocket{
     fn drop(&mut self){
@@ -49,9 +57,35 @@ impl Drop for WebSocket{
         }
     }
 }
+impl Cx{
+        
+    pub(crate) fn start_studio_websocket(&mut self) {
+        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
+        if studio_http.is_none() {
+            return
+        }
+        let url = format!("http://{}/$studio_web_socket", studio_http.unwrap());
+        println!("CONNECTING URL {}", url);
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        self.studio_web_socket = Some(WebSocket::open(request));
+    }
+    
+    pub fn send_studio_message(msg:AppToStudio){
+        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
+        if let Some(sender) = &*sender{
+            let _= sender.send(WebSocketThreadMsg::SendMessage{
+                socket_id: 0,
+                message: WebSocketMessage::Binary(msg.serialize_bin()),
+            });
+        }
+        else{
+            panic!("Web socket thread not running")
+        }
+    }
+}
 
 impl WebSocket{    
-    pub fn run_websocket_thread(cx:&mut Cx){
+    pub(crate) fn run_websocket_thread(cx:&mut Cx){
         // lets create a thread
         let (rx_sender, rx_receiver) = channel();
         let mut thread_sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
@@ -60,6 +94,7 @@ impl WebSocket{
             // this is the websocket thread.
             let mut sockets = HashMap::new();
             while let Ok(msg) = rx_receiver.recv(){
+
                 match msg{
                     WebSocketThreadMsg::Open{socket_id, request, rx_sender}=>{
                         let socket = OsWebSocket::open(request, rx_sender);
@@ -132,4 +167,5 @@ impl WebSocket{
     pub fn recv(&mut self)->Result<WebSocketMessage,RecvError>{
         self.rx_receiver.recv()
     }
+    
 }

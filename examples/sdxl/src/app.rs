@@ -104,7 +104,7 @@ pub struct App {
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
-    #[rust(true, true)] last_render:(bool, bool)
+    #[rust(true)] take_photo:bool,
     //#[rust(Instant::now())] last_flip: Instant
 }
 
@@ -374,8 +374,9 @@ impl App {
         self.ui.text_input(id!(settings_denoise.input)).set_text(&format!("{}", preset.denoise));
     }
     
-    fn render(&mut self, cx: &mut Cx, photo:bool, randomise: bool) {
-        self.last_render = (photo, randomise);
+    fn render(&mut self, cx: &mut Cx, photo:bool) {
+        let randomise = self.ui.check_box(id!(random_check_box)).selected(cx);
+        self.take_photo = photo;
         let positive = self.ui.text_input(id!(positive)).text();
         let negative = self.ui.text_input(id!(negative)).text();
         if randomise {
@@ -429,7 +430,7 @@ impl App {
     fn update_render_todo(&mut self, cx: &mut Cx) {
         
         if self.todo.len() == 0 && self.ui.check_box(id!(auto_check_box)).selected(cx) {
-            self.render(cx, self.last_render.0, self.last_render.1);
+            self.render(cx, self.take_photo);
             return
         }
         while self.todo.len()>0{
@@ -579,7 +580,6 @@ impl AppMain for App {
         if self.db.handle_decoded_images(cx) {
             self.ui.redraw(cx);
         }
-        
         //if let Event::Timer(_te) = event {
         //   self.handle_slide_show(cx);
         //}
@@ -633,14 +633,15 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         match event{
             Event::KeyDown(KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..})=>{
+                self.clear_todo(cx);
                 if modifiers.logo || modifiers.control {
-                    self.render(cx, true, false);
+                    self.render(cx, true);
                 }
                 else if modifiers.shift {
-                    self.render(cx, false, false);
+                    self.render(cx, false);
                 }
                 else {
-                    self.render(cx, false, true);
+                    self.render(cx, false);
                 }
             }
             Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Backspace, modifiers, ..})=>{
@@ -770,16 +771,15 @@ impl AppMain for App {
         }
         
         if self.ui.button(id!(take_photo)).clicked(&actions) {
-            self.render(cx, true, false);
+            self.clear_todo(cx);
+            self.render(cx, true);
         }
         
         if self.ui.button(id!(render_single)).clicked(&actions) {
-            self.render(cx, false, false);
+            self.clear_todo(cx);
+            self.render(cx, false);
         }
         
-        if self.ui.button(id!(random)).clicked(&actions) {
-            self.render(cx, false, true);
-        }
                 
         if self.ui.button(id!(clear_toodo)).clicked(&actions) {
             self.clear_todo(cx);

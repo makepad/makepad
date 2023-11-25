@@ -199,6 +199,24 @@ live_design!{
         }
     }
     
+    SettingsSlider = <View> {
+        width: 250,
+        height: Fit,
+        margin: {top: 10},
+        label = <BarLabel> {
+            width: Fit,
+            margin: {left: 5},
+            align: {x: 1.0}
+        }
+        input = <Slider> {
+            padding: 0
+            height: Fit,
+            width: 125,
+            margin: {top: 1, left: 2}
+            text: "1344"
+        }
+    }
+    
     FillerH = <View> {
         width: Fill,
         height: Fit
@@ -626,10 +644,10 @@ live_design!{
                     render_single = <BarButton> {
                         text: "Render"
                     }
-                    random = <BarButton> {
+
+                    random_check_box = <SdxlCheckBox> {
                         text: "Random"
-                    }
-                                                    
+                    }                      
                     <DividerH> {}
                     auto_check_box = <SdxlCheckBox> {
                         text: "Auto"
@@ -680,17 +698,17 @@ live_design!{
                         height: Fill
                         flow: Right
                         <View> {
-                            width: 100,
+                            width: 200,
                             height: Fit,
-                            margin: {top: 10},
+                            margin: {top: 10, right: 20},
                             flow: Down
                             settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
                             settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
-                            settings_steps = <SettingsInput> {label = {text: "steps:"}, input = {text: "4"}}
-                            settings_cfg = <SettingsInput> {label = {text: "cfg:"}, input = {text: "1.8"}}
-                            settings_denoise = <SettingsInput> {label = {text: "denoise:"}, input = {text: "0.85"}}
+                            settings_steps = <SettingsSlider> {label = {text: "steps:"}, input = {text: "4", min:4, max: 8, step:1}}
+                            settings_cfg = <SettingsSlider> {label = {text: "cfg:"}, input = {text: "1.8", min:1.0, max:8.0, step:0.01}}
+                            settings_denoise = <SettingsSlider> {label = {text: "denoise:"}, input = {text: "0.85", min:0.2, max:1.0, step:0.01}}
                         }
-                        <View>{
+                        <View>{ 
                             width: Fit,
                             height: Fit,
                             margin: {top: 10},
