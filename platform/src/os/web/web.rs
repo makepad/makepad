@@ -55,6 +55,9 @@ impl Cx {
             let skip = to_wasm.read_block_skip();
             match block_id {
                 live_id!(ToWasmGetDeps) => { // fetch_deps
+                    WebSocket::run_websocket_thread(&mut *cx.borrow_mut());
+                    cx.borrow_mut().start_studio_websocket();
+                    
                     let tw = ToWasmGetDeps::read_to_wasm(&mut to_wasm);
                     self.cpu_cores = tw.cpu_cores as usize;
                     self.gpu_info.init_from_info(
@@ -64,6 +67,7 @@ impl Cx {
                     );
                     self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
+                    
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {
                         deps.push(path.to_string());

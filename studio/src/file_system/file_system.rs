@@ -3,9 +3,7 @@ use {
     std::path::Path,
     crate::{
         makepad_code_editor::{Document, decoration::{Decoration, DecorationSet}, Session},
-        makepad_platform::*,
         makepad_platform::makepad_live_compiler::LiveFileChange,
-        makepad_draw::*,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         file_system::FileClient,

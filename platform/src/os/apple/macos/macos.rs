@@ -141,7 +141,7 @@ impl Cx {
     
     pub fn event_loop(cx: Rc<RefCell<Cx >>) {
         WebSocket::run_websocket_thread(&mut *cx.borrow_mut());
-                        
+        cx.borrow_mut().start_studio_websocket();
         init_apple_classes_global();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;

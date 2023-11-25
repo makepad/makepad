@@ -1,7 +1,5 @@
 use crate::{
     makepad_code_editor::code_editor::*,
-    makepad_platform::*,
-    makepad_draw::*,
     makepad_widgets::*,
     makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
@@ -29,10 +27,10 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
-    
-    import makepad_studio_core::build_manager::run_view::RunView;
-    import makepad_studio_core::build_manager::log_list::LogList;
-    import makepad_studio_core::build_manager::run_list::RunList;
+     
+    import makepad_studio::build_manager::run_view::RunView;
+    import makepad_studio::build_manager::log_list::LogList;
+    import makepad_studio::build_manager::run_list::RunList;
     
     ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
 
@@ -306,7 +304,7 @@ impl LiveHook for App {
         cx.start_stdin_service();
     }
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) { 
         // not great but it will do.
         let mut root = "./".to_string();
         for arg in std::env::args(){

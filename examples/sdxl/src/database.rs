@@ -217,7 +217,7 @@ impl Database {
         //let image_file = &self.image_files[*self.image_index.get(&image_id).unwrap()];
         // lets see if we have too many images
         let now = Instant::now();
-        while self.textures.len()>200{
+        while self.textures.len()>20{
             if let Some((image_id,_)) = self.textures.iter().max_by(|(_,a),(_,b)|{
                 (now-a.last_seen).cmp(&(now-b.last_seen))
             }){
