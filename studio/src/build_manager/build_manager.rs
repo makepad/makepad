@@ -3,7 +3,6 @@ use {
     crate::{
         file_system::file_system::FileSystem,
         makepad_micro_serde::*,
-        makepad_platform::*,
         makepad_widgets::*,
         makepad_widgets::file_tree::FileNodeId,
         makepad_platform::makepad_live_compiler::LiveFileChange,
@@ -134,7 +133,7 @@ impl ActiveBuilds {
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
     #[rust] root_path: PathBuf,
-    #[live(8001usize)] http_port: usize,
+    #[live(0usize)] http_port: usize,
     #[rust] pub clients: Vec<BuildClient>,
     #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
     #[live] recompile_timeout: f64,
@@ -164,6 +163,13 @@ pub enum BuildManagerAction {
 impl BuildManager {
     
     pub fn init(&mut self, cx: &mut Cx, path:&Path) {
+         self.http_port = if std::option_env!("MAKEPAD_STUDIO_HTTP").is_some(){
+            8002
+        }
+        else{
+             8001
+        };
+        
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
         
@@ -449,6 +455,7 @@ impl BuildManager {
                 // only store last change, fix later
                 match message {
                     HttpServerRequest::ConnectWebSocket {web_socket_id: _, response_sender: _,headers: _} => {
+                        println!("GOT WEBSOCKET CONNECT");
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id: _} => {
                     },
@@ -530,8 +537,8 @@ impl BuildManager {
     pub fn discover_external_ip(&mut self, _cx: &mut Cx) {
         // figure out some kind of unique id. bad but whatever.
         let studio_uid = LiveId::from_str(&format!("{:?}{:?}", Instant::now(), std::time::SystemTime::now()));
-        
-        let write_discovery = UdpSocket::bind("0.0.0.0:41534");
+        let http_port = self.http_port as u16;
+        let write_discovery = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse().unwrap(), http_port*2 as u16 + 1));
         if write_discovery.is_err() {
             return
         }
@@ -542,14 +549,14 @@ impl BuildManager {
         std::thread::spawn(move || {
             let dummy = studio_uid.0.to_be_bytes();
             loop {
-                let _ = write_discovery.send_to(&dummy, "255.255.255.255:41533");
+                let _ = write_discovery.send_to(&dummy, SocketAddr::new("0.0.0.0".parse().unwrap(), http_port*2 as u16));
                 thread::sleep(time::Duration::from_millis(100));
             }
         });
         // listen for bounced back udp packets to get our external ip
         let ip_sender = self.recv_external_ip.sender();
         std::thread::spawn(move || {
-            let discovery = UdpSocket::bind("0.0.0.0:41533").unwrap();
+            let discovery = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse().unwrap(), http_port*2 as u16)).unwrap();
             discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
             discovery.set_broadcast(true).unwrap();
             

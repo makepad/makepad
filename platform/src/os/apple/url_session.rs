@@ -90,18 +90,23 @@ impl OsWebSocket{
                     rx_sender.send(WebSocketMessage::Error(error_str)).unwrap();
                 }
             });
-            
+                       
             let msg: ObjcId = match &message{
                 WebSocketMessage::String(data)=>{
                     let nsstring = str_to_nsstring(data);
-                    msg_send![class!(NSURLSessionWebSocketMessage), initWithString: nsstring]
+                    let msg:ObjcId = msg_send![class!(NSURLSessionWebSocketMessage), alloc];
+                    let () = msg_send![msg, initWithString: nsstring];
+                    msg
                 }
                 WebSocketMessage::Binary(data)=>{
                     let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: data.as_ptr() length: data.len()];
-                    msg_send![class!(NSURLSessionWebSocketMessage), initWithData: nsdata]
+                    let msg: ObjcId = msg_send![class!(NSURLSessionWebSocketMessage), alloc];
+                    let () = msg_send![msg, initWithData: nsdata];
+                    msg
                 }
                 _=>panic!()
             };
+                        
             let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler:handler];
             Ok(())
         } 
@@ -121,6 +126,7 @@ impl OsWebSocket{
                 let data_task = data_task2.clone();
                 let handler = objc_block!(move | message: ObjcId, error: ObjcId | {
                     if error != ptr::null_mut() {
+                        
                         let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                         rx_sender.send(WebSocketMessage::Error(error_str)).unwrap();
                         return;

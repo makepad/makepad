@@ -46,6 +46,7 @@ impl Cx {
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) { 
         WebSocket::run_websocket_thread(&mut *cx.borrow_mut());
+        cx.borrow_mut().start_studio_websocket();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
@@ -329,55 +330,12 @@ impl Cx {
         }
     }
 
-    #[cfg(apple_sim)]
-    pub fn studio_http_connection(&mut self, _event: &mut Event) -> bool {
-        true
-    }
     
-    #[cfg(not(apple_sim))]
-    pub fn studio_http_connection(&mut self, event: &mut Event) -> bool {
-        if let Event::NetworkResponses(res) = event {
-            res.retain( | res | {
-                if res.request_id == live_id!(live_reload) {
-                    // alright lets see if we need to live reload from the body
-                    if let NetworkResponse::HttpResponse(res) = &res.response {
-                        // lets check our response
-                        if let Some(body) = res.get_string_body() {
-                            if body.len()>0 {
-                                let mut parts = body.split("$$$makepad_live_change$$$");
-                                if let Some(file_name) = parts.next() {
-                                    let content = parts.next().unwrap().to_string();
-                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                                        file_name:file_name.to_string(),
-                                        content
-                                    }]);
-                                }
-                            }
-                        }
-                        self.poll_studio_http();
-                    }
-                    false
-                }
-                else {
-                    true
-                }
-            });
-            if res.len()>0 {
-                return true
-            }
-        }
-        false
-    }
-    #[cfg(not(apple_sim))]
-    fn poll_studio_http(&self) {
-        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
-        if studio_http.is_none() {
-            return
-        }
-        let url = format!("http://{}/$live_file_change", studio_http.unwrap());
-        let request = HttpRequest::new(url, HttpMethod::GET);
-        make_http_request(live_id!(live_reload), request, self.os.network_response.sender.clone());
-    }
+    /*
+    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+        file_name:file_name.to_string(),
+        content
+    }]);*/
     
 }
 

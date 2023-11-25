@@ -1,11 +1,17 @@
 use crate::makepad_micro_serde::*;
+use crate::log::LogType;
+
 // communication enums for studio
 #[derive(SerBin, DeBin)]
 pub enum AppToStudio{
     Log{
-        body:String,
-        file: u32,
-        line: u32
+        file:String,
+        line_start: u32,
+        line_end: u32,
+        column_start: u32,
+        column_end: u32,
+        message: String,
+        ty: LogType
     }
 }
 
