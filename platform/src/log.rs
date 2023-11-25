@@ -1,14 +1,4 @@
-//use crate::web_socket::WebSocket;
-//use crate::studio::*;
-
-
-
-
-// lets make a global websocket with a mutex
-//pub(crate) fn init_websocket(){
-    // lets spawn a sender thread
-    
-//}
+use crate::makepad_micro_serde::*;
 
 #[macro_export]
 macro_rules!log {
@@ -24,13 +14,17 @@ macro_rules!error {
     }
 }
 
+#[derive(SerBin, DeBin)]
 pub enum LogType {
     Error,
     Log,
     Panic
 }
 
-pub fn log_with_type(file:&str, line_start:u32, column_start:u32, _line_end:u32, _column_end:u32, message:&str, _ty:LogType){
+use crate::cx::Cx;
+use crate::studio::AppToStudio;
+
+pub fn log_with_type(file:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:&str, ty:LogType){
     // lets send out our log message on the studio websocket 
     
     /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
@@ -38,6 +32,15 @@ pub fn log_with_type(file:&str, line_start:u32, column_start:u32, _line_end:u32,
         println!("{}", out);
         return
     }*/
-    println!("{}:{}:{} - {}", file, line_start, column_start, message);
-}
+    Cx::send_studio_message(AppToStudio::Log{
+        file: file.to_string(),
+        line_start,
+        column_start,
+        line_end,
+        column_end,
+        message:message.to_string(),
+        ty
+    });
+        println!("{}:{}:{} - {}", file, line_start, column_start, message);
+    }
 // alright let log

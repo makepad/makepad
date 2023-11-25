@@ -35,6 +35,7 @@ use {
         gpu_info::GpuInfo,
         window::CxWindowPool,
         draw_list::CxDrawListPool,
+        web_socket::WebSocket,
         pass::CxPassPool,
         texture::{CxTexturePool,TextureFormat,Texture},
         geometry::{
@@ -109,7 +110,9 @@ pub struct Cx {
     #[allow(dead_code)]
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
-
+    
+    pub(crate) studio_web_socket: Option<WebSocket>,
+    
     pub performance_stats: PerformanceStats,
 }
 
@@ -233,7 +236,7 @@ impl Cx {
             drag_drop: Default::default(),
             ime_area: Default::default(),
             platform_ops: Default::default(),
-            
+            studio_web_socket: None,
             
             new_next_frames: Default::default(),
             

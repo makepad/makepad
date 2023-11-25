@@ -79,7 +79,7 @@ impl Slider {
     fn to_external(&self) -> f64 {
         let val = self.value * (self.max - self.min) + self.min;
         if self.step != 0.0{
-            return (val * self.step).floor() / self.step
+            return (val / self.step).floor()* self.step
         }
         else{
             val
@@ -234,6 +234,17 @@ impl Widget for Slider {
             }
         }
     }
+    
+    fn text(&self) -> String {
+        format!("{}", self.to_external())
+    }
+        
+    fn set_text(&mut self, v: &str) {
+        if let Ok(v) = v.parse::<f64>(){
+            self.set_internal(v);
+        }
+    }
+        
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
