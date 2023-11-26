@@ -276,14 +276,14 @@ impl DrawVars {
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
                     if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                        crate::log::log_with_type(
+                        crate::log::log_with_level(
                             &err.file,
                             err.span.start.line,
                             err.span.start.column,
                             err.span.end.line,
                             err.span.end.column,
                             &err.message,
-                            crate::log::LogType::Error
+                            crate::log::LogLevel::Error
                         );
                     }
                     else{
