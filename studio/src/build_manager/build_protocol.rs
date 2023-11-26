@@ -1,5 +1,6 @@
 use crate::{
     makepad_live_id::LiveId,
+    makepad_platform::log::LogLevel,
     makepad_code_editor::text::{Position, Length},
     makepad_micro_serde::{SerBin, DeBin, DeBinErr},
 };
@@ -154,27 +155,19 @@ pub struct LogItemWrap {
     pub item: LogItem
 }
 
-#[derive(Clone, PartialEq, Eq, Copy, Debug, SerBin, DeBin)]
-pub enum LogItemLevel{
-    Warning,
-    Error,
-    Log,
-    Wait,
-    Panic,
-}
 
 #[derive(Clone, Debug)]
 pub struct LogItemLocation{
-    pub level: LogItemLevel,
+    pub level: LogLevel,
     pub file_name: String,
     pub start: Position,
     pub length: Length,
-    pub msg: String
+    pub message: String
 }
 
 #[derive(Clone, Debug)]
 pub struct LogItemBare{
-    pub level: LogItemLevel,
+    pub level: LogLevel,
     pub line: String,
 }
 

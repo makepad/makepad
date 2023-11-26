@@ -10,6 +10,8 @@ use {
             HostToStdin,
             StdinToHost,
         },
+        makepad_platform::studio::AppToStudio,
+        makepad_platform::log::LogLevel,
         build_manager::{
             run_view::*,
             build_protocol::*,
@@ -17,7 +19,7 @@ use {
         },
         makepad_shell::*,
     },
-    makepad_code_editor::{text::Position, decoration::{Decoration, DecorationType}},
+    makepad_code_editor::{text, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
     std::{
         collections::HashMap,
@@ -141,6 +143,7 @@ pub struct BuildManager {
     #[rust] pub binaries: Vec<BuildBinary>,
     #[rust] pub active: ActiveBuilds,
     #[rust] pub studio_http: String,
+    #[rust] pub recv_studio_msg: ToUIReceiver<AppToStudio>,
     #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>,
     #[rust] pub send_file_change: FromUISender<LiveFileChange>
 }
@@ -288,10 +291,56 @@ impl BuildManager {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dispatch_action: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+
         if let Event::Signal = event {
             if let Ok(mut addr) = self.recv_external_ip.try_recv() {
                 addr.set_port(self.http_port as u16);
                 self.studio_http = format!("{}", addr);
+            }
+            
+            if let Ok(msg) = self.recv_studio_msg.try_recv() {
+                if let AppToStudio::Log{file_name, line_start, line_end:_, column_start, column_end:_, message, level} = msg{
+                    let start = text::Position {
+                        line_index: line_start as usize,
+                        byte_index: column_start as usize
+                    };
+                    let length = text::Length{
+                        line_count: 0,
+                        byte_count: 0
+                    };
+                    //log!("{:?} {:?}", pos, pos + loc.length);
+                    if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
+                        match level{
+                            LogLevel::Warning=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    start,
+                                    start+length,
+                                    DecorationType::Warning
+                                ));
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            LogLevel::Error=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    start,
+                                    start+length,
+                                    DecorationType::Error
+                                ));
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            _=>()
+                        }
+                    }
+                    self.log.push((LiveId(0).into(), LogItem::Location(LogItemLocation{
+                        level,
+                        file_name,
+                        start,
+                        length,
+                        message
+                    })));
+                    dispatch_action(cx, BuildManagerAction::RedrawLog)
+                }
             }
         }
         
@@ -299,10 +348,10 @@ impl BuildManager {
             self.start_recompile(cx);
             dispatch_action(cx, BuildManagerAction::RecompileStarted)
         }
-        
-        
+                        
         let log = &mut self.log;
-        let active = &mut self.active;
+        let active = &mut self.active;        
+                
         //let editor_state = &mut state.editor_state;
         self.clients[0].handle_event_with(cx, event, &mut | cx, wrap | {
             /*match &wrap.item{
@@ -317,14 +366,14 @@ impl BuildManager {
             match wrap.item {
                 LogItem::Location(loc) => {
                     //log!("{:?}", loc);
-                    let pos = Position {
+                    let pos = text::Position {
                         line_index: loc.start.line_index,
                         byte_index: loc.start.byte_index
                     };
                     //log!("{:?} {:?}", pos, pos + loc.length);
                     if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
                         match loc.level{
-                            LogItemLevel::Warning=>{
+                            LogLevel::Warning=>{
                                 file_system.add_decoration(file_id, Decoration::new(
                                     0,
                                     pos,
@@ -333,7 +382,7 @@ impl BuildManager {
                                 ));
                                 dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
                             }
-                            LogItemLevel::Error=>{
+                            LogLevel::Error=>{
                                 file_system.add_decoration(file_id, Decoration::new(
                                     0,
                                     pos,
@@ -349,19 +398,6 @@ impl BuildManager {
                         log.push((id, LogItem::Location(loc)));
                         dispatch_action(cx, BuildManagerAction::RedrawLog)
                     }
-                    //if let Some(doc) = file_system.open_documents.get(&path){
-                    
-                    //}
-                    /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
-                        let doc = &mut editor_state.documents[*doc_id];
-                        if let Some(inner) = &mut doc.inner {
-                            inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
-                        }
-                        dispatch_event(cx, BuildManagerAction::RedrawDoc {
-                            doc_id: *doc_id
-                        })
-                    }*/
-                    //editor_state.messages.push(BuildMsg::Location(loc));
                 }
                 LogItem::Bare(bare) => {
                     //log!("{:?}", bare);
@@ -383,7 +419,7 @@ impl BuildManager {
                         Err(_) => { // we should output a log string
                             if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
                                 log.push((id, LogItem::Bare(LogItemBare {
-                                    level: LogItemLevel::Log,
+                                    level: LogLevel::Log,
                                     line: line.trim().to_string()
                                 })));
                                 dispatch_action(cx, BuildManagerAction::RedrawLog)
@@ -430,7 +466,7 @@ impl BuildManager {
                 }
             }
         });
-        
+        let studio_sender = self.recv_studio_msg.sender();
         std::thread::spawn(move || {
             
             // TODO fix this proper:
@@ -455,11 +491,15 @@ impl BuildManager {
                 // only store last change, fix later
                 match message {
                     HttpServerRequest::ConnectWebSocket {web_socket_id: _, response_sender: _,headers: _} => {
-                        println!("GOT WEBSOCKET CONNECT");
+                        //println!("GOT WEBSOCKET CONNECT");
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id: _} => {
                     },
-                    HttpServerRequest::BinaryMessage {web_socket_id: _, response_sender: _, data: _} => {
+                    HttpServerRequest::BinaryMessage {web_socket_id: _, response_sender: _, data} => {
+                        if let Ok(msg) = AppToStudio::deserialize_bin(&data){
+                            let _ = studio_sender.send(msg);
+                        }
+                        //println!("GOT BINARY MESSAGE");
                         // new incombing message from client
                     }
                     HttpServerRequest::Get {headers, response_sender} => {
