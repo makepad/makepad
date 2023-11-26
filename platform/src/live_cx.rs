@@ -157,14 +157,14 @@ impl Cx {
             line_nr_error_once();
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-                crate::log::log_with_type(
+                crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
                     &err.message,
-                    crate::log::LogType::Error
+                    crate::log::LogLevel::Error
                 );
             }
             else {
@@ -232,14 +232,14 @@ impl Cx {
                 // alright we need to output the correct error
                 if std::env::args().find(|v| v == "--message-format=json").is_some(){
                     let err = live_registry.live_error_to_live_file_error(err);
-                    crate::log::log_with_type(
+                    crate::log::log_with_level(
                         &err.file,
                         err.span.start.line,
                         err.span.start.column,
                         err.span.end.line,
                         err.span.end.column,
                         &err.message,
-                        crate::log::LogType::Error
+                        crate::log::LogLevel::Error
                     );
                     continue
                 }
@@ -265,14 +265,14 @@ impl Cx {
         for err in errs {
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-               crate::log::log_with_type(
+               crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
                     &err.message,
-                    crate::log::LogType::Error
+                    crate::log::LogLevel::Error
                 );
                 continue
             }
@@ -312,14 +312,14 @@ impl Cx {
             #[cfg(not(lines))]
             line_nr_error_once();
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                crate::log::log_with_type(
+                crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
                     &err.message,
-                    crate::log::LogType::Error
+                    crate::log::LogLevel::Error
                 );
             }
             else{
