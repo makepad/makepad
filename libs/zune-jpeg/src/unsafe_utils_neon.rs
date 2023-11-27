@@ -7,6 +7,7 @@
  */
 
 #![cfg(target_arch = "aarch64")]
+#![cfg(feature = "neon")]
 // TODO can this be extended to armv7
 
 //! This module provides unsafe ways to do some things

@@ -16,7 +16,6 @@ use {
             /*LiveTokenId,*/
             LiveFileId,
         },
-        makepad_error_log::*,
         makepad_live_compiler::LiveTypeInfo,
         /*makepad_math::*,*/
         cx::Cx,
@@ -158,14 +157,14 @@ impl Cx {
             line_nr_error_once();
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-                crate::makepad_error_log::log_with_type(
+                crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
                     &err.message,
-                    LogType::Error
+                    crate::log::LogLevel::Error
                 );
             }
             else {
@@ -229,17 +228,18 @@ impl Cx {
             let mut errs = Vec::new();
             live_registry.process_file_changes(all_changes, &mut errs);
             for err in errs {
+                
                 // alright we need to output the correct error
                 if std::env::args().find(|v| v == "--message-format=json").is_some(){
                     let err = live_registry.live_error_to_live_file_error(err);
-                    crate::makepad_error_log::log_with_type(
+                    crate::log::log_with_level(
                         &err.file,
                         err.span.start.line,
                         err.span.start.column,
                         err.span.end.line,
                         err.span.end.column,
                         &err.message,
-                        LogType::Error
+                        crate::log::LogLevel::Error
                     );
                     continue
                 }
@@ -265,14 +265,14 @@ impl Cx {
         for err in errs {
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-                crate::makepad_error_log::log_with_type(
+               crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
                     &err.message,
-                    LogType::Error
+                    crate::log::LogLevel::Error
                 );
                 continue
             }
@@ -312,14 +312,14 @@ impl Cx {
             #[cfg(not(lines))]
             line_nr_error_once();
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                crate::makepad_error_log::log_with_type(
+                crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
                     &err.message,
-                    LogType::Error
+                    crate::log::LogLevel::Error
                 );
             }
             else{

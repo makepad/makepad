@@ -5,7 +5,6 @@ use {
     },
     crate::{
         id_pool::*,
-        makepad_error_log::*,
         makepad_live_compiler::{
             LiveType,
             LiveId,
@@ -112,8 +111,6 @@ impl Cx{
         self.geometries_refs.insert(fingerprint, weak);
         GeometryRef(geometry)
     }
-    
-   
 }
 
 impl Geometry{

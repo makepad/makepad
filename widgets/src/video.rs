@@ -243,7 +243,7 @@ impl Video {
             .set_uniform(cx, id!(video_width), &[self.video_width as f32]);
 
         // Debug
-        makepad_error_log::log!(
+        log!(
             "Video id {} - decoding initialized: \n {}x{}px |",
             self.id.0,
             self.video_width,

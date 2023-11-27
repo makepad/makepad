@@ -141,10 +141,41 @@ impl Vec2 {
         (dx * dx + dy * dy).sqrt()
     }
     
+    pub fn angle_in_radians(&self) -> f32 {
+        self.y.atan2(self.x)
+    }
+    
+    pub fn angle_in_degrees(&self) -> f32 {
+        self.y.atan2(self.x) * (360.0 / (2. * std::f32::consts::PI))
+    }
+
+
     pub fn length(&self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
+    pub fn lengthsquared(&self) -> f32 {
+        self.x * self.x + self.y * self.y
+    }
+    pub fn normalize(&self) -> Vec2
+    {
+        let l  = self.length();
+        if l == 0.0 {return vec2(0.,0.);}
+        return vec2(self.x/l, self.y/l);
+    }
+    pub fn normalize_to_x(&self) -> Vec2
+    {
+        let l  = self.x;
+        if l == 0.0 {return vec2(1.,0.);}
+        return vec2(1., self.y/l);
+    }
+   
+    pub fn normalize_to_y(&self) -> Vec2
+    {
+        let l  = self.y;
+        if l == 0.0 {return vec2(1.,0.);}
+        return vec2(self.x/l, 1.);
+    }
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: 0.0}
     }

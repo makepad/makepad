@@ -46,6 +46,7 @@ pub mod slides_view;
 pub mod color_picker;
 
 pub mod debug_view;
+pub mod performance_view;
 pub mod nav_control;
 
 pub mod view;
@@ -107,6 +108,7 @@ pub fn live_design(cx: &mut Cx) {
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
+    crate::performance_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
     crate::base::live_design(cx);

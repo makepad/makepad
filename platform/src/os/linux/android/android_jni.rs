@@ -1,7 +1,8 @@
 use {
     crate::makepad_math::*,
     std::ffi::CString,
-    std::{cell::RefCell, cell::Cell, rc::Rc, sync::mpsc},
+    std::{cell::RefCell, cell::Cell, rc::Rc},
+    std::sync::{mpsc, mpsc::Sender},
     self::super::{
         ndk_sys,
         jni_sys,
@@ -12,6 +13,7 @@ use {
         area::Area,
         event::{TouchPoint, TouchState, HttpRequest},
         cx::AndroidParams,
+        WebSocketMessage,
     },
 };
 
@@ -72,6 +74,17 @@ pub enum FromJavaMessage {
         request_id: u64,
         metadata_id: u64,
         error: String,
+    },
+    WebSocketMessage {
+        message: Vec<u8>,
+        sender: Box<Sender<WebSocketMessage>>,
+    },
+    WebSocketClosed {
+        sender: Box<Sender<WebSocketMessage>>,
+    },
+    WebSocketError {
+        error: String,
+        sender: Box<Sender<WebSocketMessage>>,
     },
     MidiDeviceOpened{
         name: String,
@@ -348,6 +361,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
         body
     });
 }
+
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     env: *mut jni_sys::JNIEnv,
@@ -362,6 +376,51 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
         request_id: request_id as u64,
         metadata_id: metadata_id as u64,
         error,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    message: jni_sys::jobject,
+    callback: jni_sys::jlong,
+) {
+    let message = unsafe { java_byte_array_to_vec(env, message) };
+    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+
+    send_from_java_message(FromJavaMessage::WebSocketMessage {
+        message,
+        sender: sender.clone(),
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    callback: jni_sys::jlong,
+) {
+    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+
+    send_from_java_message(FromJavaMessage::WebSocketClosed {
+        sender: sender.clone(),
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    error: jni_sys::jstring,
+    callback: jni_sys::jlong,
+) {
+    let error = unsafe { jstring_to_string(env, error) };
+    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+
+    send_from_java_message(FromJavaMessage::WebSocketError {
+        error,
+        sender: sender.clone(),
     });
 }
 
@@ -557,6 +616,59 @@ pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
         method,
         headers,
         java_body as jni_sys::jobject
+    );
+}
+
+pub unsafe fn to_java_websocket_open(
+    request_id: LiveId,
+    request: HttpRequest,
+    recv: *const Box<std::sync::mpsc::Sender<WebSocketMessage>>
+) {
+    let env = attach_jni_env();
+    let url = CString::new(request.url.clone()).unwrap();
+    let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "openWebSocket",
+        "(JLjava/lang/String;J)V",
+        request_id.get_value() as jni_sys::jlong,
+        url,
+        recv as jni_sys::jlong
+    );
+}
+
+pub unsafe fn to_java_websocket_send_message(request_id: LiveId, message: Vec<u8>) {
+    let env = attach_jni_env();
+    let message_bytes = (**env).NewByteArray.unwrap()(env, message.len() as i32);
+    (**env).SetByteArrayRegion.unwrap()(
+        env,
+        message_bytes,
+        0,
+        message.len() as i32,
+        message.as_ptr() as *const jni_sys::jbyte,
+    );
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "sendWebSocketMessage",
+        "(J[B)V",
+        request_id.get_value() as jni_sys::jlong,
+        message_bytes as jni_sys::jobject
+    );
+}
+
+pub unsafe fn to_java_websocket_close(request_id: LiveId) {
+    let env = attach_jni_env();
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "closeWebSocket",
+        "(J)V",
+        request_id.get_value() as jni_sys::jlong
     );
 }
 
