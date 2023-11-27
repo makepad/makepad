@@ -625,7 +625,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Mat4);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Texture2D => panic!(), // TODO
+            Ty::Texture2D | Ty::TextureOES => panic!(), // TODO
             Ty::Array {ref elem_ty, len} => {
                 self.write_var_decl(string, sep, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
