@@ -27,6 +27,10 @@ public class MakepadNative {
     // networking
     public native static void onHttpResponse(long id, long metadata_id, int status_code, String headers, byte[] body);
     public native static void onHttpRequestError(long id, long metadata_id, String error);
+    public native static void onWebSocketMessage(byte[] message, long callback);
+    public native static void onWebSocketClosed(long callback);
+    public native static void onWebSocketError(String error, long callback);
+
 
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);

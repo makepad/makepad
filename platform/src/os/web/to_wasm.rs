@@ -638,7 +638,7 @@ pub struct ToWasmHttpUploadProgress {
     pub loaded: u32,
     pub total: u32
 }
-
+/*
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
     pub request_id_lo: u32,
@@ -671,7 +671,7 @@ pub struct ToWasmWebSocketBinary {
     pub request_id_hi: u32,
     pub data: WasmDataU8
 }
-
+*/
 #[derive(ToWasm)]
 pub struct ToWasmMidiInputData {
     pub uid: String,
