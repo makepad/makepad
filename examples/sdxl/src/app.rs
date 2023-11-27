@@ -576,7 +576,6 @@ impl App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let image_list = self.ui.portal_list(id!(image_list));
-        
         if self.db.handle_decoded_images(cx) {
             self.ui.redraw(cx);
         }

@@ -1,7 +1,7 @@
 use crate::{
     makepad_live_id::LiveId,
     makepad_platform::log::LogLevel,
-    makepad_code_editor::text::{Position, Length},
+    makepad_code_editor::text::{Position},
     makepad_micro_serde::{SerBin, DeBin, DeBinErr},
 };
 
@@ -161,7 +161,7 @@ pub struct LogItemLocation{
     pub level: LogLevel,
     pub file_name: String,
     pub start: Position,
-    pub length: Length,
+    pub end: Position,
     pub message: String
 }
 
