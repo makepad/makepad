@@ -613,6 +613,9 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             Ty::ClosureDecl => {
                 return false
             }
+            Ty::TextureOES {..} => {
+                return false
+            }
         }
         true
     }
@@ -791,7 +794,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 TyLit::Mat2 => "float2x2",
                 TyLit::Mat3 => "float3x3",
                 TyLit::Mat4 => "float4x4",
-                TyLit::Texture2D => panic!(), // TODO
+                TyLit::Texture2D | TyLit::TextureOES => panic!(), // TODO
             }
         )
             .unwrap();
