@@ -333,7 +333,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                         return Err(LiveError {
                             origin: live_error_origin!(),
                             span: decl.span.into(),
-                            message: String::from("texture must be a texture2D"),
+                            message: String::from("texture must be either a texture2D or a textureOES (android)"),
                         })
                     }
                 }

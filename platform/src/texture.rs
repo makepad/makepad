@@ -229,6 +229,7 @@ impl CxTexture{
         false
     }
 
+    #[allow(unused)]
     pub(crate) fn alloc_video(&mut self)->bool{
         if let Some(alloc) = self.format.as_video_alloc(){
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc{
@@ -384,6 +385,7 @@ impl TextureFormat{
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn as_video_alloc(&self)->Option<TextureAlloc>{
         match self{
             Self::VideoRGB => {
