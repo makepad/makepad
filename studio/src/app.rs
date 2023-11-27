@@ -17,7 +17,7 @@ use crate::{
             BuildManagerAction
         },
     }
-};
+}; 
 use std::fs::File;
 use std::io::Write;
 use std::env;

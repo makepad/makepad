@@ -78,6 +78,8 @@ pub struct RustcCode {
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcMessage {
     pub message: String,
+    //#[remap("$message_type")]
+    pub message_type: Option<String>,
     pub code: Option<RustcCode>,
     pub level: String,
     pub spans: Vec<RustcSpan>,
@@ -104,7 +106,7 @@ pub struct RustcCompilerMessage {
     pub linked_libs: Option<Vec<String >>,
     pub linked_paths: Option<Vec<String >>,
     pub cfgs: Option<Vec<String >>,
-    pub env: Option<Vec<String >>,
+    pub env: Option<Vec<Vec<String >>>,
     pub target: Option<RustcTarget>,
     pub message: Option<RustcMessage>,
     pub profile: Option<RustcProfile>,
