@@ -17,7 +17,7 @@ pub mod generate;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_arch = "wasm32"))]
 pub mod generate_glsl;
-#[cfg(any(target_os = "macos", target_os="ios"))]
+#[cfg(any(target_os = "macos", target_os="ios", target_os="tvos"))]
 pub mod generate_metal;
 #[cfg(any(target_os = "windows"))]
 pub mod generate_hlsl;
@@ -28,7 +28,7 @@ pub use makepad_live_compiler::makepad_live_tokenizer;
 pub use makepad_live_compiler::makepad_derive_live;
 pub use makepad_live_compiler::makepad_micro_serde;
 pub use makepad_live_tokenizer::makepad_live_id;
-pub use makepad_live_id::makepad_error_log;
+//pub use makepad_live_id::makepad_error_log;
 
 pub use {
     crate::{

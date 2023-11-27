@@ -11,7 +11,6 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::*,
-        makepad_error_log::*,
         makepad_micro_serde::*,
         makepad_live_compiler::LiveFileChange,
         event::Event,
@@ -20,6 +19,7 @@ use {
         texture::{Texture, TextureFormat},
         thread::Signal,
         os::{
+            url_session::{make_http_request},
             apple_sys::*,
             metal_xpc::{
                 xpc_service_proxy,
@@ -110,7 +110,7 @@ impl Cx {
                         }
                         Err(err) => {
                             // we should output a log string
-                            error!("Cant parse stdin-JSON {} {:?}", line, err)
+                            crate::error!("Cant parse stdin-JSON {} {:?}", line, err)
                         }
                     }
                 }
@@ -138,6 +138,9 @@ impl Cx {
                 }
                 HostToStdin::KeyUp(e) => {
                     self.call_event_handler(&Event::KeyUp(e));
+                }
+                HostToStdin::TextInput(e) => {
+                    self.call_event_handler(&Event::TextInput(e));
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(
@@ -352,6 +355,9 @@ impl Cx {
                 },
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.stdin_timers.timers.remove(&timer_id);
+                },
+                CxOsOp::HttpRequest {request_id, request} => {
+                    make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
                 _ => ()
                 /*

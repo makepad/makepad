@@ -7,7 +7,6 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::*,
-        makepad_error_log::*,
         makepad_micro_serde::*,
         makepad_live_compiler::LiveFileChange,
         event::Event,
@@ -98,7 +97,7 @@ impl Cx {
                         }
                         Err(err) => {
                             // we should output a log string
-                            error!("Cant parse stdin-JSON {} {:?}", line, err)
+                            crate::error!("Cant parse stdin-JSON {} {:?}", line, err)
                         }
                     }
                 }
@@ -126,6 +125,9 @@ impl Cx {
                 }
                 HostToStdin::KeyUp(e) => {
                     self.call_event_handler(&Event::KeyUp(e));
+                }
+                HostToStdin::TextInput(e) => {
+                    self.call_event_handler(&Event::TextInput(e));
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(
@@ -177,7 +179,7 @@ impl Cx {
                                 );
                             }
                             Err(err) => {
-                                error!("failed to receive new swapchain on auxiliary channel: {err:?}");
+                                crate::error!("failed to receive new swapchain on auxiliary channel: {err:?}");
                             }
                         }
                         new_texture

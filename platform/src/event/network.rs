@@ -16,11 +16,6 @@ pub enum NetworkResponse{
     HttpRequestError(String),
     HttpResponse(HttpResponse),
     HttpProgress{loaded:u32, total:u32},
-    WebSocketClose,
-    WebSocketOpen,
-    WebSocketError(String),
-    WebSocketString(String),
-    WebSocketBinary(Vec<u8>)
 }
 
 pub struct NetworkResponseIter<I> {

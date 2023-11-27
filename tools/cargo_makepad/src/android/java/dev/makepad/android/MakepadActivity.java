@@ -8,9 +8,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
-import android.os.Handler;
-import android.os.HandlerThread;
-import android.os.Looper;
 
 import java.util.HashMap;
 import java.util.ArrayList;
@@ -49,6 +46,7 @@ import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 
 import android.graphics.Color;
@@ -237,6 +235,11 @@ MidiManager.OnDeviceOpenedListener{
     Handler mDecoderHandler;
     HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
 
+    // networking
+    Handler mWebSocketsHandler;
+    private HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
+    private HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
+
     static {
         System.loadLibrary("makepad");
     }
@@ -259,6 +262,10 @@ MidiManager.OnDeviceOpenedListener{
         decoderThreadHandler.start(); // TODO: only start this if its needed.
         mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
         mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
+
+        HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
+        webSocketsThreadHandler.start();
+        mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
@@ -374,6 +381,39 @@ MidiManager.OnDeviceOpenedListener{
         } catch (Exception e) {
             MakepadNative.onHttpRequestError(id, metadataId, e.toString());
         }
+    }
+
+    public void openWebSocket(long id, String url, long callback) {
+        MakepadWebSocket webSocket = new MakepadWebSocket(id, url, callback);
+        mActiveWebsockets.put(id, webSocket);
+        webSocket.connect();
+    
+        if (webSocket.isConnected()) {
+            MakepadWebSocketReader reader = new MakepadWebSocketReader(this, webSocket);
+            mWebSocketsHandler.post(reader);
+            mActiveWebsocketsReaders.put(id, reader);
+        }
+    }
+
+    public void sendWebSocketMessage(long id, byte[] message) {
+        MakepadWebSocket webSocket = mActiveWebsockets.get(id);
+        if (webSocket != null) {
+            webSocket.sendMessage(message);
+        }
+    }
+
+    public void closeWebSocket(long id) {
+        MakepadWebSocketReader reader = mActiveWebsocketsReaders.get(id);
+        if (reader != null) {
+            mWebSocketsHandler.removeCallbacks(reader);
+        }
+        mActiveWebsocketsReaders.remove(id);
+        mActiveWebsockets.remove(id);
+    }
+
+    public void webSocketConnectionDone(long id, long callback) {
+        mActiveWebsockets.remove(id);
+        MakepadNative.onWebSocketClosed(callback);
     }
 
     public String[] getAudioDevices(long flag){

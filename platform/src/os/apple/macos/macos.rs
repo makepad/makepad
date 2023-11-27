@@ -26,7 +26,7 @@ use {
                     macos_window::MacosWindow
                 },
                 apple_classes::init_apple_classes_global,
-                ns_url_session::{make_http_request, web_socket_open},
+                url_session::{make_http_request},
             },
             metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,
@@ -37,6 +37,7 @@ use {
         thread::Signal,
         cx_stdin::PollTimers,
         window::WindowId,
+        web_socket::WebSocket,
         event::{
             WindowGeom,
             MouseUpEvent,
@@ -139,11 +140,12 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx: Rc<RefCell<Cx >>) {
+        WebSocket::run_websocket_thread(&mut *cx.borrow_mut());
+        cx.borrow_mut().start_studio_websocket();
         init_apple_classes_global();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
-        
         
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
@@ -519,7 +521,7 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::WebSocketOpen {request_id, request} => {
+                /*CxOsOp::WebSocketOpen {request_id, request} => {
                     web_socket_open(request_id, request, self.os.network_response.sender.clone());
                 }
                 CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
@@ -527,7 +529,7 @@ impl Cx {
                 }
                 CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     todo!()
-                }
+                }*/
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
@@ -566,6 +568,7 @@ impl CxOsApi for Cx {
     fn start_stdin_service(&mut self) {
         self.start_xpc_service()
     }
+    
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
