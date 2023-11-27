@@ -299,14 +299,14 @@ impl BuildManager {
             }
             
             if let Ok(msg) = self.recv_studio_msg.try_recv() {
-                if let AppToStudio::Log{file_name, line_start, line_end:_, column_start, column_end:_, message, level} = msg{
+                if let AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level} = msg{
                     let start = text::Position {
                         line_index: line_start as usize,
                         byte_index: column_start as usize
                     };
-                    let length = text::Length{
-                        line_count: 0,
-                        byte_count: 0
+                    let end = text::Position {
+                        line_index: line_end as usize,
+                        byte_index: column_end as usize
                     };
                     //log!("{:?} {:?}", pos, pos + loc.length);
                     if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
@@ -315,7 +315,7 @@ impl BuildManager {
                                 file_system.add_decoration(file_id, Decoration::new(
                                     0,
                                     start,
-                                    start+length,
+                                    end,
                                     DecorationType::Warning
                                 ));
                                 dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
@@ -324,7 +324,7 @@ impl BuildManager {
                                 file_system.add_decoration(file_id, Decoration::new(
                                     0,
                                     start,
-                                    start+length,
+                                    end,
                                     DecorationType::Error
                                 ));
                                 dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
@@ -336,7 +336,7 @@ impl BuildManager {
                         level,
                         file_name,
                         start,
-                        length,
+                        end,
                         message
                     })));
                     dispatch_action(cx, BuildManagerAction::RedrawLog)
@@ -365,19 +365,13 @@ impl BuildManager {
             // ok we have a cmd_id in wrap.msg
             match wrap.item {
                 LogItem::Location(loc) => {
-                    //log!("{:?}", loc);
-                    let pos = text::Position {
-                        line_index: loc.start.line_index,
-                        byte_index: loc.start.byte_index
-                    };
-                    //log!("{:?} {:?}", pos, pos + loc.length);
                     if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
                         match loc.level{
                             LogLevel::Warning=>{
                                 file_system.add_decoration(file_id, Decoration::new(
                                     0,
-                                    pos,
-                                    pos + loc.length,
+                                    loc.start,
+                                    loc.end,
                                     DecorationType::Warning
                                 ));
                                 dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
@@ -385,8 +379,8 @@ impl BuildManager {
                             LogLevel::Error=>{
                                 file_system.add_decoration(file_id, Decoration::new(
                                     0,
-                                    pos,
-                                    pos + loc.length,
+                                    loc.start,
+                                    loc.end,
                                     DecorationType::Error
                                 ));
                                 dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
