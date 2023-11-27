@@ -3,21 +3,21 @@ use crate::makepad_micro_serde::*;
 #[macro_export]
 macro_rules!log {
     ( $ ( $ t: tt) *) => {
-        $crate::log::log_with_level(file!(), line!(), column!()+1, line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::log::LogLevel::Log)
+        $crate::log::log_with_level(file!(), line!()-1, column!()-1, line!()-1, column!() + 3, &format!( $ ( $ t) *), $ crate::log::LogLevel::Log)
     }
 }
 
 #[macro_export]
 macro_rules!error {
     ( $ ( $ t: tt) *) => {
-        $crate::log::log_with_level(file!(), line!(), column!()+1, line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::log::LogLevel::Error)
+        $crate::log::log_with_level(file!(), line!()-1, column!()-1, line!()-1, column!() + 3, &format!( $ ( $ t) *), $ crate::log::LogLevel::Error)
     }
 }
 
 #[macro_export]
 macro_rules!warning {
     ( $ ( $ t: tt) *) => {
-        $crate::log::log_with_level(file!(), line!(), column!()+1, line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::log::LogLevel::Warning)
+        $crate::log::log_with_level(file!(), line!()-1, column!()-1, line!()-1, column!() + 3, &format!( $ ( $ t) *), $ crate::log::LogLevel::Warning)
     }
 }
 
@@ -45,7 +45,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
     
     let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
     if studio_http.is_none() {
-        println!("{}:{}:{} - {}", file_name, line_start, column_start, message);
+        println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
     }
     else{
         Cx::send_studio_message(AppToStudio::Log{

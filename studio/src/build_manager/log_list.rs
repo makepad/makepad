@@ -6,7 +6,7 @@ use {
             build_protocol::*,
         },
         makepad_widgets::*,
-        makepad_code_editor::text::{Position, Length},
+        makepad_code_editor::text::{Position},
         makepad_widgets::portal_list::PortalList,
     },
     std::{
@@ -205,7 +205,7 @@ live_design!{
     
 }
 pub enum LogListAction {
-    JumpToError{file_name:String, start:Position, length:Length},
+    JumpToError{file_name:String, start:Position},
     None
 }
 
@@ -283,7 +283,6 @@ impl BuildManager {
                                 line_index: msg.start.line_index,
                                 byte_index: msg.start.byte_index,
                             },
-                            length:msg.length
                         })
                     }
                     _ => ()
