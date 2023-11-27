@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_code_editor::text::{Position, Length},
+        makepad_code_editor::text::{Position},
         makepad_micro_serde::*,
         makepad_platform::log::LogLevel,
         build_manager::{
@@ -422,13 +422,13 @@ pub trait MsgSender: Send {
     }
     
 
-    fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogLevel, file_name: String, start: Position, length: Length, message: String) {
+    fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogLevel, file_name: String, start: Position, end: Position, message: String) {
         self.send_message(
             cmd_id.wrap_msg(LogItem::Location(LogItemLocation {
                 level,
                 file_name,
                 start,
-                length,
+                end,
                 message
             }))
         );
@@ -449,7 +449,7 @@ pub trait MsgSender: Send {
                 }
             };
             if let Some(span) = msg.spans.iter().find( | span | span.is_primary) {
-                self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.length(), msg.message.clone());
+                self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.end(), msg.message.clone());
                 /*
                 if let Some(label) = &span.label {
                     self.send_location_msg(cmd_id, level, span.file_name.clone(), range, label.clone());
