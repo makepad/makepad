@@ -343,15 +343,6 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id: _, request: _} => {
                     //todo!()
                 },
-                CxOsOp::WebSocketOpen {request_id: _, request: _,} => {
-                    //todo!()
-                }
-                CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
-                    //todo!()
-                }
-                CxOsOp::WebSocketSendString {request_id: _, data: _} => {
-                    //todo!()
-                },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),

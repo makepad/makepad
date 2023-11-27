@@ -322,15 +322,6 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::WebSocketOpen{request_id, request}=>{
-                    web_socket_open(request_id, request, self.os.network_response.sender.clone());
-                }
-                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
-                    todo!()
-                }
-                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
-                    todo!()
-                },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
