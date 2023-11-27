@@ -1,14 +1,14 @@
 use crate::makepad_shell::*;
-use crate::ios::{IosTarget};
+use crate::apple::{AppleTarget};
 
-pub fn rustup_toolchain_install(ios_targets:&[IosTarget]) -> Result<(), String> {
-    println!("[Begin] Installing Rust toolchains for iOS");
+pub fn rustup_toolchain_install(apple_targets:&[AppleTarget]) -> Result<(), String> {
+    println!("[Begin] Installing Rust toolchains for Apple devices");
     shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "install",
         "nightly"
     ]) ?;
     
-    for target in ios_targets{
+    for target in apple_targets{
         shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
             "target",
             "add",
@@ -17,7 +17,7 @@ pub fn rustup_toolchain_install(ios_targets:&[IosTarget]) -> Result<(), String> 
             "nightly"
         ]) ?
     }
-    
+    /*
     let cwd = std::env::current_dir().unwrap();
     let ios_deploy_dir = cwd.join(format!("{}/ios-deploy", env!("CARGO_MANIFEST_DIR")));
     
@@ -26,7 +26,7 @@ pub fn rustup_toolchain_install(ios_targets:&[IosTarget]) -> Result<(), String> 
         "-target",
         "ios-deploy",  
     ]) ?;
-    
-    println!("[Finished] iOS Rust toolchains installed");
+    */
+    println!("[Finished] Apple Rust toolchains installed");
     Ok(())
 }

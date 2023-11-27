@@ -14,7 +14,7 @@ use {
         },
         os::{
             apple::apple_sys::*,
-            ns_url_session::define_web_socket_delegate,
+            url_session::define_web_socket_delegate,
             av_capture::define_av_video_callback_delegate,
             audio_unit::define_key_value_observing_delegate,
             apple_util::{

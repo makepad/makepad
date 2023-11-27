@@ -9,7 +9,6 @@ use {
     self::super::gl_sys,
     crate::{
         makepad_live_id::*,
-        makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
         cx::Cx,
         texture::{Texture, TextureFormat, TexturePixel, CxTexture},
@@ -255,7 +254,7 @@ impl Cx {
     pub fn setup_render_pass(&mut self, pass_id: PassId,) -> Option<DVec2> {
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass_rect = self.get_pass_rect2(pass_id, dpi_factor).unwrap();
+        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].paint_dirty = false;
         
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
@@ -461,7 +460,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    log!("{}\n{}", vertex, pixel);
+                    crate::log!("{}\n{}", vertex, pixel);
                 }
                 
                 // lets see if we have the shader already
@@ -735,7 +734,7 @@ impl CxOsDrawShader {
             #extension GL_OES_EGL_image_external : require
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
@@ -748,7 +747,7 @@ impl CxOsDrawShader {
             #extension GL_OES_EGL_image_external : require
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}

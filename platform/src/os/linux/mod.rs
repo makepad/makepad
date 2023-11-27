@@ -32,6 +32,9 @@ pub mod pulse_audio;
 #[cfg(not(target_os="android"))]
 pub mod pulse_sys;
 
+#[cfg(not(target_os="android"))]
+mod web_socket;
+
 #[cfg(target_os="android")]
 pub mod android;
 
@@ -45,7 +48,7 @@ pub(crate) use self::x11::linux_x11::*;
 #[cfg(linux_direct)]
 pub(crate) use self::direct::linux_direct::*;
 
-pub(crate) use self::opengl::*; 
+pub(crate) use self::opengl::*;
 
 #[cfg(not(target_os="android"))]
 pub(crate) use self::alsa_midi::{OsMidiInput, OsMidiOutput};
@@ -53,3 +56,8 @@ pub(crate) use self::alsa_midi::{OsMidiInput, OsMidiOutput};
 #[cfg(target_os="android")]
 pub(crate) use self::android::android_midi::{OsMidiInput, OsMidiOutput};
 
+#[cfg(not(target_os="android"))]
+pub (crate) use web_socket::OsWebSocket;
+
+#[cfg(target_os="android")]
+pub (crate) use self::android::android_web_socket::OsWebSocket;

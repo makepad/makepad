@@ -3,7 +3,7 @@ use {
     std::collections::{HashMap, BTreeSet},
     crate::{
         makepad_live_id::*,
-        makepad_error_log::*,
+       // makepad_error_log::*,
         makepad_live_tokenizer::{TokenWithLen, Delim, FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
         live_error::{LiveError, LiveErrorSpan, LiveFileError},
         live_parser::LiveParser,
@@ -259,7 +259,7 @@ impl LiveRegistry {
             let doc = &live.expanded;
             if name != LiveId::empty() {
                 if doc.nodes.is_empty() {
-                    error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
+                    eprintln!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
                 if let Some(index) = doc.nodes.child_by_name(0, name.as_instance()) {
@@ -313,7 +313,7 @@ impl LiveRegistry {
         if let Some(file_id) = self.module_id_to_file_id(module_id) {
             let file = self.file_id_to_file(file_id);
             if file.expanded.nodes.is_empty() {
-                log!("Looking for {} but its not expanded yet, dependency order bug", file.file_name);
+                println!("Looking for {} but its not expanded yet, dependency order bug", file.file_name);
                 return None
             }
             if let Some(index) = file.expanded.nodes.child_by_name(0, item.as_instance()) {
@@ -330,7 +330,7 @@ impl LiveRegistry {
             id_resolve.get(&item).cloned()
         }
         else {
-            log!("Can't find scope target on rootnode without id_resolve");
+            println!("Can't find scope target on rootnode without id_resolve");
             None
         }
     }

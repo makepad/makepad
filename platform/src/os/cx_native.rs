@@ -16,6 +16,9 @@ pub enum EventFlow{
     Exit
 }
 
+// lets start a websocket thread
+
+
 impl Cx {
     
     pub fn native_load_dependencies(&mut self){
@@ -30,6 +33,7 @@ impl Cx {
                 }
             }
             else{
+                println!("Could not load resource {}", path);
                 dep.data = Some(Err("File open failed".to_string()));
             }
         }
