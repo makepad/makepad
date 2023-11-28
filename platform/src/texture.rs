@@ -80,6 +80,7 @@ pub enum TextureFormat {
     RenderRGBAf16{size:TextureSize},
     RenderRGBAf32{size:TextureSize},
     SharedBGRAu8{width:usize, height:usize, id:crate::cx_stdin::PresentableImageId},
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     VideoRGB,
 }
 
@@ -123,6 +124,7 @@ pub(crate) enum TexturePixel{
     RGu8,
     Rf32,
     D32,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     VideoRGB
 }
 
@@ -229,6 +231,7 @@ impl CxTexture{
         false
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[allow(unused)]
     pub(crate) fn alloc_video(&mut self)->bool{
         if let Some(alloc) = self.format.as_video_alloc(){
@@ -276,6 +279,7 @@ impl TextureFormat{
         }
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub fn is_video(&self) -> bool {
         match self {
             Self::VideoRGB => true,
@@ -385,6 +389,7 @@ impl TextureFormat{
         }
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[allow(unused)]
     pub(crate) fn as_video_alloc(&self)->Option<TextureAlloc>{
         match self{

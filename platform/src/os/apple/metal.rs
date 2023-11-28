@@ -805,16 +805,15 @@ struct MetalBufferInner {
 pub struct CxOsTexture {
     texture: Option<RcObjcId>
 }
-fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)-> Option<MTLPixelFormat> {
+fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)-> MTLPixelFormat {
      match pix{
-         TexturePixel::BGRAu8 => Some(MTLPixelFormat::BGRA8Unorm),
-         TexturePixel::RGBAf16 => Some(MTLPixelFormat::RGBA16Float),
-         TexturePixel::RGBAf32 => Some(MTLPixelFormat::RGBA32Float),
-         TexturePixel::Ru8  => Some(MTLPixelFormat::R8Unorm),
-         TexturePixel::RGu8  => Some(MTLPixelFormat::RG8Unorm),
-         TexturePixel::Rf32  => Some(MTLPixelFormat::R32Float),
-         TexturePixel::D32 => Some(MTLPixelFormat::Depth32Float),
-         TexturePixel::VideoRGB => None
+         TexturePixel::BGRAu8 => MTLPixelFormat::BGRA8Unorm,
+         TexturePixel::RGBAf16 => MTLPixelFormat::RGBA16Float,
+         TexturePixel::RGBAf32 => MTLPixelFormat::RGBA32Float,
+         TexturePixel::Ru8  => MTLPixelFormat::R8Unorm,
+         TexturePixel::RGu8  => MTLPixelFormat::RG8Unorm,
+         TexturePixel::Rf32  => MTLPixelFormat::R32Float,
+         TexturePixel::D32 => MTLPixelFormat::Depth32Float,
      }   
 }
 impl CxTexture {
@@ -837,9 +836,7 @@ impl CxTexture {
             let _: () = unsafe {msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead]};
             let _: () = unsafe {msg_send![descriptor.as_id(), setWidth: alloc.width as u64]};
             let _: () = unsafe {msg_send![descriptor.as_id(), setHeight: alloc.height as u64]};
-            if let Some(mtl_pixel) = texture_pixel_to_mtl_pixel(&alloc.pixel) {
-                let _: () = unsafe{msg_send![descriptor.as_id(), setPixelFormat: mtl_pixel]};
-            }
+            let _: () = unsafe{msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]};
             let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
             self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         }
