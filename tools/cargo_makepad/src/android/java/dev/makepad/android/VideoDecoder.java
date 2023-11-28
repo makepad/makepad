@@ -37,7 +37,6 @@ public class VideoDecoder {
     public void prepareVideoPlayback(byte[] video) {
         try {
             mSurfaceTexture = new SurfaceTexture(mExternalTextureHandle);
-            Log.e("Makepad", "TEXTURE HANDLE: " + mExternalTextureHandle);
 
             HandlerThread handlerThread = new HandlerThread("GLHandlerThread");
             handlerThread.start();
@@ -81,11 +80,8 @@ public class VideoDecoder {
                     }
                 }
             });
-        } catch (IllegalStateException e) {
-            Log.e("Makepad", "CATCH: " + e.getMessage());
         } catch (Exception e) {
             String message = e.getMessage() != null? e.getMessage() : ("Error decoding video: " + e.toString());
-            Log.e("Makepad", "CATCH: " + message);
             MakepadNative.onVideoDecodingError(mVideoId, message);
         }
     }
@@ -99,13 +95,7 @@ public class VideoDecoder {
         }
 
         if (mAvailableFrames.get() > 0) {
-            // GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, mExternalTextureHandle);
-            checkGLError("Before updateTexImage");
-
             mSurfaceTexture.updateTexImage();
-
-            // GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
-            checkGLError("After updateTexImage");
 
             mAvailableFrames.decrementAndGet();
             int processedFrames = mFramesProcessed.incrementAndGet();
@@ -115,16 +105,8 @@ public class VideoDecoder {
                 mMediaPlayer.pause();
                 mPauseFirstFrame = false;
             }
-
         }
         return updated;
-    }
-
-    private void checkGLError(String op) {
-        int error;
-        while ((error = GLES20.glGetError()) != GLES20.GL_NO_ERROR) {
-            Log.e("SurfaceTexture", op + ": glError " + error);
-        }
     }
 
     public void pausePlayback() {
@@ -140,7 +122,6 @@ public class VideoDecoder {
     }
 
     public void endPlayback() {
-        // end playback and cleanup player resources
         mMediaPlayer.stop();
         mMediaPlayer.release();
     }
