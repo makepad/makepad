@@ -166,6 +166,7 @@ impl<'a> DrawShaderGenerator<'a> {
         for field in &self.draw_shader_def.fields {
             match field.kind {
                 DrawShaderFieldKind::Texture {..} => {
+                    assert_ne!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::TextureOES, "TextureOES is only available on Android");
                     assert_eq!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
                     write!(self.string, "    texture2d<float> ").unwrap();
                     write!(self.string, "{}", &DisplayDsIdent(field.ident)).unwrap();
@@ -591,7 +592,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Mat4);
                 write!(string, " {}{}", ref_prefix, ident).unwrap();
             }
-            Ty::Texture2D => panic!(), // TODO
+            Ty::Texture2D | Ty::TextureOES => panic!(), // TODO
             Ty::Array {ref elem_ty, len} => {
                 self.write_var_decl(string, sep, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
@@ -611,9 +612,6 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 return false
             }
             Ty::ClosureDecl => {
-                return false
-            }
-            Ty::TextureOES {..} => {
                 return false
             }
         }
