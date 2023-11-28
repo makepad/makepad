@@ -14,9 +14,11 @@ pub enum AppToStudio{
         level: LogLevel
     },
     Profile{
-        
     }
 }
+
+#[derive(SerBin, DeBin)]
+pub struct AppToStudioVec(pub Vec<AppToStudio>);
 
 #[derive(SerBin, DeBin)]
 pub enum StudioToApp{
@@ -25,3 +27,6 @@ pub enum StudioToApp{
         content: String
     }
 }
+
+#[derive(SerBin, DeBin)]
+pub struct StudioToAppVec(pub Vec<StudioToApp>);

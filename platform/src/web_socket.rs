@@ -2,18 +2,19 @@ use crate::{
     os::OsWebSocket,
     cx_api::*,
     Cx,
-    studio::AppToStudio,
+    studio::{AppToStudio,AppToStudioVec},
     event::HttpMethod,
     event::HttpRequest,
     makepad_micro_serde::*
 };
 
 use std::{
+    time::{Instant, Duration},
     collections::HashMap,
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{channel, Sender, Receiver, TryRecvError,RecvError}
+        mpsc::{channel, Sender, Receiver, RecvTimeoutError, TryRecvError,RecvError}
     }
 };
     
@@ -29,6 +30,9 @@ pub enum WebSocketThreadMsg{
     SendMessage{
         socket_id: u64,
         message: WebSocketMessage
+    },
+    AppToStudio{
+        message: AppToStudio
     }
 }
 
@@ -60,22 +64,24 @@ impl Drop for WebSocket{
 impl Cx{
         
     pub(crate) fn start_studio_websocket(&mut self) {
-        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
-        if studio_http.is_none() {
+        let studio_http = std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("");
+        if studio_http.len() == 0{
             return
         }
-        let url = format!("http://{}/$studio_web_socket", studio_http.unwrap());
+        // lets open a websocket
+        let url = format!("http://{}/$studio_web_socket", studio_http);
         let request = HttpRequest::new(url, HttpMethod::GET);
         self.studio_web_socket = Some(WebSocket::open(request));
     }
     
     pub fn send_studio_message(msg:AppToStudio){
+        let studio_http = std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("");
+        if studio_http.len() == 0{
+            return
+        }
         let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
         if let Some(sender) = &*sender{
-            let _= sender.send(WebSocketThreadMsg::SendMessage{
-                socket_id: 0,
-                message: WebSocketMessage::Binary(msg.serialize_bin()),
-            });
+            let _= sender.send(WebSocketThreadMsg::AppToStudio{message:msg});
         }
         else{
             panic!("Web socket thread not running")
@@ -92,21 +98,50 @@ impl WebSocket{
         cx.spawn_thread(move ||{
             // this is the websocket thread.
             let mut sockets = HashMap::new();
-            while let Ok(msg) = rx_receiver.recv(){
-
-                match msg{
-                    WebSocketThreadMsg::Open{socket_id, request, rx_sender}=>{
-                        let socket = OsWebSocket::open(request, rx_sender);
-                        sockets.insert(socket_id, socket);
-                    }
-                    WebSocketThreadMsg::SendMessage{socket_id, message}=>{
-                        // lets look up our OsWebSocket and send a message
-                        if let Some(socket) = sockets.get_mut(&socket_id){
-                            socket.send_message(message).unwrap();
+            let mut app_to_studio = AppToStudioVec(Vec::new());
+            let mut first_message = None;
+            let collect_time = Duration::from_millis(16);
+            let mut cycle_time = Duration::MAX;
+            loop{
+                // the idea is that this loop collects AppToStudio messages for a minimum of collect_time 
+                // and then batches it. this solves flooding underlying platform websocket overhead (esp on web)
+                match rx_receiver.recv_timeout(cycle_time){
+                    Ok(msg)=>match msg{
+                        WebSocketThreadMsg::Open{socket_id, request, rx_sender}=>{
+                            let socket = OsWebSocket::open(request, rx_sender);
+                            sockets.insert(socket_id, socket);
                         }
+                        WebSocketThreadMsg::SendMessage{socket_id, message}=>{
+                            if let Some(socket) = sockets.get_mut(&socket_id){
+                                socket.send_message(message).unwrap();
+                            }
+                        }
+                        WebSocketThreadMsg::AppToStudio{message}=>{
+                            if first_message.is_none(){
+                                first_message = Some(Instant::now())
+                            }
+                            app_to_studio.0.push(message);
+                            cycle_time = collect_time; // we should now block with a max of collect time since we received the first message
+                        }
+                        WebSocketThreadMsg::Close{socket_id}=>{
+                            sockets.remove(&socket_id);
+                        }
+                    },
+                    Err(RecvTimeoutError::Timeout)=>{ 
                     }
-                    WebSocketThreadMsg::Close{socket_id}=>{
-                        sockets.remove(&socket_id);
+                    Err(RecvTimeoutError::Disconnected)=>{
+                        return
+                    }
+                }
+                if let Some(first_time) = first_message{
+                    if Instant::now().duration_since(first_time) >= collect_time{
+                        // lets send it
+                        if let Some(socket) = sockets.get_mut(&0){
+                            socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())).unwrap();
+                        }
+                        app_to_studio.0.clear();
+                        first_message = None;
+                        cycle_time = Duration::MAX;
                     }
                 }
             }
