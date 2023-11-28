@@ -22,8 +22,8 @@ import android.media.MediaPlayer;
 import android.opengl.GLES20;
 import android.opengl.GLES11Ext;
 
-public class VideoDecoder {
-    public VideoDecoder(Activity activity, long videoId) {
+public class VideoPlayer {
+    public VideoPlayer(Activity activity, long videoId) {
         mActivityReference = new WeakReference<>(activity);
         mVideoId = videoId;
     }
@@ -70,7 +70,7 @@ public class VideoDecoder {
                                 mMediaPlayer.getVideoWidth(),
                                 mMediaPlayer.getVideoHeight(),
                                 mMediaPlayer.getDuration(),
-                                VideoDecoder.this);
+                                VideoPlayer.this);
                         });
                     }
                     
