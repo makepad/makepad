@@ -4,7 +4,6 @@ use {
     std::cell::RefCell,
     self::super::{
         web_media::CxWebMedia,
-        web_decoding::CxWebDecoding,
         from_wasm::*,
         to_wasm::*,
     },
@@ -652,7 +651,6 @@ pub struct CxOs {
     pub (crate) from_wasm_js: Vec<String>,
     
     pub (crate) media: CxWebMedia,
-    pub (crate) decoding: CxWebDecoding
 }
 
 impl CxOs {

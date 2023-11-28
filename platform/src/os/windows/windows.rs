@@ -11,7 +11,6 @@ use {
         os::{
             windows::{
                 windows_media::CxWindowsMedia,
-                windows_decoding::CxWindowsDecoding,
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
@@ -370,6 +369,5 @@ impl CxOsApi for Cx {
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
-    pub (crate) decoding: CxWindowsDecoding,
     pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }
