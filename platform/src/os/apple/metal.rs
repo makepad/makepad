@@ -14,7 +14,6 @@ use {
         },
         makepad_math::*,
         makepad_live_id::*,
-        makepad_error_log::*,
         os::{
             apple::apple_sys::*,
             apple::apple_util::{
@@ -41,7 +40,10 @@ use {
 };
 
 #[cfg(target_os = "macos")]
-use crate::metal_xpc::store_xpc_service_texture;
+use crate::{
+    metal_xpc::store_xpc_service_texture
+};
+
 
 impl Cx {
     
@@ -138,7 +140,7 @@ impl Cx {
                         atIndex: 0
                     ]}
                 }
-                else {error!("Drawing error: vertex_buffer None")}
+                else {crate::error!("Drawing error: vertex_buffer None")}
                 
                 if let Some(inner) = draw_item.os.instance_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
@@ -148,7 +150,7 @@ impl Cx {
                         atIndex: 1
                     ]}
                 }
-                else {error!("Drawing error: instance_buffer None")}
+                else {crate::error!("Drawing error: instance_buffer None")}
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
@@ -242,7 +244,7 @@ impl Cx {
                         instanceCount: instances
                     ]};
                 }
-                else {error!("Drawing error: index_buffer None")}
+                else {crate::error!("Drawing error: index_buffer None")}
                 
                 gpu_read_guards.push(draw_item.os.instance_buffer.get().gpu_read());
                 gpu_read_guards.push(geometry.os.vertex_buffer.get().gpu_read());
@@ -261,7 +263,7 @@ impl Cx {
             draw_list_id
         }
         else{
-            error!("Draw pass has no draw list!");
+            crate::error!("Draw pass has no draw list!");
             return
         };
         
@@ -341,7 +343,7 @@ impl Cx {
                     ]};
                 }
                 else {
-                    error!("draw_pass_to_texture invalid render target");
+                    crate::error!("draw_pass_to_texture invalid render target");
                 }
                 
                 unsafe {msg_send![color_attachment, setStoreAction: MTLStoreAction::Store]}
@@ -389,7 +391,7 @@ impl Cx {
                 unsafe {msg_send![depth_attachment, setTexture: texture.as_id()]}
             }
             else {
-                error!("draw_pass_to_texture invalid render target");
+                crate::error!("draw_pass_to_texture invalid render target");
             }
             let () = unsafe {msg_send![depth_attachment, setStoreAction: MTLStoreAction::Store]};
             
@@ -509,7 +511,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    log!("{}", gen.mtlsl);
+                    crate::log!("{}", gen.mtlsl);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
@@ -545,7 +547,7 @@ impl Cx {
         }
     }
     
-    #[cfg(target_os="ios")]
+    #[cfg(any(target_os="ios", target_os="tvos"))]
     pub fn share_texture_for_presentable_image(
         &mut self,
         _texture: &Texture,
@@ -648,7 +650,7 @@ impl CxOsDrawShader {
                 for (index, line) in shader.mtlsl.split("\n").enumerate() {
                     out.push_str(&format!("{}: {}\n", index + 1, line));
                 }
-                error!("{}", out);
+                crate::error!("{}", out);
                 panic!("{}", string);
             }
         });
@@ -1048,11 +1050,11 @@ pub fn get_default_metal_device() -> Option<ObjcId> {
 }
 
 pub fn get_all_metal_devices() -> Vec<ObjcId> {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     unsafe {
         vec![MTLCreateSystemDefaultDevice()]
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "macos")]
     unsafe {
         let array = MTLCopyAllDevices();
         let count: u64 = msg_send![array, count];

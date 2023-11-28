@@ -6,7 +6,6 @@ use {
         session::{SelectionMode, Session},
         settings::Settings,
         str::StrExt,
-        text::Length,
         text::Position,
         token::TokenKind,
         Line, Selection, Token,
@@ -516,7 +515,6 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         pos: Position,
-        _lenght: Length,
         session: &mut Session,
     ) {
         session.set_selection(pos, Affinity::Before, SelectionMode::Simple);

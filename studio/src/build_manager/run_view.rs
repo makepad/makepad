@@ -1,5 +1,4 @@
 use crate::{
-    makepad_draw::*,
     makepad_widgets::*,
     makepad_platform::os::cx_stdin::*,
     build_manager::build_manager::BuildManager,
@@ -130,6 +129,9 @@ impl RunView {
         match event.hits(cx, self.draw_app.area()) {
             Hit::FingerDown(_) => {
                 cx.set_key_focus(self.draw_app.area());
+            }
+            Hit::TextInput(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
             }
             Hit::KeyDown(e) => {
                 manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));

@@ -1,5 +1,5 @@
 use std::io::prelude::*;
-use makepad_http::websocket::{WebSocket, WebSocketMessage, BinaryMessageHeader};
+use makepad_http::websocket::{WebSocket, WebSocketMessage, MessageHeader};
 use std::env;
 use std::fs;
 use std::sync::mpsc;
@@ -51,7 +51,7 @@ fn main() {
             while let Ok(msg) = rx_sender.recv() {
                 let mut bytes = Vec::new();
                 msg.ser_bin(&mut bytes);
-                let header = BinaryMessageHeader::from_len(bytes.len());
+                let header = MessageHeader::from_len(bytes.len(), MessageFormat::Binary, false);
                 if tcp_stream.write_all(header.as_slice()).is_err() {
                     println!("tcp stream write error");
                     return

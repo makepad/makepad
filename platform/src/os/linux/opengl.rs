@@ -9,7 +9,6 @@ use {
     self::super::gl_sys,
     crate::{
         makepad_live_id::*,
-        makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
         cx::Cx,
         texture::{Texture, TextureFormat, TexturePixel, CxTexture},
@@ -240,7 +239,7 @@ impl Cx {
     pub fn setup_render_pass(&mut self, pass_id: PassId,) -> Option<DVec2> {
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass_rect = self.get_pass_rect2(pass_id, dpi_factor).unwrap();
+        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].paint_dirty = false;
         
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
@@ -446,7 +445,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    log!("{}\n{}", vertex, pixel);
+                    crate::log!("{}\n{}", vertex, pixel);
                 }
                 
                 // lets see if we have the shader already
