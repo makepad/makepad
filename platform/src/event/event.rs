@@ -76,9 +76,9 @@ pub enum Event {
     VideoInputs(VideoInputsEvent),
     NetworkResponses(Vec<NetworkResponseEvent>),
 
-    VideoTextureUpdated(VideoTextureUpdatedEvent),
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
-    VideoChunkDecoded(LiveId),
+    VideoTextureUpdated(VideoTextureUpdatedEvent),
+    VideoPlaybackCompleted(VideoPlaybackCompletedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
  

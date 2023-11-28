@@ -212,19 +212,11 @@ live_design!{
             texture image: textureOES
             instance image_scale: vec2(1.0, 1.0)
             instance image_pan: vec2(0.0, 0.0)
-
-            uniform image_alpha: 1.0
-            uniform texture_available: 0.0
             uniform is_last_frame: 0.0
 
             fn pixel(self) -> vec4 {
-                // if (self.texture_available < 0.5) {
-                    // return vec4(0.0, 0.0, 0.0, 1.0);
-                // }
-    
-                return sample2dOES(self.image, self.pos);
-                // let color = self.get_color();
-                // return color * vec4(1.0, 1.0, 1.0, self.image_alpha);
+                let color = sample2dOES(self.image, self.pos);
+                return color * vec4(1.0, 1.0, 1.0, 0.8);
             }
         }
     }
