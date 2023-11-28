@@ -1,15 +1,9 @@
 package dev.makepad.android;
 
-import android.media.MediaCodec;
-import android.media.MediaExtractor;
-import android.media.MediaFormat;
+import android.util.Log;
 
 import android.app.Activity;
 import java.lang.ref.WeakReference;
-
-import android.util.Log;
-
-import dev.makepad.android.MakepadNative;
 
 import android.graphics.SurfaceTexture;
 import android.view.Surface;
@@ -19,8 +13,7 @@ import android.os.HandlerThread;
 import java.util.concurrent.atomic.AtomicInteger;
 import android.media.MediaPlayer;
 
-import android.opengl.GLES20;
-import android.opengl.GLES11Ext;
+import dev.makepad.android.MakepadNative;
 
 public class VideoPlayer {
     public VideoPlayer(Activity activity, long videoId) {
