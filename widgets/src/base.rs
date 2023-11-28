@@ -467,11 +467,11 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            if self.radius.x > 0.0 {
+            if self.radius > 0.0 {
                 sdf.circle(
                     self.rect_size.x * 0.5,
                     self.rect_size.y * 0.5,
-                    self.radius.x
+                    self.radius
                 )
             }
             else {

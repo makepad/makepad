@@ -4,7 +4,6 @@ use {
             LiveId,
         },
         makepad_math::*,
-        makepad_error_log::*,
         os::{
             CxOsDrawCall,
             CxOsView,

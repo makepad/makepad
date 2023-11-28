@@ -1,7 +1,6 @@
 use crate::{
     makepad_shader_compiler::generate_hlsl,
     makepad_math::*,
-    makepad_error_log::*,
     os::{
         windows::win32_app::{TRUE, FALSE,},
         windows::win32_window::Win32Window,
@@ -480,7 +479,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    log!("{}", hlsl);
+                    crate::log!("{}", hlsl);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {

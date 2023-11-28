@@ -18,6 +18,7 @@ use {
             },
             cx_native::EventFlow,
         },
+        makepad_math::*,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         window::CxWindowPool,
@@ -362,15 +363,6 @@ impl Cx {
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest {request_id: _, request: _} => {
-                    //todo!()
-                },
-                CxOsOp::WebSocketOpen {request_id: _, request: _,} => {
-                    //todo!()
-                }
-                CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
-                    //todo!()
-                }
-                CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     //todo!()
                 },
                 CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),

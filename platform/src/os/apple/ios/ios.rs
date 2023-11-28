@@ -18,7 +18,7 @@ use {
                     ios_event::IosEvent,
                     ios_app::{IosApp, init_ios_app_global,get_ios_app_global}
                 },
-                ns_url_session::{make_http_request, web_socket_open},
+                url_session::{make_http_request},
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
@@ -28,6 +28,7 @@ use {
         pass::{CxPassParent},
         thread::Signal,
         window::CxWindowPool,
+        web_socket::WebSocket,
         event::{
             Event,
             NetworkResponseChannel
@@ -36,14 +37,16 @@ use {
         cx::{Cx, OsType},
     }
 };
-#[cfg(not(ios_sim))]
+#[cfg(not(apple_sim))]
 use crate::makepad_live_compiler::LiveFileChange;
-#[cfg(not(ios_sim))]
+#[cfg(not(apple_sim))]
 use crate::event::{NetworkResponse, HttpRequest, HttpMethod};
 
 impl Cx {
     
-    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+    pub fn event_loop(cx:Rc<RefCell<Cx>>) { 
+        WebSocket::run_websocket_thread(&mut *cx.borrow_mut());
+        cx.borrow_mut().start_studio_websocket();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
@@ -319,15 +322,6 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::WebSocketOpen{request_id, request}=>{
-                    web_socket_open(request_id, request, self.os.network_response.sender.clone());
-                }
-                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
-                    todo!()
-                }
-                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
-                    todo!()
-                },
                 CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
                 CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
@@ -336,79 +330,36 @@ impl Cx {
         }
     }
 
-    #[cfg(ios_sim)]
-    pub fn studio_http_connection(&mut self, _event: &mut Event) -> bool {
-        true
-    }
     
-    #[cfg(not(ios_sim))]
-    pub fn studio_http_connection(&mut self, event: &mut Event) -> bool {
-        if let Event::NetworkResponses(res) = event {
-            res.retain( | res | {
-                if res.request_id == live_id!(live_reload) {
-                    // alright lets see if we need to live reload from the body
-                    if let NetworkResponse::HttpResponse(res) = &res.response {
-                        // lets check our response
-                        if let Some(body) = res.get_string_body() {
-                            if body.len()>0 {
-                                let mut parts = body.split("$$$makepad_live_change$$$");
-                                if let Some(file_name) = parts.next() {
-                                    let content = parts.next().unwrap().to_string();
-                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                                        file_name:file_name.to_string(),
-                                        content
-                                    }]);
-                                }
-                            }
-                        }
-                        self.poll_studio_http();
-                    }
-                    false
-                }
-                else {
-                    true
-                }
-            });
-            if res.len()>0 {
-                return true
-            }
-        }
-        false
-    }
-    #[cfg(not(ios_sim))]
-    fn poll_studio_http(&self) {
-        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
-        if studio_http.is_none() {
-            return
-        }
-        let url = format!("http://{}/$live_file_change", studio_http.unwrap());
-        let request = HttpRequest::new(url, HttpMethod::GET);
-        make_http_request(live_id!(live_reload), request, self.os.network_response.sender.clone());
-    }
+    /*
+    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
+        file_name:file_name.to_string(),
+        content
+    }]);*/
     
 }
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) { 
         
-        #[cfg(not(ios_sim))]{
+        #[cfg(not(apple_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         }
         
         self.live_expand();
 
-        #[cfg(ios_sim)]
+        #[cfg(apple_sim)]
         self.start_disk_live_file_watcher(50);
         
-        #[cfg(not(ios_sim))]
+        #[cfg(not(apple_sim))]
         self.poll_studio_http();
         
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
-        #[cfg(ios_sim)]
+        #[cfg(apple_sim)]
         self.native_load_dependencies();
         
-        #[cfg(not(ios_sim))]
+        #[cfg(not(apple_sim))]
         self.ios_load_dependencies();
     }
     

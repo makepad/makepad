@@ -1,7 +1,5 @@
 use crate::{
     makepad_code_editor::code_editor::*,
-    makepad_platform::*,
-    makepad_draw::*,
     makepad_widgets::*,
     makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
@@ -19,7 +17,7 @@ use crate::{
             BuildManagerAction
         },
     }
-};
+}; 
 use std::fs::File;
 use std::io::Write;
 use std::env;
@@ -29,11 +27,13 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
+     
+    import makepad_studio::build_manager::run_view::RunView;
+    import makepad_studio::build_manager::log_list::LogList;
+    import makepad_studio::build_manager::run_list::RunList;
     
-    import makepad_studio_core::build_manager::run_view::RunView;
-    import makepad_studio_core::build_manager::log_list::LogList;
-    import makepad_studio_core::build_manager::run_list::RunList;
-    
+    ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
+
     Logo = <Button> {
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
@@ -245,6 +245,37 @@ live_design!{
                 }
                 Search = <RectView> {
                     draw_bg: {color: #2}
+                  //  margin:{left: 0, top: 0}
+                    <View> {
+                        margin:10
+                        flow: Down
+                        <View> 
+                        {
+                            flow: Right
+                            height: Fit
+                            <TextInput>{
+                                width: Fill,
+                             empty_message:"Search here.."                           
+                            }
+                            //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
+                        <Button> {
+                            text:"Search!"
+                            
+                            draw_icon: {
+                                svg_file: (ICO_SEARCH)
+                                fn get_color(self) -> vec4 {
+                                    return #f;
+                                }
+                            } 
+                            icon_walk:  {
+                                width: Fit, height: 17.0} 
+                        }
+                    }
+                        <Label>
+                        {
+                            text: "this does not work yet."
+                        }
+                    }
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
@@ -273,7 +304,7 @@ impl LiveHook for App {
         cx.start_stdin_service();
     }
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) { 
         // not great but it will do.
         let mut root = "./".to_string();
         for arg in std::env::args(){
@@ -484,7 +515,7 @@ impl AppMain for App {
         for (item_id, item) in log_list.items_with_actions(&actions) {
             for action in self.build_manager.handle_log_list(cx, &log_list, item_id, item, &actions) {
                 match action {
-                    LogListAction::JumpToError{file_name, start, length} => {
+                    LogListAction::JumpToError{file_name, start} => {
                         // lets find a tab if we have it otherwise open it
                         if let Some(file_id) = self.file_system.path_to_file_node_id(&file_name) {
                             if let Some(tab_id) = self.file_system.file_node_id_to_tab_id(file_id){
@@ -492,7 +523,7 @@ impl AppMain for App {
                                 // ok lets scroll into view
                                 if let Some(mut editor) = dock.item(tab_id).as_code_editor().borrow_mut() {
                                     if let Some(session) = self.file_system.get_session_mut(tab_id) {
-                                        editor.set_cursor_and_scroll(cx, start, length, session);
+                                        editor.set_cursor_and_scroll(cx, start, session);
                                         editor.set_key_focus(cx);
                                     }
                                 }

@@ -18,7 +18,10 @@ pub mod media_foundation;
 pub mod d3d11;
 pub mod windows;
 pub mod windows_stdin;
+mod web_socket;
+
 pub(crate) use crate::os::windows::d3d11::*; 
 pub(crate) use crate::os::windows::windows::*;
 pub(crate) use crate::os::windows::winrt_midi::{OsMidiInput, OsMidiOutput};
+pub (crate) use web_socket::OsWebSocket;
 
