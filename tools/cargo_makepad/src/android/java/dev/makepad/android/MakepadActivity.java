@@ -233,7 +233,7 @@ MidiManager.OnDeviceOpenedListener{
 
     // video decoding
     Handler mDecoderHandler;
-    HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
+    HashMap<Long, VideoPlayerRunnable> mDecoderRunnables;
 
     // networking
     Handler mWebSocketsHandler;
@@ -258,10 +258,10 @@ MidiManager.OnDeviceOpenedListener{
 
         MakepadNative.activityOnCreate(this);
 
-        HandlerThread decoderThreadHandler = new HandlerThread("VideoDecoderThread");
+        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
         decoderThreadHandler.start(); // TODO: only start this if its needed.
         mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
-        mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
+        mDecoderRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
         HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
         webSocketsThreadHandler.start();
@@ -505,33 +505,33 @@ MidiManager.OnDeviceOpenedListener{
     }
 
     public void prepareVideoPlayback(long videoId, byte[] videoData, int externalTextureHandle, boolean autoplay, boolean shouldLoop, boolean pauseFirstFrame) {
-        VideoDecoder videoDecoder = new VideoDecoder(this, videoId);
-        videoDecoder.setExternalTextureHandle(externalTextureHandle);
-        videoDecoder.setAutoplay(autoplay);
-        videoDecoder.setShouldLoop(shouldLoop);
-        videoDecoder.setPauseFirstFrame(pauseFirstFrame);
-        VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, videoDecoder);
+        VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
+        VideoPlayer.setExternalTextureHandle(externalTextureHandle);
+        VideoPlayer.setAutoplay(autoplay);
+        VideoPlayer.setShouldLoop(shouldLoop);
+        VideoPlayer.setPauseFirstFrame(pauseFirstFrame);
+        VideoPlayerRunnable runnable = new VideoPlayerRunnable(videoData, VideoPlayer);
 
         mDecoderRunnables.put(videoId, runnable);
         mDecoderHandler.post(runnable);
     }
 
     public void pauseVideoPlayback(long videoId) {
-        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+        VideoPlayerRunnable runnable = mDecoderRunnables.get(videoId);
         if(runnable != null) {
             runnable.pausePlayback();
         }
     }
 
     public void resumeVideoPlayback(long videoId) {
-        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+        VideoPlayerRunnable runnable = mDecoderRunnables.get(videoId);
         if(runnable != null) {
             runnable.resumePlayback();
         }
     }
 
     public void endVideoPlayback(long videoId) {
-        VideoDecoderRunnable runnable = mDecoderRunnables.remove(videoId);
+        VideoPlayerRunnable runnable = mDecoderRunnables.remove(videoId);
         if(runnable != null) {
             runnable.endPlayback();
         }
