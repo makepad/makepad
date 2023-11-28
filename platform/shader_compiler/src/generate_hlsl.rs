@@ -193,6 +193,7 @@ impl<'a> DrawShaderGenerator<'a> {
         for field in &self.draw_shader_def.fields {
             match field.kind {
                 DrawShaderFieldKind::Texture {..} => {
+                    assert_ne!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::TextureOES, "TextureOES is only available on Android");
                     assert_eq!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
                     write!(self.string, "Texture2D {}: register(t{});", DisplayDsIdent(field.ident), index).unwrap();
                     index += 1;
@@ -800,7 +801,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 TyLit::Mat2 => "float2x2",
                 TyLit::Mat3 => "float3x3",
                 TyLit::Mat4 => "float4x4",
-                TyLit::Texture2D => panic!(), // TODO
+                TyLit::Texture2D | TyLit::TextureOES => panic!(), // TODO
             }
         )
             .unwrap();
