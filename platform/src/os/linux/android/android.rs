@@ -9,7 +9,6 @@ use {
     std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
-        android_decoding::CxAndroidDecoding,
         jni_sys::jobject,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
@@ -798,7 +797,6 @@ impl Default for CxOs {
             dpi_factor: 1.5,
             keyboard_closed: 0.0,
             media: CxAndroidMedia::default(),
-            decoding: CxAndroidDecoding::default(),
             display: None,
             quit: false,
             fullscreen: false,
@@ -830,7 +828,6 @@ pub struct CxOs {
     pub (crate) timers: PollTimers,
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
-    pub (crate) decoding: CxAndroidDecoding,
     pub (crate) video_surfaces: HashMap<LiveId, jobject>,
 }
 

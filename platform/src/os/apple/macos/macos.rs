@@ -30,7 +30,6 @@ use {
             },
             metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,
-            apple_decoding::CxAppleDecoding,
             metal::{MetalCx, DrawPassMode},
         },
         pass::CxPassParent,
@@ -587,7 +586,6 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
-    pub (crate) decoding: CxAppleDecoding,
     pub (crate) stdin_timers: PollTimers,
 
     pub metal_device: Option<ObjcId>,

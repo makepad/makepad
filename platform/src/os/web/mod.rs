@@ -4,7 +4,6 @@ pub mod web_gl;
 pub mod from_wasm;
 pub mod to_wasm; 
 pub mod web_media;
-pub mod web_decoding;
 pub mod web_audio;
 pub mod web_midi;
 mod web_socket;
