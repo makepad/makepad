@@ -97,6 +97,9 @@ pub enum FromJavaMessage {
         duration: u128,
         surface_texture: jni_sys::jobject,
     },
+    VideoPlaybackCompleted {
+        video_id: u64,
+    },
     VideoDecodingError {
         video_id: u64,
         error: String,
@@ -438,6 +441,17 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackP
         video_height: video_height as u32,
         duration: duration as u128,
         surface_texture: global_ref
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackCompleted(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    video_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::VideoPlaybackCompleted {
+        video_id: video_id as u64,
     });
 }
 

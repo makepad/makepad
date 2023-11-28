@@ -1,6 +1,6 @@
 use crate::{
     makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_decoding::*,
-    widget::*, VideoColorFormat,
+    widget::*,
 };
 
 // Usage
@@ -54,8 +54,6 @@ pub struct Video {
     video_height: usize,
     #[rust]
     total_duration: u128,
-    #[rust]
-    _color_format: VideoColorFormat,
 
     #[rust]
     id: LiveId,
@@ -65,14 +63,12 @@ pub struct Video {
 pub struct VideoRef(WidgetRef);
 
 impl VideoRef {
-    // it will initialize decoding if not already initialized
-    pub fn show_preview(&mut self, cx: &mut Cx) {
+    pub fn preview_first_frame(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.show_preview(cx);
+            inner.preview_first_frame(cx);
         }
     }
 
-    // it will initialize decoding if not already initialized
     pub fn begin_playback(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.begin_playback(cx);
@@ -91,7 +87,7 @@ impl VideoRef {
         }
     }
 
-    // it will finish playback and cleanup decoding
+    // it will finish playback and cleanup decoding resources
     pub fn end_playback(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.end_playback(cx);
@@ -113,8 +109,8 @@ enum PlaybackState {
     Previewing,
     Playing,
     Paused,
-    // Finished is only used when not looping, mean playback reached end of stream
-    Finished,
+    // Completed is only used when not looping, means playback reached end of stream
+    Completed,
 }
 
 impl LiveHook for Video {
@@ -187,6 +183,14 @@ impl Video {
             }
         }
 
+        if let Event::VideoPlaybackCompleted(event) = event {
+            if event.video_id == self.id {
+                if !self.is_looping {
+                    self.playback_state = PlaybackState::Completed;
+                }
+            }
+        }
+
         if let Event::TextureHandleReady(event) = event {
             if event.texture_id == self.texture.clone().unwrap().texture_id() {
                 self.texture_handle = Some(event.handle);
@@ -243,12 +247,12 @@ impl Video {
             .set_uniform(cx, id!(video_width), &[self.video_width as f32]);
 
         // Debug
-        log!(
-            "Video id {} - decoding initialized: \n {}x{}px |",
-            self.id.0,
-            self.video_width,
-            self.video_height,
-        );
+        // log!(
+        //     "Video id {} - decoding initialized: \n {}x{}px |",
+        //     self.id.0,
+        //     self.video_width,
+        //     self.video_height,
+        // );
 
         self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
     }
@@ -288,7 +292,7 @@ impl Video {
         }
     }
 
-    fn show_preview(&mut self, cx: &mut Cx) {
+    fn preview_first_frame(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::NotStarted {
             self.prepare_playback(cx);
             self.pause_on_first_frame = true;
@@ -299,8 +303,6 @@ impl Video {
     fn begin_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::NotStarted {
             self.prepare_playback(cx);
-            self.playback_state = PlaybackState::Playing;
-        } else if self.playback_state == PlaybackState::Prepared {
             self.playback_state = PlaybackState::Playing;
         }
     }

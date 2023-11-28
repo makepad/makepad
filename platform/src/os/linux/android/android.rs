@@ -45,8 +45,8 @@ use {
             WindowGeom,
             VideoPlaybackPreparedEvent,
             VideoTextureUpdatedEvent,
-            VideoColorFormat,
             VideoDecodingErrorEvent,
+            VideoPlaybackCompletedEvent,
             HttpRequest,
             HttpMethod,
         },
@@ -311,6 +311,14 @@ impl Cx {
                         self.os.video_surfaces.insert(LiveId(video_id), surface_texture);
                         self.call_event_handler(&e);
                     },
+                    FromJavaMessage::VideoPlaybackCompleted {video_id} => {
+                        let e = Event::VideoPlaybackCompleted(
+                            VideoPlaybackCompletedEvent {
+                                video_id: LiveId(video_id)
+                            }
+                        );
+                        self.call_event_handler(&e);
+                    }
                     FromJavaMessage::VideoDecodingError {video_id, error} => {
                         let e = Event::VideoDecodingError(
                             VideoDecodingErrorEvent {
