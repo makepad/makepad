@@ -36,6 +36,6 @@ public class MakepadNative {
     public native static void onMidiDeviceOpened(String name, Object midi_device);
 
     // video playback
-    public static native void onVideoPlaybackPrepared(long videoId, int videoWidth, int videoHeight, long duration, VideoDecoder surfaceTexture);
+    public static native void onVideoPlaybackPrepared(long videoId, int videoWidth, int videoHeight, long duration, VideoPlayer surfaceTexture);
     public static native void onVideoDecodingError(long videoId, String error);
 }
