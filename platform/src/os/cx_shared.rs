@@ -2,7 +2,6 @@
 use {
     std::collections::{HashSet, HashMap},
     crate::{
-        makepad_error_log::*,
         cx::Cx,
         pass::{
             PassId,
@@ -136,7 +135,7 @@ impl Cx {
             }));
             self.inner_key_focus_change();
             if counter > 100 {
-                error!("Trigger feedback loop detected");
+                crate::error!("Trigger feedback loop detected");
                 break
             }
         }
@@ -167,6 +166,9 @@ impl Cx {
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
+
+        self.performance_stats.process_frame_data(time);
+
         self.call_event_handler(&Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }
 }

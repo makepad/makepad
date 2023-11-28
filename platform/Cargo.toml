@@ -12,6 +12,7 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 [dependencies]
 makepad-futures = { path = "../libs/futures", version = "0.4.0" }
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.5.0" }
+makepad-http = { path = "../libs/http", version="0.4.0" }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "0.4.0" }
@@ -31,6 +32,14 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 [target.aarch64-apple-ios.dependencies]
 makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 
+[target.x86_64-apple-tvos.dependencies]
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
+
+[target.aarch64-apple-tvos-sim.dependencies]
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
+
+[target.aarch64-apple-tvos.dependencies]
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 

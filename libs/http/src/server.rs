@@ -5,7 +5,7 @@ use std::io::prelude::*;
 use std::sync::{mpsc, mpsc::{RecvTimeoutError}};
 use std::time::Duration;
 
-use crate::websocket::{WebSocket, WebSocketMessage, BinaryMessageHeader, PING_MESSAGE};
+use crate::websocket::{PONG_MESSAGE, WebSocket, WebSocketMessage, MessageFormat, MessageHeader, PING_MESSAGE};
 use crate::utils::*;
 
 #[derive(Clone)]
@@ -146,10 +146,9 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
             match rx_socket.recv_timeout(Duration::from_millis(2000)){
                 Ok(data)=>{
                     if data.is_empty(){
-                        println!("Write socket closed");
                         break
                     }
-                    let header = BinaryMessageHeader::from_len(data.len());
+                    let header = MessageHeader::from_len(data.len(), MessageFormat::Binary, false);
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, header.as_slice());
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
                 },
@@ -157,7 +156,6 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &PING_MESSAGE);
                 }
                 Err(RecvTimeoutError::Disconnected)=>{
-                    println!("Write socket closed");
                     break
                 }
             }
@@ -180,7 +178,6 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
         match tcp_stream.read(&mut data) {
             Ok(n) => {
                 if n == 0 {
-                    println!("Websocket closed");
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                     let _ = tx_socket.send(Vec::new());
                     break 
@@ -188,11 +185,11 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                 web_socket.parse(&data[0..n], | result | {
                     match result {
                         Ok(WebSocketMessage::Ping(_)) => {
+                            let _ = tx_socket.send(PONG_MESSAGE.to_vec());
                         },
                         Ok(WebSocketMessage::Pong(_)) => {
                         },
                         Ok(WebSocketMessage::Text(_text)) => {
-                            println!("Websocket text");
                         }
                         Ok(WebSocketMessage::Binary(data)) => {
                             if http_server.request.send(HttpServerRequest::BinaryMessage {

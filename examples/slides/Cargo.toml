@@ -9,4 +9,3 @@ metadata.makepad-auto-version = "_Cje-i05FmRoF8Bp-FtTHnJ3-fA="
 metadata.makepad-check-platform = "desktop"
 
 [dependencies]
-makepad-studio-core = { path = "../../studio/core", version = "0.5.0" }
