@@ -311,24 +311,6 @@ impl Cx {
                         self.os.video_surfaces.insert(LiveId(video_id), surface_texture);
                         self.call_event_handler(&e);
                     },
-                    FromJavaMessage::VideoTextureUpdated {video_id} => {
-                        let e = Event::VideoTextureUpdated(
-                            VideoTextureUpdatedEvent { video_id: LiveId(video_id) }
-                        );
-                        self.call_event_handler(&e);
-
-                        // if let Some(surface_texture) = self.os.video_surfaces.get(&LiveId(video_id)) {
-                        //     unsafe {
-                        //         crate::makepad_error_log::log!(">>>>>>>> Updating Tex Image");
-                        //         let env = attach_jni_env();
-                        //         android_jni::to_java_update_tex_image(env, *surface_texture);
-                        //     }
-                        // }
-                    }
-                    FromJavaMessage::VideoChunkDecoded {video_id} => {
-                        let e = Event::VideoChunkDecoded(LiveId(video_id));
-                        self.call_event_handler(&e);
-                    },
                     FromJavaMessage::VideoDecodingError {video_id, error} => {
                         let e = Event::VideoDecodingError(
                             VideoDecodingErrorEvent {
