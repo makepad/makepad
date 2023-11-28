@@ -211,8 +211,8 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
             (makepad_java_classes_dir.join("MakepadWebSocket.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadWebSocketReader.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("ByteArrayMediaDataSource.java").to_str().unwrap()),
-            (makepad_java_classes_dir.join("VideoDecoder.java").to_str().unwrap()),
-            (makepad_java_classes_dir.join("VideoDecoderRunnable.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("VideoPlayer.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("VideoPlayerRunnable.java").to_str().unwrap()),
             (build_paths.java_file.to_str().unwrap())
         ]   
     ) ?; 
@@ -248,10 +248,10 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
             (compiled_java_classes_dir.join("MakepadWebSocketReader.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("HttpResponse.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("ByteArrayMediaDataSource.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("VideoDecoder.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("VideoDecoderRunnable.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("VideoDecoder$1.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("VideoDecoder$2.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("VideoPlayer.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("VideoPlayerRunnable.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("VideoPlayer$1.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("VideoPlayer$2.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$2.class").to_str().unwrap()),
             (build_paths.java_class.to_str().unwrap()),

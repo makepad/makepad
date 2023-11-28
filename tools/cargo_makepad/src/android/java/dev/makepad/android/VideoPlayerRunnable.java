@@ -2,34 +2,34 @@ package dev.makepad.android;
 
 import java.nio.ByteBuffer;
 
-public class VideoDecoderRunnable implements Runnable {
-    private final VideoDecoder mVideoDecoder;
+public class VideoPlayerRunnable implements Runnable {
+    private final VideoPlayer mVideoPlayer;
     private final byte[] mVideoData;
     private boolean mIsPrepared = false;
 
-    public VideoDecoderRunnable(byte[] videoData, VideoDecoder videoDecoder) {
+    public VideoPlayerRunnable(byte[] videoData, VideoPlayer VideoPlayer) {
         mVideoData = videoData;
-        mVideoDecoder = videoDecoder;
+        mVideoPlayer = VideoPlayer;
     }
 
     @Override
     public void run() {
         if(!mIsPrepared) {
-            mVideoDecoder.prepareVideoPlayback(mVideoData);
+            mVideoPlayer.prepareVideoPlayback(mVideoData);
             mIsPrepared = true;
         }
     }
 
     public void pausePlayback() {
-        mVideoDecoder.pausePlayback();
+        mVideoPlayer.pausePlayback();
     }
 
     public void resumePlayback() {
-        mVideoDecoder.resumePlayback();
+        mVideoPlayer.resumePlayback();
     }
 
     public void endPlayback() {
-        mVideoDecoder.endPlayback();
+        mVideoPlayer.endPlayback();
     }
 }
 
