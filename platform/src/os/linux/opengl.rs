@@ -215,10 +215,17 @@ impl Cx {
                         // get the loc
                         gl_sys::ActiveTexture(gl_sys::TEXTURE0 + i as u32);
                         if let Some(texture) = cxtexture.os.gl_texture {
-                            gl_sys::BindTexture(gl_sys::TEXTURE_2D, texture);
+                            // Video playback with SurfaceTexture requires TEXTURE_EXTERNAL_OES, for any other format we assume regular 2D textures
+                            match cxtexture.format {
+                                TextureFormat::VideoRGB => gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, texture),
+                                _ => gl_sys::BindTexture(gl_sys::TEXTURE_2D, texture)     
+                            }
                         }
                         else {
-                            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+                            match cxtexture.format {
+                                TextureFormat::VideoRGB => gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, 0),
+                                _ => gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0)     
+                            }
                         }
                         gl_sys::Uniform1i(shgl.textures[i].loc, i as i32);
                     }
