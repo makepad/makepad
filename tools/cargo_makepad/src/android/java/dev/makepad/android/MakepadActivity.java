@@ -231,9 +231,9 @@ MidiManager.OnDeviceOpenedListener{
     private MakepadSurface view;
     Handler mHandler;
 
-    // video decoding
-    Handler mDecoderHandler;
-    HashMap<Long, VideoPlayerRunnable> mDecoderRunnables;
+    // video playback
+    Handler mVideoPlaybackHandler;
+    HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
     // networking
     Handler mWebSocketsHandler;
@@ -260,8 +260,8 @@ MidiManager.OnDeviceOpenedListener{
 
         HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
         decoderThreadHandler.start(); // TODO: only start this if its needed.
-        mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
-        mDecoderRunnables = new HashMap<Long, VideoPlayerRunnable>();
+        mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
+        mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
         HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
         webSocketsThreadHandler.start();
@@ -512,26 +512,26 @@ MidiManager.OnDeviceOpenedListener{
         VideoPlayer.setPauseFirstFrame(pauseFirstFrame);
         VideoPlayerRunnable runnable = new VideoPlayerRunnable(videoData, VideoPlayer);
 
-        mDecoderRunnables.put(videoId, runnable);
-        mDecoderHandler.post(runnable);
+        mVideoPlayerRunnables.put(videoId, runnable);
+        mVideoPlaybackHandler.post(runnable);
     }
 
     public void pauseVideoPlayback(long videoId) {
-        VideoPlayerRunnable runnable = mDecoderRunnables.get(videoId);
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
             runnable.pausePlayback();
         }
     }
 
     public void resumeVideoPlayback(long videoId) {
-        VideoPlayerRunnable runnable = mDecoderRunnables.get(videoId);
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
             runnable.resumePlayback();
         }
     }
 
     public void endVideoPlayback(long videoId) {
-        VideoPlayerRunnable runnable = mDecoderRunnables.remove(videoId);
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {
             runnable.endPlayback();
         }
