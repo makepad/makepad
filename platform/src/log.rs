@@ -36,15 +36,8 @@ use crate::studio::AppToStudio;
 
 pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:&str, level:LogLevel){
     // lets send out our log message on the studio websocket 
-    
-    /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
-        let out = ty.make_json(file, line_start, column_start, line_end, column_end, message);
-        println!("{}", out);
-        return
-    }*/
-    
-    let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
-    if studio_http.is_none() {
+
+    if std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("").len() == 0 {
         println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
     }
     else{
