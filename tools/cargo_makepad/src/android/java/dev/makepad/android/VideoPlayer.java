@@ -73,6 +73,19 @@ public class VideoPlayer {
                     }
                 }
             });
+
+            mMediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                @Override
+                public void onCompletion(MediaPlayer mp) {
+                    // Video playback has finished
+                    Activity activity = mActivityReference.get();
+                    if (activity != null) {
+                        activity.runOnUiThread(() -> {
+                            MakepadNative.onVideoPlaybackCompleted(mVideoId);
+                        });
+                    }
+                }
+            });
         } catch (Exception e) {
             String message = e.getMessage() != null? e.getMessage() : ("Error decoding video: " + e.toString());
             MakepadNative.onVideoDecodingError(mVideoId, message);
