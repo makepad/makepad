@@ -183,7 +183,7 @@ impl Video {
 
         if let Event::VideoTextureUpdated(event) = event {
             if event.video_id == self.id {
-                self.draw_bg.redraw(cx);
+                self.redraw(cx);
             }
         }
 
