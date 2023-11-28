@@ -20,6 +20,7 @@ use {
         draw_matrix::CxDrawMatrixPool,
         os::{CxOs},
         debug::Debug,
+        performance_stats::PerformanceStats,
         event::{
             DrawEvent,
             CxFingers,
@@ -34,6 +35,7 @@ use {
         gpu_info::GpuInfo,
         window::CxWindowPool,
         draw_list::CxDrawListPool,
+        web_socket::WebSocket,
         pass::CxPassPool,
         texture::{CxTexturePool,TextureFormat,Texture},
         geometry::{
@@ -44,8 +46,8 @@ use {
     }
 };
 
-pub use makepad_shader_compiler::makepad_derive_live::*;
-pub use makepad_shader_compiler::makepad_math::*;
+//pub use makepad_shader_compiler::makepad_derive_live::*;
+//pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
     pub (crate) os_type: OsType,
@@ -108,6 +110,10 @@ pub struct Cx {
     #[allow(dead_code)]
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
+    
+    pub(crate) studio_web_socket: Option<WebSocket>,
+    
+    pub performance_stats: PerformanceStats,
 }
 
 #[derive(Clone)]
@@ -230,7 +236,7 @@ impl Cx {
             drag_drop: Default::default(),
             ime_area: Default::default(),
             platform_ops: Default::default(),
-            
+            studio_web_socket: None,
             
             new_next_frames: Default::default(),
             
@@ -256,7 +262,8 @@ impl Cx {
             executor: Some(executor),
             spawner,
 
-            self_ref: None
+            self_ref: None,
+            performance_stats: Default::default(),
         }
     }
 }

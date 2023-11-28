@@ -36,6 +36,7 @@ live_design!{
                 },
                 text: "hi! how may I assist you today?",
             }
+            
             message_input = <TextInput> {
                 text: "Hi!"
                 width: 300,
@@ -44,6 +45,7 @@ live_design!{
                     color: #1
                 }
             }
+            
             send_button = <Button> {
                 icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                 text: "send"

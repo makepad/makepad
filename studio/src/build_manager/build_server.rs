@@ -1,7 +1,8 @@
 use {
     crate::{
-        makepad_code_editor::text::{Position, Length},
+        makepad_code_editor::text::{Position},
         makepad_micro_serde::*,
+        makepad_platform::log::LogLevel,
         build_manager::{
             build_protocol::*,
             child_process::{
@@ -150,28 +151,59 @@ impl BuildConnection {
                 "--".into(),
                 "--message-format=json".into(),
             ],
-            BuildTarget::IosSim {org, app} => vec![
+            BuildTarget::IosSim  => vec![
                 "run".into(),
                 "nightly".into(),
                 "cargo".into(),
                 "makepad".into(),
+                "apple".into(),
                 "ios".into(),
-                format!("--org={org}"),
-                format!("--app={app}"),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
                 "run-sim".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--release".into(),
                 "--message-format=json".into(),
             ],
-            BuildTarget::IosDevice {org, app} => vec![
+            BuildTarget::IosDevice => vec![
                 "run".into(),
                 "nightly".into(),
                 "cargo".into(),
                 "makepad".into(),
                 "ios".into(),
-                format!("--org={org}"),
-                format!("--app={app}"),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
+                "run-device".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::TvosSim  => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "apple".into(),
+                "tvos".into(),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
+                "run-sim".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::TvosDevice => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "apple".into(),
+                "tvos".into(),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
                 "run-device".into(),
                 "-p".into(),
                 what.binary.clone(),
@@ -309,10 +341,10 @@ impl BuildConnection {
                     }
                     ChildStdIO::StdErr(line) => {
                         if line.trim().starts_with("Running ") {
-                           msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
+                           msg_sender.send_bare_message(cmd_id, LogLevel::Wait, line);
                         }
                         else if line.trim().starts_with("Compiling ") {
-                           msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
+                           msg_sender.send_bare_message(cmd_id, LogLevel::Wait, line);
                         }
                         else if line.trim().starts_with("Blocking waiting for file lock on package cache") {
                             //msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
@@ -324,11 +356,11 @@ impl BuildConnection {
                             //stderr_state = StdErrState::Running;
                         }
                         else{
-                            msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
+                            msg_sender.send_bare_message(cmd_id, LogLevel::Error, line);
                         }
                     }
                     ChildStdIO::Term => {
-                        msg_sender.send_bare_msg(cmd_id, LogItemLevel::Log, "process terminated".into());
+                        msg_sender.send_bare_message(cmd_id, LogLevel::Log, "process terminated".into());
                         break;
                     }
                     ChildStdIO::Kill => {
@@ -373,7 +405,7 @@ pub trait MsgSender: Send {
     fn box_clone(&self) -> Box<dyn MsgSender>;
     fn send_message(&self, wrap: LogItemWrap);
     
-    fn send_bare_msg(&self, cmd_id: BuildCmdId, level: LogItemLevel, line: String) {
+    fn send_bare_message(&self, cmd_id: BuildCmdId, level: LogLevel, line: String) {
         let line = line.trim();
         self.send_message(
             cmd_id.wrap_msg(LogItem::Bare(LogItemBare {
@@ -390,14 +422,14 @@ pub trait MsgSender: Send {
     }
     
 
-    fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogItemLevel, file_name: String, start: Position, length: Length, msg: String) {
+    fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogLevel, file_name: String, start: Position, end: Position, message: String) {
         self.send_message(
             cmd_id.wrap_msg(LogItem::Location(LogItemLocation {
                 level,
                 file_name,
                 start,
-                length,
-                msg
+                end,
+                message
             }))
         );
     }
@@ -406,18 +438,18 @@ pub trait MsgSender: Send {
         if let Some(msg) = msg.message {
             
             let level = match msg.level.as_ref() {
-                "error" => LogItemLevel::Error,
-                "warning" => LogItemLevel::Warning,
-                "log" => LogItemLevel::Log,
-                "failure-note" => LogItemLevel::Error,
-                "panic" => LogItemLevel::Panic,
+                "error" => LogLevel::Error,
+                "warning" => LogLevel::Warning,
+                "log" => LogLevel::Log,
+                "failure-note" => LogLevel::Error,
+                "panic" => LogLevel::Panic,
                 other => {
-                    self.send_bare_msg(cmd_id, LogItemLevel::Error, format!("process_compiler_message: unexpected level {}", other));
+                    self.send_bare_message(cmd_id, LogLevel::Error, format!("process_compiler_message: unexpected level {}", other));
                     return
                 }
             };
             if let Some(span) = msg.spans.iter().find( | span | span.is_primary) {
-                self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.length(), msg.message.clone());
+                self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.end(), msg.message.clone());
                 /*
                 if let Some(label) = &span.label {
                     self.send_location_msg(cmd_id, level, span.file_name.clone(), range, label.clone());
@@ -436,7 +468,7 @@ pub trait MsgSender: Send {
                 msg.message.trim().contains("warning emitted") {
                 }
                 else {
-                    self.send_bare_msg(cmd_id, LogItemLevel::Warning, msg.message);
+                    self.send_bare_message(cmd_id, LogLevel::Warning, msg.message);
                 }
             }
         }

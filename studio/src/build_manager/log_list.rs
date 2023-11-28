@@ -1,13 +1,12 @@
 
 use {
     crate::{
-        makepad_platform::*,
         build_manager::{
             build_manager::*,
             build_protocol::*,
         },
         makepad_widgets::*,
-        makepad_code_editor::text::{Position, Length},
+        makepad_code_editor::text::{Position},
         makepad_widgets::portal_list::PortalList,
     },
     std::{
@@ -206,7 +205,7 @@ live_design!{
     
 }
 pub enum LogListAction {
-    JumpToError{file_name:String, start:Position, length:Length},
+    JumpToError{file_name:String, start:Position},
     None
 }
 
@@ -217,13 +216,13 @@ impl BuildManager {
         list.set_item_range(cx, 0, self.log.len() as u64);
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id & 1 == 0;
-            fn map_level_to_icon(level: LogItemLevel) -> LiveId {
+            fn map_level_to_icon(level: LogLevel) -> LiveId {
                 match level {
-                    LogItemLevel::Warning => live_id!(warning),
-                    LogItemLevel::Error => live_id!(error),
-                    LogItemLevel::Log => live_id!(log),
-                    LogItemLevel::Wait => live_id!(wait),
-                    LogItemLevel::Panic => live_id!(panic),
+                    LogLevel::Warning => live_id!(warning),
+                    LogLevel::Error => live_id!(error),
+                    LogLevel::Log => live_id!(log),
+                    LogLevel::Wait => live_id!(wait),
+                    LogLevel::Panic => live_id!(panic),
                 }
             }
             if let Some((build_id, log_item)) = self.log.get(item_id as usize) {
@@ -251,7 +250,7 @@ impl BuildManager {
                         item.apply_over(cx, live!{
                             binary = {text: (&binary)}
                             icon = {active_page: (map_level_to_icon(msg.level))},
-                            body = {text: (&msg.msg)}
+                            body = {text: (&msg.message)}
                             location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
@@ -284,7 +283,6 @@ impl BuildManager {
                                 line_index: msg.start.line_index,
                                 byte_index: msg.start.byte_index,
                             },
-                            length:msg.length
                         })
                     }
                     _ => ()
