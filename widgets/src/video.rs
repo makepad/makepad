@@ -1,5 +1,5 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_decoding::*,
+    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_decoding::*, 
     widget::*,
 };
 
@@ -114,11 +114,17 @@ enum PlaybackState {
 }
 
 impl LiveHook for Video {
+    #[allow(unused)]
     fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Video);
+        #[cfg(target_os = "android")]
+        {
+            register_widget!(cx, Video);
+        }
     }
 
+    #[allow(unused)]
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        #[cfg(target_os = "android")]
         if self.texture.is_none() {
             let new_texture = Texture::new(cx);
             new_texture.set_format(cx, TextureFormat::VideoRGB);
