@@ -455,7 +455,9 @@ impl DeJsonState {
                         if self.cur == '\0' {
                             return Err(self.err_parse("string"));
                         }
-                        self.strbuf.push(self.cur);
+                        else if self.cur != '$'{
+                            self.strbuf.push(self.cur);
+                        }
                         self.next(i);
                     }
                 }
