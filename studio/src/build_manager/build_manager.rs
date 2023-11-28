@@ -10,7 +10,7 @@ use {
             HostToStdin,
             StdinToHost,
         },
-        makepad_platform::studio::AppToStudio,
+        makepad_platform::studio::{AppToStudioVec,AppToStudio},
         makepad_platform::log::LogLevel,
         build_manager::{
             run_view::*,
@@ -143,7 +143,7 @@ pub struct BuildManager {
     #[rust] pub binaries: Vec<BuildBinary>,
     #[rust] pub active: ActiveBuilds,
     #[rust] pub studio_http: String,
-    #[rust] pub recv_studio_msg: ToUIReceiver<AppToStudio>,
+    #[rust] pub recv_studio_msg: ToUIReceiver<AppToStudioVec>,
     #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>,
     #[rust] pub send_file_change: FromUISender<LiveFileChange>
 }
@@ -298,48 +298,50 @@ impl BuildManager {
                 self.studio_http = format!("{}", addr);
             }
             
-            if let Ok(msg) = self.recv_studio_msg.try_recv() {
-                if let AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level} = msg{
-                    let start = text::Position {
-                        line_index: line_start as usize,
-                        byte_index: column_start as usize
-                    };
-                    let end = text::Position {
-                        line_index: line_end as usize,
-                        byte_index: column_end as usize
-                    };
-                    //log!("{:?} {:?}", pos, pos + loc.length);
-                    if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
-                        match level{
-                            LogLevel::Warning=>{
-                                file_system.add_decoration(file_id, Decoration::new(
-                                    0,
-                                    start,
-                                    end,
-                                    DecorationType::Warning
-                                ));
-                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+            if let Ok(msgs) = self.recv_studio_msg.try_recv() {
+                for msg in msgs.0{
+                    if let AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level} = msg{
+                        let start = text::Position {
+                            line_index: line_start as usize,
+                            byte_index: column_start as usize
+                        };
+                        let end = text::Position {
+                            line_index: line_end as usize,
+                            byte_index: column_end as usize
+                        };
+                        //log!("{:?} {:?}", pos, pos + loc.length);
+                        if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
+                            match level{
+                                LogLevel::Warning=>{
+                                    file_system.add_decoration(file_id, Decoration::new(
+                                        0,
+                                        start,
+                                        end,
+                                        DecorationType::Warning
+                                    ));
+                                    dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                }
+                                LogLevel::Error=>{
+                                    file_system.add_decoration(file_id, Decoration::new(
+                                        0,
+                                        start,
+                                        end,
+                                        DecorationType::Error
+                                    ));
+                                    dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                }
+                                _=>()
                             }
-                            LogLevel::Error=>{
-                                file_system.add_decoration(file_id, Decoration::new(
-                                    0,
-                                    start,
-                                    end,
-                                    DecorationType::Error
-                                ));
-                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
-                            }
-                            _=>()
                         }
+                        self.log.push((LiveId(0).into(), LogItem::Location(LogItemLocation{
+                            level,
+                            file_name,
+                            start,
+                            end,
+                            message
+                        })));
+                        dispatch_action(cx, BuildManagerAction::RedrawLog)
                     }
-                    self.log.push((LiveId(0).into(), LogItem::Location(LogItemLocation{
-                        level,
-                        file_name,
-                        start,
-                        end,
-                        message
-                    })));
-                    dispatch_action(cx, BuildManagerAction::RedrawLog)
                 }
             }
         }
@@ -490,7 +492,7 @@ impl BuildManager {
                     HttpServerRequest::DisconnectWebSocket {web_socket_id: _} => {
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id: _, response_sender: _, data} => {
-                        if let Ok(msg) = AppToStudio::deserialize_bin(&data){
+                        if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
                             let _ = studio_sender.send(msg);
                         }
                         //println!("GOT BINARY MESSAGE");
