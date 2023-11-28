@@ -97,12 +97,6 @@ pub enum FromJavaMessage {
         duration: u128,
         surface_texture: jni_sys::jobject,
     },
-    VideoTextureUpdated {
-        video_id: u64,
-    },
-    VideoChunkDecoded {
-        video_id: u64,
-    },
     VideoDecodingError {
         video_id: u64,
         error: String,
@@ -426,7 +420,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackPrepared(
-    env: *mut jni_sys::JNIEnv,
+    _env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     video_id: jni_sys::jlong,
     video_width: jni_sys::jint,
@@ -444,19 +438,6 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackP
         video_height: video_height as u32,
         duration: duration as u128,
         surface_texture: global_ref
-    });
-}
-
-// TODO: REMOVE
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoTextureUpdated(
-    env: *mut jni_sys::JNIEnv,
-    _: jni_sys::jobject,
-    video_id: jni_sys::jlong,
-    timestamp: jni_sys::jlong,
-) {
-    send_from_java_message(FromJavaMessage::VideoTextureUpdated {
-        video_id: video_id as u64,
     });
 }
 
@@ -514,26 +495,6 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
     let slice = std::slice::from_raw_parts(bytes as *const u8, length as usize);
     out_bytes.extend_from_slice(slice);
     (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, jni_sys::JNI_ABORT);
-    out_bytes
-}
-
-// TODO: cache method ids
-unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sys::jobject) -> Vec<u8> {
-    let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
-    let poisition_cstring = CString::new("position").unwrap();
-    let remaining_cstring = CString::new("remaining").unwrap();
-    let signature_cstring = CString::new("()I").unwrap();
-    let position_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, poisition_cstring.as_ptr(), signature_cstring.as_ptr());
-    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, remaining_cstring.as_ptr(), signature_cstring.as_ptr());
-    let position = (**env).CallIntMethod.unwrap()(env, byte_buffer, position_method_id) as isize;
-    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id) as usize;
-
-    let direct_buffer_ptr = (**env).GetDirectBufferAddress.unwrap()(env, byte_buffer) as *const u8;
-
-    let slice = std::slice::from_raw_parts(direct_buffer_ptr.offset(position), remaining);
-
-    let out_bytes = slice.to_vec();
-
     out_bytes
 }
 
