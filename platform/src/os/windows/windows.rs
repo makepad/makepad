@@ -59,7 +59,7 @@ impl Cx {
                 cx.win32_event_callback(event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
-        
+        get_win32_app_global().start_timer(0, 0.008, true);
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
         get_win32_app_global().start_signal_poll();
@@ -77,7 +77,24 @@ impl Cx {
         }
         
         let mut paint_dirty = false;
-        
+        match &event{
+            Win32Event::Timer(time) =>{
+                if time.timer_id == 0{
+                    if Signal::check_and_clear_ui_signal() {
+                        self.handle_media_signals();
+                        self.call_event_handler(&Event::Signal);
+                    }
+                    if self.handle_live_edit() {
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
+                    self.handle_networking_events();
+                    return EventFlow::Poll;
+                }
+            }
+            _=>{}
+        }
+
         //self.process_desktop_pre_event(&mut event);
         match event {
             Win32Event::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
@@ -163,6 +180,11 @@ impl Cx {
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
+            }
+            Win32Event::MouseLeave(e) => {
+                self.call_event_handler(&Event::MouseLeave(e.into()));
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.fingers.switch_captures();
             }
             Win32Event::Scroll(e) => {
                 self.call_event_handler(&Event::Scroll(e.into()))
@@ -356,6 +378,9 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.live_expand();
+        if std::env::args().find( | v | v == "--stdin-loop").is_none() {
+            self.start_disk_live_file_watcher(100);
+        }
         self.live_scan_dependencies();
         self.native_load_dependencies();
     }
