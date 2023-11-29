@@ -23,6 +23,7 @@ macro_rules!app_main {
                 }
                 <dyn AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }))));
+            cx.borrow_mut().init_websockets();
             live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();
             Cx::event_loop(cx);
@@ -68,6 +69,7 @@ macro_rules!app_main {
                     }
                     app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
                 })));
+                cx.init_websockets();
                 live_design(&mut cx);
                 cx.init_cx_os();
                 cx
@@ -91,7 +93,7 @@ macro_rules!app_main {
                 }
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             })));
-            
+            cx.init_websockets();
             live_design(&mut cx);
             cx.init_cx_os();
             Box::into_raw(cx) as u32

@@ -197,7 +197,7 @@ impl RunView {
                 self.redraw(cx);
             }
             StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
-                if let Some(v) = manager.active.builds.values_mut().find(|v| v.run_view_id == run_view_id) {
+                if let Some(v) = manager.active.builds.get_mut(&run_view_id){
                     // Only allow presenting images in the current host swapchain
                     // (or the previous one, before any draws on the current one),
                     // and look them up by their unique IDs, to avoid rendering
@@ -277,8 +277,8 @@ impl RunView {
 
             let min_width = ((inner_width * dpi_factor).ceil() as u32).max(1);
             let min_height = ((inner_height * dpi_factor).ceil() as u32).max(1);
-            let active_build_needs_new_swapchain = manager.active.builds.values_mut()
-                .find(|v| v.run_view_id == run_view_id)
+            let active_build_needs_new_swapchain = manager.active.builds
+                .get_mut(&run_view_id)
                 .filter(|v| v.aux_chan_host_endpoint.is_some())
                 .filter(|v| {
                     v.swapchain.as_ref().map(|swapchain| {
