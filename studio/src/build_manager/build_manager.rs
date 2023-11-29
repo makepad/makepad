@@ -92,7 +92,7 @@ pub struct BuildManager {
     #[rust] pub binaries: Vec<BuildBinary>,
     #[rust] pub active: ActiveBuilds,
     #[rust] pub studio_http: String,
-    #[rust] pub recv_studio_msg: ToUIReceiver<AppToStudioVec>,
+    #[rust] pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
     #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>,
     #[rust] pub send_file_change: FromUISender<LiveFileChange>
 }
@@ -229,10 +229,10 @@ impl BuildManager {
         if let Event::Signal = event {
             if let Ok(mut addr) = self.recv_external_ip.try_recv() {
                 addr.set_port(self.http_port as u16);
-                self.studio_http = format!("{}", addr);
+                self.studio_http = format!("http://{}/$studio_web_socket", addr);
             }
             
-            if let Ok(msgs) = self.recv_studio_msg.try_recv() {
+            if let Ok((_build_id, msgs)) = self.recv_studio_msg.try_recv() {
                 for msg in msgs.0{
                     match msg{
                         AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level}=>{
@@ -277,7 +277,7 @@ impl BuildManager {
                             })));
                             dispatch_action(cx, BuildManagerAction::RedrawLog)
                         }
-                        AppToStudio::EventProfile{event_u32,start, end}=>{
+                        AppToStudio::EventProfile{event_u32:_,start:_, end:_}=>{
                             //println!("GOT PROFILE {} {}", name, end-start);
                         }
                     }
@@ -411,18 +411,23 @@ impl BuildManager {
                 ("/makepad/".to_string(), format!("{}/{}",root,makepad_path.clone())),
                 ("/".to_string(), "".to_string())
             ];
-            
+            let mut sockets = HashMap::new();
             while let Ok(message) = rx_request.recv() {
                 // only store last change, fix later
                 match message {
-                    HttpServerRequest::ConnectWebSocket {web_socket_id: _, response_sender: _,headers: _} => {
+                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender: _,headers} => {
                         //println!("GOT WEBSOCKET CONNECT");
+                        sockets.insert(web_socket_id, headers);
                     },
-                    HttpServerRequest::DisconnectWebSocket {web_socket_id: _} => {
+                    HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
+                        sockets.remove(&web_socket_id);
                     },
-                    HttpServerRequest::BinaryMessage {web_socket_id: _, response_sender: _, data} => {
-                        if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
-                            let _ = studio_sender.send(msg);
+                    HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
+                        if let Some(headers) = sockets.get(&web_socket_id){
+                            log!("{:?}", headers.search);
+                            if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
+                                let _ = studio_sender.send((LiveId(0),msg));
+                            }
                         }
                         //println!("GOT BINARY MESSAGE");
                         // new incombing message from client

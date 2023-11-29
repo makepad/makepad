@@ -230,7 +230,7 @@ impl BuildManager {
         out
     }
     
-    pub fn run_app(&mut self, run_view_id:LiveId, binary_name:&str){
+    pub fn run_app(&mut self, binary_name:&str){
         let mut out = Vec::new();
         Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, 0,  &mut out);
     }
@@ -242,7 +242,7 @@ impl BuildManager {
             target
         };
         let item_id = process.as_id();
-        client.send_cmd_with_id(item_id, BuildCmd::Run(process.clone(), format!("{}?id={}", studio_http, item_id.0)));
+        client.send_cmd_with_id(item_id, BuildCmd::Run(process.clone(),studio_http));
         //let run_view_id = LiveId::unique();
         if active.builds.get(&item_id).is_none() {
             let index = active.builds.len();
