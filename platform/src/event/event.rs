@@ -51,6 +51,7 @@ pub enum Event {
     MouseDown(MouseDownEvent),
     MouseMove(MouseMoveEvent),
     MouseUp(MouseUpEvent),
+    MouseLeave(MouseLeaveEvent),
     TouchUpdate(TouchUpdateEvent),
     Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
     
