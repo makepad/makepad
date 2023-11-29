@@ -7,6 +7,7 @@ use {
         },
         any::{Any, TypeId},
         rc::Rc,
+        time::Instant,
         rc::Weak,
         cell::RefCell,
     },
@@ -63,7 +64,7 @@ pub struct Cx {
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
-    
+    pub (crate) start_time: Instant,
     pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
     pub draw_shaders: CxDrawShaders,
@@ -224,6 +225,8 @@ impl Cx {
             draw_shaders: Default::default(),
             
             new_draw_event: Default::default(),
+            
+            start_time: Instant::now(),
             
             redraw_id: 1,
             event_id: 1,

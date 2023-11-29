@@ -1,9 +1,6 @@
 use crate::{
     makepad_widgets::*,
-    makepad_studio_core::build_manager::build_manager::*,
-    makepad_studio_core::build_manager::run_view::*,
-    makepad_studio_core::file_system::file_system::*,
-};
+}; 
 
 live_design!{
     import makepad_widgets::base::*;
@@ -141,27 +138,13 @@ app_main!(App);
 #[derive(Live)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[live] build_manager: BuildManager,
-    #[rust] file_system: FileSystem,
+
 }
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        crate::makepad_code_editor::live_design(cx);
-        crate::build_manager::build_manager::live_design(cx);
-        crate::build_manager::run_list::live_design(cx);
-        crate::build_manager::log_list::live_design(cx);
-        crate::build_manager::run_view::live_design(cx);
         //cx.start_stdin_service();
-    }
-    
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        let root_path = std::env::current_dir().unwrap();
-        self.file_system.init(cx, &root_path);
-        self.build_manager.init(cx, &root_path);
-        self.build_manager.run_app(live_id!(fractal_zoom),"makepad-example-fractal-zoom");
-        self.build_manager.run_app(live_id!(ironfish),"makepad-example-ironfish");
     }
 }
 
@@ -171,44 +154,16 @@ impl App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
-        let apps = [id!(fractal_zoom),id!(ironfish)];
-        
         if let Event::Draw(event) = event {
             //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                let run_view_id = next.id();
-                if let Some(mut run_view) = next.as_run_view().borrow_mut() {
-                    run_view.draw(cx, run_view_id, &mut self.build_manager);
-                }
+            while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
+              
             }
             //profile_end!(dt);
             return
         }
-        if let Event::Destruct = event {
-            self.build_manager.clear_active_builds();
-        }
+        
         let _actions = self.ui.handle_widget_event(cx, event);
-        
-        //ok i want all runviews... how do i do that
-        for app in apps{
-            if let Some(mut run_view) = self.ui.run_view(app).borrow_mut(){
-                run_view.pump_event_loop(cx, event, app[0], &mut self.build_manager);
-                run_view.handle_event(cx, event, app[0], &mut self.build_manager);
-            }
-        }
-        
-        for _action in self.file_system.handle_event(cx, event, &self.ui) {}
-                
-        for action in self.build_manager.handle_event(cx, event, &mut self.file_system) {
-            match action {
-                BuildManagerAction::StdinToHost {run_view_id, msg} => {
-                    if let Some(mut run_view) = self.ui.run_view(&[run_view_id]).borrow_mut() {
-                        run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.build_manager);
-                    }
-                }
-                _ => ()
-            }
-        }
     }
 }
