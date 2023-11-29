@@ -230,7 +230,7 @@ impl BuildManager {
         out
     }
     
-    pub fn run_app(&mut self, run_view_id:LiveId, binary_name:&str){
+    pub fn run_app(&mut self, binary_name:&str){
         let mut out = Vec::new();
         Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, 0,  &mut out);
     }
