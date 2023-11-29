@@ -73,6 +73,7 @@ impl AppMain for App{
         let actions = self.ui.handle_widget_event(cx, event);
   
         if self.ui.button(id!(button1)).clicked(&actions) {
+            log!("BUTTON CLICKED"); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
