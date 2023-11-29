@@ -48,13 +48,8 @@ live_design!{
 pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
-    pub item_id: LiveId,
     pub process: BuildProcess,
-    pub run_view_id: LiveId,
-    pub cmd_id: Option<BuildCmdId>,
-    
     pub swapchain: Option<cx_stdin::Swapchain<Texture >>,
-    
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
@@ -66,22 +61,14 @@ pub struct ActiveBuild {
     pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct ActiveBuildId(pub LiveId);
-
 #[derive(Default)]
 pub struct ActiveBuilds {
-    pub builds: HashMap<ActiveBuildId, ActiveBuild>
+    pub builds: HashMap<LiveId, ActiveBuild>
 }
 
 impl ActiveBuilds {
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
-        for (_k, v) in &self.builds {
-            if v.item_id == item_id {
-                return true
-            }
-        }
-        false
+        self.builds.get(&item_id).is_some()
     }
     
     pub fn any_binary_active(&self, binary: &str) -> bool {
@@ -92,44 +79,6 @@ impl ActiveBuilds {
         }
         false
     }
-    
-    pub fn build_id_from_cmd_id(&self, cmd_id: BuildCmdId) -> Option<ActiveBuildId> {
-        for (k, v) in &self.builds {
-            if v.cmd_id == Some(cmd_id) {
-                return Some(*k);
-            }
-        }
-        None
-    }
-    
-    pub fn build_id_from_run_view_id(&self, run_view_id: LiveId) -> Option<ActiveBuildId> {
-        for (k, v) in &self.builds {
-            if v.run_view_id == run_view_id {
-                return Some(*k);
-            }
-        }
-        None
-    }
-    
-    
-    pub fn run_view_id_from_cmd_id(&self, cmd_id: BuildCmdId) -> Option<LiveId> {
-        for v in self.builds.values() {
-            if v.cmd_id == Some(cmd_id) {
-                return Some(v.run_view_id);
-            }
-        }
-        None
-    }
-    
-    pub fn cmd_id_from_run_view_id(&self, run_view_id: LiveId) -> Option<BuildCmdId> {
-        for v in self.builds.values() {
-            if v.run_view_id == run_view_id {
-                return v.cmd_id
-            }
-        }
-        None
-    }
-    
 }
 
 #[derive(Live, LiveHook)]
@@ -137,7 +86,7 @@ pub struct BuildManager {
     #[rust] root_path: PathBuf,
     #[live(0usize)] http_port: usize,
     #[rust] pub clients: Vec<BuildClient>,
-    #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
+    #[rust] pub log: Vec<(LiveId, LogItem)>,
     #[live] recompile_timeout: f64,
     #[rust] recompile_timer: Timer,
     #[rust] pub binaries: Vec<BuildBinary>,
@@ -180,10 +129,8 @@ impl BuildManager {
         //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
     
-    pub fn send_host_to_stdin(&self, run_view_id: LiveId, msg: HostToStdin) {
-        if let Some(cmd_id) = self.active.cmd_id_from_run_view_id(run_view_id) {
-            self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::HostToStdin(msg.to_json()));
-        }
+    pub fn send_host_to_stdin(&self, item_id: LiveId, msg: HostToStdin) {
+        self.clients[0].send_cmd_with_id(item_id, BuildCmd::HostToStdin(msg.to_json()));
     }
     
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
@@ -213,15 +160,9 @@ impl BuildManager {
     
     pub fn handle_tab_close(&mut self, tab_id: LiveId) -> bool {
         let len = self.active.builds.len();
-        self.active.builds.retain( | _, v | {
-            if v.run_view_id == tab_id {
-                if let Some(cmd_id) = v.cmd_id {
-                    self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
-                }
-                return false
-            }
-            true
-        });
+        if self.active.builds.remove(&tab_id).is_some(){
+            self.clients[0].send_cmd_with_id(tab_id, BuildCmd::Stop);
+        }
         if len != self.active.builds.len() {
             self.log.clear();
             true
@@ -233,12 +174,9 @@ impl BuildManager {
     
     pub fn start_recompile(&mut self, _cx: &mut Cx) {
         // alright so. a file was changed. now what.
-        for active_build in self.active.builds.values_mut() {
-            if let Some(cmd_id) = active_build.cmd_id {
-                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
-            }
-            let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
-            active_build.cmd_id = Some(cmd_id);
+        for (item_id, active_build) in &mut self.active.builds {
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
             active_build.swapchain = None;
             //active_build.last_swapchain_with_completed_draws = None;
             active_build.aux_chan_host_endpoint = None;
@@ -247,10 +185,8 @@ impl BuildManager {
     
     pub fn clear_active_builds(&mut self) {
         // alright so. a file was changed. now what.
-        for active_build in self.active.builds.values_mut() {
-            if let Some(cmd_id) = active_build.cmd_id {
-                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
-            }
+        for item_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
         }
         self.active.builds.clear();
     }
@@ -265,8 +201,8 @@ impl BuildManager {
     pub fn start_recompile_timer(&mut self, cx: &mut Cx, ui: &WidgetRef) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        for active_build in self.active.builds.values_mut() {
-            let view = ui.run_view(&[active_build.run_view_id]);
+        for item_id in self.active.builds.keys() {
+            let view = ui.run_view(&[*item_id]);
             view.recompile_started(cx);
         }
     }
@@ -279,13 +215,11 @@ impl BuildManager {
     
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
-        for active_build in self.active.builds.values_mut() {
-            if let Some(cmd_id) = active_build.cmd_id {
-                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile {
-                    file: live_file_change.file_name.clone(),
-                    contents: live_file_change.content.clone()
-                }.to_json()));
-            }
+       for item_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile {
+                file: live_file_change.file_name.clone(),
+                contents: live_file_change.content.clone()
+            }.to_json()));
         }
         let _ = self.send_file_change.send(live_file_change);
     }
@@ -300,47 +234,52 @@ impl BuildManager {
             
             if let Ok(msgs) = self.recv_studio_msg.try_recv() {
                 for msg in msgs.0{
-                    if let AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level} = msg{
-                        let start = text::Position {
-                            line_index: line_start as usize,
-                            byte_index: column_start as usize
-                        };
-                        let end = text::Position {
-                            line_index: line_end as usize,
-                            byte_index: column_end as usize
-                        };
-                        //log!("{:?} {:?}", pos, pos + loc.length);
-                        if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
-                            match level{
-                                LogLevel::Warning=>{
-                                    file_system.add_decoration(file_id, Decoration::new(
-                                        0,
-                                        start,
-                                        end,
-                                        DecorationType::Warning
-                                    ));
-                                    dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                    match msg{
+                        AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level}=>{
+                            let start = text::Position {
+                                line_index: line_start as usize,
+                                byte_index: column_start as usize
+                            };
+                            let end = text::Position {
+                                line_index: line_end as usize,
+                                byte_index: column_end as usize
+                            };
+                            //log!("{:?} {:?}", pos, pos + loc.length);
+                            if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
+                                match level{
+                                    LogLevel::Warning=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Warning
+                                        ));
+                                        dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                    }
+                                    LogLevel::Error=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Error
+                                        ));
+                                        dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                    }
+                                    _=>()
                                 }
-                                LogLevel::Error=>{
-                                    file_system.add_decoration(file_id, Decoration::new(
-                                        0,
-                                        start,
-                                        end,
-                                        DecorationType::Error
-                                    ));
-                                    dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
-                                }
-                                _=>()
                             }
+                            self.log.push((LiveId(0).into(), LogItem::Location(LogItemLocation{
+                                level,
+                                file_name,
+                                start,
+                                end,
+                                message
+                            })));
+                            dispatch_action(cx, BuildManagerAction::RedrawLog)
                         }
-                        self.log.push((LiveId(0).into(), LogItem::Location(LogItemLocation{
-                            level,
-                            file_name,
-                            start,
-                            end,
-                            message
-                        })));
-                        dispatch_action(cx, BuildManagerAction::RedrawLog)
+                        AppToStudio::EventProfile{event_u32,start, end}=>{
+                            //println!("GOT PROFILE {} {}", name, end-start);
+                        }
                     }
                 }
             }
@@ -390,17 +329,13 @@ impl BuildManager {
                             _=>()
                         }
                     }
-                    if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
-                        log.push((id, LogItem::Location(loc)));
-                        dispatch_action(cx, BuildManagerAction::RedrawLog)
-                    }
+                    log.push((wrap.cmd_id, LogItem::Location(loc)));
+                    dispatch_action(cx, BuildManagerAction::RedrawLog)
                 }
                 LogItem::Bare(bare) => {
                     //log!("{:?}", bare);
-                    if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
-                        log.push((id, LogItem::Bare(bare)));
-                        dispatch_action(cx, BuildManagerAction::RedrawLog)
-                    }
+                    log.push((wrap.cmd_id, LogItem::Bare(bare)));
+                    dispatch_action(cx, BuildManagerAction::RedrawLog)
                     //editor_state.messages.push(wrap.msg);
                 }
                 LogItem::StdinToHost(line) => {
@@ -408,18 +343,16 @@ impl BuildManager {
                     match msg {
                         Ok(msg) => {
                             dispatch_action(cx, BuildManagerAction::StdinToHost {
-                                run_view_id: active.run_view_id_from_cmd_id(wrap.cmd_id).unwrap_or(LiveId(0)),
+                                run_view_id: wrap.cmd_id,
                                 msg
                             });
                         }
                         Err(_) => { // we should output a log string
-                            if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
-                                log.push((id, LogItem::Bare(LogItemBare {
-                                    level: LogLevel::Log,
-                                    line: line.trim().to_string()
-                                })));
-                                dispatch_action(cx, BuildManagerAction::RedrawLog)
-                            }
+                            log.push((wrap.cmd_id, LogItem::Bare(LogItemBare {
+                                level: LogLevel::Log,
+                                line: line.trim().to_string()
+                            })));
+                            dispatch_action(cx, BuildManagerAction::RedrawLog)
                             /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                 level: BuildMsgLevel::Log,
                                 line
@@ -428,12 +361,8 @@ impl BuildManager {
                     }
                 }
                 LogItem::AuxChanHostEndpointCreated(aux_chan_host_endpoint) => {
-                    for active_build in active.builds.values_mut() {
-                        if active_build.cmd_id == Some(wrap.cmd_id) {
-                            //assert!(active_build.aux_chan_host_endpoint.is_none());
-                            active_build.aux_chan_host_endpoint = Some(aux_chan_host_endpoint);
-                            break;
-                        }
+                    if let Some(active_build) = active.builds.get_mut(&wrap.cmd_id){
+                        active_build.aux_chan_host_endpoint = Some(aux_chan_host_endpoint);                        
                     }
                 }
             }
