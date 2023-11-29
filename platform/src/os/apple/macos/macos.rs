@@ -139,7 +139,6 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx: Rc<RefCell<Cx >>) {
-        init_apple_classes_global();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
@@ -539,6 +538,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn pre_start() -> bool {
+        init_apple_classes_global();
         for arg in std::env::args() {
             if arg == "--metal-xpc" {
                 start_xpc_service();
