@@ -282,7 +282,7 @@ impl BuildConnection {
             ]
         };
         
-        let http = format!("{}?id={}", http, cmd_id.0);
+        let http = format!("\"{}?id={}\"", http, cmd_id.0);
         let env = [
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
