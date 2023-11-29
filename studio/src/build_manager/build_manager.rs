@@ -416,7 +416,6 @@ impl BuildManager {
                 // only store last change, fix later
                 match message {
                     HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender: _,headers} => {
-                        //println!("GOT WEBSOCKET CONNECT");
                         sockets.insert(web_socket_id, headers);
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
@@ -424,9 +423,12 @@ impl BuildManager {
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
                         if let Some(headers) = sockets.get(&web_socket_id){
-                            log!("{:?}", headers.search);
-                            if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
-                                let _ = studio_sender.send((LiveId(0),msg));
+                            if let Some(id) = headers.path.rsplit("/").next(){
+                                if let Ok(id) = id.parse::<u64>(){
+                                    if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
+                                        let _ = studio_sender.send((LiveId(id),msg));
+                                    }
+                                }
                             }
                         }
                         //println!("GOT BINARY MESSAGE");
