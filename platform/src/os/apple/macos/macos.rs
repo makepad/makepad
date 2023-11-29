@@ -37,7 +37,6 @@ use {
         thread::Signal,
         cx_stdin::PollTimers,
         window::WindowId,
-        web_socket::WebSocket,
         event::{
             WindowGeom,
             MouseUpEvent,
@@ -140,8 +139,6 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx: Rc<RefCell<Cx >>) {
-        WebSocket::run_websocket_thread(&mut *cx.borrow_mut());
-        cx.borrow_mut().start_studio_websocket();
         init_apple_classes_global();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;

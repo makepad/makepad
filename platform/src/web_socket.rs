@@ -3,8 +3,7 @@ use crate::{
     cx_api::*,
     Cx,
     studio::{AppToStudio,AppToStudioVec},
-    event::HttpMethod,
-    event::HttpRequest,
+    event::{HttpMethod,HttpRequest},
     makepad_micro_serde::*
 };
 
@@ -62,40 +61,16 @@ impl Drop for WebSocket{
     }
 }
 impl Cx{
-        
-    pub(crate) fn start_studio_websocket(&mut self) {
-        let studio_http = std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("");
-        if studio_http.len() == 0{
-            return
-        }
-        // lets open a websocket
-        let url = format!("http://{}/$studio_web_socket", studio_http);
-        let request = HttpRequest::new(url, HttpMethod::GET);
-        self.studio_web_socket = Some(WebSocket::open(request));
+    pub(crate) const fn has_studio_web_socket()->bool{ 
+       std::option_env!("MAKEPAD_STUDIO_HTTP").is_some()
     }
     
-    pub fn send_studio_message(msg:AppToStudio){
-        let studio_http = std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("");
-        if studio_http.len() == 0{
-            return
-        }
-        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        if let Some(sender) = &*sender{
-            let _= sender.send(WebSocketThreadMsg::AppToStudio{message:msg});
-        }
-        else{
-            panic!("Web socket thread not running")
-        }
-    }
-}
-
-impl WebSocket{    
-    pub(crate) fn run_websocket_thread(cx:&mut Cx){
+    fn run_websocket_thread(&mut self){
         // lets create a thread
         let (rx_sender, rx_receiver) = channel();
         let mut thread_sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
         *thread_sender = Some(rx_sender);
-        cx.spawn_thread(move ||{
+        self.spawn_thread(move ||{
             // this is the websocket thread.
             let mut sockets = HashMap::new();
             let mut app_to_studio = AppToStudioVec(Vec::new());
@@ -147,6 +122,39 @@ impl WebSocket{
             }
         });
     }
+    
+    fn start_studio_websocket(&mut self) {
+        let studio_http = std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("");
+        if studio_http.len() == 0{
+            return
+        }
+        // lets open a websocket
+        let url = format!("http://{}/$studio_web_socket", studio_http);
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        self.studio_web_socket = Some(WebSocket::open(request));
+    }
+    
+    pub fn init_websockets(&mut self) {
+        self.run_websocket_thread();
+        self.start_studio_websocket();
+    }
+    
+    pub fn send_studio_message(msg:AppToStudio){
+        if !Cx::has_studio_web_socket(){
+            return
+        }
+        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
+        if let Some(sender) = &*sender{
+            let _= sender.send(WebSocketThreadMsg::AppToStudio{message:msg});
+        }
+        else{
+            println!("Web socket thread not running (yet) for {:?}", msg);
+        }
+    }
+}
+
+impl WebSocket{    
+    
     
     pub fn open(request:HttpRequest)->WebSocket {
         let (rx_sender, rx_receiver) = channel();
