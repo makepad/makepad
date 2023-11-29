@@ -1,19 +1,33 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_decoding::*, 
+    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_playback::*, 
     widget::*,
 };
 
-// Usage
+// Currently only supported on Android
+
+// DSL Usage
+// source - determines the source for the video playback, can be either:
+//  - Network { url: "https://www.someurl.com/video.mkv" }. On Android it supports: HLS, DASH, RTMP, RTSP, and progressive HTTP downloads
+//  - Filesystem { path: "/storage/.../DCIM/Camera/video.mp4" }. On Android it requires read permissions that must be granted at runtime.
+//  - Dependency { path: dep("crate://self/resources/video.mp4") }. For in-memory videos loaded through LiveDependencies
 // is_looping - determines if the video should be played in a loop. defaults to false.
 // hold_to_pause - determines if the video should be paused when the user hold the pause button. defaults to false.
 // autoplay - determines if the video should start playback when the widget is created. defaults to false.
 
+
+// Not yet implemented:
+// UI
+//  - Playback controls
+//  - Progress/seek-to bar
+
+// API
+//  - Option to restart playback manually when not looping.
+//  - Mute/Unmute
+//  - Hotswap video source
+
 live_design! {
     VideoBase = {{Video}} {}
 }
-
-// TODO:
-// - Add function to restart playback manually when not looping.
 
 #[derive(Live)]
 pub struct Video {
@@ -29,7 +43,7 @@ pub struct Video {
 
     // Texture
     #[live]
-    source: LiveDependency,
+    source: VideoDataSource,
     #[rust]
     texture: Option<Texture>,
     #[rust]
@@ -218,24 +232,50 @@ impl Video {
         }
 
         if self.playback_state == PlaybackState::NotStarted {
-            match cx.get_dependency(self.source.as_str()) {
-                Ok(data) => {
+            match &self.source {
+                VideoDataSource::Dependency { path }  => {
+                    match cx.get_dependency(path.as_str()) {
+                        Ok(data) => {
+                            cx.prepare_video_playback(
+                                self.id,
+                                VideoSource::InMemory(data),
+                                self.texture_handle.unwrap(),
+                                self.autoplay,
+                                self.is_looping,
+                                self.pause_on_first_frame,
+                            );
+                            self.playback_state = PlaybackState::Preparing;
+                        }
+                        Err(e) => {
+                            error!(
+                                "Attempted to prepare playback: resource not found {} {}",
+                                path.as_str(),
+                                e
+                            );
+                        }
+                    }
+                },
+                VideoDataSource::Network { url } => {
                     cx.prepare_video_playback(
                         self.id,
-                        data,
+                        VideoSource::Network(url.to_string()),
                         self.texture_handle.unwrap(),
                         self.autoplay,
                         self.is_looping,
                         self.pause_on_first_frame,
                     );
                     self.playback_state = PlaybackState::Preparing;
-                }
-                Err(e) => {
-                    error!(
-                        "Attempted to prepare playback: resource not found {} {}",
-                        self.source.as_str(),
-                        e
+                },
+                VideoDataSource::Filesystem { path } => {
+                    cx.prepare_video_playback(
+                        self.id,
+                        VideoSource::Filesystem(path.to_string()),
+                        self.texture_handle.unwrap(),
+                        self.autoplay,
+                        self.is_looping,
+                        self.pause_on_first_frame,
                     );
+                    self.playback_state = PlaybackState::Preparing;
                 }
             }
         }
@@ -259,8 +299,6 @@ impl Video {
         //     self.video_width,
         //     self.video_height,
         // );
-
-        self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
     }
 
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
@@ -333,4 +371,14 @@ impl Video {
         }
         self.playback_state = PlaybackState::NotStarted;
     }
+}
+
+#[derive(Clone, Debug, Live, LiveHook)]
+pub enum VideoDataSource {
+    #[live {path: LiveDependency::default()}]
+    Dependency {path: LiveDependency},
+    #[pick {url: "".to_string()}]
+    Network {url: String},
+    #[live {path: "".to_string()}]
+    Filesystem {path: String}
 }

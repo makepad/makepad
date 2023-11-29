@@ -15,7 +15,7 @@ use {
             xr::*,
             drag_drop::*,
             network::*,
-            video_decoding::*,
+            video_playback::*,
         },
         animator::Ease,
         audio::AudioDevicesEvent,

@@ -1,7 +1,7 @@
 use {
     crate::makepad_math::*,
     std::ffi::CString,
-    std::{cell::RefCell, cell::Cell, rc::Rc},
+    std::{cell::RefCell, cell::Cell},
     std::sync::{mpsc, mpsc::Sender},
     self::super::{
         ndk_sys,
@@ -11,7 +11,7 @@ use {
     crate::{
         makepad_live_id::*,
         area::Area,
-        event::{TouchPoint, TouchState, HttpRequest},
+        event::{TouchPoint, TouchState, HttpRequest, VideoSource},
         cx::AndroidParams,
         WebSocketMessage,
     },
@@ -662,25 +662,36 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>, external_texture_handle: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
-    let video_data = &*video;
+pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, source: VideoSource, external_texture_handle: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
+    let video_source = match source {
+        VideoSource::InMemory(data) => {
+            let source = &*data;
 
-    let java_body = (**env).NewByteArray.unwrap()(env, video_data.len() as i32);
-    (**env).SetByteArrayRegion.unwrap()(
-        env,
-        java_body,
-        0,
-        video_data.len() as i32,
-        video_data.as_ptr() as *const jni_sys::jbyte,
-    );
+            let java_body = (**env).NewByteArray.unwrap()(env, source.len() as i32);
+            (**env).SetByteArrayRegion.unwrap()(
+                env,
+                java_body,
+                0,
+                source.len() as i32,
+                source.as_ptr() as *const jni_sys::jbyte,
+            );
+        
+            java_body as jni_sys::jobject
+        },
+        VideoSource::Network(url) | VideoSource::Filesystem(url) => {
+            let url = CString::new(url.clone()).unwrap();
+            let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+            url
+        }
+    };
 
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
         "prepareVideoPlayback",
-        "(J[BIZZZ)V",
+        "(JLjava/lang/Object;IZZZ)V",
         video_id.get_value() as jni_sys::jlong,
-        java_body as jni_sys::jobject,
+        video_source,
         external_texture_handle as jni_sys::jint,
         autoplay as jni_sys::jboolean as std::ffi::c_uint,
         should_loop as jni_sys::jboolean as std::ffi::c_uint,

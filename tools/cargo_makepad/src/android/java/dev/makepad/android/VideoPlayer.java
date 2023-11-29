@@ -13,6 +13,9 @@ import android.os.HandlerThread;
 import java.util.concurrent.atomic.AtomicInteger;
 import android.media.MediaPlayer;
 
+import java.io.FileInputStream;
+import java.io.File;
+
 import dev.makepad.android.MakepadNative;
 
 public class VideoPlayer {
@@ -27,7 +30,7 @@ public class VideoPlayer {
         }
     }
 
-    public void prepareVideoPlayback(byte[] video) {
+    public void prepareVideoPlayback() {
         try {
             mSurfaceTexture = new SurfaceTexture(mExternalTextureHandle);
 
@@ -45,9 +48,20 @@ public class VideoPlayer {
 
             mMediaPlayer = new MediaPlayer();
             mMediaPlayer.setSurface(surface);
-            
-            ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource(video);
-            mMediaPlayer.setDataSource(dataSource);
+
+            if (mSource instanceof byte[]) {
+                ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource((byte[]) mSource);
+                mMediaPlayer.setDataSource(dataSource);
+            } else if (mSource instanceof String) {
+                String dataString = (String) mSource;
+                if (dataString.startsWith("http://") || dataString.startsWith("https://")) {
+                    // Source is a network URL
+                    mMediaPlayer.setDataSource(dataString);
+                } else {
+                    // Source is a url pointing to the local filesystem
+                    mMediaPlayer.setDataSource(new FileInputStream(new File(dataString)).getFD());
+                }
+            }
             
             mMediaPlayer.setLooping(mShouldLoop);
 
@@ -148,20 +162,25 @@ public class VideoPlayer {
         mPauseFirstFrame = pauseFirstFrame;
     }
 
+    public void setSource(Object source) {
+        mSource = source;
+    }
+
     private long mVideoId;
+    private Object mSource;
 
     // player
     private MediaPlayer mMediaPlayer;
     private boolean mIsPrepared = false; 
     private boolean mIsDecoding = false;
     private int mExternalTextureHandle;
+    private SurfaceTexture mSurfaceTexture;
+
 
     // playback
     private boolean mAutoplay = false;
     private boolean mShouldLoop = false;
     private boolean mPauseFirstFrame = false;
-
-    private SurfaceTexture mSurfaceTexture;
 
     private AtomicInteger mAvailableFrames = new AtomicInteger(0);
     private AtomicInteger mFramesProcessed = new AtomicInteger(0);
