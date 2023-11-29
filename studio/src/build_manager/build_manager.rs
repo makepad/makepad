@@ -278,7 +278,7 @@ impl BuildManager {
                             })));
                             dispatch_action(cx, BuildManagerAction::RedrawLog)
                         }
-                        AppToStudio::EventProfile{event_u32,start, end}=>{
+                        AppToStudio::ProfileSample(_sample)=>{
                             
                         }
                     }

@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicBool, Ordering},
         mpsc::{channel, Sender, Receiver, RecvTimeoutError, TryRecvError,RecvError}
     }
 };
@@ -49,6 +49,7 @@ pub enum WebSocketMessage{
 
 pub (crate) static WEB_SOCKET_THREAD_SENDER: Mutex<Option<Sender<WebSocketThreadMsg>>> = Mutex::new(None);
 pub (crate) static WEB_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
+pub (crate) static HAS_STUDIO_WEB_SOCKET: AtomicBool = AtomicBool::new(false);
 
 impl Drop for WebSocket{
     fn drop(&mut self){
@@ -61,8 +62,8 @@ impl Drop for WebSocket{
     }
 }
 impl Cx{
-    pub(crate) const fn has_studio_web_socket()->bool{ 
-       std::option_env!("MAKEPAD_STUDIO_HTTP").is_some()
+    pub(crate) fn has_studio_web_socket()->bool{ 
+       HAS_STUDIO_WEB_SOCKET.load(Ordering::SeqCst)
     }
     
     fn run_websocket_thread(&mut self){
@@ -123,19 +124,19 @@ impl Cx{
         });
     }
     
-    fn start_studio_websocket(&mut self) {
-        let studio_http = std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("");
+    fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.len() == 0{
             return
         }
         // lets open a websocket
+        HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
         let request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
         self.studio_web_socket = Some(WebSocket::open(request));
     }
     
-    pub fn init_websockets(&mut self) {
+    pub fn init_websockets(&mut self, studio_http: &str) {
         self.run_websocket_thread();
-        self.start_studio_websocket();
+        self.start_studio_websocket(studio_http);
     }
     
     pub fn send_studio_message(msg:AppToStudio){
