@@ -7,7 +7,7 @@ use {
         makepad_micro_serde::*,
         makepad_platform::{*, cx_stdin::aux_chan},
         build_manager::{
-            build_protocol::{BuildCmd, BuildCmdWrap, LogItemWrap, BuildCmdId, LogItem},
+            build_protocol::{BuildCmd, BuildCmdWrap, LogItemWrap, LogItem},
             build_server::{BuildConnection, BuildServer},
         }
     },
@@ -29,30 +29,15 @@ pub struct BuildClient{
 }
 
 impl BuildClient {
-    
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn send_cmd(&self, cmd: BuildCmd)->BuildCmdId{
-        let cmd_id = BuildCmdId(LiveId::unique().0);
-        self.cmd_sender.send(BuildCmdWrap{
-            cmd_id,
-            cmd
-        }).unwrap();
-        cmd_id
-    }
-    
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){
-        self.cmd_sender.send(BuildCmdWrap{
-            cmd_id,
-            cmd
-        }).unwrap();
-    }
-    
-    #[cfg(target_arch = "wasm32")]
-    pub fn send_cmd(&self, _cmd: BuildCmd) ->BuildCmdId{
-        BuildCmdId(LiveId::unique().0)
-    }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn send_cmd_with_id(&self, cmd_id: LiveId, cmd: BuildCmd){
+        self.cmd_sender.send(BuildCmdWrap{
+            cmd_id,
+            cmd
+        }).unwrap();
+    }
+    
     #[cfg(target_arch = "wasm32")]
     pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){}
      

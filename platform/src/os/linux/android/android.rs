@@ -65,9 +65,6 @@ use {
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
-        WebSocket::run_websocket_thread(self);
-        self.start_studio_websocket();
-        //elf.android_load_dependencies();
         self.gpu_info.performance = GpuPerformance::Tier1;
         
         self.call_event_handler(&Event::Construct);

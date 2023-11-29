@@ -1,5 +1,6 @@
 
 use {
+    std::time::{Instant},
     std::collections::{HashSet, HashMap},
     crate::{
         cx::Cx,
@@ -14,6 +15,7 @@ use {
             KeyFocusEvent,
             NextFrameEvent,
         },
+        studio::AppToStudio,
     }
 };
 
@@ -109,9 +111,23 @@ impl Cx {
     
     pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        let mut event_handler = self.event_handler.take().unwrap();
-        event_handler(self, event);
-        self.event_handler = Some(event_handler);
+        if Cx::has_studio_web_socket(){
+            let start = Instant::now().duration_since(self.start_time);
+            let mut event_handler = self.event_handler.take().unwrap();
+            event_handler(self, event);
+            self.event_handler = Some(event_handler);
+            let end = Instant::now().duration_since(self.start_time);
+            Cx::send_studio_message(AppToStudio::EventProfile{
+                event_u32: event.to_u32(),
+                start: start.as_secs_f64(),
+                end: end.as_secs_f64()
+            })
+        }
+        else{
+            let mut event_handler = self.event_handler.take().unwrap();
+            event_handler(self, event);
+            self.event_handler = Some(event_handler);
+        }
     }
     
     fn inner_key_focus_change(&mut self) {
