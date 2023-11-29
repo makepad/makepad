@@ -129,8 +129,7 @@ impl Cx{
             return
         }
         // lets open a websocket
-        let url = format!("http://{}/$studio_web_socket", studio_http);
-        let request = HttpRequest::new(url, HttpMethod::GET);
+        let request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
         self.studio_web_socket = Some(WebSocket::open(request));
     }
     
