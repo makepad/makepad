@@ -37,7 +37,7 @@ use crate::studio::AppToStudio;
 pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:&str, level:LogLevel){
     // lets send out our log message on the studio websocket 
 
-    if std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or("").len() == 0 {
+    if !Cx::has_studio_web_socket() {
         println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
     }
     else{
