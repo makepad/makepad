@@ -282,11 +282,11 @@ impl BuildConnection {
             ]
         };
         
+        let http = format!("{}?id={}", http, cmd_id.0);
         let env = [
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
         ];
-
 
         let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
         
