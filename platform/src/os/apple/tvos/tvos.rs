@@ -47,8 +47,6 @@ use crate::makepad_live_id::*;
 impl Cx {
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
-        WebSocket::run_websocket_thread(&mut *cx.borrow_mut());
-        cx.borrow_mut().start_studio_websocket();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
