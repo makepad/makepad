@@ -15,6 +15,7 @@ use {
             Trigger,
             NextFrame,
             HttpRequest,
+            VideoSource
         },
         draw_list::DrawListId,
         window::WindowId,
@@ -78,7 +79,7 @@ pub enum CxOsOp {
     //WebSocketSendString{request_id: LiveId, data:String},
     //WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
 
-    PrepareVideoPlayback(LiveId, Rc<Vec<u8>>, u32, bool, bool, bool),
+    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool, bool),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
     EndVideoPlayback(LiveId),
@@ -437,8 +438,8 @@ impl Cx {
         });
     }
 */
-    pub fn prepare_video_playback(&mut self, video_id: LiveId, video: Rc<Vec<u8>>, external_texture_id: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
-        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(video_id, video, external_texture_id, autoplay, should_loop, pause_on_first_frame));
+    pub fn prepare_video_playback(&mut self, video_id: LiveId, source: VideoSource, external_texture_id: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
+        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {

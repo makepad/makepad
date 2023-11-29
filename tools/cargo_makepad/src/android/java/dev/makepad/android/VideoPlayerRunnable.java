@@ -4,18 +4,16 @@ import java.nio.ByteBuffer;
 
 public class VideoPlayerRunnable implements Runnable {
     private final VideoPlayer mVideoPlayer;
-    private final byte[] mVideoData;
     private boolean mIsPrepared = false;
 
-    public VideoPlayerRunnable(byte[] videoData, VideoPlayer VideoPlayer) {
-        mVideoData = videoData;
+    public VideoPlayerRunnable(VideoPlayer VideoPlayer) {
         mVideoPlayer = VideoPlayer;
     }
 
     @Override
     public void run() {
         if(!mIsPrepared) {
-            mVideoPlayer.prepareVideoPlayback(mVideoData);
+            mVideoPlayer.prepareVideoPlayback();
             mIsPrepared = true;
         }
     }
@@ -32,4 +30,3 @@ public class VideoPlayerRunnable implements Runnable {
         mVideoPlayer.endPlayback();
     }
 }
-
