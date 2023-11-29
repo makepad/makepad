@@ -2,6 +2,7 @@ use {
     crate::{
         makepad_code_editor::text::{Position},
         makepad_micro_serde::*,
+        makepad_live_id::*,
         makepad_platform::log::LogLevel,
         build_manager::{
             build_protocol::*,
@@ -22,7 +23,7 @@ use {
 };
 
 struct BuildServerProcess {
-    cmd_id: BuildCmdId,
+    cmd_id: LiveId,
     stdin_sender: Mutex<Sender<ChildStdIn> >,
     line_sender: Mutex<Sender<ChildStdIO> >,
 }
@@ -72,7 +73,7 @@ enum StdErrState {
 
 impl BuildConnection {
     
-    pub fn stop(&self, cmd_id: BuildCmdId) {
+    pub fn stop(&self, cmd_id: LiveId) {
         let shared = self.shared.clone();
         
         let shared = shared.write().unwrap();
@@ -82,7 +83,7 @@ impl BuildConnection {
         }
     }
     
-    pub fn run(&self, what: BuildProcess, cmd_id: BuildCmdId, http:String) {
+    pub fn run(&self, what: BuildProcess, cmd_id: LiveId, http:String) {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
@@ -302,9 +303,10 @@ impl BuildConnection {
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
         // it will definitely arrive before C->H ReadyToStart triggers anything).
-        msg_sender.send_message(cmd_id.wrap_msg(
-            LogItem::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
-        ));
+        msg_sender.send_message(LogItemWrap{
+            cmd_id,
+            item: LogItem::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
+        });
 
        // let mut stderr_state = StdErrState::First;
         //let stdin_sender = process.stdin_sender.clone();
@@ -405,36 +407,40 @@ pub trait MsgSender: Send {
     fn box_clone(&self) -> Box<dyn MsgSender>;
     fn send_message(&self, wrap: LogItemWrap);
     
-    fn send_bare_message(&self, cmd_id: BuildCmdId, level: LogLevel, line: String) {
+    fn send_bare_message(&self, cmd_id: LiveId, level: LogLevel, line: String) {
         let line = line.trim();
-        self.send_message(
-            cmd_id.wrap_msg(LogItem::Bare(LogItemBare {
+        self.send_message(LogItemWrap{
+            cmd_id,
+            item:LogItem::Bare(LogItemBare {
                 line: line.to_string(),
                 level
-            }))
-        );
+            })
+        });
     }
     
-    fn send_stdin_to_host_msg(&self, cmd_id: BuildCmdId, line: String) {
-        self.send_message(
-            cmd_id.wrap_msg(LogItem::StdinToHost(line))
-        );
+    fn send_stdin_to_host_msg(&self, cmd_id: LiveId, line: String) {
+        self.send_message(LogItemWrap{
+            cmd_id,
+            item:LogItem::StdinToHost(line)
+        });
     }
     
 
-    fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogLevel, file_name: String, start: Position, end: Position, message: String) {
+    fn send_location_msg(&self, cmd_id: LiveId, level: LogLevel, file_name: String, start: Position, end: Position, message: String) {
         self.send_message(
-            cmd_id.wrap_msg(LogItem::Location(LogItemLocation {
+            LogItemWrap{
+                cmd_id,
+                item:LogItem::Location(LogItemLocation {
                 level,
                 file_name,
                 start,
                 end,
                 message
-            }))
-        );
+            })
+        });
     }
     
-    fn process_compiler_message(&self, cmd_id: BuildCmdId, msg: RustcCompilerMessage) {
+    fn process_compiler_message(&self, cmd_id: LiveId, msg: RustcCompilerMessage) {
         if let Some(msg) = msg.message {
             
             let level = match msg.level.as_ref() {

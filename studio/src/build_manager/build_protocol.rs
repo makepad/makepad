@@ -2,12 +2,8 @@ use crate::{
     makepad_live_id::LiveId,
     makepad_platform::log::LogLevel,
     makepad_code_editor::text::{Position},
-    makepad_micro_serde::{SerBin, DeBin, DeBinErr},
 };
 
-
-#[derive(PartialEq, Clone, Copy, Debug, SerBin, DeBin)]
-pub struct BuildCmdId(pub u64);
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildTarget {
@@ -126,20 +122,10 @@ impl BuildProcess{
     }
 }
 
-
 #[derive(Clone, Debug)]
 pub struct BuildCmdWrap {
-    pub cmd_id: BuildCmdId,
+    pub cmd_id: LiveId,
     pub cmd: BuildCmd
-}
-
-impl BuildCmdId{
-    pub fn wrap_msg(&self, item:LogItem)->LogItemWrap{
-        LogItemWrap{
-            cmd_id: *self,
-            item,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -151,10 +137,9 @@ pub enum BuildCmd {
 
 #[derive(Clone)]
 pub struct LogItemWrap {
-    pub cmd_id: BuildCmdId,
+    pub cmd_id: LiveId,
     pub item: LogItem
 }
-
 
 #[derive(Clone, Debug)]
 pub struct LogItemLocation{

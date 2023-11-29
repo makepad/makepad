@@ -199,9 +199,8 @@ impl BuildManager {
                 if let Some(change) = item.check_box(id!(check)).changed(actions) {
                     run_list.redraw(cx);
                     for i in 0..if change{1}else{BuildTarget::len()} {
-                        let item_id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
                         if change{
-                            Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], item_id, &binary_name, i, LiveId::unique(), &mut out);
+                            Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, i,  &mut out);
                         }
                         else{
                             Self::stop_active_build(&mut self.active, &self.clients[0], &binary_name, i,  &mut out);
@@ -217,7 +216,7 @@ impl BuildManager {
                         if let Some(change) = item.check_box(id!(check)).changed(actions) {
                             run_list.redraw(cx);
                             if change{
-                                Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], item_id, &binary_name, i, LiveId::unique(), &mut out);
+                                Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, i, &mut out);
                             }
                             else{
                                 Self::stop_active_build( &mut self.active, &self.clients[0], &binary_name, i,  &mut out);
@@ -233,26 +232,23 @@ impl BuildManager {
     
     pub fn run_app(&mut self, run_view_id:LiveId, binary_name:&str){
         let mut out = Vec::new();
-        Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], LiveId(0), &binary_name, 0, run_view_id, &mut out);
+        Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, 0,  &mut out);
     }
     
-    pub fn start_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient, item_id: LiveId, binary: &str, tgt: u64, run_view_id: LiveId, actions:&mut Vec<RunListAction>) {
+    pub fn start_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient,  binary: &str, tgt: u64,  actions:&mut Vec<RunListAction>) {
         let target = BuildTarget::from_id(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
             target
         };
-        let build_id = process.as_id().into();
-      
+        let item_id = process.as_id();
+        client.send_cmd_with_id(item_id, BuildCmd::Run(process.clone(), format!("{}?id={}", studio_http, item_id.0)));
         //let run_view_id = LiveId::unique();
-        if active.builds.get(&build_id).is_none() {
+        if active.builds.get(&item_id).is_none() {
             let index = active.builds.len();
-            active.builds.insert(build_id, ActiveBuild {
-                item_id,
+            active.builds.insert(item_id, ActiveBuild {
                 log_index: format!("[{}]", index),
                 process: process.clone(),
-                run_view_id,
-                cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
                 swapchain: None,
                 last_swapchain_with_completed_draws: None,
                 aux_chan_host_endpoint: None,
@@ -260,7 +256,7 @@ impl BuildManager {
         }
         if process.target.runs_in_studio(){
             // create the runview tab
-            actions.push(RunListAction::Create(run_view_id, process.binary.clone()))
+            actions.push(RunListAction::Create(item_id, process.binary.clone()))
         }
     }
     
@@ -272,12 +268,10 @@ impl BuildManager {
             target
         };
         let build_id = process.as_id().into();
-       if let Some(build) = active.builds.remove(&build_id) {
-            if let Some(cmd_id) = build.cmd_id {
-                client.send_cmd_with_id(cmd_id, BuildCmd::Stop);
-            }
+       if let Some(_) = active.builds.remove(&build_id) {
+            client.send_cmd_with_id(build_id, BuildCmd::Stop);
             if process.target.runs_in_studio(){
-                actions.push(RunListAction::Destroy(build.run_view_id))
+                actions.push(RunListAction::Destroy(build_id))
             }
         }
     }
