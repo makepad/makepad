@@ -10,7 +10,7 @@ use {
             HostToStdin,
             StdinToHost,
         },
-        makepad_platform::studio::{AppToStudioVec,AppToStudio},
+        makepad_platform::studio::{AppToStudioVec,AppToStudio,ProfileSample},
         makepad_platform::log::LogLevel,
         build_manager::{
             run_view::*,
@@ -87,6 +87,7 @@ pub struct BuildManager {
     #[live(0usize)] http_port: usize,
     #[rust] pub clients: Vec<BuildClient>,
     #[rust] pub log: Vec<(LiveId, LogItem)>,
+    #[rust] pub profile: HashMap<LiveId, Vec<ProfileSample>>,
     #[live] recompile_timeout: f64,
     #[rust] recompile_timer: Timer,
     #[rust] pub binaries: Vec<BuildBinary>,
@@ -232,7 +233,7 @@ impl BuildManager {
                 self.studio_http = format!("http://{}/$studio_web_socket", addr);
             }
             
-            if let Ok((_build_id, msgs)) = self.recv_studio_msg.try_recv() {
+            if let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
                 for msg in msgs.0{
                     match msg{
                         AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level}=>{
@@ -268,7 +269,7 @@ impl BuildManager {
                                     _=>()
                                 }
                             }
-                            self.log.push((LiveId(0).into(), LogItem::Location(LogItemLocation{
+                            self.log.push((build_id, LogItem::Location(LogItemLocation{
                                 level,
                                 file_name,
                                 start,
@@ -277,8 +278,8 @@ impl BuildManager {
                             })));
                             dispatch_action(cx, BuildManagerAction::RedrawLog)
                         }
-                        AppToStudio::EventProfile{event_u32:_,start:_, end:_}=>{
-                            //println!("GOT PROFILE {} {}", name, end-start);
+                        AppToStudio::EventProfile{event_u32,start, end}=>{
+                            
                         }
                     }
                 }
