@@ -46,6 +46,9 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
         <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
         <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
         <uses-feature android:name="android.software.midi" android:required="true"/>
+        <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+        <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"  />
+        <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"  />
         <uses-permission android:name="android.permission.INTERNET" />
         <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
         <uses-permission android:name="android.permission.BLUETOOTH"/>

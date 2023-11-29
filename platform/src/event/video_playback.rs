@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use makepad_shader_compiler::makepad_live_tokenizer::LiveId;
 use crate::TextureId;
 
@@ -14,6 +16,12 @@ pub struct VideoTextureUpdatedEvent {
     pub video_id: LiveId,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum VideoSource {
+    InMemory(Rc<Vec<u8>>),
+    Network(String),
+    Filesystem(String)
+}
 
 #[derive(Clone, Debug)]
 pub struct VideoPlaybackCompletedEvent {
