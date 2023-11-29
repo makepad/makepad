@@ -144,6 +144,7 @@ impl Event{
              
             #[cfg(target_arch = "wasm32")]
             44=>"ToWasmMsg",
+            45=>"MouseLeave",
             _=>panic!()
         }
     }
@@ -202,9 +203,10 @@ impl Event{
             Self::VideoDecodingInitialized(_)=>41,
             Self::VideoChunkDecoded(_)=>42,
             Self::VideoDecodingError(_)=>43,
-                         
+            Self::MouseLeave(_)=>44,
+                                     
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>44,
+            Self::ToWasmMsg(_)=>45,
         }
     }
 }
