@@ -138,9 +138,9 @@ impl Event{
             38=>"VideoInputs",
             39=>"NetworkResponses",
             
-            40=>"VideoStream",
-            41=>"VideoDecodingInitialized",
-            42=>"VideoChunkDecoded",
+            40=>"VideoPlaybackPrepared",
+            41=>"VideoTextureUpdated",
+            42=>"VideoPlaybackCompleted",
             43=>"VideoDecodingError",
              
             #[cfg(target_arch = "wasm32")]
@@ -199,15 +199,16 @@ impl Event{
             Self::MidiPorts(_)=>37,
             Self::VideoInputs(_)=>38,
             Self::NetworkResponses(_)=>39,
-                        
-            Self::VideoStream(_)=>40,
-            Self::VideoDecodingInitialized(_)=>41,
-            Self::VideoChunkDecoded(_)=>42,
+
+            Self::VideoPlaybackPrepared(_)=>40,
+            Self::VideoTextureUpdated(_)=>41,
+            Self::VideoPlaybackCompleted(_)=>42,
             Self::VideoDecodingError(_)=>43,
-            Self::MouseLeave(_)=>44,
+            Self::TextureHandleReady(_)=>44,
+            Self::MouseLeave(_)=>45,
                                      
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>45,
+            Self::ToWasmMsg(_)=>46,
         }
     }
 }

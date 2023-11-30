@@ -202,8 +202,8 @@ live_design!{
             width: Fill
         }
     }
-    
 }
+
 pub enum LogListAction {
     JumpToError{file_name:String, start:Position},
     None
@@ -243,7 +243,6 @@ impl BuildManager {
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
                         item.draw_widget_all(cx);
-                        
                     }
                     LogItem::Location(msg) => {
                         let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
@@ -255,7 +254,6 @@ impl BuildManager {
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
                         item.draw_widget_all(cx);
-                        
                     }
                     _ => {}
                 }
@@ -268,27 +266,51 @@ impl BuildManager {
         //profile_end!(dt);
     }
     
-    pub fn handle_log_list(&mut self, _cx: &mut Cx, _log_list: &PortalListRef, item_id: u64, item: WidgetRef, actions: &WidgetActions) -> Vec<LogListAction> {
+    pub fn handle_log_list(&mut self, _cx: &mut Cx, log_list: &PortalListRef, actions: &WidgetActions) -> Vec<LogListAction> {
         // ok lets see if someone clicked our jump to error
         let mut ret = Vec::new();
-        if item.link_label(id!(location)).pressed(actions) {
-            if let Some((_build_id, log_item)) = self.log.get(item_id as usize) {
-                // alright lets select a file tab or open the file
-                // and lets jump to the location
-                match log_item {
-                    LogItem::Location(msg) => {
-                        ret.push(LogListAction::JumpToError{
-                            file_name:msg.file_name.clone(), 
-                            start:Position{
-                                line_index: msg.start.line_index,
-                                byte_index: msg.start.byte_index,
-                            },
-                        })
+        for (item_id, item) in log_list.items_with_actions(&actions) {
+            if item.link_label(id!(location)).pressed(actions) {
+                if let Some((_build_id, log_item)) = self.log.get(item_id as usize) {
+                    // alright lets select a file tab or open the file
+                    // and lets jump to the location
+                    match log_item {
+                        LogItem::Location(msg) => {
+                            ret.push(LogListAction::JumpToError{
+                                file_name:msg.file_name.clone(), 
+                                start:Position{
+                                    line_index: msg.start.line_index,
+                                    byte_index: msg.start.byte_index,
+                                },
+                            })
+                        }
+                        _ => ()
                     }
-                    _ => ()
                 }
             }
         }
         ret    
     }
 }
+/*
+
+#[derive(Live)]
+struct LogList{
+    #[live] body:WidgetRef
+}
+
+impl Widget for LogList {
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.body.redraw(cx);
+    }
+    
+    fn walk(&mut self, cx:&mut Cx) -> Walk {
+        self.body.walk(cx)
+    }
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx, walk:Walk)->WidgetDraw{
+        self.body.draw_walk_widget(cx)
+    }
+}
+
+*/
