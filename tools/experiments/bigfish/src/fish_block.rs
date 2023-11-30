@@ -4,7 +4,7 @@ use crate::makepad_micro_serde::*;
 
 #[derive(Clone, Debug, SerRon, DeRon, Default)]
 pub struct FishBlock{
-    pub id: i32,
+    pub id: u64,
     pub x: i32,
     pub y: i32,
     pub block_type: String,
@@ -15,7 +15,7 @@ pub struct FishBlock{
 
 impl FishBlock{
 
-    pub fn create_test_block(id: i32) -> FishBlock
+    pub fn create_test_block(id: u64) -> FishBlock
     {
         let mut block = FishBlock::default();
         block.block_type = String::from(format!("BlockType {:?}", id));

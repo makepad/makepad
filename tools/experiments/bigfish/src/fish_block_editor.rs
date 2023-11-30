@@ -119,14 +119,16 @@ live_design!{
     {
         margin: 20
         width: 400
+        height: Fit
         flow: Down
+        optimize: DrawList
        // show_bg: true,
        // draw_bg: {
             //fn pixel(self) -> vec4 {
                 //return mix(vec4(1,1,0.6,1), vec4(1,1,0.5,1),self.pos.y);
             //}
         //}
-        <Label>{text:"Block", draw_text:{color: #0}}
+      
         <View>
         {
             show_bg: true
