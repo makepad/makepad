@@ -1,7 +1,9 @@
 use {
     crate::{
-        makepad_code_editor::text::{Position, Length},
+        makepad_code_editor::text::{Position},
         makepad_micro_serde::*,
+        makepad_live_id::*,
+        makepad_platform::log::LogLevel,
         build_manager::{
             build_protocol::*,
             child_process::{
@@ -21,7 +23,7 @@ use {
 };
 
 struct BuildServerProcess {
-    cmd_id: BuildCmdId,
+    cmd_id: LiveId,
     stdin_sender: Mutex<Sender<ChildStdIn> >,
     line_sender: Mutex<Sender<ChildStdIO> >,
 }
@@ -59,19 +61,19 @@ pub struct BuildConnection {
     shared: Arc<RwLock<BuildServerShared >>,
     msg_sender: Box<dyn MsgSender>,
 }
-
+/*
 #[derive(Debug, PartialEq)]
 enum StdErrState {
     First,
     Sync,
     Desync,
     Running,
-}
+}*/
 
 
 impl BuildConnection {
     
-    pub fn stop(&self, cmd_id: BuildCmdId) {
+    pub fn stop(&self, cmd_id: LiveId) {
         let shared = self.shared.clone();
         
         let shared = shared.write().unwrap();
@@ -81,15 +83,13 @@ impl BuildConnection {
         }
     }
     
-    pub fn run(&self, what: BuildProcess, cmd_id: BuildCmdId, http:String) {
-        
+    pub fn run(&self, what: BuildProcess, cmd_id: LiveId, http:String) {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
         let path = shared.read().unwrap().path.clone();
         
         let args: Vec<String> = match &what.target {
-            #[cfg(not(target_os="windows"))]
             BuildTarget::ReleaseStudio => vec![
                 "run".into(),
                 "nightly".into(),
@@ -103,7 +103,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
                 "--stdin-loop".into(),
             ],
-            #[cfg(not(target_os="windows"))]
             BuildTarget::DebugStudio => vec![
                 "run".into(),
                 "nightly".into(),
@@ -153,28 +152,59 @@ impl BuildConnection {
                 "--".into(),
                 "--message-format=json".into(),
             ],
-            BuildTarget::IosSim {org, app} => vec![
+            BuildTarget::IosSim  => vec![
                 "run".into(),
                 "nightly".into(),
                 "cargo".into(),
                 "makepad".into(),
+                "apple".into(),
                 "ios".into(),
-                format!("--org={org}"),
-                format!("--app={app}"),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
                 "run-sim".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--release".into(),
                 "--message-format=json".into(),
             ],
-            BuildTarget::IosDevice {org, app} => vec![
+            BuildTarget::IosDevice => vec![
                 "run".into(),
                 "nightly".into(),
                 "cargo".into(),
                 "makepad".into(),
                 "ios".into(),
-                format!("--org={org}"),
-                format!("--app={app}"),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
+                "run-device".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::TvosSim  => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "apple".into(),
+                "tvos".into(),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
+                "run-sim".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::TvosDevice => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "apple".into(),
+                "tvos".into(),
+                format!("--org={}", "makepad"),
+                format!("--app={}", "example"),
                 "run-device".into(),
                 "-p".into(),
                 what.binary.clone(),
@@ -204,13 +234,60 @@ impl BuildConnection {
                 what.binary.clone(),
                 "--release".into(),
                 "--message-format=json".into(),
+            ],
+            BuildTarget::CheckMacos => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "check".into(),
+                "--target=aarch64-apple-darwin".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::CheckWindows => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "check".into(),
+                "--target=x86_64-pc-windows-msvc".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::CheckLinux => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "check".into(),
+                "--target=x86_64-unknown-linux-gnu".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],            
+            BuildTarget::CheckAll => vec![
+                "run".into(),
+                "nightly".into(),
+                "cargo".into(),
+                "makepad".into(),
+                "check".into(),
+                "all".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
             ]
         };
         
+        let http = format!("{}/{}", http, cmd_id.0);
         let env = [
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
         ];
+
         let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
         
         shared.write().unwrap().processes.insert(
@@ -226,12 +303,13 @@ impl BuildConnection {
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
         // it will definitely arrive before C->H ReadyToStart triggers anything).
-        msg_sender.send_message(cmd_id.wrap_msg(
-            LogItem::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
-        ));
+        msg_sender.send_message(LogItemWrap{
+            cmd_id,
+            item: LogItem::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
+        });
 
-        let mut stderr_state = StdErrState::First;
-        let stdin_sender = process.stdin_sender.clone();
+       // let mut stderr_state = StdErrState::First;
+        //let stdin_sender = process.stdin_sender.clone();
         std::thread::spawn(move || {
             // lets create a BuildProcess and run it
             while let Ok(line) = process.line_receiver.recv() {
@@ -243,9 +321,6 @@ impl BuildConnection {
                             Ok(msg) => {
                                 // alright we have a couple of 'reasons'
                                 match msg.reason.as_str() {
-                                    "makepad-signal" => {
-                                        let _ = stdin_sender.send(ChildStdIn::Send(format!("{{\"Signal\":[{}]}}\n", msg.signal.unwrap())));
-                                    }
                                     "makepad-error-log" | "compiler-message" => {
                                         msg_sender.process_compiler_message(cmd_id, msg);
                                     }
@@ -264,43 +339,30 @@ impl BuildConnection {
                                 //eprintln!("GOT ERROR {:?}", err);
                                 msg_sender.send_stdin_to_host_msg(cmd_id, line);
                             }
-                        }
+                        }                        
                     }
                     ChildStdIO::StdErr(line) => {
-                        // attempt to clean up stderr of cargo
-                        match stderr_state {
-                            StdErrState::First => {
-                                if line.trim().starts_with("Compiling ") {
-                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
-                                }
-                                else if line.trim().starts_with("Finished ") {
-                                    stderr_state = StdErrState::Running;
-                                }
-                                else if line.trim().starts_with("error: could not compile ") {
-                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
-                                }
-                                else {
-                                    stderr_state = StdErrState::Desync;
-                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
-                                }
-                            }
-                            StdErrState::Sync | StdErrState::Desync => {
-                                msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
-                            }
-                            StdErrState::Running => {
-                                if line.trim().starts_with("Running ") {
-                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, format!("{}", line.trim()));
-                                    stderr_state = StdErrState::Sync
-                                }
-                                else {
-                                    stderr_state = StdErrState::Desync;
-                                    msg_sender.send_bare_msg(cmd_id, LogItemLevel::Error, line);
-                                }
-                            }
+                        if line.trim().starts_with("Running ") {
+                           msg_sender.send_bare_message(cmd_id, LogLevel::Wait, line);
+                        }
+                        else if line.trim().starts_with("Compiling ") {
+                           msg_sender.send_bare_message(cmd_id, LogLevel::Wait, line);
+                        }
+                        else if line.trim().starts_with("Blocking waiting for file lock on package cache") {
+                            //msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
+                        }
+                        else if line.trim().starts_with("Checking ") {
+                            //msg_sender.send_bare_msg(cmd_id, LogItemLevel::Wait, line);
+                        }
+                        else if line.trim().starts_with("Finished ") {
+                            //stderr_state = StdErrState::Running;
+                        }
+                        else{
+                            msg_sender.send_bare_message(cmd_id, LogLevel::Error, line);
                         }
                     }
                     ChildStdIO::Term => {
-                        msg_sender.send_bare_msg(cmd_id, LogItemLevel::Log, "process terminated".into());
+                        msg_sender.send_bare_message(cmd_id, LogLevel::Log, "process terminated".into());
                         break;
                     }
                     ChildStdIO::Kill => {
@@ -345,51 +407,55 @@ pub trait MsgSender: Send {
     fn box_clone(&self) -> Box<dyn MsgSender>;
     fn send_message(&self, wrap: LogItemWrap);
     
-    fn send_bare_msg(&self, cmd_id: BuildCmdId, level: LogItemLevel, line: String) {
+    fn send_bare_message(&self, cmd_id: LiveId, level: LogLevel, line: String) {
         let line = line.trim();
-        self.send_message(
-            cmd_id.wrap_msg(LogItem::Bare(LogItemBare {
+        self.send_message(LogItemWrap{
+            cmd_id,
+            item:LogItem::Bare(LogItemBare {
                 line: line.to_string(),
                 level
-            }))
-        );
+            })
+        });
     }
     
-    fn send_stdin_to_host_msg(&self, cmd_id: BuildCmdId, line: String) {
-        self.send_message(
-            cmd_id.wrap_msg(LogItem::StdinToHost(line))
-        );
+    fn send_stdin_to_host_msg(&self, cmd_id: LiveId, line: String) {
+        self.send_message(LogItemWrap{
+            cmd_id,
+            item:LogItem::StdinToHost(line)
+        });
     }
     
 
-    fn send_location_msg(&self, cmd_id: BuildCmdId, level: LogItemLevel, file_name: String, start: Position, length: Length, msg: String) {
+    fn send_location_msg(&self, cmd_id: LiveId, level: LogLevel, file_name: String, start: Position, end: Position, message: String) {
         self.send_message(
-            cmd_id.wrap_msg(LogItem::Location(LogItemLocation {
+            LogItemWrap{
+                cmd_id,
+                item:LogItem::Location(LogItemLocation {
                 level,
                 file_name,
                 start,
-                length,
-                msg
-            }))
-        );
+                end,
+                message
+            })
+        });
     }
     
-    fn process_compiler_message(&self, cmd_id: BuildCmdId, msg: RustcCompilerMessage) {
+    fn process_compiler_message(&self, cmd_id: LiveId, msg: RustcCompilerMessage) {
         if let Some(msg) = msg.message {
             
             let level = match msg.level.as_ref() {
-                "error" => LogItemLevel::Error,
-                "warning" => LogItemLevel::Warning,
-                "log" => LogItemLevel::Log,
-                "failure-note" => LogItemLevel::Error,
-                "panic" => LogItemLevel::Panic,
+                "error" => LogLevel::Error,
+                "warning" => LogLevel::Warning,
+                "log" => LogLevel::Log,
+                "failure-note" => LogLevel::Error,
+                "panic" => LogLevel::Panic,
                 other => {
-                    self.send_bare_msg(cmd_id, LogItemLevel::Error, format!("process_compiler_message: unexpected level {}", other));
+                    self.send_bare_message(cmd_id, LogLevel::Error, format!("process_compiler_message: unexpected level {}", other));
                     return
                 }
             };
             if let Some(span) = msg.spans.iter().find( | span | span.is_primary) {
-                self.send_location_msg(cmd_id, level, span.file_name.clone(), span.start(), span.length(), msg.message.clone());
+                self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.end(), msg.message.clone());
                 /*
                 if let Some(label) = &span.label {
                     self.send_location_msg(cmd_id, level, span.file_name.clone(), range, label.clone());
@@ -402,13 +468,13 @@ pub trait MsgSender: Send {
                 }*/
             }
             else {
-                if msg.message.trim().starts_with("aborting due to ") ||
-                msg.message.trim().starts_with("For more information about this error") ||
-                msg.message.trim().ends_with("warning emitted") ||
-                msg.message.trim().ends_with("warnings emitted") {
+                if msg.message.trim().starts_with("Some errors have detailed explanations") ||
+                msg.message.trim().starts_with("For more information about an error") ||
+                msg.message.trim().contains("warnings emitted") ||
+                msg.message.trim().contains("warning emitted") {
                 }
                 else {
-                    self.send_bare_msg(cmd_id, LogItemLevel::Warning, msg.message);
+                    self.send_bare_message(cmd_id, LogLevel::Warning, msg.message);
                 }
             }
         }

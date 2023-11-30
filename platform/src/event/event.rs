@@ -51,6 +51,7 @@ pub enum Event {
     MouseDown(MouseDownEvent),
     MouseMove(MouseMoveEvent),
     MouseUp(MouseUpEvent),
+    MouseLeave(MouseLeaveEvent),
     TouchUpdate(TouchUpdateEvent),
     Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
     
@@ -84,6 +85,132 @@ pub enum Event {
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
+
+impl Event{
+    pub fn name_from_u32(v:u32)->&'static str{
+        match v{
+            1=>"Construct",
+            2=>"Destruct",
+                
+            3=>"Pause",
+            4=>"Resume",
+            
+            5=>"Draw",
+            6=>"LiveEdit",
+            7=>"AppGotFocus",
+            8=>"AppLostFocus",
+            9=>"NextFrame",
+            10=>"XRUpdate",
+                
+            11=>"WindowDragQuery",
+            12=>"WindowCloseRequested",
+            13=>"WindowClosed",
+            14=>"WindowGeomChange",
+            15=>"VirtualKeyboard",
+            16=>"ClearAtlasses",
+                
+            17=>"MouseDown",
+            18=>"MouseMove",
+            19=>"MouseUp",
+            20=>"TouchUpdate",
+            21=>"Scroll",
+                
+            22=>"Timer",
+                
+            23=>"Signal",
+            24=>"Trigger",
+            25=>"MacosMenuCommand",
+            26=>"KeyFocus",
+            27=>"KeyFocusLost",
+            28=>"KeyDown",
+            29=>"KeyUp",
+            30=>"TextInput",
+            31=>"TextCopy",
+            32=>"TextCut",
+                
+            33=>"Drag",
+            34=>"Drop",
+            35=>"DragEnd",
+                
+            36=>"AudioDevices",
+            37=>"MidiPorts",
+            38=>"VideoInputs",
+            39=>"NetworkResponses",
+            
+            40=>"VideoStream",
+            41=>"VideoDecodingInitialized",
+            42=>"VideoChunkDecoded",
+            43=>"VideoDecodingError",
+             
+            #[cfg(target_arch = "wasm32")]
+            44=>"ToWasmMsg",
+            45=>"MouseLeave",
+            _=>panic!()
+        }
+    }
+    
+    pub fn to_u32(&self)->u32{
+        match self{
+            Self::Construct=>1,
+            Self::Destruct=>2,
+                            
+            Self::Pause=>3,
+            Self::Resume=>4,
+                        
+            Self::Draw(_)=>5,
+            Self::LiveEdit=>6,
+            Self::AppGotFocus=>7,
+            Self::AppLostFocus=>8,
+            Self::NextFrame(_)=>9,
+            Self::XRUpdate(_)=>10,
+                            
+            Self::WindowDragQuery(_)=>11,
+            Self::WindowCloseRequested(_)=>12,
+            Self::WindowClosed(_)=>13,
+            Self::WindowGeomChange(_)=>14,
+            Self::VirtualKeyboard(_)=>15,
+            Self::ClearAtlasses=>16,
+                            
+            Self::MouseDown(_)=>17,
+            Self::MouseMove(_)=>18,
+            Self::MouseUp(_)=>19,
+            Self::TouchUpdate(_)=>20,
+            Self::Scroll(_)=>21,
+                            
+            Self::Timer(_)=>22,
+                            
+            Self::Signal=>23,
+            Self::Trigger(_)=>24,
+            Self::MacosMenuCommand(_)=>25,
+            Self::KeyFocus(_)=>26,
+            Self::KeyFocusLost(_)=>27,
+            Self::KeyDown(_)=>28,
+            Self::KeyUp(_)=>29,
+            Self::TextInput(_)=>30,
+            Self::TextCopy(_)=>31,
+            Self::TextCut(_)=>32,
+                            
+            Self::Drag(_)=>33,
+            Self::Drop(_)=>34,
+            Self::DragEnd=>35,
+                            
+            Self::AudioDevices(_)=>36,
+            Self::MidiPorts(_)=>37,
+            Self::VideoInputs(_)=>38,
+            Self::NetworkResponses(_)=>39,
+                        
+            Self::VideoStream(_)=>40,
+            Self::VideoDecodingInitialized(_)=>41,
+            Self::VideoChunkDecoded(_)=>42,
+            Self::VideoDecodingError(_)=>43,
+            Self::MouseLeave(_)=>44,
+                                     
+            #[cfg(target_arch = "wasm32")]
+            Self::ToWasmMsg(_)=>45,
+        }
+    }
+}
+
 
 pub enum Hit{
     KeyFocus(KeyFocusEvent),

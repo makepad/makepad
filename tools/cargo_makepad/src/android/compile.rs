@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    collections::HashSet,
-};
+use std::path::{Path, PathBuf};
 use crate::android::{HostOs, AndroidTarget};
 use crate::utils::*;
 use crate::makepad_shell::*;
@@ -211,16 +208,11 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
             (makepad_java_classes_dir.join("MakepadNative.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadNetwork.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("MakepadWebSocket.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("MakepadWebSocketReader.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("ByteArrayMediaDataSource.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("VideoDecoder.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("VideoDecoderRunnable.java").to_str().unwrap()),
-            /*
-            (makepad_java_classes_dir.join("Makepad.java").to_str().unwrap()),
-            (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
-            (makepad_java_classes_dir.join("MakepadSurfaceView.java").to_str().unwrap()),
-            (makepad_java_classes_dir.join("MakepadNetwork.java").to_str().unwrap()),
-            (makepad_java_classes_dir.join("HttpResponse.java").to_str().unwrap()),
-            */
             (build_paths.java_file.to_str().unwrap())
         ]   
     ) ?; 
@@ -252,20 +244,15 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
             (compiled_java_classes_dir.join("MakepadSurface.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("ResizingLayout.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadNetwork.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadWebSocket.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadWebSocketReader.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("HttpResponse.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("ByteArrayMediaDataSource.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("VideoDecoder.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("VideoDecoderRunnable.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("VideoDecoder$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$2.class").to_str().unwrap()),
-            /*
-            (compiled_java_classes_dir.join("Makepad.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("MakepadActivity.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("MakepadSurfaceView.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("MakepadNetwork.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("HttpResponse.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap()),
-            */
             (build_paths.java_class.to_str().unwrap()),
         ]
     ) ?;
@@ -300,7 +287,7 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args:&[String]) -> Result<(), String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let profile = get_profile_from_args(args);
     
@@ -328,7 +315,6 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
 }
 
 fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) -> Result<(), String> {
-    let cwd = std::env::current_dir().unwrap();
     let mut assets_to_add: Vec<String> = Vec::new();
 
     let build_crate_dir = get_crate_dir(build_crate) ?;
@@ -346,19 +332,8 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
         }
     }
 
-    let mut dependencies = HashSet::new();
-    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate]) {
-        for line in cargo_tree_output.lines().skip(1) {
-            if let Some((name, path)) = extract_dependency_info(line) {
-                let resources_path = Path::new(&path).join("resources");
-                if resources_path.is_dir() {
-                    dependencies.insert((name.replace('-',"_"), resources_path));
-                }
-            }
-        }
-    }
-
-    for (name, resources_path) in dependencies.iter() {
+    let resources = get_crate_resources(build_crate);
+    for (name, resources_path) in resources.iter() {
         let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{name}/resources"));
         mkdir(&dst_dir) ?;
         cp_all(resources_path, &dst_dir, false) ?;

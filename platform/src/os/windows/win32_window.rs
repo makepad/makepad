@@ -271,7 +271,7 @@ use {
             droptarget::*,
         },
         window::WindowId,
-        cx::*,
+        makepad_math::*,
         cursor::MouseCursor,
     },
 };
@@ -501,7 +501,7 @@ impl Win32Window {
                     return LRESULT(0)
                 }
                 window.track_mouse_event = false;
-                window.send_mouse_move(
+                window.send_mouse_leave(
                     window.last_mouse_pos,
                     Self::get_key_modifiers()
                 );
@@ -1030,6 +1030,17 @@ impl Win32Window {
     pub fn send_mouse_move(&mut self, pos: DVec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         self.do_callback(Win32Event::MouseMove(MouseMoveEvent {
+            window_id: self.window_id,
+            abs: pos,
+            modifiers: modifiers,
+            time: self.time_now(),
+            handled: Cell::new(Area::Empty),
+        }));
+    }
+
+    pub fn send_mouse_leave(&mut self, pos: DVec2, modifiers: KeyModifiers) {
+        self.last_mouse_pos = pos;
+        self.do_callback(Win32Event::MouseLeave(MouseLeaveEvent {
             window_id: self.window_id,
             abs: pos,
             modifiers: modifiers,

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use {
     std::cell::Cell,
+    std::collections::HashMap,
     crate::{
         cx::Cx,
         cursor::MouseCursor,
@@ -9,6 +10,9 @@ use {
         window::CxWindowPool,
         area::Area,
         event::{
+            Event,
+            TextInputEvent,
+            TimerEvent,
             KeyEvent,
             ScrollEvent,
             MouseDownEvent,
@@ -348,6 +352,14 @@ pub struct StdinMouseUp{
    pub y: f64
 }
 
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct StdinTextInput{
+    pub time: f64,
+    pub button: usize,
+    pub x: f64,
+    pub y: f64
+}
+
 impl From<StdinMouseUp> for MouseUpEvent {
     fn from(v: StdinMouseUp) -> Self {
         Self{
@@ -406,6 +418,7 @@ pub enum HostToStdin{
     MouseMove(StdinMouseMove),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
+    TextInput(TextInputEvent),
     Scroll(StdinScroll),
     ReloadFile{
         file:String,
@@ -450,4 +463,77 @@ impl HostToStdin{
 
 impl Cx {
     
+}
+
+
+use std::time::Instant;
+use std::time::Duration;
+
+pub struct PollTimer {
+    pub start_time: Instant,
+    pub interval: Duration,
+    pub repeats: bool,
+    pub step: u64,
+}
+
+impl PollTimer {
+    pub fn new(interval_ms: f64, repeats: bool) -> Self {
+        let interval_ns = (interval_ms * 1e6) as u64;
+        Self {
+            start_time: Instant::now(),
+            interval: Duration::from_nanos(interval_ns),
+            repeats,
+            step: 0,
+        }
+    }
+}
+
+pub struct PollTimers{
+    pub timers: HashMap<u64, PollTimer>,
+    pub time_start: Instant,
+    pub last_time: Instant,
+}
+impl Default for PollTimers{
+    fn default()->Self{
+        Self{
+            time_start: Instant::now(),
+            last_time: Instant::now(),
+            timers: Default::default()
+        }
+    }
+}
+impl PollTimers{
+   
+    pub fn time_now(&self) -> f64 {
+        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
+        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+    }
+
+    pub fn get_dispatch(&mut self)->Vec<Event>{
+        let mut to_be_dispatched = Vec::with_capacity(self.timers.len());
+        let mut to_be_removed = Vec::with_capacity(self.timers.len());
+        let now = Instant::now();
+        let time = self.time_now();
+        for (id, timer) in self.timers.iter_mut() {
+            let elapsed_time = now - timer.start_time;
+            let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
+            
+            if elapsed_time > next_due_time {
+                
+                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time:Some(time)}));
+                if timer.repeats {
+                    timer.step += 1;
+                } else {
+                    to_be_removed.push(*id);
+                }
+            }
+        }
+        
+        for id in to_be_removed {
+            self.timers.remove(&id);
+        }
+
+        self.last_time = now;
+        to_be_dispatched
+    }
 }

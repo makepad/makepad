@@ -3,13 +3,15 @@ use {
     crate::{
         file_system::file_system::FileSystem,
         makepad_micro_serde::*,
-        makepad_platform::*,
         makepad_widgets::*,
+        makepad_widgets::file_tree::FileNodeId,
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_platform::os::cx_stdin::{
             HostToStdin,
             StdinToHost,
         },
+        makepad_platform::studio::{AppToStudioVec,AppToStudio,ProfileSample},
+        makepad_platform::log::LogLevel,
         build_manager::{
             run_view::*,
             build_protocol::*,
@@ -17,12 +19,14 @@ use {
         },
         makepad_shell::*,
     },
-    makepad_code_editor::{text::Position, decoration::{Decoration}},
+    makepad_code_editor::{text, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
     std::{
         collections::HashMap,
         env,
         io::prelude::*,
+        path::PathBuf,
+        path::Path,
         fs::File,
     },
     std::sync::mpsc,
@@ -44,13 +48,8 @@ live_design!{
 pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
-    pub item_id: LiveId,
     pub process: BuildProcess,
-    pub run_view_id: LiveId,
-    pub cmd_id: Option<BuildCmdId>,
-    
     pub swapchain: Option<cx_stdin::Swapchain<Texture >>,
-    
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
@@ -62,22 +61,14 @@ pub struct ActiveBuild {
     pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct ActiveBuildId(pub LiveId);
-
 #[derive(Default)]
 pub struct ActiveBuilds {
-    pub builds: HashMap<ActiveBuildId, ActiveBuild>
+    pub builds: HashMap<LiveId, ActiveBuild>
 }
 
 impl ActiveBuilds {
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
-        for (_k, v) in &self.builds {
-            if v.item_id == item_id {
-                return true
-            }
-        }
-        false
+        self.builds.get(&item_id).is_some()
     }
     
     pub fn any_binary_active(&self, binary: &str) -> bool {
@@ -88,57 +79,21 @@ impl ActiveBuilds {
         }
         false
     }
-    
-    pub fn build_id_from_cmd_id(&self, cmd_id: BuildCmdId) -> Option<ActiveBuildId> {
-        for (k, v) in &self.builds {
-            if v.cmd_id == Some(cmd_id) {
-                return Some(*k);
-            }
-        }
-        None
-    }
-    
-    pub fn build_id_from_run_view_id(&self, run_view_id: LiveId) -> Option<ActiveBuildId> {
-        for (k, v) in &self.builds {
-            if v.run_view_id == run_view_id {
-                return Some(*k);
-            }
-        }
-        None
-    }
-    
-    
-    pub fn run_view_id_from_cmd_id(&self, cmd_id: BuildCmdId) -> Option<LiveId> {
-        for v in self.builds.values() {
-            if v.cmd_id == Some(cmd_id) {
-                return Some(v.run_view_id);
-            }
-        }
-        None
-    }
-    
-    pub fn cmd_id_from_run_view_id(&self, run_view_id: LiveId) -> Option<BuildCmdId> {
-        for v in self.builds.values() {
-            if v.run_view_id == run_view_id {
-                return v.cmd_id
-            }
-        }
-        None
-    }
-    
 }
 
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
-    #[live] path: String,
-    #[live(8001usize)] http_port: usize,
+    #[rust] root_path: PathBuf,
+    #[live(0usize)] http_port: usize,
     #[rust] pub clients: Vec<BuildClient>,
-    #[rust] pub log: Vec<(ActiveBuildId, LogItem)>,
+    #[rust] pub log: Vec<(LiveId, LogItem)>,
+    #[rust] pub profile: HashMap<LiveId, Vec<ProfileSample>>,
     #[live] recompile_timeout: f64,
     #[rust] recompile_timer: Timer,
     #[rust] pub binaries: Vec<BuildBinary>,
     #[rust] pub active: ActiveBuilds,
     #[rust] pub studio_http: String,
+    #[rust] pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
     #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>,
     #[rust] pub send_file_change: FromUISender<LiveFileChange>
 }
@@ -148,47 +103,40 @@ pub struct BuildBinary {
     pub name: String
 }
 
-
 pub enum BuildManagerAction {
     RedrawDoc, // {doc_id: DocumentId},
     StdinToHost {run_view_id: LiveId, msg: StdinToHost},
     RedrawLog,
+    RedrawFile(FileNodeId),
+    RecompileStarted,
     ClearLog,
     None
 }
 
 impl BuildManager {
     
-    pub fn init(&mut self, cx: &mut Cx) {
-        // not great but it will do.
-        self.clients = vec![BuildClient::new_with_local_server(&self.path)];
+    pub fn init(&mut self, cx: &mut Cx, path:&Path) {
+         self.http_port = if std::option_env!("MAKEPAD_STUDIO_HTTP").is_some(){
+            8002
+        }
+        else{
+             8001
+        };
+        
+        self.root_path = path.to_path_buf();
+        self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
+        
         self.update_run_list(cx);
-        self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        self.discover_external_ip(cx);
-        // alright lets start our http server
-        self.start_http_server();
+        //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
     
-    
-    /*pub fn get_process_texture(&self, run_view_id: LiveId) -> Option<Texture> {
-        for v in self.active.builds.values() {
-            if v.run_view_id == run_view_id {
-                return Some(v.texture.clone())
-            }
-        }
-        None
-    }*/
-    
-    pub fn send_host_to_stdin(&self, run_view_id: LiveId, msg: HostToStdin) {
-        if let Some(cmd_id) = self.active.cmd_id_from_run_view_id(run_view_id) {
-            self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::HostToStdin(msg.to_json()));
-        }
+    pub fn send_host_to_stdin(&self, item_id: LiveId, msg: HostToStdin) {
+        self.clients[0].send_cmd_with_id(item_id, BuildCmd::HostToStdin(msg.to_json()));
     }
     
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
-        let cwd = std::env::current_dir().unwrap();
         self.binaries.clear();
-        match shell_env_cap(&[], &cwd, "cargo", &["run", "--bin"]) {
+        match shell_env_cap(&[], &self.root_path, "cargo", &["run", "--bin"]) {
             Ok(_) => {}
             // we expect it on stderr
             Err(e) => {
@@ -213,15 +161,9 @@ impl BuildManager {
     
     pub fn handle_tab_close(&mut self, tab_id: LiveId) -> bool {
         let len = self.active.builds.len();
-        self.active.builds.retain( | _, v | {
-            if v.run_view_id == tab_id {
-                if let Some(cmd_id) = v.cmd_id {
-                    self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
-                }
-                return false
-            }
-            true
-        });
+        if self.active.builds.remove(&tab_id).is_some(){
+            self.clients[0].send_cmd_with_id(tab_id, BuildCmd::Stop);
+        }
         if len != self.active.builds.len() {
             self.log.clear();
             true
@@ -233,24 +175,19 @@ impl BuildManager {
     
     pub fn start_recompile(&mut self, _cx: &mut Cx) {
         // alright so. a file was changed. now what.
-        for active_build in self.active.builds.values_mut() {
-            if let Some(cmd_id) = active_build.cmd_id {
-                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
-            }
-            let cmd_id = self.clients[0].send_cmd(BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
-            active_build.cmd_id = Some(cmd_id);
+        for (item_id, active_build) in &mut self.active.builds {
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
             active_build.swapchain = None;
-            active_build.last_swapchain_with_completed_draws = None;
+            //active_build.last_swapchain_with_completed_draws = None;
             active_build.aux_chan_host_endpoint = None;
         }
     }
     
     pub fn clear_active_builds(&mut self) {
         // alright so. a file was changed. now what.
-        for active_build in self.active.builds.values_mut() {
-            if let Some(cmd_id) = active_build.cmd_id {
-                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::Stop);
-            }
+        for item_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
         }
         self.active.builds.clear();
     }
@@ -265,127 +202,158 @@ impl BuildManager {
     pub fn start_recompile_timer(&mut self, cx: &mut Cx, ui: &WidgetRef) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        for active_build in self.active.builds.values_mut() {
-            let view = ui.run_view(&[active_build.run_view_id]);
+        for item_id in self.active.builds.keys() {
+            let view = ui.run_view(&[*item_id]);
             view.recompile_started(cx);
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dock: &DockRef) -> Vec<BuildManagerAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
-        self.handle_event_with(cx, event, file_system, dock, &mut | _, action | actions.push(action));
+        self.handle_event_with(cx, event, file_system, &mut | _, action | actions.push(action));
         actions
     }
     
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
-        for active_build in self.active.builds.values_mut() {
-            if let Some(cmd_id) = active_build.cmd_id {
-                self.clients[0].send_cmd_with_id(cmd_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile {
-                    file: live_file_change.file_name.clone(),
-                    contents: live_file_change.content.clone()
-                }.to_json()));
-            }
+       for item_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile {
+                file: live_file_change.file_name.clone(),
+                contents: live_file_change.content.clone()
+            }.to_json()));
         }
         let _ = self.send_file_change.send(live_file_change);
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dock: &DockRef, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dispatch_action: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+
         if let Event::Signal = event {
             if let Ok(mut addr) = self.recv_external_ip.try_recv() {
                 addr.set_port(self.http_port as u16);
-                self.studio_http = format!("{}", addr);
+                self.studio_http = format!("http://{}/$studio_web_socket", addr);
+            }
+            
+            if let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
+                for msg in msgs.0{
+                    match msg{
+                        AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level}=>{
+                            let start = text::Position {
+                                line_index: line_start as usize,
+                                byte_index: column_start as usize
+                            };
+                            let end = text::Position {
+                                line_index: line_end as usize,
+                                byte_index: column_end as usize
+                            };
+                            //log!("{:?} {:?}", pos, pos + loc.length);
+                            if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
+                                match level{
+                                    LogLevel::Warning=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Warning
+                                        ));
+                                        dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                    }
+                                    LogLevel::Error=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Error
+                                        ));
+                                        dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                    }
+                                    _=>()
+                                }
+                            }
+                            self.log.push((build_id, LogItem::Location(LogItemLocation{
+                                level,
+                                file_name,
+                                start,
+                                end,
+                                message
+                            })));
+                            dispatch_action(cx, BuildManagerAction::RedrawLog)
+                        }
+                        AppToStudio::EventProfile{event_u32,start, end}=>{
+                            
+                        }
+                    }
+                }
             }
         }
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            self.clear_log(cx, &dock, file_system);
-            
-            if let Some(mut dock) = dock.borrow_mut() {
-                for (_id, (_, item)) in dock.items().iter() {
-                    if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                        run_view.resend_framebuffer(cx);
-                    }
-                }
-            }
-            dispatch_event(cx, BuildManagerAction::RedrawLog)
+            dispatch_action(cx, BuildManagerAction::RecompileStarted)
         }
-        
-        // process events on all run_views
-        if let Some(mut dock) = dock.borrow_mut() {
-            for (id, (_, item)) in dock.items().iter() {
-                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                    run_view.pump_event_loop(cx, event, *id, self);
-                }
-            }
-        }
-        
+                        
         let log = &mut self.log;
-        let active = &mut self.active;
+        let active = &mut self.active;        
+                
         //let editor_state = &mut state.editor_state;
         self.clients[0].handle_event_with(cx, event, &mut | cx, wrap | {
+            /*match &wrap.item{
+                LogItem::StdinToHost(line) => {
+                    log!("GOT {}", line);
+                }
+                _=>()
+            }*/
+                            
             //let msg_id = editor_state.messages.len();
             // ok we have a cmd_id in wrap.msg
             match wrap.item {
                 LogItem::Location(loc) => {
-                    let pos = Position {
-                        line_index: loc.start.line_index.max(1) - 1,
-                        byte_index: loc.start.byte_index.max(1) - 1
-                    };
                     if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
-                        if loc.level == LogItemLevel::Warning ||
-                        loc.level == LogItemLevel::Error {
-                            file_system.add_decoration(file_id, Decoration::new(
-                                0,
-                                pos,
-                                pos + loc.length
-                            ));
-                            file_system.redraw_view_by_file_id(cx, file_id, dock);
+                        match loc.level{
+                            LogLevel::Warning=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    loc.start,
+                                    loc.end,
+                                    DecorationType::Warning
+                                ));
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            LogLevel::Error=>{
+                                file_system.add_decoration(file_id, Decoration::new(
+                                    0,
+                                    loc.start,
+                                    loc.end,
+                                    DecorationType::Error
+                                ));
+                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                            }
+                            _=>()
                         }
                     }
-                    if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
-                        log.push((id, LogItem::Location(loc)));
-                        dispatch_event(cx, BuildManagerAction::RedrawLog)
-                    }
-                    //if let Some(doc) = file_system.open_documents.get(&path){
-                    
-                    //}
-                    /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
-                        let doc = &mut editor_state.documents[*doc_id];
-                        if let Some(inner) = &mut doc.inner {
-                            inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
-                        }
-                        dispatch_event(cx, BuildManagerAction::RedrawDoc {
-                            doc_id: *doc_id
-                        })
-                    }*/
-                    //editor_state.messages.push(BuildMsg::Location(loc));
+                    log.push((wrap.cmd_id, LogItem::Location(loc)));
+                    dispatch_action(cx, BuildManagerAction::RedrawLog)
                 }
                 LogItem::Bare(bare) => {
-                    if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
-                        log.push((id, LogItem::Bare(bare)));
-                        dispatch_event(cx, BuildManagerAction::RedrawLog)
-                    }
+                    //log!("{:?}", bare);
+                    log.push((wrap.cmd_id, LogItem::Bare(bare)));
+                    dispatch_action(cx, BuildManagerAction::RedrawLog)
                     //editor_state.messages.push(wrap.msg);
                 }
                 LogItem::StdinToHost(line) => {
                     let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
                     match msg {
                         Ok(msg) => {
-                            dispatch_event(cx, BuildManagerAction::StdinToHost {
-                                run_view_id: active.run_view_id_from_cmd_id(wrap.cmd_id).unwrap_or(LiveId(0)),
+                            dispatch_action(cx, BuildManagerAction::StdinToHost {
+                                run_view_id: wrap.cmd_id,
                                 msg
                             });
                         }
                         Err(_) => { // we should output a log string
-                            if let Some(id) = active.build_id_from_cmd_id(wrap.cmd_id) {
-                                log.push((id, LogItem::Bare(LogItemBare {
-                                    level: LogItemLevel::Log,
-                                    line: line.trim().to_string()
-                                })));
-                                dispatch_event(cx, BuildManagerAction::RedrawLog)
-                            }
+                            log.push((wrap.cmd_id, LogItem::Bare(LogItemBare {
+                                level: LogLevel::Log,
+                                line: line.trim().to_string()
+                            })));
+                            dispatch_action(cx, BuildManagerAction::RedrawLog)
                             /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                 level: BuildMsgLevel::Log,
                                 line
@@ -394,12 +362,8 @@ impl BuildManager {
                     }
                 }
                 LogItem::AuxChanHostEndpointCreated(aux_chan_host_endpoint) => {
-                    for active_build in active.builds.values_mut() {
-                        if active_build.cmd_id == Some(wrap.cmd_id) {
-                            //assert!(active_build.aux_chan_host_endpoint.is_none());
-                            active_build.aux_chan_host_endpoint = Some(aux_chan_host_endpoint);
-                            break;
-                        }
+                    if let Some(active_build) = active.builds.get_mut(&wrap.cmd_id){
+                        active_build.aux_chan_host_endpoint = Some(aux_chan_host_endpoint);                        
                     }
                 }
             }
@@ -410,7 +374,7 @@ impl BuildManager {
         let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), self.http_port as u16);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
         
-        log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
+        //log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
         start_http_server(HttpServer {
             listen_address: addr,
             post_max_size: 1024 * 1024,
@@ -418,75 +382,67 @@ impl BuildManager {
         });
         
         let rx_file_change = self.send_file_change.receiver();
-        let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
+        //let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
         
         // livecoding observer
         std::thread::spawn(move || {
-            loop {
-                let mut last_change = None;
-                let mut addrs = Vec::new();
-                if let Ok(change) = rx_file_change.recv_timeout(Duration::from_millis(5000)) {
-                    last_change = Some(change);
-                    addrs.clear();
-                }
-                while let Ok(change) = rx_file_change.try_recv() {
-                    last_change = Some(change);
-                    addrs.clear();
-                }
-                while let Ok(HttpServerRequest::Get {headers, response_sender}) = rx_live_file.try_recv() {
-                    let body = if addrs.contains(&headers.addr) {
-                        vec![]
-                    }
-                    else if let Some(last_change) = &last_change {
-                        addrs.push(headers.addr);
-                        format!("{}$$$makepad_live_change$$${}", last_change.file_name, last_change.content).as_bytes().to_vec()
-                    }
-                    else {
-                        vec![]
-                    };
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\n\
-                            Content-Type: application/json\r\n\
-                            Content-encoding: none\r\n\
-                            Cache-Control: max-age:0\r\n\
-                            Content-Length: {}\r\n\
-                            Connection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = response_sender.send(HttpServerResponse {header, body});
+            loop{
+                if let Ok(_change) = rx_file_change.recv() {
+                    // lets send this change to all our websocket connections
                 }
             }
         });
-        
+        let studio_sender = self.recv_studio_msg.sender();
         std::thread::spawn(move || {
             
             // TODO fix this proper:
             let makepad_path = "./".to_string();
             let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
+            let mut root = "./".to_string();
+            for arg in std::env::args(){
+                if let Some(prefix) = arg.strip_prefix("--root="){
+                    root = prefix.to_string();
+                    break;
+                }
+            }
             let remaps = [
                 (format!("/makepad/{}/", abs_makepad_path), makepad_path.clone()),
                 (format!("/makepad/{}/", std::env::current_dir().unwrap().display()), "".to_string()),
-                ("/makepad//".to_string(), makepad_path.clone()),
-                ("/makepad/".to_string(), makepad_path.clone()),
+                ("/makepad//".to_string(), format!("{}/{}",root,makepad_path.clone())),
+                ("/makepad/".to_string(), format!("{}/{}",root,makepad_path.clone())),
                 ("/".to_string(), "".to_string())
             ];
-            
+            let mut sockets = HashMap::new();
             while let Ok(message) = rx_request.recv() {
                 // only store last change, fix later
                 match message {
-                    HttpServerRequest::ConnectWebSocket {web_socket_id: _, response_sender: _, headers: _} => {
+                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender: _,headers} => {
+                        sockets.insert(web_socket_id, headers);
                     },
-                    HttpServerRequest::DisconnectWebSocket {web_socket_id: _} => {
+                    HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
+                        sockets.remove(&web_socket_id);
                     },
-                    HttpServerRequest::BinaryMessage {web_socket_id: _, response_sender: _, data: _} => {
+                    HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
+                        if let Some(headers) = sockets.get(&web_socket_id){
+                            if let Some(id) = headers.path.rsplit("/").next(){
+                                if let Ok(id) = id.parse::<u64>(){
+                                    if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
+                                        let _ = studio_sender.send((LiveId(id),msg));
+                                    }
+                                }
+                            }
+                        }
+                        //println!("GOT BINARY MESSAGE");
+                        // new incombing message from client
                     }
                     HttpServerRequest::Get {headers, response_sender} => {
                         let path = &headers.path;
+                        // ok so this live connection.. where do we do it
+                        // i mean its just a network event msg. we can ignore that
+                        // we could just handle this in 'window'
+                        // or where shall we handle it
+                        // lets give live edit an api so you can codegen/live edit shaders?
                         
-                        if path == "/$live_file_change" {
-                            let _ = tx_live_file.send(HttpServerRequest::Get {headers, response_sender});
-                            continue
-                        }
                         // alright wasm http server
                         if path == "/$watch" {
                             let header = "HTTP/1.1 200 OK\r\n\
@@ -554,8 +510,8 @@ impl BuildManager {
     pub fn discover_external_ip(&mut self, _cx: &mut Cx) {
         // figure out some kind of unique id. bad but whatever.
         let studio_uid = LiveId::from_str(&format!("{:?}{:?}", Instant::now(), std::time::SystemTime::now()));
-        
-        let write_discovery = UdpSocket::bind("0.0.0.0:41534");
+        let http_port = self.http_port as u16;
+        let write_discovery = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse().unwrap(), http_port*2 as u16 + 1));
         if write_discovery.is_err() {
             return
         }
@@ -566,14 +522,14 @@ impl BuildManager {
         std::thread::spawn(move || {
             let dummy = studio_uid.0.to_be_bytes();
             loop {
-                let _ = write_discovery.send_to(&dummy, "255.255.255.255:41533");
+                let _ = write_discovery.send_to(&dummy, SocketAddr::new("0.0.0.0".parse().unwrap(), http_port*2 as u16));
                 thread::sleep(time::Duration::from_millis(100));
             }
         });
         // listen for bounced back udp packets to get our external ip
         let ip_sender = self.recv_external_ip.sender();
         std::thread::spawn(move || {
-            let discovery = UdpSocket::bind("0.0.0.0:41533").unwrap();
+            let discovery = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse().unwrap(), http_port*2 as u16)).unwrap();
             discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
             discovery.set_broadcast(true).unwrap();
             

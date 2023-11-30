@@ -111,7 +111,7 @@ pub struct KeyFocusEvent {
     pub focus: Area,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct TextInputEvent {
     pub input: String,
     pub replace_last: bool,

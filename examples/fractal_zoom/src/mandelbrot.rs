@@ -22,13 +22,13 @@ live_design!{
             let magsq = (fractal.w * 256 + fractal.x - 127);
             
             // create a nice palette index
-            let index = abs((1.0 * iter / self.max_iter * 8.0) - .08 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter * 8.0) - .01 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq2(index - self.color_cycle),1);
+            return vec4(Pal::iq2(index - self.color_cycle*-3.0),1);
         }
     }
     
@@ -148,10 +148,10 @@ impl TileCache {
             empty.push(Tile::new(i));
             
             let texture = Texture::new(cx);
-            texture.set_desc(cx, TextureDesc {
-                format: TextureFormat::ImageBGRA,
-                width: Some(TILE_SIZE_X),
-                height: Some(TILE_SIZE_Y),
+            texture.set_format(cx, TextureFormat::VecBGRAu8_32 {
+                data: vec![],
+                width: TILE_SIZE_X,
+                height: TILE_SIZE_Y,
             });
             textures.push(texture);
         }
@@ -171,7 +171,7 @@ impl TileCache {
     
     fn tile_completed(&mut self, cx: &mut Cx, mut tile: Tile) {
         self.tiles_in_flight -= 1;
-        self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
+        self.textures[tile.texture_index].swap_vec_u32(cx, &mut tile.buffer);
         self.next.push(tile)
     }
     
@@ -206,14 +206,14 @@ impl TileCache {
     
     fn discard_next_layer(&mut self, cx: &mut Cx) {
         while let Some(mut tile) = self.next.pop() {
-            self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
+            self.textures[tile.texture_index].swap_vec_u32(cx, &mut tile.buffer);
             self.empty.push(tile);
         }
     }
     
     fn discard_current_layer(&mut self, cx: &mut Cx) {
         while let Some(mut tile) = self.current.pop() {
-            self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
+            self.textures[tile.texture_index].swap_vec_u32(cx, &mut tile.buffer);
             self.empty.push(tile);
         }
         self.current_zoom = self.next_zoom;

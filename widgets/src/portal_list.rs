@@ -3,7 +3,7 @@ use crate::{
     widget::*,
     makepad_derive_widget::*,
     makepad_draw::*,
-    scroll_bar::{ScrollBar, ScrollBarAction}
+    scroll_bar::{ScrollBar, ScrollAxis, ScrollBarAction}
 };
 
 live_design!{
@@ -31,7 +31,6 @@ enum ListDrawState {
     DownAgain {index: u64, pos: f64, viewport: Rect},
     End {viewport: Rect}
 }
-
 
 #[derive(Clone, WidgetAction)]
 pub enum PortalListAction {
@@ -295,7 +294,7 @@ impl PortalList {
             }
         }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
-        self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
+        self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
         if !self.keep_invisible{
             self.items.retain_visible();
         }

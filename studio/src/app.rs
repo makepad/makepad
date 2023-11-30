@@ -1,8 +1,7 @@
 use crate::{
     makepad_code_editor::code_editor::*,
-    makepad_platform::*,
-    makepad_draw::*,
     makepad_widgets::*,
+    makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
     file_system::file_system::*,
     build_manager::{
@@ -18,18 +17,23 @@ use crate::{
             BuildManagerAction
         },
     }
-};
+}; 
+use std::fs::File;
+use std::io::Write;
+use std::env;
 
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_code_editor::code_editor::CodeEditor;
-    
+     
     import makepad_studio::build_manager::run_view::RunView;
     import makepad_studio::build_manager::log_list::LogList;
     import makepad_studio::build_manager::run_list::RunList;
     
+    ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
+
     Logo = <Button> {
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
@@ -241,6 +245,37 @@ live_design!{
                 }
                 Search = <RectView> {
                     draw_bg: {color: #2}
+                  //  margin:{left: 0, top: 0}
+                    <View> {
+                        margin:10
+                        flow: Down
+                        <View> 
+                        {
+                            flow: Right
+                            height: Fit
+                            <TextInput>{
+                                width: Fill,
+                             empty_message:"Search here.."                           
+                            }
+                            //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
+                        <Button> {
+                            text:"Search!"
+                            
+                            draw_icon: {
+                                svg_file: (ICO_SEARCH)
+                                fn get_color(self) -> vec4 {
+                                    return #f;
+                                }
+                            } 
+                            icon_walk:  {
+                                width: Fit, height: 17.0} 
+                        }
+                    }
+                        <Label>
+                        {
+                            text: "this does not work yet."
+                        }
+                    }
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
@@ -269,10 +304,21 @@ impl LiveHook for App {
         cx.start_stdin_service();
     }
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.file_system.init(cx);
-        self.build_manager.init(cx);
+    fn after_new_from_doc(&mut self, cx: &mut Cx) { 
+        // not great but it will do.
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+        let root_path = env::current_dir().unwrap().join(root);
         
+        self.file_system.init(cx, &root_path);
+        self.build_manager.init(cx, &root_path);
+        self.build_manager.discover_external_ip(cx);
+        self.build_manager.start_http_server();
         //self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
     }
 }
@@ -280,11 +326,11 @@ impl LiveHook for App {
 app_main!(App);
 
 impl App {
-    fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
-        let tab_id = LiveId::unique();
+    pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.file_system.path_to_file_node_id(&path) {
+            let dock = self.ui.dock(id!(dock));            
+            let tab_id = dock.unique_tab_id(file_id.0.0);
             self.file_system.request_open_file(tab_id, file_id);
-            let dock = self.ui.dock(id!(dock));
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
             self.file_system.ensure_unique_tab_names(cx, &dock)
         }
@@ -293,13 +339,15 @@ impl App {
 
 impl AppMain for App {
     
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
         let log_list = self.ui.portal_list(id!(log_list));
         let run_list = self.ui.flat_list(id!(run_list));
+        
         if let Event::Draw(event) = event {
+            
             //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
@@ -351,13 +399,19 @@ impl AppMain for App {
                     self.build_manager.clear_log(cx, &dock, &mut self.file_system);
                     log_list.redraw(cx);
                 }
+                else if let KeyCode::KeyR = key_code{
+                    // lets reload the tree
+                    self.file_system.reload_file_tree();
+                    
+                }
             }
         }
-        
+                
         for action in self.file_system.handle_event(cx, event, &self.ui) {
             match action {
                 FileSystemAction::TreeLoaded => {
-                    self.open_code_file_by_path(cx, "examples/news_feed/src/app.rs");
+                    file_tree.redraw(cx);
+                    //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
                 }
                 FileSystemAction::RecompileNeeded => {
                     self.build_manager.start_recompile_timer(cx, &self.ui);
@@ -385,11 +439,23 @@ impl AppMain for App {
                             }
                         }
                     }
+
+                    // When the document for a session is modified, it sends a copy of this
+                    // modification to the mpsc queues of its sessions so they can update
+                    // themselves accordingly. It is the responsibility of the consumer to make
+                    // sure that these mpsc queues are actually polled.
+                    // 
+                    // To make sure that our sessions are always up to date, we poll the mpsc
+                    // queues for every session here.
+                    self.file_system.handle_sessions();
                 }
             }
         }
         
-        for action in self.build_manager.handle_event(cx, event, &mut self.file_system, &dock) {
+        let actions = self.ui.handle_widget_event(cx, event);
+        
+        
+        for action in self.build_manager.handle_event(cx, event, &mut self.file_system) {
             match action {
                 BuildManagerAction::RedrawLog => {
                     // if the log_list is tailing, set the new len
@@ -400,11 +466,33 @@ impl AppMain for App {
                         run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.build_manager);
                     }
                 }
+                BuildManagerAction::RedrawFile(file_id)=>{
+                    self.file_system.redraw_view_by_file_id(cx, file_id, &dock);
+                }
+                BuildManagerAction::RecompileStarted=>{
+                    
+                    self.build_manager.clear_log(cx, &dock, &mut self.file_system);
+                    
+                    if let Some(mut dock) = dock.borrow_mut() {
+                        for (_id, (_, item)) in dock.items().iter() {
+                            if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                                run_view.resend_framebuffer(cx);
+                            }
+                        }
+                    }
+                }
                 _ => ()
             }
         }
         
-        let actions = self.ui.handle_widget_event(cx, event);
+            // process events on all run_views
+        if let Some(mut dock) = dock.borrow_mut() {
+            for (id, (_, item)) in dock.items().iter() {
+                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                    run_view.pump_event_loop(cx, event, *id, &mut self.build_manager);
+                }
+            }
+        }
         
         for (item_id, item) in run_list.items_with_actions(&actions) {
             for action in self.build_manager.handle_run_list(cx, &run_list, item_id, item, &actions) {
@@ -427,7 +515,7 @@ impl AppMain for App {
         for (item_id, item) in log_list.items_with_actions(&actions) {
             for action in self.build_manager.handle_log_list(cx, &log_list, item_id, item, &actions) {
                 match action {
-                    LogListAction::JumpToError{file_name, start, length} => {
+                    LogListAction::JumpToError{file_name, start} => {
                         // lets find a tab if we have it otherwise open it
                         if let Some(file_id) = self.file_system.path_to_file_node_id(&file_name) {
                             if let Some(tab_id) = self.file_system.file_node_id_to_tab_id(file_id){
@@ -435,14 +523,14 @@ impl AppMain for App {
                                 // ok lets scroll into view
                                 if let Some(mut editor) = dock.item(tab_id).as_code_editor().borrow_mut() {
                                     if let Some(session) = self.file_system.get_session_mut(tab_id) {
-                                        editor.set_cursor_and_scroll(cx, start, length, session);
+                                        editor.set_cursor_and_scroll(cx, start, session);
                                         editor.set_key_focus(cx);
                                     }
                                 }
                             }
                             else{
                                 // lets open the editor
-                                let tab_id = LiveId::unique();
+                                let tab_id = dock.unique_tab_id(file_id.0.0);
                                 self.file_system.request_open_file(tab_id, file_id);
                                 // lets add a file tab 'somewhere'
                                 dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
@@ -491,7 +579,8 @@ impl AppMain for App {
             if let DragItem::FilePath {path, internal_id} = &drop.items[0] {
                 if let Some(internal_id) = internal_id { // from inside the dock
                     if drop.modifiers.logo {
-                        dock.drop_clone(cx, drop.abs, *internal_id, LiveId::unique());
+                        let tab_id = dock.unique_tab_id(internal_id.0);
+                        dock.drop_clone(cx, drop.abs, *internal_id, tab_id);
                     }
                     else {
                         dock.drop_move(cx, drop.abs, *internal_id);
@@ -499,8 +588,8 @@ impl AppMain for App {
                     self.file_system.ensure_unique_tab_names(cx, &dock);
                 }
                 else { // external file, we have to create a new tab
-                    let tab_id = LiveId::unique();
                     if let Some(file_id) = self.file_system.path_to_file_node_id(&path) {
+                        let tab_id = dock.unique_tab_id(file_id.0.0);
                         self.file_system.request_open_file(tab_id, file_id);
                         dock.drop_create(cx, drop.abs, tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
                         self.file_system.ensure_unique_tab_names(cx, &dock)
@@ -520,12 +609,36 @@ impl AppMain for App {
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
             // ok lets open the file
-            let tab_id = LiveId::unique();
+            let tab_id = dock.unique_tab_id(file_id.0.0);
             self.file_system.request_open_file(tab_id, file_id);
             // lets add a file tab 'somewhere'
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
             // lets scan the entire doc for duplicates
             self.file_system.ensure_unique_tab_names(cx, &dock)
         }
+        
+        if let Some(mut dock_items) = dock.needs_save(){
+            dock_items.retain(|di| {
+                if let DockItemStore::Tab{kind,..} = di{
+                    if kind.0 == live_id!(RunView){
+                        return false
+                    }
+                }
+                true 
+            });
+            let state = PersistentState{
+                dock_items
+            };
+            // alright lets save it to disk
+            let saved = state.serialize_ron();
+            let mut f = File::create("makepad_state.ron").expect("Unable to create file");
+            f.write_all(saved.as_bytes()).expect("Unable to write data");
+        }
+        
     }
+}
+
+#[derive(Clone, Debug, SerRon, DeRon)]
+struct PersistentState{
+    dock_items: Vec<DockItemStore>
 }

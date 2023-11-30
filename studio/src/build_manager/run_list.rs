@@ -1,6 +1,5 @@
 use {
     crate::{
-        makepad_platform::*,
         build_manager::{
             build_manager::*,
             build_protocol::*,
@@ -164,7 +163,7 @@ impl BuildManager {
                     item.apply_over(cx, live!{
                         height: (height)
                         draw_bg: {is_even: (if is_even {1.0} else {0.0})}
-                        check = {text: (BuildTarget::name(i))}
+                        check = {text: (BuildTarget::from_id(i).name())}
                     });
                     item.check_box(id!(check)).set_selected(cx, self.active.item_id_active(item_id));
                     item.draw_widget_all(cx);
@@ -200,8 +199,12 @@ impl BuildManager {
                 if let Some(change) = item.check_box(id!(check)).changed(actions) {
                     run_list.redraw(cx);
                     for i in 0..if change{1}else{BuildTarget::len()} {
-                        let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
-                        Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0],id, &binary_name, i, change, &mut out);
+                        if change{
+                            Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, i,  &mut out);
+                        }
+                        else{
+                            Self::stop_active_build(&mut self.active, &self.clients[0], &binary_name, i,  &mut out);
+                        } 
                         self.log.clear();
                     }
                 };
@@ -212,7 +215,12 @@ impl BuildManager {
                     if item_id == id{
                         if let Some(change) = item.check_box(id!(check)).changed(actions) {
                             run_list.redraw(cx);
-                            Self::toggle_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], item_id, &binary_name, i, change, &mut out);
+                            if change{
+                                Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, i, &mut out);
+                            }
+                            else{
+                                Self::stop_active_build( &mut self.active, &self.clients[0], &binary_name, i,  &mut out);
+                            }
                             self.log.clear();
                         }
                     }
@@ -222,67 +230,50 @@ impl BuildManager {
         out
     }
     
-    pub fn target_id_to_target(tgt:u64)->BuildTarget{
-        match tgt {
-            BuildTarget::RELEASE => BuildTarget::Release,
-            BuildTarget::DEBUG => BuildTarget::Debug,
-            #[cfg(not(target_os="windows"))]
-            BuildTarget::RELEASE_STUDIO => BuildTarget::ReleaseStudio,
-            #[cfg(not(target_os="windows"))]
-            BuildTarget::DEBUG_STUDIO => BuildTarget::DebugStudio,
-            BuildTarget::PROFILER => BuildTarget::Profiler,
-            BuildTarget::IOS_SIM => BuildTarget::IosSim {
-                org: "makepad".to_string(),
-                app: "example".to_string()
-            },
-            BuildTarget::IOS_DEVICE => BuildTarget::IosDevice {
-                org: "makepad".to_string(),
-                app: "example".to_string()
-            },
-            BuildTarget::ANDROID => BuildTarget::Android,
-            BuildTarget::WEBASSEMBLY => BuildTarget::WebAssembly,
-            _ => panic!()
+    pub fn run_app(&mut self, binary_name:&str){
+        let mut out = Vec::new();
+        Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, 0,  &mut out);
+    }
+    
+    pub fn start_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient,  binary: &str, tgt: u64,  actions:&mut Vec<RunListAction>) {
+        let target = BuildTarget::from_id(tgt);
+        let process = BuildProcess {
+            binary: binary.to_string(),
+            target
+        };
+        let item_id = process.as_id();
+        client.send_cmd_with_id(item_id, BuildCmd::Run(process.clone(),studio_http));
+        //let run_view_id = LiveId::unique();
+        if active.builds.get(&item_id).is_none() {
+            let index = active.builds.len();
+            active.builds.insert(item_id, ActiveBuild {
+                log_index: format!("[{}]", index),
+                process: process.clone(),
+                swapchain: None,
+                last_swapchain_with_completed_draws: None,
+                aux_chan_host_endpoint: None,
+            });
+        }
+        if process.target.runs_in_studio(){
+            // create the runview tab
+            actions.push(RunListAction::Create(item_id, process.binary.clone()))
         }
     }
     
-    pub fn toggle_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient, item_id: LiveId, binary: &str, tgt: u64, run: bool, actions:&mut Vec<RunListAction>) {
-        let target = Self::target_id_to_target(tgt);
+    
+    pub fn stop_active_build(active:&mut ActiveBuilds, client:&BuildClient, binary: &str, tgt: u64, actions:&mut Vec<RunListAction>) {
+        let target = BuildTarget::from_id(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
             target
         };
         let build_id = process.as_id().into();
-        if run {
-            let run_view_id = LiveId::unique();
-            if active.builds.get(&build_id).is_none() {
-                let index = active.builds.len();
-                active.builds.insert(build_id, ActiveBuild {
-                    item_id,
-                    log_index: format!("[{}]", index),
-                    process: process.clone(),
-                    run_view_id,
-                    cmd_id: Some(client.send_cmd(BuildCmd::Run(process.clone(), studio_http))),
-                    swapchain: None,
-                    last_swapchain_with_completed_draws: None,
-                    aux_chan_host_endpoint: None,
-                });
-            }
+       if let Some(_) = active.builds.remove(&build_id) {
+            client.send_cmd_with_id(build_id, BuildCmd::Stop);
             if process.target.runs_in_studio(){
-                // create the runview tab
-                actions.push(RunListAction::Create(run_view_id, process.binary.clone()))
+                actions.push(RunListAction::Destroy(build_id))
             }
         }
-        else {
-            if let Some(build) = active.builds.remove(&build_id) {
-                if let Some(cmd_id) = build.cmd_id {
-                    client.send_cmd_with_id(cmd_id, BuildCmd::Stop);
-                }
-                if process.target.runs_in_studio(){
-                     actions.push(RunListAction::Destroy(build.run_view_id))
-                }
-            }
-        }
-        
     }
     
 }

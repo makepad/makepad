@@ -7,16 +7,14 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::*,
-        makepad_error_log::*,
         makepad_micro_serde::*,
         makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
-        texture::{Texture, TextureDesc, TextureFormat},
-        live_traits::LiveNew,
+        texture::{Texture, TextureFormat},
         thread::Signal,
-        os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain},
+        os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain, PollTimer},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
@@ -44,7 +42,7 @@ impl Cx {
                         *present_index = (*present_index + 1) % swapchain.presentable_images.len();
 
                         // render to swapchain
-                        self.draw_pass_to_texture(pass_id, current_image.image.texture_id());
+                        self.draw_pass_to_texture(pass_id, &current_image.image);
 
                         // wait for GPU to finish rendering
                         unsafe { gl_sys::Finish(); }
@@ -99,7 +97,7 @@ impl Cx {
                         }
                         Err(err) => {
                             // we should output a log string
-                            error!("Cant parse stdin-JSON {} {:?}", line, err)
+                            crate::error!("Cant parse stdin-JSON {} {:?}", line, err)
                         }
                     }
                 }
@@ -127,6 +125,9 @@ impl Cx {
                 }
                 HostToStdin::KeyUp(e) => {
                     self.call_event_handler(&Event::KeyUp(e));
+                }
+                HostToStdin::TextInput(e) => {
+                    self.call_event_handler(&Event::TextInput(e));
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(
@@ -165,21 +166,20 @@ impl Cx {
                         match pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
                             Ok(pi) => {
                                 // update texture
-                                let desc = TextureDesc {
-                                    format: TextureFormat::SharedBGRA(pi.id),
-                                    width: Some(new_swapchain.alloc_width as usize),
-                                    height: Some(new_swapchain.alloc_height as usize),
+                                let desc = TextureFormat::SharedBGRAu8{
+                                    id: pi.id,
+                                    width: new_swapchain.alloc_width as usize,
+                                    height: new_swapchain.alloc_height as usize,
                                 };
-                                new_texture.set_desc(self, desc);
+                                new_texture.set_format(self, desc);
                                 self.textures[new_texture.texture_id()]
-                                .os.update_from_shared_dma_buf_image(
+                                .update_from_shared_dma_buf_image(
                                     self.os.opengl_cx.as_ref().unwrap(),
-                                    &desc,
                                     &pi.image,
                                 );
                             }
                             Err(err) => {
-                                error!("failed to receive new swapchain on auxiliary channel: {err:?}");
+                                crate::error!("failed to receive new swapchain on auxiliary channel: {err:?}");
                             }
                         }
                         new_texture
@@ -201,6 +201,9 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    for event in self.os.stdin_timers.get_dispatch() {
+                        self.call_event_handler(&event);
+                    }                    
                     if self.handle_live_edit(){
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
@@ -247,12 +250,18 @@ impl Cx {
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture_id: swapchain.presentable_images[present_index].image.texture_id(),
+                            texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
                     }
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
+                },
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    self.os.stdin_timers.timers.insert(timer_id, PollTimer::new(interval, repeats));
+                },
+                CxOsOp::StopTimer(timer_id) => {
+                    self.os.stdin_timers.timers.remove(&timer_id);
                 },
                 _ => ()
                 /*

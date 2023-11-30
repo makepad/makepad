@@ -2,9 +2,7 @@ package dev.makepad.android;
 
 import android.os.AsyncTask;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -44,7 +42,8 @@ class HttpResponse {
 
 public class MakepadNetwork {
 
-    public MakepadNetwork() {}
+    public MakepadNetwork() {
+    }
 
     public CompletableFuture<HttpResponse> performHttpRequest(String url, String method, String headers, byte[] body) {
         return CompletableFuture.supplyAsync(() -> {
