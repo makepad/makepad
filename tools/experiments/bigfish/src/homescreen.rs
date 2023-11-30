@@ -5,9 +5,11 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
-
+    import makepad_audio_widgets::piano::Piano;
     BigFishHomeScreen=  <View> {
-
+        flow:Down
+        <View>        
+        {
         width: Fill,
         height: Fill,
         flow: Down
@@ -34,7 +36,13 @@ live_design!{
         width: (431*0.5 ), height: (287*0.5), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0  }
 
         }
-
+    }
+    <View>
+    {
+        height: Fit,
+        align:{x:0.5, y:1.0}
+        <Piano> {height: Fit, width: Fill, margin:0}
+    }
 
     }
 }
