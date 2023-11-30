@@ -11,7 +11,6 @@ use {
         os::{
             windows::{
                 windows_media::CxWindowsMedia,
-                windows_decoding::CxWindowsDecoding,
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
@@ -365,10 +364,11 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id: _, request: _} => {
                     //todo!()
                 },
-                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
-                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
-                CxOsOp::CleanupVideoDecoding(_) => todo!(),
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
+                CxOsOp::PauseVideoPlayback(_) => todo!(),
+                CxOsOp::ResumeVideoPlayback(_) => todo!(),
+                CxOsOp::EndVideoPlayback(_) => todo!(),
+                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
             }
         }
         ret
@@ -394,6 +394,5 @@ impl CxOsApi for Cx {
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
-    pub (crate) decoding: CxWindowsDecoding,
     pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }
