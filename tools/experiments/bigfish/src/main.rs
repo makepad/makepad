@@ -1,3 +1,3 @@
 fn main(){
-    bigfish::app::app_main()
+    do_not_run_bigfish::app::app_main()
 }
