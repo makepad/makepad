@@ -32,12 +32,13 @@ impl  FishPatch{
         );
     }
 
-    pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) -> FishBlock
+    pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) 
     {
         let mut B = lib.create_instance_from_template(name);
         B.x = x;
         B.y = y;
-        B
+
+        self.blocks.push(B);
 
     }
 

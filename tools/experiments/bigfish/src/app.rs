@@ -1,4 +1,5 @@
 use makepad_widgets::*;
+use makepad_audio_widgets::*;
 use crate::fish_patch_editor::*;
 use crate::homescreen::*;
 use crate::fish_doc::*;
@@ -187,7 +188,8 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        crate::makepad_widgets::live_design(cx);
+        crate::makepad_audio_widgets::live_design(cx);
+        //crate::makepad_widgets::live_design(cx);
         crate::fish_patch_editor::live_design(cx);
         crate::fish_block_editor::live_design(cx);
         crate::homescreen::live_design(cx);
