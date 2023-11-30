@@ -47,7 +47,6 @@ pub mod web_socket;
 pub mod audio_stream;
 
 mod media_api;
-mod decoding_api;
 
 #[macro_use]
 mod app_main;
@@ -121,7 +120,6 @@ pub use {
     },
     crate::{
         os::*,
-        decoding_api::CxDecodingApi,
         cx_api::CxOsApi,
         media_api::CxMediaApi,
         draw_list::{
@@ -198,7 +196,6 @@ pub use {
             HitOptions,
             DragHitEvent,
             DropHitEvent,
-            VideoColorFormat,
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,
