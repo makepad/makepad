@@ -278,7 +278,7 @@ impl BuildManager {
                             })));
                             dispatch_action(cx, BuildManagerAction::RedrawLog)
                         }
-                        AppToStudio::EventProfile{event_u32,start, end}=>{
+                        AppToStudio::ProfileSample(_sample)=>{
                             
                         }
                     }
@@ -412,24 +412,24 @@ impl BuildManager {
                 ("/makepad/".to_string(), format!("{}/{}",root,makepad_path.clone())),
                 ("/".to_string(), "".to_string())
             ];
-            let mut sockets = HashMap::new();
+            let mut socket_id_to_build_id = HashMap::new();
             while let Ok(message) = rx_request.recv() {
                 // only store last change, fix later
                 match message {
                     HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender: _,headers} => {
-                        sockets.insert(web_socket_id, headers);
+                        if let Some(id) = headers.path.rsplit("/").next(){
+                            if let Ok(id) = id.parse::<u64>(){
+                                socket_id_to_build_id.insert(web_socket_id, LiveId(id));
+                            }
+                        }
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
-                        sockets.remove(&web_socket_id);
+                        socket_id_to_build_id.remove(&web_socket_id);
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
-                        if let Some(headers) = sockets.get(&web_socket_id){
-                            if let Some(id) = headers.path.rsplit("/").next(){
-                                if let Ok(id) = id.parse::<u64>(){
-                                    if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
-                                        let _ = studio_sender.send((LiveId(id),msg));
-                                    }
-                                }
+                        if let Some(id) = socket_id_to_build_id.get(&web_socket_id){
+                            if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
+                                let _ = studio_sender.send((*id,msg));
                             }
                         }
                         //println!("GOT BINARY MESSAGE");
