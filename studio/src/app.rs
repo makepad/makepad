@@ -129,8 +129,6 @@ live_design!{
                     b: run_tabs
                 }
                 
-                
-                
                 file_tree_tabs = Tabs {
                     tabs: [file_tree, search, run_list],
                     selected: 2
@@ -168,6 +166,7 @@ live_design!{
                     closable: false,
                     kind: RunFirst
                 }
+                
                 edit_first = Tab {
                     name: "Edit"
                     closable: false,
@@ -203,9 +202,7 @@ live_design!{
                             y: 0.5
                         }
                         flow: Down
-                        
-                            <Logo> {}
-                        
+                        <Logo> {}
                         <Label> {
                             text: "Welcome to\nMakepad \n\n欢迎来到\nMakepad"
                             width: Fit,
@@ -219,7 +216,6 @@ live_design!{
                             }
                         }
                     }
-                    
                 }
                 RunFirst = <RectView> {
                     draw_bg: {color: #4}
@@ -304,8 +300,7 @@ impl LiveHook for App {
         cx.start_stdin_service();
     }
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) { 
-        // not great but it will do.
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
         let mut root = "./".to_string();
         for arg in std::env::args(){
             if let Some(prefix) = arg.strip_prefix("--root="){
@@ -340,6 +335,8 @@ impl App {
 impl AppMain for App {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        
+        
         
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
@@ -454,7 +451,6 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        
         for action in self.build_manager.handle_event(cx, event, &mut self.file_system) {
             match action {
                 BuildManagerAction::RedrawLog => {
@@ -512,37 +508,35 @@ impl AppMain for App {
             }
         }
         
-        for (item_id, item) in log_list.items_with_actions(&actions) {
-            for action in self.build_manager.handle_log_list(cx, &log_list, item_id, item, &actions) {
-                match action {
-                    LogListAction::JumpToError{file_name, start} => {
-                        // lets find a tab if we have it otherwise open it
-                        if let Some(file_id) = self.file_system.path_to_file_node_id(&file_name) {
-                            if let Some(tab_id) = self.file_system.file_node_id_to_tab_id(file_id){
-                                dock.select_tab(cx, tab_id);
-                                // ok lets scroll into view
-                                if let Some(mut editor) = dock.item(tab_id).as_code_editor().borrow_mut() {
-                                    if let Some(session) = self.file_system.get_session_mut(tab_id) {
-                                        editor.set_cursor_and_scroll(cx, start, session);
-                                        editor.set_key_focus(cx);
-                                    }
+        for action in self.build_manager.handle_log_list(cx, &log_list, &actions) {
+            match action {
+                LogListAction::JumpToError{file_name, start} => {
+                    // lets find a tab if we have it otherwise open it
+                    if let Some(file_id) = self.file_system.path_to_file_node_id(&file_name) {
+                        if let Some(tab_id) = self.file_system.file_node_id_to_tab_id(file_id){
+                            dock.select_tab(cx, tab_id);
+                            // ok lets scroll into view
+                            if let Some(mut editor) = dock.item(tab_id).as_code_editor().borrow_mut() {
+                                if let Some(session) = self.file_system.get_session_mut(tab_id) {
+                                    editor.set_cursor_and_scroll(cx, start, session);
+                                    editor.set_key_focus(cx);
                                 }
                             }
-                            else{
-                                // lets open the editor
-                                let tab_id = dock.unique_tab_id(file_id.0.0);
-                                self.file_system.request_open_file(tab_id, file_id);
-                                // lets add a file tab 'somewhere'
-                                dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
-                                // lets scan the entire doc for duplicates
-                                self.file_system.ensure_unique_tab_names(cx, &dock)
-                            }
+                        }
+                        else{
+                            // lets open the editor
+                            let tab_id = dock.unique_tab_id(file_id.0.0);
+                            self.file_system.request_open_file(tab_id, file_id);
+                            // lets add a file tab 'somewhere'
+                            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
+                            // lets scan the entire doc for duplicates
+                            self.file_system.ensure_unique_tab_names(cx, &dock)
                         }
                     }
-                    _ => ()
                 }
-                log_list.redraw(cx);
+                _ => ()
             }
+            log_list.redraw(cx);
         }
         
         if let Some(tab_id) = dock.clicked_tab_close(&actions) {
@@ -634,7 +628,6 @@ impl AppMain for App {
             let mut f = File::create("makepad_state.ron").expect("Unable to create file");
             f.write_all(saved.as_bytes()).expect("Unable to write data");
         }
-        
     }
 }
 
