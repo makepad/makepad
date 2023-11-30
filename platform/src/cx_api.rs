@@ -15,6 +15,7 @@ use {
             Trigger,
             NextFrame,
             HttpRequest,
+            VideoSource
         },
         draw_list::DrawListId,
         window::WindowId,
@@ -78,10 +79,11 @@ pub enum CxOsOp {
     //WebSocketSendString{request_id: LiveId, data:String},
     //WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
 
-    InitializeVideoDecoding(LiveId, Rc<Vec<u8>>),
-    DecodeNextVideoChunk(LiveId, usize),
-    FetchNextVideoFrames(LiveId, usize),
-    CleanupVideoDecoding(LiveId),
+    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool, bool),
+    PauseVideoPlayback(LiveId),
+    ResumeVideoPlayback(LiveId),
+    EndVideoPlayback(LiveId),
+    UpdateVideoSurfaceTexture(LiveId),
 }
 
 impl Cx { 
@@ -198,9 +200,6 @@ impl Cx {
         });
         Timer(self.timer_id)
     }
-    
-    
-    
     
     pub fn stop_timer(&mut self, timer: Timer) {
         if timer.0 != 0 {
@@ -439,22 +438,22 @@ impl Cx {
         });
     }
 */
-    pub fn initialize_video_decoding(&mut self, video_id: LiveId, video: Rc<Vec<u8>>) {
-        self.platform_ops.push(CxOsOp::InitializeVideoDecoding(video_id, video));
+    pub fn prepare_video_playback(&mut self, video_id: LiveId, source: VideoSource, external_texture_id: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
+        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame));
     }
 
-    pub fn decode_next_video_chunk(&mut self, video_id: LiveId, max_frames_to_decode: usize) {
-        self.platform_ops.push(CxOsOp::DecodeNextVideoChunk(video_id, max_frames_to_decode));
+    pub fn pause_video_playback(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::PauseVideoPlayback(video_id));
     }
 
-    pub fn fetch_next_video_frames(&mut self, video_id: LiveId, number_frames: usize) {
-        self.platform_ops.push(CxOsOp::FetchNextVideoFrames(video_id, number_frames));
+    pub fn resume_video_playback(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::ResumeVideoPlayback(video_id));
     }
 
-    pub fn cleanup_video_decoding(&mut self, video_id: LiveId) {
-        self.platform_ops.push(CxOsOp::CleanupVideoDecoding(video_id));
+    pub fn end_video_playback(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::EndVideoPlayback(video_id));
     }
-    
+
     pub fn println_resources(&self){
         println!("Num textures: {}",self.textures.0.pool.len());
     }

@@ -178,6 +178,10 @@ class MakepadSurface
             }
         }
 
+        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP) || (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            return super.onKeyUp(keyCode, event);
+        }
+
         return true;
     }
 
@@ -227,12 +231,9 @@ MidiManager.OnDeviceOpenedListener{
     private MakepadSurface view;
     Handler mHandler;
 
-    // video decoding
-    Handler mDecoderHandler;
-    HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
-    private HashMap<Long, BlockingQueue<ByteBuffer>> mVideoFrameQueues = new HashMap<>();
-    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 5; 
-    private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
+    // video playback
+    Handler mVideoPlaybackHandler;
+    HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
     // networking
     Handler mWebSocketsHandler;
@@ -257,10 +258,10 @@ MidiManager.OnDeviceOpenedListener{
 
         MakepadNative.activityOnCreate(this);
 
-        HandlerThread decoderThreadHandler = new HandlerThread("VideoDecoderThread");
+        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
         decoderThreadHandler.start(); // TODO: only start this if its needed.
-        mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
-        mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
+        mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
+        mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
         HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
         webSocketsThreadHandler.start();
@@ -270,6 +271,9 @@ MidiManager.OnDeviceOpenedListener{
         float density = getResources().getDisplayMetrics().density;
 
         MakepadNative.onAndroidParams(cache_path, density);
+
+        // Set volume keys to control music stream, we might want make this flexible for app devs
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         //% MAIN_ACTIVITY_ON_CREATE
     }
@@ -500,85 +504,37 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void initializeVideoDecoding(long videoId, byte[] videoData) {
-        BlockingQueue<ByteBuffer> videoFrameQueue = new LinkedBlockingQueue<>();
-        mVideoFrameQueues.put(videoId, videoFrameQueue);
+    public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop, boolean pauseFirstFrame) {
+        VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
+        VideoPlayer.setSource(source);
+        VideoPlayer.setExternalTextureHandle(externalTextureHandle);
+        VideoPlayer.setAutoplay(autoplay);
+        VideoPlayer.setShouldLoop(shouldLoop);
+        VideoPlayer.setPauseFirstFrame(pauseFirstFrame);
+        VideoPlayerRunnable runnable = new VideoPlayerRunnable(VideoPlayer);
 
-        VideoDecoder videoDecoder = new VideoDecoder(this, videoId, videoFrameQueue);
-        VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, videoDecoder);
-
-        mDecoderRunnables.put(videoId, runnable);
-        mDecoderHandler.post(runnable);
+        mVideoPlayerRunnables.put(videoId, runnable);
+        mVideoPlaybackHandler.post(runnable);
     }
 
-    public void decodeNextVideoChunk(long videoId, int maxFramesToDecode) {
-        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+    public void pauseVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
-            runnable.setMaxFramesToDecode(maxFramesToDecode);
-            mDecoderHandler.post(runnable);
-        }
-    } 
-
-    public void fetchNextVideoFrames(long videoId, int numberFrames) {
-        BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
-        if (videoFrameQueue != null) {
-            int totalBytes = 0;
-            Iterator<ByteBuffer> iterator = videoFrameQueue.iterator();
-            int frameCount = 0;
-            while (iterator.hasNext() && frameCount < numberFrames) {
-                totalBytes += iterator.next().remaining();
-                frameCount++;
-            }
-
-            VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
-            ByteBuffer frameGroup = acquireBuffer(totalBytes);
-
-            for (int i = 0; i < frameCount; i++) {
-                ByteBuffer frame = videoFrameQueue.poll();
-                if (frame != null) {
-                    frameGroup.put(frame);
-                    if (runnable != null) {
-                        runnable.releaseBuffer(frame);
-                    }
-                }
-            }
-
-            frameGroup.flip();
-            runOnUiThread(() -> MakepadNative.onVideoStream(videoId, frameGroup));
-            releaseBuffer(frameGroup);
+            runnable.pausePlayback();
         }
     }
 
-    public void cleanupVideoDecoding(long videoId) {
-        VideoDecoderRunnable runnable = mDecoderRunnables.remove(videoId);
+    public void resumeVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
-            runnable.cleanup();
-        }
-        mVideoFrameQueues.remove(videoId);
-    }
-
-    private ByteBuffer acquireBuffer(int size) {
-        synchronized(mVideoChunkBufferPool) {
-            if (!mVideoChunkBufferPool.isEmpty()) {
-                ByteBuffer buffer = mVideoChunkBufferPool.poll();
-                if (buffer.capacity() == size) {
-                    return buffer;
-                } else {
-                    return ByteBuffer.allocateDirect(size);
-                }
-            } else {
-                return ByteBuffer.allocateDirect(size);
-            }
+            runnable.resumePlayback();
         }
     }
 
-    private void releaseBuffer(ByteBuffer buffer) {
-        synchronized(mVideoChunkBufferPool) {
-            if (mVideoChunkBufferPool.size() < VIDEO_CHUNK_BUFFER_POOL_SIZE) {
-                buffer.clear();
-                mVideoChunkBufferPool.offer(buffer);
-            }
+    public void endVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
+        if(runnable != null) {
+            runnable.endPlayback();
         }
     }
 }
-

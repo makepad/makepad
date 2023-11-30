@@ -536,6 +536,7 @@ pub enum ShaderTy {
     Mat3,
     Mat4,
     Texture2D,
+    TextureOES,
     Array {elem_ty: Rc<ShaderTy>, len: usize},
     Struct(StructPtr),
     Enum(LiveType),
@@ -565,6 +566,7 @@ pub enum TyLit {
     Mat3,
     Mat4,
     Texture2D,
+    TextureOES,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -989,6 +991,7 @@ impl Ty {
             Ty::Mat3 => Some(TyLit::Mat3),
             Ty::Mat4 => Some(TyLit::Mat4),
             Ty::Texture2D => Some(TyLit::Bool),
+            Ty::TextureOES => Some(TyLit::Bool),
             Ty::Array {..} => None,
             Ty::Struct(_) => None,
             Ty::Enum(_) => None,
@@ -1037,6 +1040,7 @@ impl Ty {
             Ty::Mat3 => 9,
             Ty::Mat4 => 16,
             Ty::Texture2D {..} => panic!(),
+            Ty::TextureOES {..} => panic!(),
             Ty::Array {elem_ty, len} => elem_ty.slots() * len,
             Ty::Enum(_) => 1,
             Ty::Struct(_) => panic!(),
@@ -1068,6 +1072,7 @@ impl Ty {
                 Ty::Mat3 => TyExprKind::Lit {ty_lit: TyLit::Mat3},
                 Ty::Mat4 => TyExprKind::Lit {ty_lit: TyLit::Mat4},
                 Ty::Texture2D => TyExprKind::Lit {ty_lit: TyLit::Texture2D},
+                Ty::TextureOES => TyExprKind::Lit {ty_lit: TyLit::TextureOES},
                 Ty::Array {elem_ty, len} => {
                     TyExprKind::Array {
                         elem_ty_expr: Box::new(elem_ty.to_ty_expr()),
@@ -1129,6 +1134,7 @@ impl Ty {
                 live_id!(vec3) => Self::Vec3,
                 live_id!(vec4) => Self::Vec4,
                 live_id!(texture2d) => Self::Texture2D,
+                live_id!(textureOES) => Self::TextureOES,
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
@@ -1174,6 +1180,7 @@ impl fmt::Display for Ty {
             Ty::Mat3 => write!(f, "mat3"),
             Ty::Mat4 => write!(f, "mat4"),
             Ty::Texture2D => write!(f, "texture2D"),
+            Ty::TextureOES => write!(f, "textureOES"),
             Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
             Ty::Struct(struct_ptr) => write!(f, "Struct:{:?}", struct_ptr),
             Ty::DrawShader(shader_ptr) => write!(f, "DrawShader:{:?}", shader_ptr),
@@ -1225,6 +1232,7 @@ impl TyLit {
             TyLit::Mat3 => Ty::Mat3,
             TyLit::Mat4 => Ty::Mat4,
             TyLit::Texture2D => Ty::Texture2D,
+            TyLit::TextureOES => Ty::TextureOES,
         }
     }
     
@@ -1252,6 +1260,7 @@ impl fmt::Display for TyLit {
                 TyLit::Mat3 => "mat3",
                 TyLit::Mat4 => "mat4",
                 TyLit::Texture2D => "texture2D",
+                TyLit::TextureOES => "textureOES",
             }
         )
     }
