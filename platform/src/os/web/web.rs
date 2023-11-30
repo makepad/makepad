@@ -395,9 +395,6 @@ impl Cx {
     fn handle_platform_ops(&mut self) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::FetchNextVideoFrames(_, _)=>{
-                    
-                }
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     self.os.from_wasm(FromWasmSetDocumentTitle {
