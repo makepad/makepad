@@ -238,7 +238,7 @@ impl Cx {
                         }
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
-                        let mut e = Event::NetworkResponses(vec![
+                        let e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpResponse(HttpResponse::new(
@@ -249,20 +249,16 @@ impl Cx {
                                 ))
                             }
                         ]);
-                        if self.studio_http_connection(&mut e) {
-                            self.call_event_handler(&e);
-                        }
+                        self.call_event_handler(&e);
                     }
                     FromJavaMessage::HttpRequestError {request_id, error, ..} => {
-                        let mut e = Event::NetworkResponses(vec![
+                        let e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpRequestError(error)
                             }
                         ]);
-                        if self.studio_http_connection(&mut e) {
-                            self.call_event_handler(&e);
-                        }
+                        self.call_event_handler(&e);
                     }
                     FromJavaMessage::WebSocketMessage {message, sender} => {
                         let mut ws_message_parser = WebSocketImpl::new();
