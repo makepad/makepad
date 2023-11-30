@@ -4,12 +4,13 @@ live_design!
 {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
-    
+    import crate::fish_block_editor::*;
+
     FishPatchEditor = {{FishPatchEditor}} {
         width: Fill,
         height: Fill,
         scroll_bars: <ScrollBars> {}      
-      
+        BlockTemplate = <FishBlockEditor>{};
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let Pos = floor(self.pos*self.rect_size *0.10);
@@ -30,6 +31,9 @@ pub struct FishPatchEditor{
     #[live] scroll_bars: ScrollBars,
     #[live] draw_bg: DrawColor,
     #[rust] unscrolled_rect:Rect,
+
+    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+    #[rust] items: ComponentMap<LiveId, (LiveId,WidgetRef)>,
 }
 
 impl Widget for FishPatchEditor {
@@ -42,6 +46,16 @@ impl Widget for FishPatchEditor {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
+
+
+        for (_,item) in self.items.values_mut() {
+            let item_uid = item.widget_uid();
+            item.handle_widget_event_with(cx, event, &mut | cx, action | {
+                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
+            });
+        }
+
+
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -68,9 +82,53 @@ impl LiveHook for FishPatchEditor {
     }
 
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
+
+    
+    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = from {
+            self.templates.clear();
+        }
+    }
+    
+    // hook the apply flow to collect our templates and apply to instanced childnodes
+    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        let id = nodes[index].id;
+        match from {
+            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
+                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
+                    let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+                    self.templates.insert(id, live_ptr);
+                    // lets apply this thing over all our childnodes with that template
+                    for (templ_id, node) in self.items.values_mut() {
+                        if *templ_id == id {
+                            node.apply(cx, from, index, nodes);
+                        }
+                    }
+                }
+                else {
+                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+                }
+            }
+            _ => ()
+        }
+        nodes.skip_node(index)
+    }
+    
+
 }
 
 impl FishPatchEditor {
+
+    pub fn item(&mut self, cx: &mut Cx, id: LiveId, template: LiveId) -> Option<WidgetRef> {
+        if let Some(ptr) = self.templates.get(&template) {
+            let (_, entry) = self.items.get_or_insert(cx, id, | cx | {
+                (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
+            });
+            return Some(entry.clone())
+        }
+        None
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);        
@@ -89,18 +147,23 @@ impl FishPatchEditor {
         let turtle_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
-
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        
         for i in patch.blocks.iter() 
         {
-            let item_id = LiveId::from_num(1, i.id);
-            let item = list.item(cx, item_id, live_id!(PatchBlock)).unwrap().as_view();
+            let item_id = LiveId::from_num(1, i.id as u64);
+            let item = self.item(cx, item_id, live_id!(BlockTemplate)).unwrap();
+
+            item.apply_over(cx, live!{
+                abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
+            });
+
             item.draw_widget_all(cx);
+            
 
             println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
-        
-        
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+                
         self.scroll_bars.end(cx);
     }
 }
