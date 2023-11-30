@@ -805,7 +805,7 @@ struct MetalBufferInner {
 pub struct CxOsTexture {
     texture: Option<RcObjcId>
 }
-fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)->MTLPixelFormat{
+fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)-> MTLPixelFormat {
      match pix{
          TexturePixel::BGRAu8 => MTLPixelFormat::BGRA8Unorm,
          TexturePixel::RGBAf16 => MTLPixelFormat::RGBA16Float,

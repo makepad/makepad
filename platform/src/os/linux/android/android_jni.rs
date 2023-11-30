@@ -1,7 +1,7 @@
 use {
     crate::makepad_math::*,
     std::ffi::CString,
-    std::{cell::RefCell, cell::Cell, rc::Rc},
+    std::{cell::RefCell, cell::Cell},
     std::sync::{mpsc, mpsc::Sender},
     self::super::{
         ndk_sys,
@@ -11,7 +11,7 @@ use {
     crate::{
         makepad_live_id::*,
         area::Area,
-        event::{TouchPoint, TouchState, HttpRequest},
+        event::{TouchPoint, TouchState, HttpRequest, VideoSource},
         cx::AndroidParams,
         WebSocketMessage,
     },
@@ -90,19 +90,14 @@ pub enum FromJavaMessage {
         name: String,
         midi_device: jni_sys::jobject
     },
-    VideoDecodingInitialized {
+    VideoPlaybackPrepared {
         video_id: u64,
-        frame_rate: usize,
         video_width: u32,
         video_height: u32,
-        color_format: String,
         duration: u128,
+        surface_texture: jni_sys::jobject,
     },
-    VideoStream {
-        video_id: u64,
-        frames_group: Vec<u8>,
-    },
-    VideoChunkDecoded {
+    VideoPlaybackCompleted {
         video_id: u64,
     },
     VideoDecodingError {
@@ -427,50 +422,35 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoDecodingInitialized(
-    env: *mut jni_sys::JNIEnv,
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackPrepared(
+    _env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     video_id: jni_sys::jlong,
-    frame_rate: jni_sys::jint,
     video_width: jni_sys::jint,
     video_height: jni_sys::jint,
-    color_format: jni_sys::jstring,
     duration: jni_sys::jlong,
+    surface_texture: jni_sys::jobject
 ) {
-    let color_format = unsafe { jstring_to_string(env, color_format) };
+    let env = attach_jni_env();    
 
-    send_from_java_message(FromJavaMessage::VideoDecodingInitialized {
+    let global_ref = (**env).NewGlobalRef.unwrap()(env, surface_texture);
+
+    send_from_java_message(FromJavaMessage::VideoPlaybackPrepared {
         video_id: video_id as u64,
-        frame_rate: frame_rate as usize,
         video_width: video_width as u32,
         video_height: video_height as u32,
-        color_format,
         duration: duration as u128,
+        surface_texture: global_ref
     });
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoStream(
-    env: *mut jni_sys::JNIEnv,
-    _: jni_sys::jobject,
-    video_id: jni_sys::jlong,
-    frames_group: jni_sys::jobject,
-) {
-    let frames_group = unsafe { java_byte_buffer_to_vec(env, frames_group) };
-
-    send_from_java_message(FromJavaMessage::VideoStream {
-        video_id: video_id as u64,
-        frames_group,
-    });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoChunkDecoded(
-    _: *mut jni_sys::JNIEnv,
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackCompleted(
+    _env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     video_id: jni_sys::jlong,
 ) {
-    send_from_java_message(FromJavaMessage::VideoChunkDecoded {
+    send_from_java_message(FromJavaMessage::VideoPlaybackCompleted {
         video_id: video_id as u64,
     });
 }
@@ -529,26 +509,6 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
     let slice = std::slice::from_raw_parts(bytes as *const u8, length as usize);
     out_bytes.extend_from_slice(slice);
     (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, jni_sys::JNI_ABORT);
-    out_bytes
-}
-
-// TODO: cache method ids
-unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sys::jobject) -> Vec<u8> {
-    let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
-    let poisition_cstring = CString::new("position").unwrap();
-    let remaining_cstring = CString::new("remaining").unwrap();
-    let signature_cstring = CString::new("()I").unwrap();
-    let position_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, poisition_cstring.as_ptr(), signature_cstring.as_ptr());
-    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, remaining_cstring.as_ptr(), signature_cstring.as_ptr());
-    let position = (**env).CallIntMethod.unwrap()(env, byte_buffer, position_method_id) as isize;
-    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id) as usize;
-
-    let direct_buffer_ptr = (**env).GetDirectBufferAddress.unwrap()(env, byte_buffer) as *const u8;
-
-    let slice = std::slice::from_raw_parts(direct_buffer_ptr.offset(position), remaining);
-
-    let out_bytes = slice.to_vec();
-
     out_bytes
 }
 
@@ -702,56 +662,84 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>) {
-    let video_data = &*video;
+pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, source: VideoSource, external_texture_handle: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
+    let video_source = match source {
+        VideoSource::InMemory(data) => {
+            let source = &*data;
 
-    let java_body = (**env).NewByteArray.unwrap()(env, video_data.len() as i32);
-    (**env).SetByteArrayRegion.unwrap()(
-        env,
-        java_body,
-        0,
-        video_data.len() as i32,
-        video_data.as_ptr() as *const jni_sys::jbyte,
-    );
+            let java_body = (**env).NewByteArray.unwrap()(env, source.len() as i32);
+            (**env).SetByteArrayRegion.unwrap()(
+                env,
+                java_body,
+                0,
+                source.len() as i32,
+                source.as_ptr() as *const jni_sys::jbyte,
+            );
+        
+            java_body as jni_sys::jobject
+        },
+        VideoSource::Network(url) | VideoSource::Filesystem(url) => {
+            let url = CString::new(url.clone()).unwrap();
+            let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+            url
+        }
+    };
 
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
-        "initializeVideoDecoding",
-        "(J[B)V",
+        "prepareVideoPlayback",
+        "(JLjava/lang/Object;IZZZ)V",
         video_id.get_value() as jni_sys::jlong,
-        java_body as jni_sys::jobject
+        video_source,
+        external_texture_handle as jni_sys::jint,
+        autoplay as jni_sys::jboolean as std::ffi::c_uint,
+        should_loop as jni_sys::jboolean as std::ffi::c_uint,
+        pause_on_first_frame as jni_sys::jboolean as std::ffi::c_uint
     );
 }
 
-pub unsafe fn to_java_decode_next_video_chunk(env: *mut jni_sys::JNIEnv, video_id: LiveId, max_frames_to_decode: usize) {
-    ndk_utils::call_void_method!(
-        env,
-        ACTIVITY,
-        "decodeNextVideoChunk",
-        "(JI)V",
-        video_id.get_value() as jni_sys::jlong,
-        max_frames_to_decode as jni_sys::jint
+pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_ref: jni_sys::jobject) -> bool {
+    let class = (**env).GetObjectClass.unwrap()(env, video_decoder_ref);
+    let update_tex_image_cstring = CString::new("maybeUpdateTexImage").unwrap();
+    let signature_cstring = CString::new("()Z").unwrap();
+    let mid_update_tex_image = (**env).GetMethodID.unwrap()(
+        env, 
+        class, 
+        update_tex_image_cstring.as_ptr(), 
+        signature_cstring.as_ptr()
     );
+
+    let updated = (**env).CallBooleanMethod.unwrap()(env, video_decoder_ref, mid_update_tex_image);
+    updated != 0
 }
 
-pub unsafe fn to_java_fetch_next_video_frames(env: *mut jni_sys::JNIEnv, video_id: LiveId, number_frames: usize) {
+pub unsafe fn to_java_pause_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
-        "fetchNextVideoFrames",
-        "(JI)V",
-        video_id.get_value() as jni_sys::jlong,
-        number_frames as jni_sys::jint
-    );
-}
-
-pub unsafe fn to_java_cleanup_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
-    ndk_utils::call_void_method!(
-        env,
-        ACTIVITY,
-        "cleanupVideoDecoding",
+        "pauseVideoPlayback",
         "(J)V",
         video_id
     );
 }    
+
+pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "resumeVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}    
+
+pub unsafe fn to_java_end_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "endVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}

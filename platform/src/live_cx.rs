@@ -125,6 +125,13 @@ impl Cx {
     }
     
     pub fn apply_error_cant_find_target(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], id: LiveId) {
+        // Hacky workaround to notify users, since the widget is not supported outside of android it doens't get registered
+        #[cfg(not(target_os = "android"))]
+        if id == crate::live_id!(video) {
+            self.apply_error(origin, index, nodes, format!("Video Player widget is currently only supported on Android"));
+            return;
+        }
+    
         self.apply_error(origin, index, nodes, format!("property: {} target class not found", id))
     }
     
