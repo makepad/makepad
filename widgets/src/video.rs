@@ -107,6 +107,12 @@ impl VideoRef {
             inner.end_playback(cx);
         }
     }
+
+    pub fn set_source(&mut self, source: VideoDataSource) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source(source);
+        }
+    }
 }
 
 #[derive(Clone, Default, WidgetSet)]
@@ -117,7 +123,7 @@ impl VideoSet {}
 #[derive(Default, PartialEq, Debug)]
 enum PlaybackState {
     #[default]
-    NotStarted,
+    Unprepared,
     Preparing,
     Prepared,
     Previewing,
@@ -214,7 +220,7 @@ impl Video {
         if let Event::TextureHandleReady(event) = event {
             if event.texture_id == self.texture.clone().unwrap().texture_id() {
                 self.texture_handle = Some(event.handle);
-                if self.autoplay && self.playback_state == PlaybackState::NotStarted {
+                if self.autoplay && self.playback_state == PlaybackState::Unprepared {
                     self.prepare_playback(cx);
                 }
             }
@@ -231,7 +237,7 @@ impl Video {
             return;
         }
 
-        if self.playback_state == PlaybackState::NotStarted {
+        if self.playback_state == PlaybackState::Unprepared {
             match &self.source {
                 VideoDataSource::Dependency { path }  => {
                     match cx.get_dependency(path.as_str()) {
@@ -337,7 +343,7 @@ impl Video {
     }
 
     fn preview_first_frame(&mut self, cx: &mut Cx) {
-        if self.playback_state == PlaybackState::NotStarted {
+        if self.playback_state == PlaybackState::Unprepared {
             self.prepare_playback(cx);
             self.pause_on_first_frame = true;
             self.playback_state = PlaybackState::Previewing;
@@ -345,7 +351,7 @@ impl Video {
     }
 
     fn begin_playback(&mut self, cx: &mut Cx) {
-        if self.playback_state == PlaybackState::NotStarted {
+        if self.playback_state == PlaybackState::Unprepared {
             self.prepare_playback(cx);
             self.playback_state = PlaybackState::Playing;
         }
@@ -366,10 +372,18 @@ impl Video {
     }
 
     fn end_playback(&mut self, cx: &mut Cx) {
-        if self.playback_state != PlaybackState::NotStarted {
+        if self.playback_state != PlaybackState::Unprepared {
             cx.end_video_playback(self.id);
         }
-        self.playback_state = PlaybackState::NotStarted;
+        self.playback_state = PlaybackState::Unprepared;
+    }
+
+    fn set_source(&mut self, source: VideoDataSource) {
+        if self.playback_state == PlaybackState::Unprepared {
+            self.source = source;
+        } else {
+            error!("Attempted to set source while player state is: {:?}", self.playback_state);
+        } 
     }
 }
 
