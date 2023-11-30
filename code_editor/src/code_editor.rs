@@ -333,7 +333,7 @@ impl Widget for CodeEditor {
         self.draw_state.end();
         WidgetDraw::done()
     }
-}
+} 
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct CodeEditorRef(WidgetRef);
@@ -429,7 +429,7 @@ impl CodeEditor {
             KeepCursorInView::Off => {}
         }
 
-        let walk = self.draw_state.get().unwrap();
+        let walk: Walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
 
         let turtle_rect = cx.turtle().rect();

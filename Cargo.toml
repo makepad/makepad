@@ -4,6 +4,7 @@ workspace.members = [
     "examples/news_feed", 
     "examples/web_cam", 
     "examples/ironfish",
+    "tools/experiments/bigfish",
     "examples/simple",
     "examples/simple_shader",
     "examples/chatgpt",
