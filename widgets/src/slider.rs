@@ -73,7 +73,6 @@ pub enum SliderAction {
     None
 }
 
-
 impl Slider {
     
     fn to_external(&self) -> f64 {
@@ -92,7 +91,7 @@ impl Slider {
         old != self.value
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)){
         self.animator_handle_event(cx, event);
         for action in self.text_input.handle_event(cx, event) {
             match action {
