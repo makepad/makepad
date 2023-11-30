@@ -9,7 +9,6 @@ live_design!{
     SlidePanelBase = {{SlidePanel}} {}
 }
 
-
 #[derive(Live)]
 pub struct SlidePanel {
     #[deref] frame: View,
@@ -86,15 +85,16 @@ impl SlidePanel {
         }
         match event {
             Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
-                
                 self.frame.redraw(cx);
             }
             _ => ()
         }
     }
+    
     pub fn open(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }
+    
     pub fn close(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }

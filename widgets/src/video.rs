@@ -388,6 +388,7 @@ impl Video {
 }
 
 #[derive(Clone, Debug, Live, LiveHook)]
+#[live_ignore]
 pub enum VideoDataSource {
     #[live {path: LiveDependency::default()}]
     Dependency {path: LiveDependency},
