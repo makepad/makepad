@@ -896,6 +896,11 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Texture2D);
                 write!(string, " {}", ident).unwrap();
             }
+            Ty::TextureOES => {
+                write!(string, "{}", sep).unwrap();
+                self.write_ty_lit(string, TyLit::TextureOES);
+                write!(string, " {}", ident).unwrap();
+            }
             Ty::Array {ref elem_ty, len} => {
                 self.write_var_decl(string, sep, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
@@ -956,6 +961,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 TyLit::Mat3 => "mat3",
                 TyLit::Mat4 => "mat4",
                 TyLit::Texture2D => "sampler2D",
+                TyLit::TextureOES => "samplerExternalOES",
             }
         )
             .unwrap();
