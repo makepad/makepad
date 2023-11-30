@@ -8,8 +8,10 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "-HQyt_6S4hcP4_ja_KDjE6dYxko="
+metadata.makepad-check-nightly-only = true
 
 [dependencies]
 makepad-widgets = {path="../../widgets", version="0.6.0"}
+
 
 

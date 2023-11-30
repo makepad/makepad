@@ -58,14 +58,14 @@ pub struct Padding {
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 #[live_ignore]
-pub enum Axis {
+pub enum Axis2 {
     #[pick] Horizontal,
     Vertical
 }
 
-impl Default for Axis {
+impl Default for Axis2 {
     fn default() -> Self {
-        Axis::Horizontal
+        Axis2::Horizontal
     }
 }
 
@@ -925,6 +925,13 @@ impl Layout {
         }
     }
     
+    pub fn flow_overlay() -> Self {
+        Self {
+            flow: Flow::Overlay,
+            ..Self::default()
+        }
+    }
+
     pub fn with_scroll(mut self, v: DVec2) -> Self {
         self.scroll = v;
         self
@@ -1208,5 +1215,3 @@ fn max_zero_keep_nan(v: f64) -> f64 {
         f64::max(v, 0.0)
     }
 }
-
-

@@ -54,11 +54,7 @@ macro_rules! h {
         &RESULT
     }};
 }
-
-pub use h;
-pub use s;
-pub use w;
-
+ 
 #[doc(hidden)]
 pub const fn decode_utf8_char(bytes: &[u8], mut pos: usize) -> Option<(u32, usize)> {
     if bytes.len() == pos {

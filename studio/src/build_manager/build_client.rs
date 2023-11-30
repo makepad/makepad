@@ -7,11 +7,12 @@ use {
         makepad_micro_serde::*,
         makepad_platform::{*, cx_stdin::aux_chan},
         build_manager::{
-            build_protocol::{BuildCmd, BuildCmdWrap, LogItemWrap, BuildCmdId},
+            build_protocol::{BuildCmd, BuildCmdWrap, LogItemWrap, LogItem},
             build_server::{BuildConnection, BuildServer},
         }
     },
     std::{
+        path::Path,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
@@ -28,30 +29,15 @@ pub struct BuildClient{
 }
 
 impl BuildClient {
-    
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn send_cmd(&self, cmd: BuildCmd)->BuildCmdId{
-        let cmd_id = BuildCmdId(LiveId::unique().0);
-        self.cmd_sender.send(BuildCmdWrap{
-            cmd_id,
-            cmd
-        }).unwrap();
-        cmd_id
-    }
-    
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){
-        self.cmd_sender.send(BuildCmdWrap{
-            cmd_id,
-            cmd
-        }).unwrap();
-    }
-    
-    #[cfg(target_arch = "wasm32")]
-    pub fn send_cmd(&self, _cmd: BuildCmd) ->BuildCmdId{
-        BuildCmdId(LiveId::unique().0)
-    }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn send_cmd_with_id(&self, cmd_id: LiveId, cmd: BuildCmd){
+        self.cmd_sender.send(BuildCmdWrap{
+            cmd_id,
+            cmd
+        }).unwrap();
+    }
+    
     #[cfg(target_arch = "wasm32")]
     pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){}
      
@@ -66,7 +52,11 @@ impl BuildClient {
             Event::Signal=>{
                 loop {
                     match self.log_receiver.try_recv() {
-                        Ok(msg) => dispatch_msg(cx, msg),
+                        Ok(msg) => {
+                            
+
+                            dispatch_msg(cx, msg);
+                        }
                         Err(TryRecvError::Empty) => break,
                         _ => panic!(),
                     }
@@ -89,21 +79,28 @@ impl BuildClient {
     }
     
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn new_with_local_server(subdir:&str) -> Self {
+    pub fn new_with_local_server(path:&Path) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
         let log_signal = Signal::new();
         let (log_sender, log_receiver) = mpsc::channel();
-        
-        let base_path = env::current_dir().unwrap();
+        /*
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+        let base_path = env::current_dir().unwrap().join(root);
         let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
-        
-        let mut server = BuildServer::new(final_path);
+        */
+        let mut server = BuildServer::new(path);
         spawn_local_cmd_handler(
             cmd_receiver,
             server.connect(Box::new({
                 let log_sender = log_sender.clone();
                 let log_signal = log_signal.clone();
-                move | log_item | {
+                move | log_item:LogItemWrap | {
                     log_sender.send(log_item).unwrap();
                     log_signal.set()
                 }

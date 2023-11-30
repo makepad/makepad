@@ -1,7 +1,8 @@
 use {
     crate::makepad_math::*,
     std::ffi::CString,
-    std::{cell::RefCell, cell::Cell, rc::Rc, sync::mpsc},
+    std::{cell::RefCell, cell::Cell, rc::Rc},
+    std::sync::{mpsc, mpsc::Sender},
     self::super::{
         ndk_sys,
         jni_sys,
@@ -12,6 +13,7 @@ use {
         area::Area,
         event::{TouchPoint, TouchState, HttpRequest},
         cx::AndroidParams,
+        WebSocketMessage,
     },
 };
 
@@ -72,6 +74,17 @@ pub enum FromJavaMessage {
         request_id: u64,
         metadata_id: u64,
         error: String,
+    },
+    WebSocketMessage {
+        message: Vec<u8>,
+        sender: Box<Sender<WebSocketMessage>>,
+    },
+    WebSocketClosed {
+        sender: Box<Sender<WebSocketMessage>>,
+    },
+    WebSocketError {
+        error: String,
+        sender: Box<Sender<WebSocketMessage>>,
     },
     MidiDeviceOpened{
         name: String,
@@ -350,6 +363,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
         body
     });
 }
+
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     env: *mut jni_sys::JNIEnv,
@@ -364,6 +378,51 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
         request_id: request_id as u64,
         metadata_id: metadata_id as u64,
         error,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    message: jni_sys::jobject,
+    callback: jni_sys::jlong,
+) {
+    let message = unsafe { java_byte_array_to_vec(env, message) };
+    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+
+    send_from_java_message(FromJavaMessage::WebSocketMessage {
+        message,
+        sender: sender.clone(),
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    callback: jni_sys::jlong,
+) {
+    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+
+    send_from_java_message(FromJavaMessage::WebSocketClosed {
+        sender: sender.clone(),
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    error: jni_sys::jstring,
+    callback: jni_sys::jlong,
+) {
+    let error = unsafe { jstring_to_string(env, error) };
+    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+
+    send_from_java_message(FromJavaMessage::WebSocketError {
+        error,
+        sender: sender.clone(),
     });
 }
 
@@ -473,28 +532,22 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
     out_bytes
 }
 
+// TODO: cache method ids
 unsafe fn java_byte_buffer_to_vec(env: *mut jni_sys::JNIEnv, byte_buffer: jni_sys::jobject) -> Vec<u8> {
     let byte_buffer_class = (**env).GetObjectClass.unwrap()(env, byte_buffer);
+    let poisition_cstring = CString::new("position").unwrap();
+    let remaining_cstring = CString::new("remaining").unwrap();
+    let signature_cstring = CString::new("()I").unwrap();
+    let position_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, poisition_cstring.as_ptr(), signature_cstring.as_ptr());
+    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, remaining_cstring.as_ptr(), signature_cstring.as_ptr());
+    let position = (**env).CallIntMethod.unwrap()(env, byte_buffer, position_method_id) as isize;
+    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id) as usize;
 
-    // call 'remaining' method to find out how many elements are remaining between the current position and the limit
-    let method_name = CString::new("remaining").unwrap();
-    let method_sig = CString::new("()I").unwrap();
-    let remaining_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
-    let remaining = (**env).CallIntMethod.unwrap()(env, byte_buffer, remaining_method_id);
+    let direct_buffer_ptr = (**env).GetDirectBufferAddress.unwrap()(env, byte_buffer) as *const u8;
 
-    // call 'array()' to get the backing byte array (works only for non-direct byte buffers)
-    let method_name = CString::new("array").unwrap();
-    let method_sig = CString::new("()[B").unwrap();
-    let array_method_id = (**env).GetMethodID.unwrap()(env, byte_buffer_class, method_name.as_ptr(), method_sig.as_ptr());
-    let byte_array = (**env).CallObjectMethod.unwrap()(env, byte_buffer, array_method_id);
+    let slice = std::slice::from_raw_parts(direct_buffer_ptr.offset(position), remaining);
 
-    // extract elements from byte array
-    let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
-    let mut out_bytes = Vec::new();
-    let slice = std::slice::from_raw_parts(bytes as *const u8, remaining as usize);
-    out_bytes.extend_from_slice(slice);
-
-    (**env).ReleaseByteArrayElements.unwrap()(env, byte_array, bytes, jni_sys::JNI_ABORT);
+    let out_bytes = slice.to_vec();
 
     out_bytes
 }
@@ -581,6 +634,59 @@ pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
     );
 }
 
+pub unsafe fn to_java_websocket_open(
+    request_id: LiveId,
+    request: HttpRequest,
+    recv: *const Box<std::sync::mpsc::Sender<WebSocketMessage>>
+) {
+    let env = attach_jni_env();
+    let url = CString::new(request.url.clone()).unwrap();
+    let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "openWebSocket",
+        "(JLjava/lang/String;J)V",
+        request_id.get_value() as jni_sys::jlong,
+        url,
+        recv as jni_sys::jlong
+    );
+}
+
+pub unsafe fn to_java_websocket_send_message(request_id: LiveId, message: Vec<u8>) {
+    let env = attach_jni_env();
+    let message_bytes = (**env).NewByteArray.unwrap()(env, message.len() as i32);
+    (**env).SetByteArrayRegion.unwrap()(
+        env,
+        message_bytes,
+        0,
+        message.len() as i32,
+        message.as_ptr() as *const jni_sys::jbyte,
+    );
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "sendWebSocketMessage",
+        "(J[B)V",
+        request_id.get_value() as jni_sys::jlong,
+        message_bytes as jni_sys::jobject
+    );
+}
+
+pub unsafe fn to_java_websocket_close(request_id: LiveId) {
+    let env = attach_jni_env();
+
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "closeWebSocket",
+        "(J)V",
+        request_id.get_value() as jni_sys::jlong
+    );
+}
+
 pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
     unsafe {
         let env = attach_jni_env();
@@ -596,7 +702,7 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>, chunk_size: usize) {
+pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video_id: LiveId, video: Rc<Vec<u8>>) {
     let video_data = &*video;
 
     let java_body = (**env).NewByteArray.unwrap()(env, video_data.len() as i32);
@@ -612,10 +718,9 @@ pub unsafe fn to_java_initialize_video_decoding(env: *mut jni_sys::JNIEnv, video
         env,
         ACTIVITY,
         "initializeVideoDecoding",
-        "(J[BI)V",
+        "(J[B)V",
         video_id.get_value() as jni_sys::jlong,
-        java_body as jni_sys::jobject,
-        chunk_size
+        java_body as jni_sys::jobject
     );
 }
 

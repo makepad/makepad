@@ -12,7 +12,7 @@ use {
         Selection, Settings,
     },
     std::{
-        cell::{Ref, RefCell},
+        cell::{Cell, Ref, RefCell},
         collections::HashSet,
         fmt::Write,
         iter, mem,
@@ -28,10 +28,8 @@ pub struct Session {
     document: Document,
     layout: RefCell<SessionLayout>,
     selection_state: RefCell<SelectionState>,
-    wrap_column: Option<usize>,
-    folding_lines: HashSet<usize>,
-    folded_lines: HashSet<usize>,
-    unfolding_lines: HashSet<usize>,
+    wrap_column: Cell<Option<usize>>,
+    fold_state: RefCell<FoldState>,
     edit_receiver: Receiver<(Option<SelectionSet>, Vec<Edit>)>,
 }
 
@@ -53,16 +51,18 @@ impl Session {
                 wrap_data: (0..line_count).map(|_| None).collect(),
             }),
             selection_state: RefCell::new(SelectionState {
+                mode: SelectionMode::Simple,
                 selections: SelectionSet::new(),
                 last_added_selection_index: Some(0),
                 injected_char_stack: Vec::new(),
                 highlighted_delimiter_positions: HashSet::new(),
             }),
-            wrap_column: None,
-            folding_lines: HashSet::new(),
-            folded_lines: HashSet::new(),
-            unfolding_lines: HashSet::new(),
-
+            wrap_column: Cell::new(None),
+            fold_state: RefCell::new(FoldState {
+                folding_lines: HashSet::new(),
+                folded_lines: HashSet::new(),
+                unfolding_lines: HashSet::new(),
+            }),
             edit_receiver,
         };
         for line in 0..line_count {
@@ -94,7 +94,7 @@ impl Session {
     }
 
     pub fn wrap_column(&self) -> Option<usize> {
-        self.wrap_column
+        self.wrap_column.get()
     }
 
     pub fn selections(&self) -> Ref<'_, [Selection]> {
@@ -113,11 +113,11 @@ impl Session {
         })
     }
 
-    pub fn set_wrap_column(&mut self, wrap_column: Option<usize>) {
-        if self.wrap_column == wrap_column {
+    pub fn set_wrap_column(&self, wrap_column: Option<usize>) {
+        if self.wrap_column.get() == wrap_column {
             return;
         }
-        self.wrap_column = wrap_column;
+        self.wrap_column.set(wrap_column);
         let line_count = self.document.as_text().as_lines().len();
         for line in 0..line_count {
             self.update_wrap_data(line);
@@ -125,166 +125,181 @@ impl Session {
         self.update_y();
     }
 
-    pub fn fold(&mut self) {
+    pub fn fold(&self) {
+        let mut fold_state = self.fold_state.borrow_mut();
         let line_count = self.document().as_text().as_lines().len();
         for line_index in 0..line_count {
             let layout = self.layout();
             let line = layout.line(line_index);
             let indent_level = line.indent_column_count() / self.settings.tab_column_count;
             drop(layout);
-            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line_index) {
+            if indent_level >= self.settings.fold_level
+                && !fold_state.folded_lines.contains(&line_index)
+            {
                 self.layout.borrow_mut().fold_column[line_index] =
                     self.settings.fold_level * self.settings.tab_column_count;
-                self.unfolding_lines.remove(&line_index);
-                self.folding_lines.insert(line_index);
+                fold_state.unfolding_lines.remove(&line_index);
+                fold_state.folding_lines.insert(line_index);
             }
         }
     }
 
-    pub fn unfold(&mut self) {
-        for line in self.folding_lines.drain() {
-            self.unfolding_lines.insert(line);
+    pub fn unfold(&self) {
+        let fold_state = &mut *self.fold_state.borrow_mut();
+        for line in fold_state.folding_lines.drain() {
+            fold_state.unfolding_lines.insert(line);
         }
-        for line in self.folded_lines.drain() {
-            self.unfolding_lines.insert(line);
+        for line in fold_state.folded_lines.drain() {
+            fold_state.unfolding_lines.insert(line);
         }
     }
 
-    pub fn update_folds(&mut self) -> bool {
-        if self.folding_lines.is_empty() && self.unfolding_lines.is_empty() {
+    pub fn update_folds(&self) -> bool {
+        let mut fold_state_ref = self.fold_state.borrow_mut();
+        if fold_state_ref.folding_lines.is_empty() && fold_state_ref.unfolding_lines.is_empty() {
             return false;
         }
+        let mut layout = self.layout.borrow_mut();
         let mut new_folding_lines = HashSet::new();
-        for &line in &self.folding_lines {
-            self.layout.borrow_mut().scale[line] *= 0.9;
-            if self.layout.borrow().scale[line] < 0.1 + 0.001 {
-                self.layout.borrow_mut().scale[line] = 0.1;
-                self.folded_lines.insert(line);
+        let fold_state = &mut *fold_state_ref;
+        for &line in &fold_state.folding_lines {
+            layout.scale[line] *= 0.9;
+            if layout.scale[line] < 0.1 + 0.001 {
+                layout.scale[line] = 0.1;
+                fold_state.folded_lines.insert(line);
             } else {
                 new_folding_lines.insert(line);
             }
-            self.layout.borrow_mut().y.truncate(line + 1);
+            layout.y.truncate(line + 1);
         }
-        self.folding_lines = new_folding_lines;
+        fold_state.folding_lines = new_folding_lines;
         let mut new_unfolding_lines = HashSet::new();
-        for &line in &self.unfolding_lines {
-            let scale = self.layout.borrow().scale[line];
-            self.layout.borrow_mut().scale[line] = 1.0 - 0.9 * (1.0 - scale);
-            if self.layout.borrow().scale[line] > 1.0 - 0.001 {
-                self.layout.borrow_mut().scale[line] = 1.0;
+        for &line in &fold_state_ref.unfolding_lines {
+            let scale = layout.scale[line];
+            layout.scale[line] = 1.0 - 0.9 * (1.0 - scale);
+            if layout.scale[line] > 1.0 - 0.001 {
+                layout.scale[line] = 1.0;
             } else {
                 new_unfolding_lines.insert(line);
             }
-            self.layout.borrow_mut().y.truncate(line + 1);
+            layout.y.truncate(line + 1);
         }
-        self.unfolding_lines = new_unfolding_lines;
+        fold_state_ref.unfolding_lines = new_unfolding_lines;
+        drop(layout);
+        drop(fold_state_ref);
         self.update_y();
         true
     }
 
-    pub fn set_selection(&mut self, position: Position, affinity: Affinity, tap_count: u32) {
-        let mut selection= Selection::from(Cursor {
-            position,
-            affinity,
-            preferred_column_index: None,
-        });
-        if tap_count == 2 {
-            let text = self.document().as_text();
-            let lines = text.as_lines();
-            match lines[position.line_index][..position.byte_index].chars().next_back() {
-                Some(char) if char.is_opening_delimiter() => {
-                    let opening_delimiter_position = Position {
-                        line_index: position.line_index,
-                        byte_index: position.byte_index - char.len_utf8()
-                    };
-                    if let Some(closing_delimiter_position) = find_closing_delimiter(lines, position, char) {
-                        selection = Selection {
-                            cursor: Cursor::from(closing_delimiter_position),
-                            anchor: opening_delimiter_position,
-                        }
-                    }
-                }
-                _ => {}
-            }
-            drop(text);
-        };
+    pub fn set_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode) {
+        let selection = grow_selection(
+            Selection::from(Cursor {
+                position,
+                affinity,
+                preferred_column_index: None,
+            }),
+            self.document().as_text().as_lines(),
+            mode,
+            &self.settings.word_separators,
+        );
         let mut selection_state = self.selection_state.borrow_mut();
-        selection_state
-            .selections
-            .set_selection(selection);
+        selection_state.mode = mode;
+        selection_state.selections.set_selection(selection);
         selection_state.last_added_selection_index = Some(0);
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
-        self.document.force_new_group();
+        self.document().force_new_group();
     }
 
-    pub fn add_selection(&mut self, position: Position, affinity: Affinity, _tap_count: u32) {
-        let mut selection_state = self.selection_state.borrow_mut();
-        selection_state.last_added_selection_index = Some(
-            selection_state
-                .selections
-                .add_selection(Selection::from(Cursor {
-                    position,
-                    affinity,
-                    preferred_column_index: None,
-                })),
+    pub fn add_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode) {
+        let selection = grow_selection(
+            Selection::from(Cursor {
+                position,
+                affinity,
+                preferred_column_index: None,
+            }),
+            self.document().as_text().as_lines(),
+            mode,
+            &self.settings.word_separators,
         );
+        let mut selection_state = self.selection_state.borrow_mut();
+        selection_state.mode = mode;
+        selection_state.last_added_selection_index =
+            Some(selection_state.selections.add_selection(selection));
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
-        self.document.force_new_group();
+        self.document().force_new_group();
     }
 
-    pub fn move_to(&mut self, position: Position, affinity: Affinity) {
+    pub fn move_to(&self, position: Position, affinity: Affinity) {
         let mut selection_state = self.selection_state.borrow_mut();
         let last_added_selection_index = selection_state.last_added_selection_index.unwrap();
+        let mode = selection_state.mode;
         selection_state.last_added_selection_index = Some(
             selection_state
                 .selections
                 .update_selection(last_added_selection_index, |selection| {
-                    selection.update_cursor(|_| Cursor {
-                        position,
-                        affinity,
-                        preferred_column_index: None,
-                    })
+                    grow_selection(
+                        selection.update_cursor(|_| Cursor {
+                            position,
+                            affinity,
+                            preferred_column_index: None,
+                        }),
+                        self.document.as_text().as_lines(),
+                        mode,
+                        &self.settings.word_separators,
+                    )
                 }),
         );
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
-        self.document.force_new_group();
+        self.document().force_new_group();
     }
 
-    pub fn move_left(&mut self, reset_anchor: bool) {
+    pub fn move_left(&self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |selection, layout| {
             selection.update_cursor(|cursor| cursor.move_left(layout.as_text().as_lines()))
         });
     }
 
-    pub fn move_right(&mut self, reset_anchor: bool) {
+    pub fn move_right(&self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |selection, layout| {
             selection.update_cursor(|cursor| cursor.move_right(layout.as_text().as_lines()))
         });
     }
 
-    pub fn move_up(&mut self, reset_anchor: bool) {
+    pub fn move_up(&self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |selection, layout| {
             selection.update_cursor(|cursor| cursor.move_up(layout))
         });
     }
 
-    pub fn move_down(&mut self, reset_anchor: bool) {
+    pub fn move_down(&self, reset_anchor: bool) {
         self.modify_selections(reset_anchor, |selection, layout| {
             selection.update_cursor(|cursor| cursor.move_down(layout))
         });
     }
 
-    pub fn insert(&mut self, text: Text) {
+    pub fn home(&self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| cursor.home(layout.as_text().as_lines()))
+        });
+    }
+
+    pub fn end(&self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |selection, layout| {
+            selection.update_cursor(|cursor| cursor.end(layout.as_text().as_lines()))
+        });
+    }
+
+    pub fn insert(&self, text: Text) {
+
         let mut edit_kind = EditKind::Insert;
         let mut inject_char = None;
         let mut uninject_char = None;
-        {}
         if let Some(char) = text.to_single_char() {
             let mut selection_state = self.selection_state.borrow_mut();
             if char == ' ' {
@@ -384,7 +399,26 @@ impl Session {
         );
     }
 
-    pub fn enter(&mut self) {
+    pub fn paste(&self, text: Text) {
+        self.document.edit_selections(
+            self.id,
+            EditKind::Other,
+            &self.selection_state.borrow().selections,
+            &self.settings,
+            |mut editor, position, length| {
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                editor.apply_edit(Edit {
+                    change: Change::Insert(position, text.clone()),
+                    drift: Drift::Before,
+                });
+            },
+        );
+    }
+
+    pub fn enter(&self) {
         self.selection_state
             .borrow_mut()
             .injected_char_stack
@@ -462,7 +496,7 @@ impl Session {
         );
     }
 
-    pub fn delete(&mut self) {
+    pub fn delete(&self) {
         self.selection_state
             .borrow_mut()
             .injected_char_stack
@@ -543,7 +577,7 @@ impl Session {
         );
     }
 
-    pub fn backspace(&mut self) {
+    pub fn backspace(&self) {
         self.selection_state
             .borrow_mut()
             .injected_char_stack
@@ -654,7 +688,7 @@ impl Session {
         );
     }
 
-    pub fn indent(&mut self) {
+    pub fn indent(&self) {
         self.document.edit_linewise(
             self.id,
             EditKind::Other,
@@ -680,7 +714,7 @@ impl Session {
         );
     }
 
-    pub fn outdent(&mut self) {
+    pub fn outdent(&self) {
         self.document.edit_linewise(
             self.id,
             EditKind::Other,
@@ -727,14 +761,20 @@ impl Session {
         string
     }
 
-    pub fn undo(&mut self) -> bool {
-        self.selection_state.borrow_mut().injected_char_stack.clear();
+    pub fn undo(&self) -> bool {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document
             .undo(self.id, &self.selection_state.borrow().selections)
     }
 
-    pub fn redo(&mut self) -> bool {
-        self.selection_state.borrow_mut().injected_char_stack.clear();
+    pub fn redo(&self) -> bool {
+        self.selection_state
+            .borrow_mut()
+            .injected_char_stack
+            .clear();
         self.document
             .redo(self.id, &self.selection_state.borrow().selections)
     }
@@ -746,7 +786,7 @@ impl Session {
     }
 
     fn modify_selections(
-        &mut self,
+        &self,
         reset_anchor: bool,
         mut f: impl FnMut(Selection, &Layout) -> Selection,
     ) {
@@ -770,7 +810,7 @@ impl Session {
         drop(selection_state);
         drop(layout);
         self.update_highlighted_delimiter_positions();
-        self.document.force_new_group();
+        self.document().force_new_group();
     }
 
     fn update_after_edit(&self, selections: Option<SelectionSet>, edits: &[Edit]) {
@@ -838,7 +878,10 @@ impl Session {
             selection_state.selections = selections;
         } else {
             for edit in edits {
-                selection_state.selections.apply_edit(edit);
+                let last_added_selection_index = selection_state.last_added_selection_index;
+                selection_state.last_added_selection_index = selection_state
+                    .selections
+                    .apply_edit(edit, last_added_selection_index);
             }
         }
         drop(selection_state);
@@ -900,7 +943,7 @@ impl Session {
     }
 
     fn update_wrap_data(&self, line: usize) {
-        let wrap_data = match self.wrap_column {
+        let wrap_data = match self.wrap_column.get() {
             Some(wrap_column) => {
                 let layout = self.layout();
                 let line = layout.line(line);
@@ -954,12 +997,28 @@ pub struct SessionLayout {
     pub wrap_data: Vec<Option<WrapData>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SelectionMode {
+    Simple,
+    Word,
+    Line,
+    All,
+}
+
 #[derive(Debug)]
 struct SelectionState {
+    mode: SelectionMode,
     selections: SelectionSet,
     last_added_selection_index: Option<usize>,
     injected_char_stack: Vec<char>,
     highlighted_delimiter_positions: HashSet<Position>,
+}
+
+#[derive(Debug)]
+struct FoldState {
+    folding_lines: HashSet<usize>,
+    folded_lines: HashSet<usize>,
+    unfolding_lines: HashSet<usize>,
 }
 
 pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, String) {
@@ -973,6 +1032,127 @@ pub fn reindent(string: &str, f: impl FnOnce(usize) -> usize) -> (usize, usize, 
         indentation.len() - len.min(indentation.len()),
         new_indentation[len..].to_owned(),
     )
+}
+
+fn grow_selection(
+    selection: Selection,
+    lines: &[String],
+    mode: SelectionMode,
+    word_separators: &[char],
+) -> Selection {
+    match mode {
+        SelectionMode::Simple => selection,
+        SelectionMode::Word => {
+            let position = selection.cursor.position;
+            let start_byte_index = lines[position.line_index]
+                .find_prev_word_boundary(position.byte_index, word_separators);
+            let end_byte_index = lines[position.line_index]
+                .find_next_word_boundary(position.byte_index, word_separators);
+            if selection.anchor < selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: end_byte_index,
+                        },
+                        affinity: Affinity::Before,
+                        preferred_column_index: None,
+                    },
+                    anchor: selection.anchor,
+                }
+            } else if selection.anchor > selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: start_byte_index,
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: selection.anchor,
+                }
+            } else {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: end_byte_index,
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: position.line_index,
+                        byte_index: start_byte_index,
+                    },
+                }
+            }
+        }
+        SelectionMode::Line => {
+            let position = selection.cursor.position;
+            if selection.anchor < selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: lines[position.line_index].len(),
+                        },
+                        affinity: Affinity::Before,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: selection.anchor.line_index,
+                        byte_index: 0,
+                    },
+                }
+            } else if selection.anchor > selection.cursor.position {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: 0,
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: selection.anchor.line_index,
+                        byte_index: lines[selection.anchor.line_index].len(),
+                    },
+                }
+            } else {
+                Selection {
+                    cursor: Cursor {
+                        position: Position {
+                            line_index: position.line_index,
+                            byte_index: lines[position.line_index].len(),
+                        },
+                        affinity: Affinity::After,
+                        preferred_column_index: None,
+                    },
+                    anchor: Position {
+                        line_index: position.line_index,
+                        byte_index: 0,
+                    },
+                }
+            }
+        }
+        SelectionMode::All => Selection {
+            cursor: Cursor {
+                position: Position {
+                    line_index: lines.len() - 1,
+                    byte_index: lines[lines.len() - 1].len(),
+                },
+                affinity: Affinity::After,
+                preferred_column_index: None,
+            },
+            anchor: Position {
+                line_index: 0,
+                byte_index: 0,
+            },
+        },
+    }
 }
 
 fn new_indentation(column_count: usize) -> String {

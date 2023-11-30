@@ -9,6 +9,9 @@ mod live_prims;
 mod cx;
 mod cx_api;
 
+#[macro_use]
+pub mod log;
+
 pub mod live_traits;
 pub mod live_cx;
 pub mod live_atomic;
@@ -36,6 +39,10 @@ mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
+mod performance_stats;
+pub mod studio;
+
+pub mod web_socket;
 
 pub mod audio_stream;
 
@@ -48,7 +55,7 @@ mod app_main;
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
@@ -64,10 +71,9 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
-    makepad_shader_compiler::makepad_error_log,
     //makepad_image_formats::image,
     makepad_derive_live::*,
-    makepad_error_log::*,
+    log::*,
     makepad_math::*,
     makepad_live_id::*,
     app_main::AppMain,
@@ -140,6 +146,7 @@ pub use {
         audio::*,
         thread::*,
         video::*,
+        web_socket::{WebSocket,WebSocketMessage},
         event::{
             VirtualKeyboardEvent,
             HttpRequest,
@@ -209,7 +216,7 @@ pub use {
             Texture,
             TextureId,
             TextureFormat,
-            TextureDesc
+            TextureSize
         },
         live_prims::{
             LiveDependency,

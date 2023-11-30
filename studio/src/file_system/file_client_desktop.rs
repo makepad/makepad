@@ -6,19 +6,20 @@ use {
         makepad_file_server::{FileServerConnection, FileServer},
     },
     std::{
-        env,
+        //env,
         io::{Read, Write},
-        net::{TcpListener, TcpStream},
+        net::{ TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
-        path::PathBuf
+        path::Path,
+        //path::PathBuf
     },
 };
 
 #[derive(Default)]
 pub struct FileClient {
 //    bind: Option<String>,
-    path: String,
+    //path: String,
     inner: Option<FileClientInner>
 }
 
@@ -29,9 +30,9 @@ pub struct FileClientInner {
 }
 
 impl FileClient {
-    pub fn init(&mut self, _cx:&mut Cx){
+    pub fn init(&mut self, _cx:&mut Cx, path:&Path){
         if self.inner.is_none() {
-            self.inner = Some(FileClientInner::new_with_local_server(&self.path))
+            self.inner = Some(FileClientInner::new_with_local_server(path))
         }
     }
     
@@ -69,14 +70,23 @@ impl FileClient {
 }
 
 impl FileClientInner {
-    pub fn new_with_local_server(subdir:&str) -> Self {
+    pub fn new_with_local_server(path:&Path) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         let action_signal = Signal::new();
         let (action_sender, action_receiver) = mpsc::channel();
         
-        let base_path = env::current_dir().unwrap();
-        let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
-        let mut server = FileServer::new(final_path);
+        /*let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+
+        let base_path = env::current_dir().unwrap().join(root);
+        let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());*/
+        
+        let mut server = FileServer::new(path);
         spawn_local_request_handler(
             request_receiver,
             server.connect(Box::new({
@@ -90,7 +100,7 @@ impl FileClientInner {
             action_signal.clone(),
             action_sender,
         );
-        spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
+        //spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
         
         Self {
             request_sender,
@@ -116,15 +126,15 @@ impl FileClientInner {
     }
     
 }
-
-fn spawn_connection_listener(listener: TcpListener, mut server: FileServer) {
+/*
+fn _spawn_connection_listener(listener: TcpListener, mut server: FileServer) {
     thread::spawn(move || {
         log!("Server listening on {}", listener.local_addr().unwrap());
         for stream in listener.incoming() {
             let stream = stream.unwrap();
             log!("Incoming connection from {}", stream.peer_addr().unwrap());
             let (action_sender, action_receiver) = mpsc::channel();
-            let connection = server.connect(Box::new({
+            let _connection = server.connect(Box::new({
                 let action_sender = action_sender.clone();
                 move | notification | {
                     action_sender.send(FileClientAction::Notification(notification)).unwrap();
@@ -138,9 +148,9 @@ fn spawn_connection_listener(listener: TcpListener, mut server: FileServer) {
             spawn_response_or_notification_sender(action_receiver, stream);
         }
     });
-}
+}*/
 
-fn spawn_remote_request_handler(
+fn _spawn_remote_request_handler(
     connection: FileServerConnection,
     mut stream: TcpStream,
     action_sender: Sender<FileClientAction>,
@@ -158,7 +168,7 @@ fn spawn_remote_request_handler(
     });
 }
 
-fn spawn_response_or_notification_sender(
+fn _spawn_response_or_notification_sender(
     action_receiver: Receiver<FileClientAction>,
     mut stream: TcpStream,
 ) {

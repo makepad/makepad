@@ -86,15 +86,18 @@ extern "C" {
     pub static UIKeyboardWillChangeFrameNotification: ObjcId;
     pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
     pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
-    
-    pub fn UIApplicationMain(
+}
+
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
+#[link(name = "UIKit", kind = "framework")]
+extern "C" {
+pub fn UIApplicationMain(
         argc: i32,
         argv: *mut *mut i8,
         principal_class_name: ObjcId,
         delegate_class_name: ObjcId,
     );
 }
-
 
 #[link(name = "Foundation", kind = "framework")]
 extern {
@@ -103,7 +106,8 @@ extern {
     pub fn dispatch_release(object: ObjcId);
     pub fn _NSGetExecutablePath(buf: *mut u8, buf_size: &mut u32);
 
-
+    pub fn NSLog(format: ObjcId, ...);
+    
     pub static NSNotificationCenter: ObjcId;
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
@@ -576,12 +580,17 @@ pub struct MTLClearColor {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum MTLPixelFormat {
-    RGBA8Unorm = 70,
+    //RGBA8Unorm = 70,
+    R8Unorm = 10,
+    RG8Unorm   = 30,
+    R32Float = 55,
     BGRA8Unorm = 80,
+    RGBA16Float  = 115,
+    RGBA32Float = 125,
     Depth32Float = 252,
-    Stencil8 = 253,
-    Depth24Unorm_Stencil8 = 255,
-    Depth32Float_Stencil8 = 260,
+    //Stencil8 = 253,
+    //Depth24Unorm_Stencil8 = 255,
+    //Depth32Float_Stencil8 = 260,
 }
 
 #[repr(u64)]

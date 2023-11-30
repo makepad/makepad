@@ -19,6 +19,7 @@ use {
         event::Event,
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
+        os::cx_stdin::{PollTimers},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
     }
@@ -320,16 +321,7 @@ impl Cx {
                 CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
                 },
-                CxOsOp::WebSocketOpen{request_id:_, request:_}=>{
-                    todo!()
-                }
-                CxOsOp::WebSocketSendBinary{request_id:_, data:_}=>{
-                    todo!()
-                }
-                CxOsOp::WebSocketSendString{request_id:_, data:_}=>{
-                    todo!()
-                },
-                CxOsOp::InitializeVideoDecoding(_, _, _) => todo!(),
+                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
                 CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
                 CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
                 CxOsOp::CleanupVideoDecoding(_) => todo!(),
@@ -354,6 +346,7 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
+    pub (crate) stdin_timers: PollTimers,
 
     // HACK(eddyb) generalize this to EGL, properly.
     pub(super) opengl_cx: Option<OpenglCx>,

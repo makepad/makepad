@@ -46,7 +46,7 @@ impl ViewOptimize {
 
 #[derive(Live)]
 pub struct View { // draw info per UI element
-    #[live] draw_bg: DrawColor,
+    #[live] pub draw_bg: DrawColor,
     
     #[live(false)] show_bg: bool,
     
@@ -633,6 +633,9 @@ impl View {
                         });
                         let texture_cache = self.texture_cache.as_mut().unwrap();
                         //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
+                        texture_cache.color_texture.set_format(cx, TextureFormat::RenderBGRAu8{
+                            size:TextureSize::Auto
+                        });
                         texture_cache.pass.add_color_texture(cx, &texture_cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
                     }
                     let texture_cache = self.texture_cache.as_mut().unwrap();
@@ -757,4 +760,3 @@ impl View {
         self.draw_order.len()
     }
 }
-

@@ -1,14 +1,10 @@
 use crate::{
     makepad_live_id::LiveId,
-    makepad_code_editor::text::{Position, Length},
-    makepad_micro_serde::{SerBin, DeBin, DeBinErr},
+    makepad_platform::log::LogLevel,
+    makepad_code_editor::text::{Position},
 };
 
 
-#[derive(PartialEq, Clone, Copy, Debug, SerBin, DeBin)]
-pub struct BuildCmdId(pub u64);
-
-#[cfg(not(target_os="windows"))]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildTarget {
     Release,
@@ -16,13 +12,18 @@ pub enum BuildTarget {
     ReleaseStudio,
     DebugStudio,
     Profiler,
-    IosSim{org:String, app:String},
-    IosDevice{org:String, app:String},
+    IosSim,
+    IosDevice,
+    TvosSim,
+    TvosDevice,
     Android,
-    WebAssembly
+    WebAssembly,
+    CheckMacos,
+    CheckWindows,
+    CheckLinux,
+    CheckAll,
 }
 
-#[cfg(not(target_os="windows"))]
 impl BuildTarget {
     pub fn runs_in_studio(&self)->bool{
         match self{
@@ -39,24 +40,35 @@ impl BuildTarget {
     pub const PROFILER:u64 = 4;
     pub const IOS_SIM:u64 = 5;
     pub const IOS_DEVICE:u64 = 6;
-    pub const ANDROID:u64 = 7;
-    pub const WEBASSEMBLY:u64 = 8;
-    pub fn len() -> u64 {9}
-    pub fn name(idx: u64) -> &'static str {
-        match idx {
-            Self::RELEASE_STUDIO=> "Release Studio",
-            Self::DEBUG_STUDIO=> "Debug Studio",
-            Self::RELEASE=> "Release",
-            Self::DEBUG=> "Debug",
-            Self::PROFILER=> "Profiler",
-            Self::IOS_SIM=> "iOS Simulator",
-            Self::IOS_DEVICE=> "iOS Device",
-            Self::ANDROID=> "Android",
-            Self::WEBASSEMBLY=> "WebAssembly",
-            _=>"Unknown"
+    pub const TVOS_SIM:u64 = 7;
+    pub const TVOS_DEVICE:u64 = 8;
+    pub const ANDROID:u64 = 9;
+    pub const WEBASSEMBLY:u64 = 10;
+    pub const CHECK_MACOS:u64 = 11;
+    pub const CHECK_WINDOWS:u64 = 12;
+    pub const CHECK_LINUX:u64 = 13;
+    pub const CHECK_ALL:u64 = 14;
+    pub fn len() -> u64 {Self::CHECK_ALL+1}
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::ReleaseStudio=>"Release Studio",
+            Self::DebugStudio=>"Debug Studio",
+            Self::Release=>"Release",
+            Self::Debug=>"Debug",
+            Self::Profiler=>"Profiler",
+            Self::IosSim=>"iOS Simulator",
+            Self::IosDevice=>"iOS Device",
+            Self::TvosSim=>"TVOs Simulator",
+            Self::TvosDevice=>"TVOs Device",
+            Self::Android=>"Android",
+            Self::WebAssembly=>"WebAssembly",
+            Self::CheckMacos=>"Check Macos",
+            Self::CheckWindows=>"Check Windows",
+            Self::CheckLinux=>"Check Linux",
+            Self::CheckAll=>"Check All",
         }
     }
-    pub fn id(&self) -> u64 {
+    pub fn as_id(&self) -> u64 {
         match self {
             Self::ReleaseStudio=>Self::RELEASE_STUDIO,
             Self::DebugStudio=>Self::DEBUG_STUDIO,
@@ -65,61 +77,34 @@ impl BuildTarget {
             Self::Profiler=>Self::PROFILER,
             Self::IosSim{..}=>Self::IOS_SIM,
             Self::IosDevice{..}=>Self::IOS_DEVICE,
+            Self::TvosSim{..}=>Self::TVOS_SIM,
+            Self::TvosDevice{..}=>Self::TVOS_DEVICE,
             Self::Android=>Self::ANDROID,
-            Self::WebAssembly=>Self::WEBASSEMBLY
+            Self::WebAssembly=>Self::WEBASSEMBLY,
+            Self::CheckMacos=>Self::CHECK_MACOS,
+            Self::CheckWindows=>Self::CHECK_WINDOWS,
+            Self::CheckLinux=>Self::CHECK_LINUX,
+            Self::CheckAll=>Self::CHECK_ALL
         }
     }
-}
-
-#[cfg(target_os="windows")]
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BuildTarget {
-    Release,
-    Debug,
-    Profiler,
-    IosSim{org:String, app:String},
-    IosDevice{org:String, app:String},
-    Android,
-    WebAssembly
-}
-
-#[cfg(target_os="windows")]
-impl BuildTarget {
-    pub fn runs_in_studio(&self)->bool{
-        match self{
-            _=>false
-        }
-    }
-    
-    pub const RELEASE:u64 = 0;
-    pub const DEBUG:u64 = 1;
-    pub const PROFILER:u64 = 2;
-    pub const IOS_SIM:u64 = 3;
-    pub const IOS_DEVICE:u64 = 4;
-    pub const ANDROID:u64 = 5;
-    pub const WEBASSEMBLY:u64 = 6;
-    pub fn len() -> u64 {7}
-    pub fn name(idx: u64) -> &'static str {
-        match idx {
-            Self::RELEASE=> "Release",
-            Self::DEBUG=> "Debug",
-            Self::PROFILER=> "Profiler",
-            Self::IOS_SIM=> "iOS Simulator",
-            Self::IOS_DEVICE=> "iOS Device",
-            Self::ANDROID=> "Android",
-            Self::WEBASSEMBLY=> "WebAssembly",
-            _=>"Unknown"
-        }
-    }
-    pub fn id(&self) -> u64 {
-        match self {
-            Self::Release=>Self::RELEASE,
-            Self::Debug=>Self::DEBUG,
-            Self::Profiler=>Self::PROFILER,
-            Self::IosSim{..}=>Self::IOS_SIM,
-            Self::IosDevice{..}=>Self::IOS_DEVICE,
-            Self::Android=>Self::ANDROID,
-            Self::WebAssembly=>Self::WEBASSEMBLY
+    pub fn from_id(tgt:u64) -> Self {
+        match tgt {
+            Self::RELEASE => Self::Release,
+            Self::DEBUG => Self::Debug,
+            Self::RELEASE_STUDIO => Self::ReleaseStudio,
+            Self::DEBUG_STUDIO => Self::DebugStudio,
+            Self::PROFILER => Self::Profiler,
+            Self::IOS_SIM => Self::IosSim,
+            Self::IOS_DEVICE => Self::IosDevice,
+            Self::TVOS_SIM => Self::TvosSim,
+            Self::TVOS_DEVICE => Self::TvosDevice,
+            Self::ANDROID => Self::Android,
+            Self::WEBASSEMBLY => Self::WebAssembly,
+            Self::CHECK_MACOS => Self::CheckMacos,
+            Self::CHECK_WINDOWS => Self::CheckWindows,
+            Self::CHECK_LINUX => Self::CheckLinux,
+            Self::CHECK_ALL => Self::CheckAll,
+            _ => panic!()
         }
     }
 }
@@ -133,24 +118,14 @@ pub struct BuildProcess{
 
 impl BuildProcess{
     pub fn as_id(&self)->LiveId{
-        LiveId::from_str(&self.binary).bytes_append(&self.target.id().to_be_bytes())
+        LiveId::from_str(&self.binary).bytes_append(&self.target.as_id().to_be_bytes())
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct BuildCmdWrap {
-    pub cmd_id: BuildCmdId,
+    pub cmd_id: LiveId,
     pub cmd: BuildCmd
-}
-
-impl BuildCmdId{
-    pub fn wrap_msg(&self, item:LogItem)->LogItemWrap{
-        LogItemWrap{
-            cmd_id: *self,
-            item,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -162,31 +137,22 @@ pub enum BuildCmd {
 
 #[derive(Clone)]
 pub struct LogItemWrap {
-    pub cmd_id: BuildCmdId,
+    pub cmd_id: LiveId,
     pub item: LogItem
-}
-
-#[derive(Clone, PartialEq, Eq, Copy, Debug, SerBin, DeBin)]
-pub enum LogItemLevel{
-    Warning,
-    Error,
-    Log,
-    Wait,
-    Panic,
 }
 
 #[derive(Clone, Debug)]
 pub struct LogItemLocation{
-    pub level: LogItemLevel,
+    pub level: LogLevel,
     pub file_name: String,
     pub start: Position,
-    pub length: Length,
-    pub msg: String
+    pub end: Position,
+    pub message: String
 }
 
 #[derive(Clone, Debug)]
 pub struct LogItemBare{
-    pub level: LogItemLevel,
+    pub level: LogLevel,
     pub line: String,
 }
 

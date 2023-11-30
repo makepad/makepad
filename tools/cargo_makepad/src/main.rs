@@ -1,10 +1,12 @@
 mod android;
 mod wasm;
 mod utils;
-mod ios;
+mod apple;
+mod check;
 use android::*;
 use wasm::*;
-use ios::*;
+use apple::*;
+use check::*;
 pub use makepad_shell;
 
 fn show_help(err: &str){
@@ -26,11 +28,11 @@ fn show_help(err: &str){
     println!();
     println!("       --port=8080                               The port to run the wasm webserver");
     println!();
-    println!("iOS Commands:");
+    println!("Apple iOS/TVOs Commands:");
     println!();
-    println!("    ios install-toolchain                       Install the toolchain needed for ios with rustup");
-    println!("    ios --org=x --app=x run-sim <cargo args>    runs the ios project on the aarch64 simulator");
-    println!("    ios --org=x --app=x run-real <cargo args>   runs the ios project on a real device");
+    println!("    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup");
+    println!("    apple <ios|tvos> --org=x --app=x run-sim <cargo args>    runs the project on the aarch64 simulator");
+    println!("    apple <ios|tvos> --org=x --app=x run-device <cargo args>   runs the project on a real device");
     println!(" in order for makepad to be able to install an ios application on a real device a provisioning");
     println!(" profile is needed. To create one make an empty application in xcode and give it an organisation");
     println!(" name and product name you copy exactly and without spaces/odd characters into --org=x and --app=x");
@@ -41,7 +43,6 @@ fn show_help(err: &str){
     println!("                         --signing-identity=");
     println!("                         --provisioning-profile=");
     println!("                         --device-uuid=");
-    println!("                         --ios=17");
     println!();     
     println!("Android commands:");
     println!();
@@ -96,7 +97,10 @@ fn main() {
         "wasm" => if let Err(e) = handle_wasm(&args[1..]){
             println!("Got error: {}", e);
         }
-        "ios" => if let Err(e) = handle_ios(&args[1..]){
+        "apple" => if let Err(e) = handle_apple(&args[1..]){
+            println!("Got error: {}", e);
+        }
+        "check" => if let Err(e) = handle_check(&args[1..]){
             println!("Got error: {}", e);
         }
         _=> show_help("not implemented yet")

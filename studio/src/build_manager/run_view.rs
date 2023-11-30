@@ -1,5 +1,4 @@
 use crate::{
-    makepad_draw::*,
     makepad_widgets::*,
     makepad_platform::os::cx_stdin::*,
     build_manager::build_manager::BuildManager,
@@ -15,13 +14,19 @@ live_design!{
             instance recompiling: 0.0
             instance started: 0.0
             instance tex_scale: vec2(0.0, 0.0),
+            instance tex_size: vec2(0.0, 0.0),
             fn pixel(self) -> vec4 {
-                //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
-                let fb = sample2d_rt(self.tex, self.pos * self.tex_scale)
+                //return sample2d_rt(self.tex, self.pos * self.tex_scale);
+                let tp1 = sample2d_rt(self.tex, vec2(0.0,0.0))
+                let tp2 = sample2d_rt(self.tex, vec2(1.0/self.tex_size.x,0.0));
+                let tp = vec2(tp1.r*65280.0 + tp1.b*255.0,tp2.r*65280.0 + tp2.b*255.0);
+
+                let tex_scale = tp / self.tex_size;
+                let fb = sample2d_rt(self.tex, self.pos * tex_scale)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }
-                return mix(#2,mix(fb, #4, self.recompiling * 0.4),self.started);
+                return mix(fb, #4, self.recompiling * 0.4);
             }
         }
         animator: {
@@ -57,7 +62,6 @@ pub struct RunView {
     #[walk] walk: Walk,
     #[rust] draw_state: DrawStateWrap<Walk>,
     #[animator] animator: Animator,
-    #[live] tex_scale: Vec2,
     #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
     #[rust] last_size: DVec2,
@@ -80,6 +84,15 @@ impl LiveHook for RunView {
         self.time = 0.0;
         self.draw_app.set_texture(0, &cx.null_texture());
     }
+    
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc{..} = from{
+            self.last_size = dvec2(0.0,0.0);
+            self.animator_cut(cx, id!(started.on));
+        }
+    }
+    
+    
 }
 
 impl RunView {
@@ -102,8 +115,6 @@ impl RunView {
     }
     
     pub fn pump_event_loop(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
-        
-        self.animator_handle_event(cx, event);
         if let Some(te) = self.timer.is_event(event) {
             self.run_tick(cx, te.time.unwrap_or(0.0), run_view_id, manager)
         }
@@ -113,13 +124,14 @@ impl RunView {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
-        
         self.animator_handle_event(cx, event);
-        
         // lets send mouse events
         match event.hits(cx, self.draw_app.area()) {
             Hit::FingerDown(_) => {
                 cx.set_key_focus(self.draw_app.area());
+            }
+            Hit::TextInput(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
             }
             Hit::KeyDown(e) => {
                 manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
@@ -184,8 +196,8 @@ impl RunView {
                 self.last_size = Default::default();
                 self.redraw(cx);
             }
-            &StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
-                if let Some(v) = manager.active.builds.values_mut().find(|v| v.run_view_id == run_view_id) {
+            StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
+                if let Some(v) = manager.active.builds.get_mut(&run_view_id){
                     // Only allow presenting images in the current host swapchain
                     // (or the previous one, before any draws on the current one),
                     // and look them up by their unique IDs, to avoid rendering
@@ -193,10 +205,15 @@ impl RunView {
                     let mut try_present_through = |swapchain: &Option<Swapchain<Texture>>| {
                         let swapchain = swapchain.as_ref()?;
                         let drawn = swapchain.get_image(presentable_draw.target_id)?;
+
                         self.draw_app.set_texture(0, &drawn.image);
                         self.draw_app.draw_vars.set_var_instance(cx, id!(tex_scale), &[
                             (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
                             (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
+                        ]);
+                        self.draw_app.draw_vars.set_var_instance(cx, id!(tex_size), &[
+                            (swapchain.alloc_width as f32),
+                            (swapchain.alloc_height as f32),
                         ]);
 
                         if !self.started {
@@ -204,7 +221,7 @@ impl RunView {
                             self.animator_play(cx, id!(started.on));
                         }
                         self.redraw_countdown = 20;
-
+                       
                         Some(())
                     };
 
@@ -245,7 +262,6 @@ impl RunView {
         if self.last_size != rect.size {
             self.last_size = rect.size;
             self.redraw_countdown = 20;
-
             // FIXME(eddyb) there's no type or naming scheme that tells apart
             // DPI-scaled and non-DPI-scaled values (other than float-vs-int).
             let DVec2 { x: inner_width, y: inner_height } = self.last_size;
@@ -261,8 +277,8 @@ impl RunView {
 
             let min_width = ((inner_width * dpi_factor).ceil() as u32).max(1);
             let min_height = ((inner_height * dpi_factor).ceil() as u32).max(1);
-            let active_build_needs_new_swapchain = manager.active.builds.values_mut()
-                .find(|v| v.run_view_id == run_view_id)
+            let active_build_needs_new_swapchain = manager.active.builds
+                .get_mut(&run_view_id)
                 .filter(|v| v.aux_chan_host_endpoint.is_some())
                 .filter(|v| {
                     v.swapchain.as_ref().map(|swapchain| {
@@ -297,10 +313,10 @@ impl RunView {
 
                 // Prepare a version of the swapchain for cross-process sharing.
                 let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
-                    pi.image.set_desc(cx, TextureDesc {
-                        format: TextureFormat::SharedBGRA(pi.id),
-                        width: Some(swapchain.alloc_width as usize),
-                        height: Some(swapchain.alloc_height as usize),
+                    pi.image.set_format(cx, TextureFormat::SharedBGRAu8 {
+                        id: pi.id,
+                        width: swapchain.alloc_width as usize,
+                        height: swapchain.alloc_height as usize,
                     });
                     cx.share_texture_for_presentable_image(&pi.image)
                 });
@@ -339,7 +355,6 @@ impl RunView {
                 }
             }
         }
-        
         self.draw_app.draw_abs(cx, rect);
     }
 }

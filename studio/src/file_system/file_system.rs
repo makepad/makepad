@@ -1,10 +1,9 @@
 use {
     std::collections::{HashMap, hash_map},
+    std::path::Path,
     crate::{
         makepad_code_editor::{Document, decoration::{Decoration, DecorationSet}, Session},
-        makepad_platform::*,
         makepad_platform::makepad_live_compiler::LiveFileChange,
-        makepad_draw::*,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         file_system::FileClient,
@@ -62,12 +61,16 @@ pub enum FileSystemAction {
 }
 
 impl FileSystem {
-    pub fn init(&mut self, cx: &mut Cx) {
-        self.file_client.init(cx);
+    pub fn init(&mut self, cx: &mut Cx, path:&Path) {
+        self.file_client.init(cx, path);
+        self.reload_file_tree();
+    }
+    
+    pub fn reload_file_tree(&mut self) {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
-    pub fn remove_tab(&mut self, tab_id:LiveId){
+    pub fn remove_tab(&mut self, tab_id: LiveId) {
         self.tab_id_to_file_node_id.remove(&tab_id);
         self.tab_id_to_session.remove(&tab_id);
     }
@@ -76,9 +79,9 @@ impl FileSystem {
         self.path_to_file_node_id.get(path).cloned()
     }
     
-    pub fn file_node_id_to_tab_id(&self, file_node: FileNodeId)->Option<LiveId>{
-        for (tab, id) in &self.tab_id_to_file_node_id{
-            if *id == file_node{
+    pub fn file_node_id_to_tab_id(&self, file_node: FileNodeId) -> Option<LiveId> {
+        for (tab, id) in &self.tab_id_to_file_node_id {
+            if *id == file_node {
                 return Some(*tab)
             }
         }
@@ -105,6 +108,8 @@ impl FileSystem {
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, dispatch_action: &mut dyn FnMut(&mut Cx, FileSystemAction)) {
+        
+        
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
@@ -114,27 +119,29 @@ impl FileSystem {
                         dispatch_action(cx, FileSystemAction::TreeLoaded)
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
-                    FileResponse::OpenFile(result) => match result {
-                        Ok((_unix_path, data, id)) => {
-                            let file_id = FileNodeId(LiveId(id));
-                            let dock = ui.dock(id!(dock));
-                            for (tab_id, file_id) in &self.tab_id_to_file_node_id {
-                                if id == file_id.0.0 {
-                                    dock.redraw_tab(cx, *tab_id);
+                    FileResponse::OpenFile(result) => {
+                        match result {
+                            Ok((_unix_path, data, id)) => {
+                                let file_id = FileNodeId(LiveId(id));
+                                let dock = ui.dock(id!(dock));
+                                for (tab_id, file_id) in &self.tab_id_to_file_node_id {
+                                    if id == file_id.0.0 {
+                                        dock.redraw_tab(cx, *tab_id);
+                                    }
                                 }
+                                if let Some(OpenDoc::Decorations(dec)) = self.open_documents.get(&file_id) {
+                                    let dec = dec.clone();
+                                    self.open_documents.insert(file_id, OpenDoc::Document(Document::new(data.into(), dec)));
+                                }else {panic!()}
+                                
+                                ui.redraw(cx);
                             }
-                            if let Some(OpenDoc::Decorations(dec)) = self.open_documents.get(&file_id) {
-                                let dec = dec.clone();
-                                self.open_documents.insert(file_id, OpenDoc::Document(Document::new(data.into(), dec)));
-                            }else {panic!()}
-                            
-                            ui.redraw(cx);
-                        }
-                        Err(FileError::CannotOpen(_unix_path)) => {
-                        }
-                        Err(FileError::Unknown(err)) => {
-                            log!("File error unknown {}", err);
-                            // ignore
+                            Err(FileError::CannotOpen(_unix_path)) => {
+                            }
+                            Err(FileError::Unknown(err)) => {
+                                log!("File error unknown {}", err);
+                                // ignore
+                            }
                         }
                     }
                     FileResponse::SaveFile(result) => match result {
@@ -181,17 +188,33 @@ impl FileSystem {
             }
         }
     }
+
+    pub fn handle_sessions(&mut self) {
+        for session in self.tab_id_to_session.values_mut() {
+            session.handle_changes();
+        }
+    }
     
     pub fn request_open_file(&mut self, tab_id: LiveId, file_id: FileNodeId) {
         // ok lets see if we have a document
         // ifnot, we create a new one
         self.tab_id_to_file_node_id.insert(tab_id, file_id);
-        
-        if self.open_documents.get(&file_id).is_none() {
-            self.open_documents.insert(file_id, OpenDoc::Decorations(DecorationSet::new()));
-            let path = self.file_node_path(file_id);
-            self.file_client.send_request(FileRequest::OpenFile(path, file_id.0.0));
-        }
+        // move decorations to doc
+        let dec = match self.open_documents.get(&file_id){
+            Some(OpenDoc::Decorations(_))=> if let Some(OpenDoc::Decorations(dec)) = self.open_documents.remove(&file_id){
+                dec
+            }
+            else{
+                panic!()
+            },
+            Some(OpenDoc::Document(_))=>{
+                return
+            }
+            None=>DecorationSet::new()
+        };
+        self.open_documents.insert(file_id, OpenDoc::Decorations(dec));
+        let path = self.file_node_path(file_id);
+        self.file_client.send_request(FileRequest::OpenFile(path, file_id.0.0));
     }
     
     
@@ -295,18 +318,7 @@ impl FileSystem {
     }
     
     pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
-        // alright so. what do we do.
-        // we first connect colliding names
-        // and then add more path elements till they dont
-        for (outer_tab_id, outer_id) in &self.tab_id_to_file_node_id {
-            for (inner_tab_id, inner_id) in &self.tab_id_to_file_node_id {
-                if outer_tab_id != inner_tab_id && outer_id == inner_id {
-                    // here we have multiple views
-                }
-            }
-        }
-        
-        let mut min_diff:HashMap<FileNodeId,usize> = HashMap::new();
+        let mut min_diff: HashMap<FileNodeId, usize> = HashMap::new();
         let mut outer_path = Vec::new();
         let mut inner_path = Vec::new();
         for (_outer_tab_id, outer_file_id) in &self.tab_id_to_file_node_id {
@@ -316,38 +328,42 @@ impl FileSystem {
                 outer_path.push(&edge.name);
                 outer = &self.file_nodes[edge.file_node_id];
             }
-            if min_diff.get(&outer_file_id).is_none(){
-                min_diff.insert(*outer_file_id,0);
+            if min_diff.get(&outer_file_id).is_none() {
+                min_diff.insert(*outer_file_id, 0);
             }
             for (_inner_tab_id, inner_file_id) in &self.tab_id_to_file_node_id {
+                if inner_file_id == outer_file_id{
+                    continue; 
+                }
                 let mut inner = &self.file_nodes[*inner_file_id];
                 inner_path.clear();
                 while let Some(edge) = &inner.parent_edge {
                     inner_path.push(&edge.name);
                     inner = &self.file_nodes[edge.file_node_id];
                 }
-                for i in 0..inner_path.len().min(outer_path.len()){
-                    if inner_path[i] != outer_path[i]{
+                for i in 0..inner_path.len().min(outer_path.len()) {
+                    if inner_path[i] != outer_path[i] {
                         // store the min depth at which these ones are different
-                        if let Some(min) = min_diff.get_mut(&inner_file_id){
+                        if let Some(min) = min_diff.get_mut(&inner_file_id) {
                             *min = (*min).max(i);
                         }
-                        else{
+                        else {
                             min_diff.insert(*inner_file_id, i);
                         }
-                        if let Some(min) = min_diff.get_mut(&outer_file_id){
+                        if let Some(min) = min_diff.get_mut(&outer_file_id) {
                             *min = (*min).max(i);
                         }
-                        else{
+                        else {
                             min_diff.insert(*outer_file_id, i);
                         }
+                        break;
                     }
                 }
             }
         }
         // now loop over the tabs
         for (tab_id, file_id) in &self.tab_id_to_file_node_id {
-            if let Some(min) = min_diff.get(&file_id){
+            if let Some(min) = min_diff.get(&file_id) {
                 let mut inner = &self.file_nodes[*file_id];
                 inner_path.clear();
                 while let Some(edge) = &inner.parent_edge {
@@ -355,8 +371,8 @@ impl FileSystem {
                     inner = &self.file_nodes[edge.file_node_id];
                 }
                 let mut name = String::new();
-                for i in (0..*min+1).rev(){
-                    if name.len()>0{
+                for i in (0..*min+1).rev() {
+                    if name.len()>0 {
                         name.push_str("/");
                     }
                     name.push_str(inner_path[i]);
@@ -376,7 +392,7 @@ impl FileSystem {
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
         ) -> FileNodeId {
-            let file_node_id = file_node_id.unwrap_or(LiveId::unique().into());
+            let file_node_id = file_node_id.unwrap_or(LiveId::from_str(&node_path).into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 | edge | edge.name.clone(),

@@ -5,7 +5,7 @@ use {
     std::ffi::CString,
     std::os::raw::{c_void},
     std::time::{Instant, Duration},
-    std::sync::mpsc,
+    std::sync::{mpsc, mpsc::Sender},
     std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
@@ -22,6 +22,7 @@ use {
     },
     crate::{
         cx_api::{CxOsOp, CxOsApi},
+        cx_stdin::{PollTimers,PollTimer},
         makepad_math::*,
         makepad_live_id::*,
         makepad_live_compiler::LiveFileChange,
@@ -49,19 +50,21 @@ use {
             HttpRequest,
             HttpMethod,
         },
+        web_socket::WebSocket,
         window::CxWindowPool,
         pass::CxPassParent,
         cx::{Cx, OsType, AndroidParams},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
-    }
+        web_socket::WebSocketMessage,
+    },
+    makepad_http::websocket::WebSocket as WebSocketImpl,
+    makepad_http::websocket::WebSocketMessage as WebSocketMessageImpl
 };
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
-        
-        //elf.android_load_dependencies();
         self.gpu_info.performance = GpuPerformance::Tier1;
         
         self.call_event_handler(&Event::Construct);
@@ -70,7 +73,9 @@ impl Cx {
         self.start_network_live_file_watcher();
         
         while !self.os.quit {
-            self.handle_timers();
+            for event in self.os.timers.get_dispatch() {
+                self.call_event_handler(&event);
+            }                    
             
             while let Ok(msg) = from_java_rx.try_recv() {
                 match msg {
@@ -119,7 +124,7 @@ impl Cx {
                         self.call_event_handler(&Event::ClearAtlasses);
                     }
                     FromJavaMessage::Touch(mut touches) => {
-                        let time = self.os.time_now();
+                        let time = self.os.timers.time_now();
                         let window = &mut self.windows[CxWindowPool::id_zero()];
                         let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                         for touch in &mut touches {
@@ -192,7 +197,7 @@ impl Cx {
                                         key_code: makepad_keycode,
                                         is_repeat: false,
                                         modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
-                                        time: self.os.time_now()
+                                        time: self.os.timers.time_now()
                                     }
                                 );
                                 self.call_event_handler(&e);
@@ -210,7 +215,7 @@ impl Cx {
                                 key_code: makepad_keycode,
                                 is_repeat: false,
                                 modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
-                                time: self.os.time_now()
+                                time: self.os.timers.time_now()
                             }
                         );
                         self.call_event_handler(&e);
@@ -223,13 +228,13 @@ impl Cx {
                         if is_open {
                             self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidShow {
                                 height: keyboard_height - self.os.keyboard_closed,
-                                time: self.os.time_now()
+                                time: self.os.timers.time_now()
                             }))
                         }
                         else {
                             self.text_ime_was_dismissed();
                             self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidHide {
-                                time: self.os.time_now()
+                                time: self.os.timers.time_now()
                             }))
                         }
                     }
@@ -259,6 +264,33 @@ impl Cx {
                         if self.studio_http_connection(&mut e) {
                             self.call_event_handler(&e);
                         }
+                    }
+                    FromJavaMessage::WebSocketMessage {message, sender} => {
+                        let mut ws_message_parser = WebSocketImpl::new();
+                        ws_message_parser.parse(&message, | result | {
+                            match result {
+                                Ok(WebSocketMessageImpl::Text(text_msg)) => {
+                                    let message = WebSocketMessage::String(text_msg.to_string());
+                                    sender.send(message).unwrap();
+                                },
+                                Ok(WebSocketMessageImpl::Binary(data)) => {
+                                    let message = WebSocketMessage::Binary(data.to_vec());
+                                    sender.send(message).unwrap();
+                                },
+                                Err(e) => {
+                                    println!("Websocket message parse error {:?}", e);
+                                },
+                                _ => ()
+                            }
+                        });
+                    }
+                    FromJavaMessage::WebSocketClosed {sender} => {
+                        let message = WebSocketMessage::Closed;
+                        sender.send(message).unwrap();
+                    }
+                    FromJavaMessage::WebSocketError {error, sender} => {
+                        let message = WebSocketMessage::Error(error);
+                        sender.send(message).unwrap();
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -337,7 +369,7 @@ impl Cx {
             
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(self.os.time_now());
+                    self.call_next_frame_event(self.os.timers.time_now());
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
@@ -359,6 +391,10 @@ impl Cx {
     
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
         let (from_java_tx, from_java_rx) = mpsc::channel();
+
+        std::panic::set_hook(Box::new(|info| {
+            crate::log!("Custom panic hook: {}", info);
+        }));
         
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
         
@@ -545,7 +581,7 @@ impl Cx {
             }
             else {
                 let message = format!("cannot load dependency {}", path);
-                crate::makepad_error_log::error!("Android asset failed: {}", message);
+                crate::error!("Android asset failed: {}", message);
                 dep.data = Some(Err(message));
             }
         }
@@ -613,7 +649,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(self.os.time_now() as f32);
+            self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
@@ -661,10 +697,10 @@ impl Cx {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    self.os.timers.insert(timer_id, Timer::new(interval, repeats));
+                    self.os.timers.timers.insert(timer_id, PollTimer::new(interval, repeats));
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    self.os.timers.remove(&timer_id);
+                    self.os.timers.timers.remove(&timer_id);
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
                     //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
@@ -680,10 +716,10 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
-                CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size) => {
+                CxOsOp::InitializeVideoDecoding(video_id, video) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_initialize_video_decoding(env, video_id, video, chunk_size);
+                        android_jni::to_java_initialize_video_decoding(env, video_id, video);
                     }
                 },
                 CxOsOp::DecodeNextVideoChunk(video_id, max_frames_to_decode) => {
@@ -709,35 +745,6 @@ impl Cx {
         }
         EventFlow::Poll
     }
-    
-    fn handle_timers(&mut self) {
-        let mut to_be_dispatched = Vec::with_capacity(self.os.timers.len());
-        let mut to_be_removed = Vec::with_capacity(self.os.timers.len());
-        let now = Instant::now();
-        let time = self.os.time_now();
-        for (id, timer) in self.os.timers.iter_mut() {
-            let elapsed_time = now - timer.start_time;
-            let next_due_time = Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
-            
-            if elapsed_time > next_due_time {
-                
-                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time:Some(time)}));
-                if timer.repeats {
-                    timer.step += 1;
-                } else {
-                    to_be_removed.push(*id);
-                }
-            }
-        }
-        
-        for id in to_be_removed {
-            self.os.timers.remove(&id);
-        }
-        for event in to_be_dispatched {
-            self.call_event_handler(&event);
-        }
-        self.os.last_time = now;
-    }
 }
 
 impl CxOsApi for Cx {
@@ -755,21 +762,16 @@ impl CxOsApi for Cx {
 impl Default for CxOs {
     fn default() -> Self {
         Self {
-            last_time: Instant::now(),
             first_after_resize: true,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
-            time_start: Instant::now(),
             keyboard_closed: 0.0,
-            //keyboard_visible: false,
-            //keyboard_trigger_position: DVec2::default(),
-            //keyboard_panning_offset: 0,
             media: CxAndroidMedia::default(),
             decoding: CxAndroidDecoding::default(),
             display: None,
             quit: false,
             fullscreen: false,
-            timers: HashMap::new()
+            timers: Default::default()
         }
     }
 }
@@ -786,22 +788,17 @@ pub struct CxAndroidDisplay {
 
 
 pub struct CxOs {
-    pub last_time: Instant,
     pub first_after_resize: bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
-    pub time_start: Instant,
     pub keyboard_closed: f64,
-    //pub keyboard_visible: bool,
-    //pub keyboard_trigger_position: DVec2,
-    //pub keyboard_panning_offset: i32,
     
     pub quit: bool,
     pub fullscreen: bool,
+    pub (crate) timers: PollTimers,
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
     pub (crate) decoding: CxAndroidDecoding,
-    pub (crate) timers: HashMap<u64, Timer>,
 }
 
 impl CxAndroidDisplay {
@@ -842,31 +839,5 @@ impl CxAndroidDisplay {
         );
         
         assert!(res != 0);
-    }
-}
-
-impl CxOs {
-    pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
-    }
-}
-
-pub struct Timer {
-    pub start_time: Instant,
-    pub interval: Duration,
-    pub repeats: bool,
-    pub step: u64,
-}
-
-impl Timer {
-    pub fn new(interval_ms: f64, repeats: bool) -> Timer {
-        let interval_ns = (interval_ms * 1e6) as u64;
-        Timer {
-            start_time: Instant::now(),
-            interval: Duration::from_nanos(interval_ns),
-            repeats,
-            step: 0,
-        }
     }
 }

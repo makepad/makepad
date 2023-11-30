@@ -18,8 +18,7 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         cx::Cx,
-        texture::{Texture, TextureId},
-        makepad_error_log::*,
+        texture::{Texture},
         geometry::GeometryId,
         area::Area,
         geometry::{GeometryFields},
@@ -85,7 +84,7 @@ pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
 pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 #[repr(C)]
 pub struct DrawVars {
     pub area: Area,
@@ -95,7 +94,7 @@ pub struct DrawVars {
     pub draw_shader: Option<DrawShader>,
     pub (crate) geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
-    pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
@@ -128,7 +127,7 @@ impl LiveHook for DrawVars {}
 impl DrawVars {
     
     pub fn set_texture(&mut self, slot: usize, texture: &Texture) {
-        self.texture_slots[slot] = Some(texture.texture_id());
+        self.texture_slots[slot] = Some(texture.clone());
     }
     
     pub fn empty_texture(&mut self, slot: usize) {
@@ -277,14 +276,14 @@ impl DrawVars {
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
                     if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                        crate::makepad_error_log::log_with_type(
+                        crate::log::log_with_level(
                             &err.file,
-                            err.span.start.line+1,
-                            err.span.start.column+2,
-                            err.span.end.line+1,
-                            err.span.end.column+2,
+                            err.span.start.line,
+                            err.span.start.column,
+                            err.span.end.line,
+                            err.span.end.column,
                             &err.message,
-                            LogType::Error
+                            crate::log::LogLevel::Error
                         );
                     }
                     else{
@@ -521,7 +520,7 @@ impl DrawVars {
     }
     
     pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
-        if let Some(draw_shader) = self.draw_shader {
+        if let Some(draw_shader) = self.draw_shader { 
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
             for input in &sh.mapping.user_uniforms.inputs {
                 let offset = input.offset;
@@ -656,4 +655,3 @@ impl DrawVars {
     }
     
 }
-

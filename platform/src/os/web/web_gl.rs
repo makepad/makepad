@@ -1,6 +1,5 @@
 use {
     crate::{
-        makepad_error_log::*,
         makepad_shader_compiler::{
             generate_glsl,
         },
@@ -14,6 +13,7 @@ use {
         draw_vars::DRAW_CALL_TEXTURE_SLOTS,
         cx::Cx,
         draw_list::DrawListId,
+        texture::TextureFormat,
         pass::{PassId, PassClearColor, PassClearDepth},
     },
 };
@@ -73,21 +73,28 @@ impl Cx {
                 
                 // update/alloc textures?
                 for i in 0..sh.mapping.textures.len() {
-                    let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
-                        texture_id
+                    let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
+                        texture.texture_id()
                     }else {
                         continue
                     };
                     
                     let cxtexture = &mut self.textures[texture_id];
-                    if cxtexture.update_image {
-                        cxtexture.update_image = false;
-                        self.os.from_wasm(FromWasmAllocTextureImage2D {
-                            texture_id: texture_id.0,
-                            width: cxtexture.desc.width.unwrap(),
-                            height: cxtexture.desc.height.unwrap(),
-                            data: WasmDataU32::new(&cxtexture.image_u32)
-                        });
+                    if cxtexture.format.is_vec(){
+                        if cxtexture.alloc_vec(){}
+                        if cxtexture.check_updated(){
+                            match &cxtexture.format{
+                                TextureFormat::VecBGRAu8_32{width, height, data}=>{
+                                    self.os.from_wasm(FromWasmAllocTextureImage2D {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmDataU32::new(&data)
+                                    });
+                                }
+                                _=>panic!()
+                            }
+                        }
                     }
                 }
                 
@@ -157,8 +164,8 @@ impl Cx {
                 
                 let mut textures = [None;DRAW_CALL_TEXTURE_SLOTS];
                 for (index, texture_slot) in draw_call.texture_slots.iter().enumerate(){
-                    if let Some(texture_id) = texture_slot{
-                        textures[index] = Some(texture_id.0)
+                    if let Some(texture) = texture_slot{
+                        textures[index] = Some(texture.texture_id().0)
                     }
                 }
                 self.os.from_wasm(FromWasmDrawCall {
@@ -248,17 +255,19 @@ impl Cx {
         let mut depth_target = WDepthTarget::default();
         
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+            let size = pass_size * dpi_factor;
+            self.textures[color_texture.texture.texture_id()].alloc_render(size.x as usize, size.y as usize);
             match color_texture.clear_color {
                 PassClearColor::InitWith(clear_color) => {
                     color_targets[index] = WColorTarget{
-                        texture_id: color_texture.texture_id.0,
+                        texture_id: color_texture.texture.texture_id().0,
                         init_only: true,
                         clear_color: clear_color.into()
                     };
                 },
                 PassClearColor::ClearWith(clear_color) => {
                     color_targets[index] = WColorTarget{
-                        texture_id: color_texture.texture_id.0,
+                        texture_id: color_texture.texture.texture_id().0,
                         init_only: false,
                         clear_color: clear_color.into()
                     };
@@ -267,18 +276,20 @@ impl Cx {
         }
         
         // attach/clear depth buffers, if any
-        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
+        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
+            let size = pass_size * dpi_factor;
+            self.textures[depth_texture.texture_id()].alloc_depth(size.x as usize, size.y as usize);
             match self.passes[pass_id].clear_depth {
                 PassClearDepth::InitWith(clear_depth) => {
                     depth_target = WDepthTarget{
-                        texture_id: depth_texture_id.0,
+                        texture_id: depth_texture.texture_id().0,
                         init_only: true,
                         clear_depth
                     };
                 },
                 PassClearDepth::ClearWith(clear_depth) => {
                     depth_target = WDepthTarget{
-                        texture_id: depth_texture_id.0,
+                        texture_id: depth_texture.texture_id().0,
                         init_only: false,
                         clear_depth
                     };
@@ -325,7 +336,7 @@ impl Cx {
                 );
                  
                 if cx_shader.mapping.flags.debug {
-                   log!("{}\n{}", vertex,pixel);
+                   crate::log!("{}\n{}", vertex,pixel);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
