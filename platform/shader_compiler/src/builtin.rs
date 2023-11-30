@@ -345,6 +345,9 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
         builtin!(sample2d_rt, [
             (Ty::Texture2D, Ty::Vec2) -> Ty::Vec4
         ]),
+        builtin!(sample2dOES, [
+            (Ty::TextureOES, Ty::Vec2) -> Ty::Vec4
+        ]),
         builtin!(sign, [
             (Ty::Float) -> Ty::Float,
             (Ty::Vec2) -> Ty::Vec2,
