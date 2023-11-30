@@ -75,10 +75,6 @@ pub enum CxOsOp {
 
     HttpRequest{request_id: LiveId, request:HttpRequest},
 
-    //WebSocketOpen{request_id: LiveId, request:HttpRequest},
-    //WebSocketSendString{request_id: LiveId, data:String},
-    //WebSocketSendBinary{request_id: LiveId, data:Vec<u8>},
-
     PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool, bool),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
