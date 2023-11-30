@@ -278,8 +278,8 @@ impl BuildManager {
                             })));
                             dispatch_action(cx, BuildManagerAction::RedrawLog)
                         }
-                        AppToStudio::ProfileSample(_sample)=>{
-                            
+                        AppToStudio::ProfileSample(sample)=>{  
+                            log!("{:?}", sample); 
                         }
                     }
                 }
