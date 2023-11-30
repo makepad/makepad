@@ -92,6 +92,10 @@ impl FishPatchEditor {
 
         for i in patch.blocks.iter() 
         {
+            let item_id = LiveId::from_num(1, i.id);
+            let item = list.item(cx, item_id, live_id!(PatchBlock)).unwrap().as_view();
+            item.draw_widget_all(cx);
+
             println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
         
