@@ -6,22 +6,35 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
 
-    BigFishHomeScreen = <View> {
-        
-
-       
-        
+    BigFishHomeScreen=  <View> {
 
         width: Fill,
         height: Fill,
         flow: Down
-        
-       <Label>{text:"Welcome to BigFish!", draw_text:{color: #f}}
-       <Image> {
-        source: dep("crate://self/resources/tinrs_mobile.png"),
-        width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0  }
-       
-   }
-        <Button>{text:"wtf"}
+        align:
+        {
+            x:0.5,
+            y:0.5
+        }
+        <Label>{text:"Welcome!"
+        margin: 40
+            draw_text: {
+                color: #f,
+                text_style: {
+                    
+                    font_size: 20.0,
+                    height_factor: 1.0,
+                   
+                    font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+                },
+            }
+        }
+        <Image> {
+        source: dep("crate://self/resources/colourfish.png"),
+        width: (431*0.5 ), height: (287*0.5), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0  }
+
+        }
+
+
     }
 }
