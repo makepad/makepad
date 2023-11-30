@@ -209,58 +209,14 @@ live_design!{
         draw_bg: {
             shape: Solid,
             fill: Image
-            texture y_texture: texture2d
-            texture u_texture: texture2d
-            texture v_texture: texture2d
+            texture image: textureOES
             instance image_scale: vec2(1.0, 1.0)
             instance image_pan: vec2(0.0, 0.0)
-
-            uniform image_alpha: 1.0
-            uniform texture_available: 0.0
             uniform is_last_frame: 0.0
-            uniform is_plannar: 0.0 
-            uniform video_width: 0.0
-            uniform video_height: 0.0
 
-            uniform y_stride: 0.0;
-            uniform u_stride: 0.0;
-            uniform v_stride: 0.0;
-        
-            fn yuv_to_rgb(self, y: float, u: float, v: float) -> vec4 {
-                let c = y - 16.0;
-                let d = u - 128.0;
-                let e = v - 128.0;
-        
-                let r = clamp((298.0 * c + 409.0 * e + 128.0) / 65536.0, 0.0, 1.0);
-                let g = clamp((298.0 * c - 100.0 * d - 208.0 * e + 128.0) / 65536.0, 0.0, 1.0);
-                let b = clamp((298.0 * c + 516.0 * d + 128.0) / 65536.0, 0.0, 1.0);
-        
-                return vec4(r, g, b, 1.0);
-            }
-
-            fn get_color(self) -> vec4 {
-                if (self.is_plannar > 0.5) {
-                    let y = sample2d(self.y_texture, self.pos).r;
-                    let u = sample2d(self.u_texture, self.pos).r;
-                    let v = sample2d(self.v_texture, self.pos).r;
-                    return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
-                } else {
-                    let uv_coord = self.pos / 2.0;
-                    let y = sample2d(self.y_texture, self.pos).r;
-                    let uv = sample2d(self.u_texture, uv_coord).rg;
-                    let u = uv.r;
-                    let v = uv.g;
-                    return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
-                }    
-            }
-    
             fn pixel(self) -> vec4 {
-                if (self.texture_available < 0.5) {
-                    return vec4(0.0, 0.0, 0.0, 1.0);
-                }
-    
-                let color = self.get_color();
-                return color * vec4(1.0, 1.0, 1.0, self.image_alpha);
+                let color = sample2dOES(self.image, self.pos);
+                return color * vec4(1.0, 1.0, 1.0, 0.8);
             }
         }
     }

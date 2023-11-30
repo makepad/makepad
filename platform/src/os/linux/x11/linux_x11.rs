@@ -321,10 +321,11 @@ impl Cx {
                 CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
                 },
-                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
-                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
-                CxOsOp::CleanupVideoDecoding(_) => todo!(),
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
+                CxOsOp::PauseVideoPlayback(_) => todo!(),
+                CxOsOp::ResumeVideoPlayback(_) => todo!(),
+                CxOsOp::EndVideoPlayback(_) => todo!(),
+                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
             }
         }
         ret
