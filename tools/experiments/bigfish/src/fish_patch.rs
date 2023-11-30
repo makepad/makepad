@@ -1,9 +1,12 @@
+
+
 use crate::fish_block_template::*;
 use crate::fish_preset::*;
 use crate::fish_block::*;
 use crate::fish_connection::*;
 
 use crate::makepad_micro_serde::*;
+use makepad_widgets::*;
 
 
 #[derive(Clone, Debug, SerRon, DeRon, Default)]
@@ -37,6 +40,7 @@ impl  FishPatch{
         let mut B = lib.create_instance_from_template(name);
         B.x = x;
         B.y = y;
+        B.id = LiveId::unique().0;
 
         self.blocks.push(B);
 
