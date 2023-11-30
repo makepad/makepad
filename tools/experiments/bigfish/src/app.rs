@@ -10,7 +10,11 @@ live_design!{
     import crate::fish_patch_editor::*;
     import crate::fish_block_editor::*;
     import crate::homescreen::BigFishHomeScreen;
-    
+    H2_TEXT_BOLD = {
+        font_size: (FONT_SIZE_H2),
+        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+    }
+
     App = {{App}} {
 
         ui: <Window> {
@@ -21,7 +25,9 @@ live_design!{
             margin: 0.,
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return mix(vec4(1.,1.,0.,1.),#0, abs(mod(self.pos.y*10.0,100.) - sin(self.pos.x*10.1))*100 )
+                    let Pos = floor(self.pos*self.rect_size *0.10);
+                    let PatternMask = mod(Pos.x + mod(Pos.y, 2.0), 2.0);
+                    return mix( vec4(0,0.15*self.pos.y,0.1,1), vec4(.05, 0.03, .23*self.pos.y, 1.0), PatternMask);
                 }
             }
            
@@ -68,10 +74,18 @@ live_design!{
                     a: middle_view_tabs,
                     b: right_view_tabs
                 }
-                mainscreentabs = Tabs{tabs:[mainscreentab]}
-                mainscreentab = Tab{
-                    name: "External"
-                    kind: mainscreen
+                mainscreentabs = Tabs{tabs:[homescreentab, patcheditortab, debugcontroltab]}
+                homescreentab = Tab{
+                    name: "Home"
+                    kind: homescreen
+                }
+                patcheditortab = Tab{
+                    name: "Patch Editor"
+                    kind: patcheditorscreen
+                }
+                debugcontroltab = Tab{
+                    name: "Debug"
+                    kind: debugcontrolscreen
                 }
                 middle_view_tabs = Tabs{tabs:[middle_view_tab]}
 
@@ -89,21 +103,20 @@ live_design!{
                     name: "Right"
                     kind:right_view
                 }
-                mainscreen = <View>{
-                    flow: Down,
-                
-                    align: {
-                        x: 0.5,
-                        y: 0.5
+
+                homescreen = <BigFishHomeScreen>{}
+
+                patcheditorscreen = <FishPatchEditor>{}
+
+                debugcontrolscreen = <View>{
+                    flow: Down
+                    <View>{flow: Right
+                        loadbutton = <Button>{text:"Load"}
+                        savebutton = <Button>{text:"Save"}
                     }
-                    loadbutton = <Button>{text:"Load"}
-                    savebutton = <Button>{text:"Save"}
-                   
-                    home = <BigFishHomeScreen> {}
-                    patch = <FishPatchEditor> {}
-                   
-                   
+                    <FishBlockEditor>{}
                 }
+                   
                 middle_view = <View>{
                     align: {
                         x: 0.5,
@@ -114,7 +127,21 @@ live_design!{
 
                 <View>{width:320, height: 320
                         show_bg: true,
+                        flow: Down,
                         draw_bg: {fn pixel(self) -> vec4 { return #111}}
+                        align:{x:0.5,y:0.5}
+                        <Label>{text:"Fancy Beeping"
+                        margin: 30
+                            draw_text: {
+                                color: #f,
+                                text_style: <H2_TEXT_BOLD> {}
+                            }
+                        }
+                        <Image> {
+                            source: dep("crate://self/resources/colourfish.png"),
+                            width: (431*0.25 ), height: (287*0.25), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0  }
+                    
+                            }
                     }
                 }
 
