@@ -2,15 +2,13 @@ use crate::{makepad_draw::*, makepad_widgets::*, fish_patch::FishPatch};
 
 live_design!
 {
-
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     
     FishPatchEditor = {{FishPatchEditor}} {
         width: Fill,
         height: Fill,
-        scroll_bars: <ScrollBars> {}
-      
+        scroll_bars: <ScrollBars> {}      
       
         draw_bg: {
             fn pixel(self) -> vec4 {
@@ -19,7 +17,6 @@ live_design!
                 return mix( vec4(0,0.15*self.pos.y,0.1,1), vec4(.05, 0.03, .23*self.pos.y, 1.0), PatternMask);
             }
         }
-
     }
 }
 
@@ -76,11 +73,8 @@ impl LiveHook for FishPatchEditor {
 impl FishPatchEditor {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // lets draw a bunch of quads
-        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
-
-        
+        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);        
     }
-
 
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
@@ -89,22 +83,20 @@ impl FishPatchEditor {
         WidgetDraw::done()
     }
 
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut FishPatch) {
-    
-      
+    pub fn draw(&mut self, cx: &mut Cx2d, patch: &mut FishPatch) {
         let walk: Walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
-
         let turtle_rect = cx.turtle().rect();
-        
-      
-
         let scroll_pos = self.scroll_bars.get_scroll_pos();
-
-       
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
+        for i in patch.blocks.iter() 
+        {
+            println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
+        }
+        
+        
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
         self.scroll_bars.end(cx);
     }
 }

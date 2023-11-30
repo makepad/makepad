@@ -74,6 +74,8 @@ impl Default for Axis2 {
 pub enum Flow {
     #[pick] Right,
     Down,
+    //Left,
+    //Up,
     Overlay
 }
 
