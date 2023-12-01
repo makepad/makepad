@@ -11,10 +11,8 @@ live_design!{
     import crate::fish_patch_editor::*;
     import crate::fish_block_editor::*;
     import crate::homescreen::BigFishHomeScreen;
-    H2_TEXT_BOLD = {
-        font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
-    }
+    import crate::fish_theme::*;
+
 
     App = {{App}} {
 
@@ -188,10 +186,12 @@ pub struct App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
+        
         crate::makepad_audio_widgets::live_design(cx);
         //crate::makepad_widgets::live_design(cx);
         crate::fish_patch_editor::live_design(cx);
         crate::fish_block_editor::live_design(cx);
+        crate::fish_theme::live_design(cx);
         crate::homescreen::live_design(cx);
     }
     // after_new_from_doc 

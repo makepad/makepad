@@ -5,6 +5,18 @@ use crate::fish_block::*;
 
 #[derive(Clone,Debug, SerRon, DeRon, Default)]
 
+pub enum FishBlockCategory
+{
+    Meta,
+    Generator,
+    Modulator, 
+    Effect,
+    Filter,
+    Envelope,
+    #[default]   Utility
+}
+#[derive(Clone,Debug, SerRon, DeRon, Default)]
+
 pub struct FishBlockTemplate{
     
     pub id: i32,
@@ -13,6 +25,7 @@ pub struct FishBlockTemplate{
     pub description: String,
     pub creator: String,
     pub path: String,
+    pub category: FishBlockCategory,
    
    pub parameters: Vec<FishParamStorage>,
    pub inputs: Vec<FishInputPort>,
@@ -32,7 +45,7 @@ impl FishBlockLibrary
     pub fn populate_library(&mut self, basepath: &str)
     {
         self.nulltemplate =  FishBlockTemplate{
-          
+           category: FishBlockCategory::Meta,
             outputs: vec![],
             inputs: vec![],
             parameters: vec![],
@@ -46,11 +59,14 @@ impl FishBlockLibrary
         }
         return &self.nulltemplate;
     }
-    pub fn create_instance_from_template(&self, name: String) -> FishBlock
+
+    pub fn create_instance_from_template(&self, name: &str) -> FishBlock
     {
 
+        let t = self.find_template(name);
         let mut f = FishBlock::default();
-
+        f.category = t.category.clone();
+        
         f
     }
 }
