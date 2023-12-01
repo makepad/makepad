@@ -252,6 +252,8 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
     let action_masked = unsafe {ndk_utils::call_int_method!(env, event, "getActionMasked", "()I")};
     let action_index = unsafe {ndk_utils::call_int_method!(env, event, "getActionIndex", "()I")};
     let touch_count = unsafe {ndk_utils::call_int_method!(env, event, "getPointerCount", "()I")};
+
+    let time = unsafe {ndk_utils::call_long_method!(env, event, "getEventTime", "()J")} as i64;
     
     let mut touches = Vec::with_capacity(touch_count as usize);
     for touch_index in 0..touch_count {
@@ -282,6 +284,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
+            time: time as f64 / 1000.0,
         });
     }
     send_from_java_message(FromJavaMessage::Touch(touches));
