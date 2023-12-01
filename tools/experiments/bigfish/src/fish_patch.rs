@@ -37,7 +37,7 @@ impl  FishPatch{
 
     pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) 
     {
-        let mut B = lib.create_instance_from_template(name);
+        let mut B = lib.create_instance_from_template(&name);
         B.x = x;
         B.y = y;
         B.id = LiveId::unique().0;
@@ -52,8 +52,8 @@ impl  FishPatch{
         patch.name = String::from(format!("Test Patch {:?}", id));
         patch.id = id;
 
-        for i in 0..20{
-            patch.create_block(lib, String::from("dit wordt een null"), i*10, i*10);
+        for i in 0..10{
+            patch.create_block(lib, String::from("dit wordt een null"), i%3*300, i/3*300);
         }
 
         for i in 0..20{
