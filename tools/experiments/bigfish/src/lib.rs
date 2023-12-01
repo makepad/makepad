@@ -1,5 +1,4 @@
 pub use makepad_widgets;
-
 pub use makepad_widgets::makepad_platform;
 pub use makepad_widgets::makepad_draw;
 pub use makepad_widgets::makepad_micro_serde;
@@ -17,4 +16,6 @@ mod fish_ports;
 mod fish_preset;
 mod fish_processor;
 mod fish_block_template;
+mod fish_theme;
+
 pub mod app;

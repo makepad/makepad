@@ -37,7 +37,7 @@ impl  FishPatch{
 
     pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) 
     {
-        let mut B = lib.create_instance_from_template(name);
+        let mut B = lib.create_instance_from_template(&name);
         B.x = x;
         B.y = y;
         B.id = LiveId::unique().0;
@@ -52,9 +52,16 @@ impl  FishPatch{
         patch.name = String::from(format!("Test Patch {:?}", id));
         patch.id = id;
 
-        for i in 0..20{
-            patch.create_block(lib, String::from("dit wordt een null"), i*10, i*10);
-        }
+    let mut i =0 ;
+
+    patch.create_block(lib, String::from("Utility"), i%3*300, i/3*300 + 100);i=i+1;
+    patch.create_block(lib, String::from("Oscillator"), i%3*300, i/3*300+ 100);i=i+1;
+    patch.create_block(lib, String::from("Filter"), i%3*300, i/3*300+ 100);i=i+1;
+    patch.create_block(lib, String::from("Effect"), i%3*300, i/3*300+ 100);i=i+1;
+    patch.create_block(lib, String::from("Meta"), i%3*300, i/3*300+100);i=i+1;
+    patch.create_block(lib, String::from("Envelope"), i%3*300, i/3*300+100);i=i+1;
+
+
 
         for i in 0..20{
             patch.presets.push(FishPreset::create_test_preset(i));
