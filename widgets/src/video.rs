@@ -160,6 +160,10 @@ impl LiveHook for Video {
 #[derive(Clone, WidgetAction)]
 pub enum VideoAction {
     None,
+    PlaybackPrepared,
+    PlaybackBegan,
+    TextureUpdated,
+    PlaybackCompleted,
 }
 
 impl Widget for Video {
@@ -194,20 +198,23 @@ impl Video {
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, VideoAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, VideoAction),
     ) {
         if let Event::VideoPlaybackPrepared(event) = event {
             if event.video_id == self.id {
                 self.handle_playback_prepared(cx, event);
+                dispatch_action(cx, VideoAction::PlaybackPrepared);
             }
         }
 
         if let Event::VideoTextureUpdated(event) = event {
             if event.video_id == self.id {
+                self.redraw(cx);
                 if self.playback_state == PlaybackState::Prepared {
                     self.playback_state = PlaybackState::Playing;
+                    dispatch_action(cx, VideoAction::PlaybackBegan);
                 }
-                self.redraw(cx);
+                dispatch_action(cx, VideoAction::TextureUpdated);
             }
         }
 
@@ -215,6 +222,7 @@ impl Video {
             if event.video_id == self.id {
                 if !self.is_looping {
                     self.playback_state = PlaybackState::Completed;
+                    dispatch_action(cx, VideoAction::PlaybackCompleted);
                 }
             }
         }
