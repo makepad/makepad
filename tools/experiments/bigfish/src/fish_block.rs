@@ -1,12 +1,14 @@
 use crate::fish_param_storage::*;
 use crate::fish_ports::*;
 use crate::makepad_micro_serde::*;
+use crate::fish_block_template::*;
 
 #[derive(Clone, Debug, SerRon, DeRon, Default)]
 pub struct FishBlock{
     pub id: u64,
     pub x: i32,
     pub y: i32,
+    pub category: FishBlockCategory,
     pub block_type: String,
     pub parameters: Vec<FishParamStorage>,
     pub input_ports: Vec<FishInputPort>,
