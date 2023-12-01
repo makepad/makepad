@@ -27,7 +27,6 @@ use {
         pass::{CxPassParent},
         thread::Signal,
         window::CxWindowPool,
-        web_socket::WebSocket,
         event::{
             Event,
             NetworkResponseChannel
@@ -36,10 +35,6 @@ use {
         cx::{Cx, OsType},
     }
 };
-#[cfg(not(apple_sim))]
-use crate::makepad_live_compiler::LiveFileChange;
-#[cfg(not(apple_sim))]
-use crate::event::{NetworkResponse, HttpRequest, HttpMethod};
 
 impl Cx {
     
@@ -99,10 +94,7 @@ impl Cx {
             out.push(event);
         }
         if out.len()>0{
-            let mut e = Event::NetworkResponses(out);
-            if self.studio_http_connection(&mut e){
-                self.call_event_handler(&e)
-            }
+            self.call_event_handler(& Event::NetworkResponses(out))
         }
     }
     
@@ -348,9 +340,6 @@ impl CxOsApi for Cx {
 
         #[cfg(apple_sim)]
         self.start_disk_live_file_watcher(50);
-        
-        #[cfg(not(apple_sim))]
-        self.poll_studio_http();
         
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
