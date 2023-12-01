@@ -6,6 +6,7 @@ use crate::fish_block_template::*;
 #[derive(Clone, Debug, SerRon, DeRon, Default)]
 pub struct FishBlock{
     pub id: u64,
+    pub library_id: u64,
     pub x: i32,
     pub y: i32,
     pub category: FishBlockCategory,
