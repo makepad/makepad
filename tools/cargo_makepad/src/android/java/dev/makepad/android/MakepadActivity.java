@@ -504,13 +504,12 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop, boolean pauseFirstFrame) {
+    public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
         VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
         VideoPlayer.setSource(source);
         VideoPlayer.setExternalTextureHandle(externalTextureHandle);
         VideoPlayer.setAutoplay(autoplay);
         VideoPlayer.setShouldLoop(shouldLoop);
-        VideoPlayer.setPauseFirstFrame(pauseFirstFrame);
         VideoPlayerRunnable runnable = new VideoPlayerRunnable(VideoPlayer);
 
         mVideoPlayerRunnables.put(videoId, runnable);
