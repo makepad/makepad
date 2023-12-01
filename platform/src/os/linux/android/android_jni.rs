@@ -662,7 +662,7 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, source: VideoSource, external_texture_handle: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
+pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, source: VideoSource, external_texture_handle: u32, autoplay: bool, should_loop: bool) {
     let video_source = match source {
         VideoSource::InMemory(data) => {
             let source = &*data;
@@ -689,13 +689,12 @@ pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id
         env,
         ACTIVITY,
         "prepareVideoPlayback",
-        "(JLjava/lang/Object;IZZZ)V",
+        "(JLjava/lang/Object;IZZ)V",
         video_id.get_value() as jni_sys::jlong,
         video_source,
         external_texture_handle as jni_sys::jint,
         autoplay as jni_sys::jboolean as std::ffi::c_uint,
-        should_loop as jni_sys::jboolean as std::ffi::c_uint,
-        pause_on_first_frame as jni_sys::jboolean as std::ffi::c_uint
+        should_loop as jni_sys::jboolean as std::ffi::c_uint
     );
 }
 
