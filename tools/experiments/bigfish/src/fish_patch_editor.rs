@@ -169,10 +169,9 @@ impl FishPatchEditor {
                 FishBlockCategory::Envelope => live_id!(BlockTemplateEnvelope),
                 FishBlockCategory::Filter => live_id!(BlockTemplateFilter),
                 FishBlockCategory::Meta => live_id!(BlockTemplateMeta),
-                FishBlockCategory::Utility => live_id!(BlockTemplateUtility),
-                
+                FishBlockCategory::Utility => live_id!(BlockTemplateUtility),                
             };
-            
+
             let item = self.item(cx, item_id, templateid).unwrap();
 
             item.apply_over(cx, live!{
