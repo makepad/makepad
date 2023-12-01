@@ -1,16 +1,23 @@
-use crate::{makepad_draw::*, makepad_widgets::*, fish_patch::FishPatch};
+use crate::{makepad_draw::*, makepad_widgets::*, fish_patch::FishPatch, fish_block_template::FishBlockCategory};
 
 live_design!
 {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     import crate::fish_block_editor::*;
+    import crate::fish_theme::*;
 
     FishPatchEditor = {{FishPatchEditor}} {
         width: Fill,
         height: Fill,
         scroll_bars: <ScrollBars> {}      
-        BlockTemplate = <FishBlockEditor>{};
+        BlockTemplateGenerator = <FishBlockEditorGenerator>{};
+        BlockTemplateMeta = <FishBlockEditorMeta>{};
+        BlockTemplateFilter = <FishBlockEditorFilter>{};
+        BlockTemplateEffect = <FishBlockEditorEffect>{};
+        BlockTemplateModulator = <FishBlockEditorModulator>{};
+        BlockTemplateEnvelope = <FishBlockEditorEnvelope>{};
+        BlockTemplateUtility = <FishBlockEditorUtility>{};
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let Pos = floor(self.pos*self.rect_size *0.10);
@@ -152,7 +159,20 @@ impl FishPatchEditor {
         for i in patch.blocks.iter() 
         {
             let item_id = LiveId::from_num(1, i.id as u64);
-            let item = self.item(cx, item_id, live_id!(BlockTemplate)).unwrap();
+
+            let mut templateid = 
+            match i.category
+            {
+                FishBlockCategory::Effect => live_id!(BlockTemplateEffect),
+                FishBlockCategory::Generator => live_id!(BlockTemplateGenerator),
+                FishBlockCategory::Modulator => live_id!(BlockTemplateModulator),
+                FishBlockCategory::Envelope => live_id!(BlockTemplateEnvelope),
+                FishBlockCategory::Filter => live_id!(BlockTemplateFilter),
+                FishBlockCategory::Meta => live_id!(BlockTemplateMeta),
+                FishBlockCategory::Utility => live_id!(BlockTemplateUtility),                
+            };
+
+            let item = self.item(cx, item_id, templateid).unwrap();
 
             item.apply_over(cx, live!{
                 abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
