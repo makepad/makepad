@@ -1,5 +1,5 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_playback::*, 
+    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_playback::*,
     widget::*,
 };
 
@@ -13,7 +13,6 @@ use crate::{
 // is_looping - determines if the video should be played in a loop. defaults to false.
 // hold_to_pause - determines if the video should be paused when the user hold the pause button. defaults to false.
 // autoplay - determines if the video should start playback when the widget is created. defaults to false.
-
 
 // Not yet implemented:
 // UI
@@ -57,9 +56,9 @@ pub struct Video {
     #[live(false)]
     autoplay: bool,
     #[rust]
-    pause_on_first_frame: bool,
-    #[rust]
     playback_state: PlaybackState,
+    #[rust]
+    should_prepare_playback: bool,
 
     // Original video metadata
     #[rust]
@@ -77,9 +76,9 @@ pub struct Video {
 pub struct VideoRef(WidgetRef);
 
 impl VideoRef {
-    pub fn preview_first_frame(&mut self, cx: &mut Cx) {
+    pub fn prepare_playback(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.preview_first_frame(cx);
+            inner.prepare_playback(cx);
         }
     }
 
@@ -126,7 +125,6 @@ enum PlaybackState {
     Unprepared,
     Preparing,
     Prepared,
-    Previewing,
     Playing,
     Paused,
     // Completed is only used when not looping, means playback reached end of stream
@@ -144,6 +142,8 @@ impl LiveHook for Video {
 
     #[allow(unused)]
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.id = LiveId::unique();
+
         #[cfg(target_os = "android")]
         if self.texture.is_none() {
             let new_texture = Texture::new(cx);
@@ -153,8 +153,7 @@ impl LiveHook for Video {
 
         let texture = self.texture.as_mut().unwrap();
         self.draw_bg.draw_vars.set_texture(0, &texture);
-
-        self.id = LiveId::unique();
+        self.should_prepare_playback = self.autoplay;
     }
 }
 
@@ -205,6 +204,9 @@ impl Video {
 
         if let Event::VideoTextureUpdated(event) = event {
             if event.video_id == self.id {
+                if self.playback_state == PlaybackState::Prepared {
+                    self.playback_state = PlaybackState::Playing;
+                }
                 self.redraw(cx);
             }
         }
@@ -220,9 +222,7 @@ impl Video {
         if let Event::TextureHandleReady(event) = event {
             if event.texture_id == self.texture.clone().unwrap().texture_id() {
                 self.texture_handle = Some(event.handle);
-                if self.autoplay && self.playback_state == PlaybackState::Unprepared {
-                    self.prepare_playback(cx);
-                }
+                self.maybe_prepare_playback(cx);
             }
         }
 
@@ -231,59 +231,39 @@ impl Video {
         self.handle_errors(event);
     }
 
-    fn prepare_playback(&mut self, cx: &mut Cx) {
-        if self.texture_handle.is_none() {
-            error!("Attempted to prepare playback without an external texture available");
-            return;
-        }
+    fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
+            if self.texture_handle.is_none() {
+                // texture is not yet ready, this method will be called again on TextureHandleReady
+                return;
+            }
 
-        if self.playback_state == PlaybackState::Unprepared {
-            match &self.source {
-                VideoDataSource::Dependency { path }  => {
-                    match cx.get_dependency(path.as_str()) {
-                        Ok(data) => {
-                            cx.prepare_video_playback(
-                                self.id,
-                                VideoSource::InMemory(data),
-                                self.texture_handle.unwrap(),
-                                self.autoplay,
-                                self.is_looping,
-                                self.pause_on_first_frame,
-                            );
-                            self.playback_state = PlaybackState::Preparing;
-                        }
-                        Err(e) => {
-                            error!(
-                                "Attempted to prepare playback: resource not found {} {}",
-                                path.as_str(),
-                                e
-                            );
-                        }
+            let source = match &self.source {
+                VideoDataSource::Dependency { path } => match cx.get_dependency(path.as_str()) {
+                    Ok(data) => VideoSource::InMemory(data),
+                    Err(e) => {
+                        error!(
+                            "Attempted to prepare playback: resource not found {} {}",
+                            path.as_str(),
+                            e
+                        );
+                        return;
                     }
                 },
-                VideoDataSource::Network { url } => {
-                    cx.prepare_video_playback(
-                        self.id,
-                        VideoSource::Network(url.to_string()),
-                        self.texture_handle.unwrap(),
-                        self.autoplay,
-                        self.is_looping,
-                        self.pause_on_first_frame,
-                    );
-                    self.playback_state = PlaybackState::Preparing;
-                },
-                VideoDataSource::Filesystem { path } => {
-                    cx.prepare_video_playback(
-                        self.id,
-                        VideoSource::Filesystem(path.to_string()),
-                        self.texture_handle.unwrap(),
-                        self.autoplay,
-                        self.is_looping,
-                        self.pause_on_first_frame,
-                    );
-                    self.playback_state = PlaybackState::Preparing;
-                }
-            }
+                VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
+                VideoDataSource::Filesystem { path } => VideoSource::Filesystem(path.to_string()),
+            };
+
+            cx.prepare_video_playback(
+                self.id,
+                source,
+                self.texture_handle.unwrap(),
+                self.autoplay,
+                self.is_looping,
+            );
+
+            self.playback_state = PlaybackState::Preparing;
+            self.should_prepare_playback = false;
         }
     }
 
@@ -342,18 +322,18 @@ impl Video {
         }
     }
 
-    fn preview_first_frame(&mut self, cx: &mut Cx) {
+    fn prepare_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared {
-            self.prepare_playback(cx);
-            self.pause_on_first_frame = true;
-            self.playback_state = PlaybackState::Previewing;
+            self.should_prepare_playback = true;
+            self.maybe_prepare_playback(cx);
         }
     }
 
     fn begin_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared {
-            self.prepare_playback(cx);
-            self.playback_state = PlaybackState::Playing;
+            self.should_prepare_playback = true;
+            self.autoplay = true;
+            self.maybe_prepare_playback(cx);
         }
     }
 
@@ -382,8 +362,11 @@ impl Video {
         if self.playback_state == PlaybackState::Unprepared {
             self.source = source;
         } else {
-            error!("Attempted to set source while player state is: {:?}", self.playback_state);
-        } 
+            error!(
+                "Attempted to set source while player state is: {:?}",
+                self.playback_state
+            );
+        }
     }
 }
 
@@ -391,9 +374,9 @@ impl Video {
 #[live_ignore]
 pub enum VideoDataSource {
     #[live {path: LiveDependency::default()}]
-    Dependency {path: LiveDependency},
+    Dependency { path: LiveDependency },
     #[pick {url: "".to_string()}]
-    Network {url: String},
+    Network { url: String },
     #[live {path: "".to_string()}]
-    Filesystem {path: String}
+    Filesystem { path: String },
 }

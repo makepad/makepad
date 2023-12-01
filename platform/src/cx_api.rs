@@ -75,7 +75,7 @@ pub enum CxOsOp {
 
     HttpRequest{request_id: LiveId, request:HttpRequest},
 
-    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool, bool),
+    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
     EndVideoPlayback(LiveId),
@@ -434,8 +434,8 @@ impl Cx {
         });
     }
 */
-    pub fn prepare_video_playback(&mut self, video_id: LiveId, source: VideoSource, external_texture_id: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
-        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame));
+    pub fn prepare_video_playback(&mut self, video_id: LiveId, source: VideoSource, external_texture_id: u32, autoplay: bool, should_loop: bool) {
+        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
