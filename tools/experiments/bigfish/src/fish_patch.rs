@@ -54,14 +54,15 @@ impl  FishPatch{
 
     let mut i =0 ;
 
-    patch.create_block(lib, String::from("Utility"), i%3*300, i/3*300 + 100);i=i+1;
     patch.create_block(lib, String::from("Oscillator"), i%3*300, i/3*300+ 100);i=i+1;
     patch.create_block(lib, String::from("Filter"), i%3*300, i/3*300+ 100);i=i+1;
     patch.create_block(lib, String::from("Effect"), i%3*300, i/3*300+ 100);i=i+1;
     patch.create_block(lib, String::from("Meta"), i%3*300, i/3*300+100);i=i+1;
     patch.create_block(lib, String::from("Envelope"), i%3*300, i/3*300+100);i=i+1;
+    patch.create_block(lib, String::from("Modulator"), i%3*300, i/3*300+100);i=i+1;
 
 
+    patch.create_block(lib, String::from("Utility"), i%3*300, i/3*300 + 100);i=i+1;
 
         for i in 0..20{
             patch.presets.push(FishPreset::create_test_preset(i));

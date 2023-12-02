@@ -87,8 +87,8 @@ live_design!{
 
     FishBlockEditorModulator = <FishBlockEditor>
     {
-        title = {draw_bg: { fn pixel(self) -> vec4   { return mix(THEME_COLOR_MODULATION, THEME_COLOR_MODULATOR_DARK, self.pos.y) }} }
-        body = {draw_bg: { fn pixel(self) -> vec4 { return THEME_COLOR_MODULATOR_FADE} }  }
+        title = {draw_bg: { fn pixel(self) -> vec4   { return mix(THEME_COLOR_MODULATION, THEME_COLOR_MODULATION_DARK, self.pos.y) }} }
+        body = {draw_bg: { fn pixel(self) -> vec4 { return THEME_COLOR_MODULATION_FADE} }  }
     }
 
     FishBlockEditorEnvelope= <FishBlockEditor>
