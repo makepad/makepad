@@ -217,7 +217,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                                 if let LiveEval::Float64(vm) = vmod {
 
                                     let mut hsv = vorig.to_hsva();
-                                    hsv.x = (hsv.x + (hm as f32) + 360.0).rem_euclid(360.);
+                                    hsv.x = (hsv.x + (hm as f32)/360.0 + 360.0).rem_euclid(360.);
                                     hsv.z = hsv.z + vm as f32;
                                     hsv.y = hsv.y + sm as f32;
                                 
