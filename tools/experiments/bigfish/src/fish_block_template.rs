@@ -96,7 +96,13 @@ self.allblocks.push(FishBlockTemplate{ category: FishBlockCategory::Envelope,
     
     id: 0, name: String::from("Envelope"), displayname: String::from("Envelope"), description:String::from("Generic envelope!"), creator: String::from("Stijn Haring-Kuipers"),  path:String::from("/envelope") }
 ) ;
-
+self.allblocks.push(FishBlockTemplate{ category: FishBlockCategory::Modulator,
+    outputs: vec![],
+    inputs: vec![],
+    parameters: vec![],
+    
+    id: 0, name: String::from("Modulator"), displayname: String::from("Modulator"), description:String::from("Generic modulator!"), creator: String::from("Stijn Haring-Kuipers"),  path:String::from("/modulator") }
+) ;
     }
     pub fn find_template(&self, name: &str) -> &FishBlockTemplate
     {
