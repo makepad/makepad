@@ -46,6 +46,7 @@ use {
             VideoTextureUpdatedEvent,
             VideoDecodingErrorEvent,
             VideoPlaybackCompletedEvent,
+            VideoPlaybackResourcesReleasedEvent,
             HttpRequest,
             HttpMethod,
         },
@@ -310,7 +311,16 @@ impl Cx {
                             }
                         );
                         self.call_event_handler(&e);
-                    }
+                    },
+                    FromJavaMessage::VideoPlayerReleased {video_id} => {
+                        self.os.video_surfaces.remove(&LiveId(video_id));
+                        let e = Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent {
+                                video_id: LiveId(video_id)
+                            }
+                        );
+                        self.call_event_handler(&e);
+                    },
                     FromJavaMessage::VideoDecodingError {video_id, error} => {
                         let e = Event::VideoDecodingError(
                             VideoDecodingErrorEvent {
