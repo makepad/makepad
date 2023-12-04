@@ -26,7 +26,7 @@ public class VideoPlayerRunnable implements Runnable {
         mVideoPlayer.resumePlayback();
     }
 
-    public void endPlayback() {
-        mVideoPlayer.endPlayback();
+    public void cleanupVideoPlaybackResources() {
+        mVideoPlayer.stopAndCleanup();
     }
 }

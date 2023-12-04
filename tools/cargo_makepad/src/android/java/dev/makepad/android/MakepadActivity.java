@@ -530,10 +530,10 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void endVideoPlayback(long videoId) {
+    public void cleanupVideoPlaybackResources(long videoId) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {
-            runnable.endPlayback();
+            runnable.cleanupVideoPlaybackResources();
         }
     }
 }

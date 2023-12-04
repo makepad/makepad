@@ -715,10 +715,10 @@ impl Cx {
                         android_jni::to_java_resume_video_playback(env, video_id);
                     }
                 },
-                CxOsOp::EndVideoPlayback(video_id) => {
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_end_video_playback(env, video_id);
+                        android_jni::to_java_cleanup_video_playback_resources(env, video_id);
                     }
                 },
                 _ => ()
