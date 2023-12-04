@@ -138,6 +138,12 @@ public class VideoPlayer {
     public void endPlayback() {
         mMediaPlayer.stop();
         mMediaPlayer.release();
+        Activity activity = mActivityReference.get();
+        if (activity != null) {
+            activity.runOnUiThread(() -> {
+                MakepadNative.onVideoPlayerReleased(mVideoId);
+            });
+        }
     }
 
     public void setExternalTextureHandle(int textureHandle) {
