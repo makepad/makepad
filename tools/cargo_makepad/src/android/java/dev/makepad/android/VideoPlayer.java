@@ -135,7 +135,7 @@ public class VideoPlayer {
         }
     }
 
-    public void endPlayback() {
+    public void stopAndCleanup() {
         mMediaPlayer.stop();
         mMediaPlayer.release();
         Activity activity = mActivityReference.get();

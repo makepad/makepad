@@ -78,7 +78,7 @@ pub enum CxOsOp {
     PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
-    EndVideoPlayback(LiveId),
+    CleanupVideoPlaybackResources(LiveId),
     UpdateVideoSurfaceTexture(LiveId),
 }
 
@@ -446,8 +446,8 @@ impl Cx {
         self.platform_ops.push(CxOsOp::ResumeVideoPlayback(video_id));
     }
 
-    pub fn end_video_playback(&mut self, video_id: LiveId) {
-        self.platform_ops.push(CxOsOp::EndVideoPlayback(video_id));
+    pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::CleanupVideoPlaybackResources(video_id));
     }
 
     pub fn println_resources(&self){

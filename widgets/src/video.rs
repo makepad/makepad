@@ -100,10 +100,11 @@ impl VideoRef {
         }
     }
 
-    // it will finish playback and cleanup decoding resources
-    pub fn end_playback(&mut self, cx: &mut Cx) {
+    // It will finish playback and cleanup all resources related to playback
+    // including data source, decoding threads, object references, etc.
+    pub fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.end_playback(cx);
+            inner.stop_and_cleanup_resources(cx);
         }
     }
 
@@ -370,9 +371,9 @@ impl Video {
         }
     }
 
-    fn end_playback(&mut self, cx: &mut Cx) {
+    fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
         if self.playback_state != PlaybackState::Unprepared {
-            cx.end_video_playback(self.id);
+            cx.cleanup_video_playback_resources(self.id);
         }
         self.playback_state = PlaybackState::CleaningUp;
     }
