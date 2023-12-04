@@ -750,11 +750,11 @@ pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id:
     );
 }    
 
-pub unsafe fn to_java_end_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+pub unsafe fn to_java_cleanup_video_playback_resources(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
-        "endVideoPlayback",
+        "cleanupVideoPlaybackResources",
         "(J)V",
         video_id
     );
