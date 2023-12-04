@@ -100,6 +100,9 @@ pub enum FromJavaMessage {
     VideoPlaybackCompleted {
         video_id: u64,
     },
+    VideoPlayerReleased {
+        video_id: u64,
+    },
     VideoDecodingError {
         video_id: u64,
         error: String,
@@ -456,6 +459,18 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackC
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlayerReleased(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    video_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::VideoPlayerReleased {
+        video_id: video_id as u64,
+    });
+}
+
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoDecodingError(
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
@@ -710,6 +725,8 @@ pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_
     );
 
     let updated = (**env).CallBooleanMethod.unwrap()(env, video_decoder_ref, mid_update_tex_image);
+    (**env).DeleteLocalRef.unwrap()(env, class);
+
     updated != 0
 }
 
