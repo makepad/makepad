@@ -129,6 +129,9 @@ enum PlaybackState {
     Paused,
     // Completed is only used when not looping, means playback reached end of stream
     Completed,
+    // CleaningUp happens when the platform is called to stop playback and release all resources
+    // including data source, object references, decoding threads, etc.
+    CleaningUp,
 }
 
 impl LiveHook for Video {
@@ -164,6 +167,7 @@ pub enum VideoAction {
     PlaybackBegan,
     TextureUpdated,
     PlaybackCompleted,
+    PlayerReset
 }
 
 impl Widget for Video {
@@ -224,6 +228,13 @@ impl Video {
                     self.playback_state = PlaybackState::Completed;
                     dispatch_action(cx, VideoAction::PlaybackCompleted);
                 }
+            }
+        }
+
+        if let Event::VideoPlaybackResourcesReleased(event) = event {
+            if event.video_id == self.id {
+                self.playback_state = PlaybackState::Unprepared;
+                dispatch_action(cx, VideoAction::PlayerReset);
             }
         }
 
@@ -363,7 +374,7 @@ impl Video {
         if self.playback_state != PlaybackState::Unprepared {
             cx.end_video_playback(self.id);
         }
-        self.playback_state = PlaybackState::Unprepared;
+        self.playback_state = PlaybackState::CleaningUp;
     }
 
     fn set_source(&mut self, source: VideoDataSource) {

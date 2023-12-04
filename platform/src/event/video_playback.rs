@@ -29,6 +29,11 @@ pub struct VideoPlaybackCompletedEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct VideoPlaybackResourcesReleasedEvent {
+    pub video_id: LiveId
+}
+
+#[derive(Clone, Debug)]
 pub struct VideoDecodingErrorEvent {
     pub video_id: LiveId,
     pub error: String,
