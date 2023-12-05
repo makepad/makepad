@@ -26,6 +26,14 @@ public class VideoPlayerRunnable implements Runnable {
         mVideoPlayer.resumePlayback();
     }
 
+    public void mute() {
+        mVideoPlayer.mute();
+    }
+
+    public void unmute() {
+        mVideoPlayer.unmute();
+    }
+
     public void cleanupVideoPlaybackResources() {
         mVideoPlayer.stopAndCleanup();
     }

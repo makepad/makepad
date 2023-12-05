@@ -135,6 +135,19 @@ public class VideoPlayer {
         }
     }
 
+    public void mute() {
+        if (mMediaPlayer != null) {
+            mMediaPlayer.setVolume(0, 0);
+        }
+    }
+
+    public void unmute() {
+        if (mMediaPlayer != null) {
+            mMediaPlayer.setVolume(1, 1);
+        }
+    }
+
+
     public void stopAndCleanup() {
         mMediaPlayer.stop();
         mMediaPlayer.release();
