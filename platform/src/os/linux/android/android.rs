@@ -46,6 +46,7 @@ use {
             VideoTextureUpdatedEvent,
             VideoDecodingErrorEvent,
             VideoPlaybackCompletedEvent,
+            VideoPlaybackResourcesReleasedEvent,
             HttpRequest,
             HttpMethod,
         },
@@ -310,7 +311,16 @@ impl Cx {
                             }
                         );
                         self.call_event_handler(&e);
-                    }
+                    },
+                    FromJavaMessage::VideoPlayerReleased {video_id} => {
+                        self.os.video_surfaces.remove(&LiveId(video_id));
+                        let e = Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent {
+                                video_id: LiveId(video_id)
+                            }
+                        );
+                        self.call_event_handler(&e);
+                    },
                     FromJavaMessage::VideoDecodingError {video_id, error} => {
                         let e = Event::VideoDecodingError(
                             VideoDecodingErrorEvent {
@@ -687,10 +697,10 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
-                CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame) => {
+                CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame);
+                        android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop);
                     }
                 },
                 CxOsOp::PauseVideoPlayback(video_id) => {
@@ -705,10 +715,22 @@ impl Cx {
                         android_jni::to_java_resume_video_playback(env, video_id);
                     }
                 },
-                CxOsOp::EndVideoPlayback(video_id) => {
+                CxOsOp::MuteVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_end_video_playback(env, video_id);
+                        android_jni::to_java_mute_video_playback(env, video_id);
+                    }
+                },
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_unmute_video_playback(env, video_id);
+                    }
+                },
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_cleanup_video_playback_resources(env, video_id);
                     }
                 },
                 _ => ()
