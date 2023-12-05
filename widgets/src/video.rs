@@ -129,6 +129,62 @@ impl VideoRef {
             inner.set_source(source);
         }
     }
+
+    pub fn is_unprepared(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Unprepared
+        }
+        false
+    }
+
+    pub fn is_preparing(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Preparing
+        }
+        false
+    }
+
+    pub fn is_prepared(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Prepared
+        }
+        false
+    }
+    
+    pub fn is_playing(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Playing
+        }
+        false
+    }
+
+    pub fn is_paused(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Paused
+        }
+        false
+    }
+
+    pub fn has_completed(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Completed
+        }
+        false
+    }
+
+    pub fn is_cleaning_up(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::CleaningUp
+        }
+        false
+    }
+
+    pub fn is_muted(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.audio_state == AudioState::Muted
+        }
+        false
+    }
 }
 
 #[derive(Clone, Default, WidgetSet)]
