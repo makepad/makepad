@@ -504,13 +504,12 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop, boolean pauseFirstFrame) {
+    public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
         VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
         VideoPlayer.setSource(source);
         VideoPlayer.setExternalTextureHandle(externalTextureHandle);
         VideoPlayer.setAutoplay(autoplay);
         VideoPlayer.setShouldLoop(shouldLoop);
-        VideoPlayer.setPauseFirstFrame(pauseFirstFrame);
         VideoPlayerRunnable runnable = new VideoPlayerRunnable(VideoPlayer);
 
         mVideoPlayerRunnables.put(videoId, runnable);
@@ -531,10 +530,24 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void endVideoPlayback(long videoId) {
+    public void muteVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.mute();
+        }
+    }
+
+    public void unmuteVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.unmute();
+        }
+    }
+
+    public void cleanupVideoPlaybackResources(long videoId) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {
-            runnable.endPlayback();
+            runnable.cleanupVideoPlaybackResources();
         }
     }
 }

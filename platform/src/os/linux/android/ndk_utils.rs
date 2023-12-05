@@ -57,6 +57,13 @@ macro_rules! call_int_method {
 }
 
 #[macro_export]
+macro_rules! call_long_method {
+    ($env:expr, $obj:expr, $method:expr, $sig:expr $(, $args:expr)*) => {{
+        $crate::call_method!(CallLongMethod, $env, $obj, $method, $sig $(, $args)*)
+    }};
+}
+
+#[macro_export]
 macro_rules! call_void_method {
     ($env:expr, $obj:expr, $method:expr, $sig:expr $(, $args:expr)*) => {{
         $crate::call_method!(CallVoidMethod, $env, $obj, $method, $sig $(, $args)*)
@@ -101,6 +108,6 @@ macro_rules! new_local_ref {
 }
 
 pub use {
-    call_bool_method, call_int_method, call_method, call_object_method, call_void_method,call_float_method,
+    call_bool_method, call_int_method, call_long_method, call_method, call_object_method, call_void_method,call_float_method,
     get_utf_str, new_global_ref, new_local_ref, new_object,
 };

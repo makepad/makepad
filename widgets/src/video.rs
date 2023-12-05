@@ -1,5 +1,5 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_playback::*, 
+    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_playback::*,
     widget::*,
 };
 
@@ -13,7 +13,6 @@ use crate::{
 // is_looping - determines if the video should be played in a loop. defaults to false.
 // hold_to_pause - determines if the video should be paused when the user hold the pause button. defaults to false.
 // autoplay - determines if the video should start playback when the widget is created. defaults to false.
-
 
 // Not yet implemented:
 // UI
@@ -56,10 +55,14 @@ pub struct Video {
     hold_to_pause: bool,
     #[live(false)]
     autoplay: bool,
-    #[rust]
-    pause_on_first_frame: bool,
+    #[live(false)]
+    mute: bool,
     #[rust]
     playback_state: PlaybackState,
+    #[rust]
+    should_prepare_playback: bool,
+    #[rust]
+    audio_state: AudioState,
 
     // Original video metadata
     #[rust]
@@ -77,9 +80,9 @@ pub struct Video {
 pub struct VideoRef(WidgetRef);
 
 impl VideoRef {
-    pub fn preview_first_frame(&mut self, cx: &mut Cx) {
+    pub fn prepare_playback(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.preview_first_frame(cx);
+            inner.prepare_playback(cx);
         }
     }
 
@@ -101,10 +104,23 @@ impl VideoRef {
         }
     }
 
-    // it will finish playback and cleanup decoding resources
-    pub fn end_playback(&mut self, cx: &mut Cx) {
+    pub fn mute_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.end_playback(cx);
+            inner.mute_playback(cx);
+        }
+    }
+
+    pub fn unmute_playback(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.unmute_playback(cx);
+        }
+    }
+
+    // It will finish playback and cleanup all resources related to playback
+    // including data source, decoding threads, object references, etc.
+    pub fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.stop_and_cleanup_resources(cx);
         }
     }
 
@@ -112,6 +128,62 @@ impl VideoRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_source(source);
         }
+    }
+
+    pub fn is_unprepared(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Unprepared
+        }
+        false
+    }
+
+    pub fn is_preparing(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Preparing
+        }
+        false
+    }
+
+    pub fn is_prepared(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Prepared
+        }
+        false
+    }
+    
+    pub fn is_playing(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Playing
+        }
+        false
+    }
+
+    pub fn is_paused(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Paused
+        }
+        false
+    }
+
+    pub fn has_completed(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Completed
+        }
+        false
+    }
+
+    pub fn is_cleaning_up(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::CleaningUp
+        }
+        false
+    }
+
+    pub fn is_muted(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.audio_state == AudioState::Muted
+        }
+        false
     }
 }
 
@@ -126,11 +198,20 @@ enum PlaybackState {
     Unprepared,
     Preparing,
     Prepared,
-    Previewing,
     Playing,
     Paused,
     // Completed is only used when not looping, means playback reached end of stream
     Completed,
+    // CleaningUp happens when the platform is called to stop playback and release all resources
+    // including data source, object references, decoding threads, etc.
+    CleaningUp,
+}
+
+#[derive(Default, PartialEq, Debug)]
+enum AudioState {
+    #[default]
+    Playing,
+    Muted,
 }
 
 impl LiveHook for Video {
@@ -144,6 +225,8 @@ impl LiveHook for Video {
 
     #[allow(unused)]
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.id = LiveId::unique();
+
         #[cfg(target_os = "android")]
         if self.texture.is_none() {
             let new_texture = Texture::new(cx);
@@ -153,14 +236,18 @@ impl LiveHook for Video {
 
         let texture = self.texture.as_mut().unwrap();
         self.draw_bg.draw_vars.set_texture(0, &texture);
-
-        self.id = LiveId::unique();
+        self.should_prepare_playback = self.autoplay;
     }
 }
 
 #[derive(Clone, WidgetAction)]
 pub enum VideoAction {
     None,
+    PlaybackPrepared,
+    PlaybackBegan,
+    TextureUpdated,
+    PlaybackCompleted,
+    PlayerReset
 }
 
 impl Widget for Video {
@@ -195,17 +282,23 @@ impl Video {
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, VideoAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, VideoAction),
     ) {
         if let Event::VideoPlaybackPrepared(event) = event {
             if event.video_id == self.id {
                 self.handle_playback_prepared(cx, event);
+                dispatch_action(cx, VideoAction::PlaybackPrepared);
             }
         }
 
         if let Event::VideoTextureUpdated(event) = event {
             if event.video_id == self.id {
                 self.redraw(cx);
+                if self.playback_state == PlaybackState::Prepared {
+                    self.playback_state = PlaybackState::Playing;
+                    dispatch_action(cx, VideoAction::PlaybackBegan);
+                }
+                dispatch_action(cx, VideoAction::TextureUpdated);
             }
         }
 
@@ -213,16 +306,22 @@ impl Video {
             if event.video_id == self.id {
                 if !self.is_looping {
                     self.playback_state = PlaybackState::Completed;
+                    dispatch_action(cx, VideoAction::PlaybackCompleted);
                 }
+            }
+        }
+
+        if let Event::VideoPlaybackResourcesReleased(event) = event {
+            if event.video_id == self.id {
+                self.playback_state = PlaybackState::Unprepared;
+                dispatch_action(cx, VideoAction::PlayerReset);
             }
         }
 
         if let Event::TextureHandleReady(event) = event {
             if event.texture_id == self.texture.clone().unwrap().texture_id() {
                 self.texture_handle = Some(event.handle);
-                if self.autoplay && self.playback_state == PlaybackState::Unprepared {
-                    self.prepare_playback(cx);
-                }
+                self.maybe_prepare_playback(cx);
             }
         }
 
@@ -231,59 +330,39 @@ impl Video {
         self.handle_errors(event);
     }
 
-    fn prepare_playback(&mut self, cx: &mut Cx) {
-        if self.texture_handle.is_none() {
-            error!("Attempted to prepare playback without an external texture available");
-            return;
-        }
+    fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
+            if self.texture_handle.is_none() {
+                // texture is not yet ready, this method will be called again on TextureHandleReady
+                return;
+            }
 
-        if self.playback_state == PlaybackState::Unprepared {
-            match &self.source {
-                VideoDataSource::Dependency { path }  => {
-                    match cx.get_dependency(path.as_str()) {
-                        Ok(data) => {
-                            cx.prepare_video_playback(
-                                self.id,
-                                VideoSource::InMemory(data),
-                                self.texture_handle.unwrap(),
-                                self.autoplay,
-                                self.is_looping,
-                                self.pause_on_first_frame,
-                            );
-                            self.playback_state = PlaybackState::Preparing;
-                        }
-                        Err(e) => {
-                            error!(
-                                "Attempted to prepare playback: resource not found {} {}",
-                                path.as_str(),
-                                e
-                            );
-                        }
+            let source = match &self.source {
+                VideoDataSource::Dependency { path } => match cx.get_dependency(path.as_str()) {
+                    Ok(data) => VideoSource::InMemory(data),
+                    Err(e) => {
+                        error!(
+                            "Attempted to prepare playback: resource not found {} {}",
+                            path.as_str(),
+                            e
+                        );
+                        return;
                     }
                 },
-                VideoDataSource::Network { url } => {
-                    cx.prepare_video_playback(
-                        self.id,
-                        VideoSource::Network(url.to_string()),
-                        self.texture_handle.unwrap(),
-                        self.autoplay,
-                        self.is_looping,
-                        self.pause_on_first_frame,
-                    );
-                    self.playback_state = PlaybackState::Preparing;
-                },
-                VideoDataSource::Filesystem { path } => {
-                    cx.prepare_video_playback(
-                        self.id,
-                        VideoSource::Filesystem(path.to_string()),
-                        self.texture_handle.unwrap(),
-                        self.autoplay,
-                        self.is_looping,
-                        self.pause_on_first_frame,
-                    );
-                    self.playback_state = PlaybackState::Preparing;
-                }
-            }
+                VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
+                VideoDataSource::Filesystem { path } => VideoSource::Filesystem(path.to_string()),
+            };
+
+            cx.prepare_video_playback(
+                self.id,
+                source,
+                self.texture_handle.unwrap(),
+                self.autoplay,
+                self.is_looping,
+            );
+
+            self.playback_state = PlaybackState::Preparing;
+            self.should_prepare_playback = false;
         }
     }
 
@@ -297,6 +376,10 @@ impl Video {
             .set_uniform(cx, id!(video_height), &[self.video_height as f32]);
         self.draw_bg
             .set_uniform(cx, id!(video_width), &[self.video_width as f32]);
+
+        if self.mute && self.audio_state != AudioState::Muted {
+            cx.mute_video_playback(self.id);
+        }
 
         // Debug
         // log!(
@@ -342,18 +425,18 @@ impl Video {
         }
     }
 
-    fn preview_first_frame(&mut self, cx: &mut Cx) {
+    fn prepare_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared {
-            self.prepare_playback(cx);
-            self.pause_on_first_frame = true;
-            self.playback_state = PlaybackState::Previewing;
+            self.should_prepare_playback = true;
+            self.maybe_prepare_playback(cx);
         }
     }
 
     fn begin_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared {
-            self.prepare_playback(cx);
-            self.playback_state = PlaybackState::Playing;
+            self.should_prepare_playback = true;
+            self.autoplay = true;
+            self.maybe_prepare_playback(cx);
         }
     }
 
@@ -371,19 +454,37 @@ impl Video {
         }
     }
 
-    fn end_playback(&mut self, cx: &mut Cx) {
-        if self.playback_state != PlaybackState::Unprepared {
-            cx.end_video_playback(self.id);
+    fn mute_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared {
+            cx.mute_video_playback(self.id);
+            self.audio_state = AudioState::Muted;
         }
-        self.playback_state = PlaybackState::Unprepared;
+    }
+
+    fn unmute_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared 
+        && self.audio_state == AudioState::Muted {
+            cx.unmute_video_playback(self.id);
+            self.audio_state = AudioState::Playing;
+        }
+    }
+
+    fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
+        if self.playback_state != PlaybackState::Unprepared {
+            cx.cleanup_video_playback_resources(self.id);
+        }
+        self.playback_state = PlaybackState::CleaningUp;
     }
 
     fn set_source(&mut self, source: VideoDataSource) {
         if self.playback_state == PlaybackState::Unprepared {
             self.source = source;
         } else {
-            error!("Attempted to set source while player state is: {:?}", self.playback_state);
-        } 
+            error!(
+                "Attempted to set source while player state is: {:?}",
+                self.playback_state
+            );
+        }
     }
 }
 
@@ -391,9 +492,9 @@ impl Video {
 #[live_ignore]
 pub enum VideoDataSource {
     #[live {path: LiveDependency::default()}]
-    Dependency {path: LiveDependency},
+    Dependency { path: LiveDependency },
     #[pick {url: "".to_string()}]
-    Network {url: String},
+    Network { url: String },
     #[live {path: "".to_string()}]
-    Filesystem {path: String}
+    Filesystem { path: String },
 }

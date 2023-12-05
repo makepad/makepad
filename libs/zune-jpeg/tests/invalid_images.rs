@@ -6,7 +6,7 @@
  * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
-use zune_jpeg::JpegDecoder;
+use makepad_zune_jpeg::JpegDecoder;
 
 #[test]
 fn eof() {
@@ -29,7 +29,7 @@ fn bad_number_of_scans() {
     let err = decoder.decode().unwrap_err();
 
     assert!(
-        matches!(err, zune_jpeg::errors::DecodeErrors::SosError(x) if x == "Bad SOS length 59589,corrupt jpeg")
+        matches!(err, makepad_zune_jpeg::errors::DecodeErrors::SosError(x) if x == "Bad SOS length 59589,corrupt jpeg")
     );
 }
 
@@ -40,7 +40,7 @@ fn huffman_length_subtraction_overflow() {
     let err = decoder.decode().unwrap_err();
 
     assert!(
-        matches!(err, zune_jpeg::errors::DecodeErrors::FormatStatic(x) if x == "Invalid Huffman length in image")
+        matches!(err, makepad_zune_jpeg::errors::DecodeErrors::FormatStatic(x) if x == "Invalid Huffman length in image")
     );
 }
 
@@ -59,6 +59,6 @@ fn mul_with_overflow() {
     let err = decoder.decode().unwrap_err();
 
     assert!(
-        matches!(err, zune_jpeg::errors::DecodeErrors::SofError(x) if x == "Length of start of frame differs from expected 584,value is 65281")
+        matches!(err, makepad_zune_jpeg::errors::DecodeErrors::SofError(x) if x == "Length of start of frame differs from expected 584,value is 65281")
     );
 }
