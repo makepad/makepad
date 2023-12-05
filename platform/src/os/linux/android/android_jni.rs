@@ -738,7 +738,7 @@ pub unsafe fn to_java_pause_video_playback(env: *mut jni_sys::JNIEnv, video_id: 
         "(J)V",
         video_id
     );
-}    
+}
 
 pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
@@ -748,7 +748,27 @@ pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id:
         "(J)V",
         video_id
     );
-}    
+}
+
+pub unsafe fn to_java_mute_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "muteVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}
+
+pub unsafe fn to_java_unmute_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "unmuteVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}
 
 pub unsafe fn to_java_cleanup_video_playback_resources(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(

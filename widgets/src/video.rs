@@ -55,10 +55,14 @@ pub struct Video {
     hold_to_pause: bool,
     #[live(false)]
     autoplay: bool,
+    #[live(false)]
+    mute: bool,
     #[rust]
     playback_state: PlaybackState,
     #[rust]
     should_prepare_playback: bool,
+    #[rust]
+    audio_state: AudioState,
 
     // Original video metadata
     #[rust]
@@ -100,6 +104,18 @@ impl VideoRef {
         }
     }
 
+    pub fn mute_playback(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.mute_playback(cx);
+        }
+    }
+
+    pub fn unmute_playback(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.unmute_playback(cx);
+        }
+    }
+
     // It will finish playback and cleanup all resources related to playback
     // including data source, decoding threads, object references, etc.
     pub fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
@@ -133,6 +149,13 @@ enum PlaybackState {
     // CleaningUp happens when the platform is called to stop playback and release all resources
     // including data source, object references, decoding threads, etc.
     CleaningUp,
+}
+
+#[derive(Default, PartialEq, Debug)]
+enum AudioState {
+    #[default]
+    Playing,
+    Muted,
 }
 
 impl LiveHook for Video {
@@ -298,6 +321,10 @@ impl Video {
         self.draw_bg
             .set_uniform(cx, id!(video_width), &[self.video_width as f32]);
 
+        if self.mute && self.audio_state != AudioState::Muted {
+            cx.mute_video_playback(self.id);
+        }
+
         // Debug
         // log!(
         //     "Video id {} - decoding initialized: \n {}x{}px |",
@@ -368,6 +395,21 @@ impl Video {
         if self.playback_state == PlaybackState::Paused {
             cx.resume_video_playback(self.id);
             self.playback_state = PlaybackState::Playing;
+        }
+    }
+
+    fn mute_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared {
+            cx.mute_video_playback(self.id);
+            self.audio_state = AudioState::Muted;
+        }
+    }
+
+    fn unmute_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared 
+        && self.audio_state == AudioState::Muted {
+            cx.unmute_video_playback(self.id);
+            self.audio_state = AudioState::Playing;
         }
     }
 
