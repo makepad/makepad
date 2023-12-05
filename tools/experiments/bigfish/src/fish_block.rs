@@ -12,8 +12,8 @@ pub struct FishBlock{
     pub category: FishBlockCategory,
     pub block_type: String,
     pub parameters: Vec<FishParamStorage>,
-    pub input_ports: Vec<FishInputPort>,
-    pub output_ports: Vec<FishOutputPort>
+    pub input_ports: Vec<FishInputPortInstance>,
+    pub output_ports: Vec<FishOutputPortInstance>
 }
 
 impl FishBlock{
