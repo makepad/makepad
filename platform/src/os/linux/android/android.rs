@@ -124,7 +124,7 @@ impl Cx {
                         self.call_event_handler(&Event::ClearAtlasses);
                     }
                     FromJavaMessage::Touch(mut touches) => {
-                        let time = self.os.timers.time_now();
+                        let time = touches[0].time;
                         let window = &mut self.windows[CxWindowPool::id_zero()];
                         let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                         for touch in &mut touches {

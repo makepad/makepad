@@ -105,6 +105,7 @@ pub enum TouchState {
 pub struct TouchPoint {
     pub state: TouchState,
     pub abs: DVec2,
+    pub time: f64,
     pub uid: u64,
     pub rotation_angle: f64,
     pub force: f64,
