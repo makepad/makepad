@@ -118,13 +118,7 @@ public class VideoPlayer {
             mSurfaceTexture.updateTexImage();
 
             mAvailableFrames.decrementAndGet();
-            int processedFrames = mFramesProcessed.incrementAndGet();
             updated = true;
-
-            if (mPauseFirstFrame && processedFrames > 0) {
-                mMediaPlayer.pause();
-                mPauseFirstFrame = false;
-            }
         }
         return updated;
     }
@@ -141,9 +135,28 @@ public class VideoPlayer {
         }
     }
 
-    public void endPlayback() {
+    public void mute() {
+        if (mMediaPlayer != null) {
+            mMediaPlayer.setVolume(0, 0);
+        }
+    }
+
+    public void unmute() {
+        if (mMediaPlayer != null) {
+            mMediaPlayer.setVolume(1, 1);
+        }
+    }
+
+
+    public void stopAndCleanup() {
         mMediaPlayer.stop();
         mMediaPlayer.release();
+        Activity activity = mActivityReference.get();
+        if (activity != null) {
+            activity.runOnUiThread(() -> {
+                MakepadNative.onVideoPlayerReleased(mVideoId);
+            });
+        }
     }
 
     public void setExternalTextureHandle(int textureHandle) {
@@ -158,32 +171,24 @@ public class VideoPlayer {
         mShouldLoop = shouldLoop;
     }
 
-    public void setPauseFirstFrame(boolean pauseFirstFrame) {
-        mPauseFirstFrame = pauseFirstFrame;
-    }
-
     public void setSource(Object source) {
         mSource = source;
     }
 
     private long mVideoId;
-    private Object mSource;
 
     // player
     private MediaPlayer mMediaPlayer;
     private boolean mIsPrepared = false; 
     private boolean mIsDecoding = false;
+    private Object mSource;
     private int mExternalTextureHandle;
     private SurfaceTexture mSurfaceTexture;
-
+    private AtomicInteger mAvailableFrames = new AtomicInteger(0);
 
     // playback
     private boolean mAutoplay = false;
     private boolean mShouldLoop = false;
-    private boolean mPauseFirstFrame = false;
-
-    private AtomicInteger mAvailableFrames = new AtomicInteger(0);
-    private AtomicInteger mFramesProcessed = new AtomicInteger(0);
     
     // context
     private WeakReference<Activity> mActivityReference;

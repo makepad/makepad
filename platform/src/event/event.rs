@@ -80,6 +80,7 @@ pub enum Event {
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoTextureUpdated(VideoTextureUpdatedEvent),
     VideoPlaybackCompleted(VideoPlaybackCompletedEvent),
+    VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
  
@@ -142,10 +143,11 @@ impl Event{
             41=>"VideoTextureUpdated",
             42=>"VideoPlaybackCompleted",
             43=>"VideoDecodingError",
+            44=>"VideoPlaybackResourcesReleased",
              
             #[cfg(target_arch = "wasm32")]
-            44=>"ToWasmMsg",
-            45=>"MouseLeave",
+            45=>"ToWasmMsg",
+            46=>"MouseLeave",
             _=>panic!()
         }
     }
@@ -204,11 +206,12 @@ impl Event{
             Self::VideoTextureUpdated(_)=>41,
             Self::VideoPlaybackCompleted(_)=>42,
             Self::VideoDecodingError(_)=>43,
-            Self::TextureHandleReady(_)=>44,
-            Self::MouseLeave(_)=>45,
+            Self::VideoPlaybackResourcesReleased(_)=>44,
+            Self::TextureHandleReady(_)=>45,
+            Self::MouseLeave(_)=>46,
                                      
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>46,
+            Self::ToWasmMsg(_)=>47,
         }
     }
 }
