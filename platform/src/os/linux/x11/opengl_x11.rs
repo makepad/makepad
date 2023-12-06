@@ -177,7 +177,7 @@ impl Cx {
 
 impl CxTexture {
     fn update_shared_texture(&mut self) {
-        if self.alloc_shared(){
+        if !self.alloc_shared(){
             return
         }
         let alloc = self.alloc.as_ref().unwrap();
