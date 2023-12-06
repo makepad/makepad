@@ -9,7 +9,6 @@ use {
     std::collections::HashMap,
     self::super::{
         android_media::CxAndroidMedia,
-        android_decoding::CxAndroidDecoding,
         jni_sys::jobject,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
@@ -43,10 +42,10 @@ use {
             KeyCode,
             Event,
             WindowGeom,
-            VideoDecodingInitializedEvent,
-            VideoColorFormat,
-            VideoStreamEvent,
+            VideoPlaybackPreparedEvent,
+            VideoTextureUpdatedEvent,
             VideoDecodingErrorEvent,
+            VideoPlaybackCompletedEvent,
             HttpRequest,
             HttpMethod,
         },
@@ -239,7 +238,7 @@ impl Cx {
                         }
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
-                        let mut e = Event::NetworkResponses(vec![
+                        let e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpResponse(HttpResponse::new(
@@ -250,20 +249,16 @@ impl Cx {
                                 ))
                             }
                         ]);
-                        if self.studio_http_connection(&mut e) {
-                            self.call_event_handler(&e);
-                        }
+                        self.call_event_handler(&e);
                     }
                     FromJavaMessage::HttpRequestError {request_id, error, ..} => {
-                        let mut e = Event::NetworkResponses(vec![
+                        let e = Event::NetworkResponses(vec![
                             NetworkResponseEvent {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpRequestError(error)
                             }
                         ]);
-                        if self.studio_http_connection(&mut e) {
-                            self.call_event_handler(&e);
-                        }
+                        self.call_event_handler(&e);
                     }
                     FromJavaMessage::WebSocketMessage {message, sender} => {
                         let mut ws_message_parser = WebSocketImpl::new();
@@ -295,32 +290,27 @@ impl Cx {
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
                     }
-                    FromJavaMessage::VideoDecodingInitialized {video_id, frame_rate, video_width, video_height, color_format, duration} => {
-                        let e = Event::VideoDecodingInitialized(
-                            VideoDecodingInitializedEvent {
+                    FromJavaMessage::VideoPlaybackPrepared {video_id, video_width, video_height, duration, surface_texture} => {
+                        let e = Event::VideoPlaybackPrepared(
+                            VideoPlaybackPreparedEvent {
                                 video_id: LiveId(video_id),
-                                frame_rate,
                                 video_width,
                                 video_height,
-                                color_format: VideoColorFormat::from_str(&color_format),
                                 duration,
                             }
                         );
+
+                        self.os.video_surfaces.insert(LiveId(video_id), surface_texture);
                         self.call_event_handler(&e);
                     },
-                    FromJavaMessage::VideoStream {video_id, frames_group} => {
-                        if let Some(callback_mutex) = self.os.decoding.video_decoding_input_cb.get(&LiveId(video_id)) {
-                            if let Ok(mut lock) = callback_mutex.lock() {
-                                if let Some(ref mut callback) = *lock {
-                                    (*callback)(frames_group);
-                                }
+                    FromJavaMessage::VideoPlaybackCompleted {video_id} => {
+                        let e = Event::VideoPlaybackCompleted(
+                            VideoPlaybackCompletedEvent {
+                                video_id: LiveId(video_id)
                             }
-                        }
-                    },
-                    FromJavaMessage::VideoChunkDecoded {video_id} => {
-                        let e = Event::VideoChunkDecoded(LiveId(video_id));
+                        );
                         self.call_event_handler(&e);
-                    },
+                    }
                     FromJavaMessage::VideoDecodingError {video_id, error} => {
                         let e = Event::VideoDecodingError(
                             VideoDecodingErrorEvent {
@@ -360,6 +350,17 @@ impl Cx {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
             }
+
+            let to_dispatch = self.get_video_updates();
+            for video_id in to_dispatch {
+                let e = Event::VideoTextureUpdated(
+                    VideoTextureUpdatedEvent {
+                        video_id,
+                    }
+                );
+                self.call_event_handler(&e);
+            }
+
             
             if self.handle_live_edit() {
                 self.call_event_handler(&Event::LiveEdit);
@@ -387,6 +388,20 @@ impl Cx {
                 std::thread::sleep(Duration::from_millis(8));
             }
         }
+    }
+
+    fn get_video_updates(&mut self) -> Vec<LiveId> {
+        let mut videos_to_update = Vec::new();
+        for (live_id, surface_texture) in self.os.video_surfaces.iter_mut() {
+                unsafe {
+                    let env = attach_jni_env();
+                    let updated = android_jni::to_java_update_tex_image(env, *surface_texture);
+                    if updated { 
+                        videos_to_update.push(*live_id);
+                    }
+                }    
+        }
+        videos_to_update
     }
     
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
@@ -468,52 +483,8 @@ impl Cx {
         });
     }
     
-    pub fn studio_http_connection(&mut self, event: &mut Event) -> bool {
-        if let Event::NetworkResponses(res) = event {
-            res.retain( | res | {
-                if res.request_id == live_id!(live_reload) {
-                    // alright lets see if we need to live reload from the body
-                    if let NetworkResponse::HttpResponse(res) = &res.response {
-                        // lets check our response
-                        if let Some(body) = res.get_string_body() {
-                            if body.len()>0 {
-                                let mut parts = body.split("$$$makepad_live_change$$$");
-                                if let Some(file_name) = parts.next() {
-                                    let content = parts.next().unwrap().to_string();
-                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                                        file_name:file_name.to_string(),
-                                        content
-                                    }]);
-                                }
-                            }
-                        }
-                        Self::poll_studio_http();
-                    }
-                    false
-                }
-                else {
-                    true
-                }
-            });
-            if res.len()>0 {
-                return true
-            }
-        }
-        false
-    }
-    
-    fn poll_studio_http() {
-        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
-        if studio_http.is_none() {
-            return
-        }
-        let url = format!("http://{}/$live_file_change", studio_http.unwrap());
-        let request = HttpRequest::new(url, HttpMethod::GET);
-        unsafe {android_jni::to_java_http_request(live_id!(live_reload), request);}
-    }
-    
     pub fn start_network_live_file_watcher(&mut self) {
-        Self::poll_studio_http();
+
         /*
         log!("WATCHING NETWORK FOR FILE WATCHER");
         let studio_uid: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_UID");
@@ -716,30 +687,30 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
-                CxOsOp::InitializeVideoDecoding(video_id, video) => {
+                CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_initialize_video_decoding(env, video_id, video);
+                        android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame);
                     }
                 },
-                CxOsOp::DecodeNextVideoChunk(video_id, max_frames_to_decode) => {
+                CxOsOp::PauseVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_decode_next_video_chunk(env, video_id, max_frames_to_decode);
+                        android_jni::to_java_pause_video_playback(env, video_id);
                     }
                 },
-                CxOsOp::FetchNextVideoFrames(video_id, number_frames) => {
+                CxOsOp::ResumeVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_fetch_next_video_frames(env, video_id, number_frames);
+                        android_jni::to_java_resume_video_playback(env, video_id);
                     }
                 },
-                CxOsOp::CleanupVideoDecoding(video_id) => {
+                CxOsOp::EndVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_cleanup_video_decoding(env, video_id);
+                        android_jni::to_java_end_video_playback(env, video_id);
                     }
-                }
+                },
                 _ => ()
             }
         }
@@ -767,11 +738,11 @@ impl Default for CxOs {
             dpi_factor: 1.5,
             keyboard_closed: 0.0,
             media: CxAndroidMedia::default(),
-            decoding: CxAndroidDecoding::default(),
             display: None,
             quit: false,
             fullscreen: false,
-            timers: Default::default()
+            timers: Default::default(),
+            video_surfaces: HashMap::new(),
         }
     }
 }
@@ -798,7 +769,7 @@ pub struct CxOs {
     pub (crate) timers: PollTimers,
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
-    pub (crate) decoding: CxAndroidDecoding,
+    pub (crate) video_surfaces: HashMap<LiveId, jobject>,
 }
 
 impl CxAndroidDisplay {

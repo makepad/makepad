@@ -155,7 +155,7 @@ impl Widget for FlatList {
                 scroll_to = Some((scroll_pos, scroll_pos+0.5 >= view_total - view_visible))
             }
         });
-*/
+        */
         for (_,item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
             item.handle_widget_event_with(cx, event, &mut | cx, action | {

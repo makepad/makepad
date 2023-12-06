@@ -326,13 +326,11 @@ impl LiveHook for App {
         crate::drawarc::live_design(cx);
     }
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
     }
 }
 
-impl App {
-    
+impl App {   
 }
 
 impl AppMain for App {

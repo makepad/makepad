@@ -22,13 +22,11 @@ use {
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
-            apple_decoding::CxAppleDecoding,
             metal::{MetalCx, DrawPassMode},
         },
         pass::{CxPassParent},
         thread::Signal,
         window::CxWindowPool,
-        web_socket::WebSocket,
         event::{
             Event,
             NetworkResponseChannel
@@ -37,10 +35,6 @@ use {
         cx::{Cx, OsType},
     }
 };
-#[cfg(not(apple_sim))]
-use crate::makepad_live_compiler::LiveFileChange;
-#[cfg(not(apple_sim))]
-use crate::event::{NetworkResponse, HttpRequest, HttpMethod};
 
 impl Cx {
     
@@ -100,10 +94,7 @@ impl Cx {
             out.push(event);
         }
         if out.len()>0{
-            let mut e = Event::NetworkResponses(out);
-            if self.studio_http_connection(&mut e){
-                self.call_event_handler(&e)
-            }
+            self.call_event_handler(& Event::NetworkResponses(out))
         }
     }
     
@@ -320,10 +311,11 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
-                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
-                CxOsOp::CleanupVideoDecoding(_) => todo!(),
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
+                CxOsOp::PauseVideoPlayback(_) => todo!(),
+                CxOsOp::ResumeVideoPlayback(_) => todo!(),
+                CxOsOp::EndVideoPlayback(_) => todo!(),
+                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
             }
         }
     }
@@ -348,9 +340,6 @@ impl CxOsApi for Cx {
 
         #[cfg(apple_sim)]
         self.start_disk_live_file_watcher(50);
-        
-        #[cfg(not(apple_sim))]
-        self.poll_studio_http();
         
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
@@ -381,6 +370,5 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
-    pub (crate) decoding: CxAppleDecoding,
 }
 
