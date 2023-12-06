@@ -81,6 +81,7 @@ impl Drm {
             }
         }
         if found_drm_mode.is_none() {
+			println!("ERR: no drm mode found that matched {}",mode_want);
             drmModeFreeConnector(drm_connector);
             drmModeFreeResources(drm_resources);
             return None
@@ -98,6 +99,7 @@ impl Drm {
         }
         
         if found_drm_encoder.is_none() {
+			println!("ERR: no drm encoder found");
             drmModeFreeConnector(drm_connector);
             drmModeFreeResources(drm_resources);
             return None

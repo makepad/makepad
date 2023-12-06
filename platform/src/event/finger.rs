@@ -93,7 +93,7 @@ pub struct ScrollEvent {
 
 // Touch events
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TouchState {
     Start,
     Stop,

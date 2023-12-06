@@ -32,6 +32,9 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 [target.aarch64-apple-ios.dependencies]
 makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 
+[target.'cfg(linux_direct)'.dependencies]
+inotify = { path="../libs/inotify-rs", version = "0.10.2" }
+
 [target.x86_64-apple-tvos.dependencies]
 makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 

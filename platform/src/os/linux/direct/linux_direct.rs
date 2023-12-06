@@ -1,6 +1,7 @@
 use {
     std::rc::Rc,
     std::cell::RefCell,
+    std::sync::Arc,
     self::super::{
         direct_event::*,
         egl_drm::{Egl, Drm},
@@ -23,7 +24,7 @@ use {
         },
         window::CxWindowPool,
         pass::CxPassParent,
-        cx::{Cx, OsType,},
+        cx::{Cx, OsType,LinuxDirectParams},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
@@ -35,34 +36,52 @@ pub struct DirectApp {
     timers: SelectTimers,
     drm: Drm,
     egl: Egl,
-    raw_input: RawInput,
+    raw_input: Arc<RawInput>,
     dpi_factor: f64,
 }
 
+///Optional compile time default screen settings
+const MODE: Option<&str> = option_env!("DISPLAY_MODE");
+const DPI: Option<&str> = option_env!("SCALE");
+
 impl DirectApp {
     fn new() -> Self {
-        let mut mode = "1280x720-60".to_string();
-        let mut dpi_factor = 1.0;
+        let mut mode = if MODE.is_some() {
+            MODE.unwrap().to_string()
+        } else {
+            "1280x720-60".to_string()
+        };
+        let mut dpi_factor: f64 = if DPI.is_some() {
+            if let Ok(scale) = DPI.unwrap().parse() {
+                scale
+            } else {
+                println!("Manualy entered SCALE: '{}' could not be parsed as a float", DPI.unwrap());
+                1.0f64
+            }
+        } else {
+            1.0f64
+        };
         for arg in std::env::args() {
             if arg.starts_with("-mode=") {
                 mode = arg.trim_start_matches("-mode=").to_string();
             }
             if arg.starts_with("-scale=") {
-                dpi_factor = arg.trim_start_matches("-scale=").parse().unwrap();
+                dpi_factor = arg.trim_start_matches("-scale=").parse().expect("Invalid scale argument entered, it must be parsable as a floating point number.");
             }
         }
         
         // ok so. lets do some drm devices things
-        let mut drm = unsafe {Drm::new(&mode)}.unwrap();
+        let mut drm = unsafe {Drm::new(&mode)}.expect("Could not get a DRM connection");
         let egl = unsafe {Egl::new(&drm)}.unwrap();
         egl.swap_buffers();
         unsafe {drm.first_mode()};
+        let timers = SelectTimers::new();
         Self {
             dpi_factor,
             egl,
-            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor, dpi_factor),
+            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor, dpi_factor, CxWindowPool::id_zero()),
             drm,
-            timers: SelectTimers::new()
+            timers,
         }
     }
 }
@@ -72,7 +91,7 @@ impl Cx {
         
         let mut cx = cx.borrow_mut();
         
-        cx.os_type = OsType::LinuxDirect;
+        cx.os_type = OsType::LinuxDirect(LinuxDirectParams { has_pointer: true });
         cx.gpu_info.performance = GpuPerformance::Tier1;
         
         cx.call_event_handler(&Event::Construct);
@@ -100,16 +119,16 @@ impl Cx {
                     })
                 );
             }
-            let input_events = direct_app.raw_input.poll_raw_input(
-                direct_app.timers.time_now(),
-                CxWindowPool::id_zero()
-            );
-            for event in input_events {
+
+            for event in direct_app.raw_input.clone().direct_events.lock().unwrap().drain(..) {
                 cx.direct_event_callback(
                     &mut direct_app,
                     event
                 );
-            }
+            };
+
+            cx.os_type = OsType::LinuxDirect(LinuxDirectParams { has_pointer: direct_app.raw_input.has_pointer() });
+
             event_flow = cx.direct_event_callback(&mut direct_app, DirectEvent::Paint);
         }
     }
@@ -184,6 +203,13 @@ impl Cx {
                 else {
                     self.call_event_handler(&Event::Timer(e))
                 }
+            }
+            DirectEvent::TouchUpdate(e) => {
+                self.fingers.process_touch_update_start(e.time, &e.touches);
+                let e = Event::TouchUpdate(e);
+                self.call_event_handler(&e);
+                let e = if let Event::TouchUpdate(e) = e{e}else{panic!()};
+                self.fingers.process_touch_update_end(&e.touches);
             }
         }
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {

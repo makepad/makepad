@@ -1,15 +1,12 @@
-use {
-    crate::{
-        event::{
-            MouseDownEvent,
-            MouseUpEvent,
-            MouseMoveEvent,
-            ScrollEvent,
-            KeyEvent,
-            TextInputEvent,
-            TimerEvent,
-        },
-    }
+use crate::event::{
+		MouseDownEvent,
+		MouseUpEvent,
+		MouseMoveEvent,
+		ScrollEvent,
+		KeyEvent,
+		TextInputEvent,
+		TimerEvent,
+		TouchUpdateEvent,
 };
 
 #[derive(Debug)]
@@ -23,4 +20,5 @@ pub enum DirectEvent {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     Timer(TimerEvent),
+    TouchUpdate(TouchUpdateEvent),
 }

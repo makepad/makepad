@@ -38,7 +38,7 @@ cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-pc-
 echo "Checking Linux X11 stable"
 cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
 echo "Checking Linux Direct stable"
-MAKEPAD=linux_direct cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
+RUSTFLAGS="--cfg linux_direct" cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
 echo "Checking Apple macos intel stable"
 cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-apple-darwin --message-format=json
 echo "Checking Apple macos arm stable"
@@ -57,7 +57,7 @@ MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --ta
 echo "Checking Linux X11 nightly"
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
 echo "Checking Linux Direct stable"
-MAKEPAD=lines,linux_direct cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
+MAKEPAD=lines RUSTFLAGS="--cfg linux_direct" cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
 echo "Checking Apple macos intel nightly"
 MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-apple-darwin --message-format=json
 echo "Checking Apple macos  intel nightly"

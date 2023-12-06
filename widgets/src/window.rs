@@ -40,14 +40,14 @@ pub struct Window {
             //Menu::item("Quit App", Cx::command_quit()),
         ]),
     ]))]*/
-    
+
     //#[live] _default_menu: Menu,
-    
+
     //#[rust] last_menu: Option<Menu>,
-    
+
     // testing
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    
+
 }
 
 #[derive(Clone)]
@@ -59,7 +59,7 @@ impl LiveHook for Window {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, Window)
     }
-    
+
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
@@ -91,7 +91,7 @@ impl LiveHook for Window {
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
-            OsType::LinuxDirect |
+            OsType::LinuxDirect(_) |
             OsType::Android(_) => {
                 //self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
@@ -189,7 +189,7 @@ impl Window {
             Event::Scroll(ev) => ev.window_id != self.window.window_id(),
             _ => false
         };
-        
+
         if is_for_other_window {
             return dispatch_action(cx, WindowAction::EventForOtherWindow)
         }
@@ -217,13 +217,13 @@ impl Window {
                 dispatch_action(cx, WindowAction::ViewActions(actions));
             }
         }
-        
+
         if let Event::ClearAtlasses = event {
             Cx2d::reset_fonts_atlas(cx);
             Cx2d::reset_icon_atlas(cx);
         }
         if let Event::MouseMove(ev) = event {
-            if let OsType::LinuxDirect = cx.os_type() {
+            if let OsType::LinuxDirect(_) = cx.os_type() {
                 // ok move our mouse cursor
                 self.last_mouse_pos = ev.abs;
                 self.draw_cursor.update_abs(cx, Rect {
@@ -233,38 +233,43 @@ impl Window {
             }
         }
     }
-    
+
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
 
         if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
             return Redrawing::no()
         }
-        
+
         cx.begin_pass(&self.pass, None);
 
         self.main_draw_list.begin_always(cx);
-        
+
         cx.begin_pass_sized_turtle(Layout::flow_down());
-        
+
         self.overlay.begin(cx);
-        
+
         Redrawing::yes()
     }
-    
+
     pub fn end(&mut self, cx: &mut Cx2d) {
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
         self.debug_view.draw(cx);
-        
+
         // lets draw our cursor
-        if let OsType::LinuxDirect = cx.os_type() {
-            self.cursor_draw_list.begin_overlay_last(cx);
-            self.draw_cursor.draw_abs(cx, Rect {
-                pos: self.last_mouse_pos,
-                size: self.mouse_cursor_size
-            });
-            self.cursor_draw_list.end(cx);
+        match cx.os_type() {
+            OsType::LinuxDirect(_params) => {
+                // if params.has_pointer {
+                    self.cursor_draw_list.begin_overlay_last(cx);
+                    self.draw_cursor.draw_abs(cx, Rect {
+                        pos: self.last_mouse_pos,
+                        size: self.mouse_cursor_size
+                    });
+                    self.cursor_draw_list.end(cx);
+                // }
+            },
+            _=>()
         }
-        
+
         self.overlay.end(cx);
         // lets get te pass size
         fn encode_size(x: f64)->Vec4{
@@ -314,13 +319,13 @@ impl Widget for Window {
             }
         });
     }
-    
+
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.view.redraw(cx)
     }
-    
+
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
     }
@@ -332,13 +337,13 @@ impl Widget for Window {
                 return WidgetDraw::done();
             }
         }
-        
+
         if let Some(DrawState::Drawing) = self.draw_state.get() {
             self.view.draw_walk_widget(cx, walk)?;
             self.draw_state.end();
             self.end(cx);
         }
-        
+
         WidgetDraw::done()
     }
 }
