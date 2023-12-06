@@ -1,5 +1,6 @@
 pub mod quadratic_segment;
 
+mod arc;
 mod affine_transformation;
 mod cubic_segment;
 mod f32_ext;
@@ -12,6 +13,7 @@ mod transformation;
 mod trapezoid;
 mod vector;
 
+pub use self::arc::Arc;
 pub use self::affine_transformation::AffineTransformation;
 pub use self::cubic_segment::CubicSegment;
 pub use self::f32_ext::F64Ext;
