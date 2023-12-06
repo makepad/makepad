@@ -5,6 +5,7 @@ use crate::geometry::{Point, Transform, Transformation};
 pub enum PathCommand {
     MoveTo(Point),
     LineTo(Point),
+    ArcTo(Point, Point, f64, bool, bool),
     QuadraticTo(Point, Point),
     CubicTo(Point, Point, Point),
     Close,
@@ -16,6 +17,9 @@ impl Transform for PathCommand {
         T: Transformation,
     {
         match self {
+            PathCommand::ArcTo(e, r, xr, l, s) => {
+                PathCommand::ArcTo(e.transform(t), r.transform(t), xr, l, s)
+            }
             PathCommand::MoveTo(p) => PathCommand::MoveTo(p.transform(t)),
             PathCommand::LineTo(p) => PathCommand::LineTo(p.transform(t)),
             PathCommand::QuadraticTo(p1, p) => {
