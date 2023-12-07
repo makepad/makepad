@@ -91,76 +91,6 @@ impl Slider {
         old != self.value
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)){
-        self.animator_handle_event(cx, event);
-        for action in self.text_input.handle_event(cx, event) {
-            match action {
-                TextInputAction::KeyFocus => {
-                    self.animator_play(cx, id!(focus.on));
-                }
-                TextInputAction::KeyFocusLost => {
-                    self.animator_play(cx, id!(focus.off));
-                }
-                TextInputAction::Return(value) => {
-                    if let Ok(v) = value.parse::<f64>() {
-                        self.set_internal(v.max(self.min).min(self.max));
-                    }
-                    self.update_text_input(cx);
-                    dispatch_action(cx, SliderAction::TextSlide(self.to_external()));
-                }
-                TextInputAction::Escape => {
-                    self.update_text_input(cx);
-                }
-                _ => ()
-            }
-        };
-        match event.hits(cx, self.draw_slider.area()) {
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Arrow);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            },
-            Hit::FingerDown(_fe) => {
-                // cx.set_key_focus(self.slider.area());
-                self.text_input.read_only = true;
-                self.text_input.set_key_focus(cx);
-                self.text_input.select_all();
-                self.text_input.redraw(cx);
-                
-                self.animator_play(cx, id!(drag.on));
-                self.dragging = Some(self.value);
-                dispatch_action(cx, SliderAction::StartSlide);
-            },
-            Hit::FingerUp(fe) => {
-                self.text_input.read_only = false;
-                // if the finger hasn't moved further than X we jump to edit-all on the text thing
-                self.text_input.create_external_undo();
-                self.animator_play(cx, id!(drag.off));
-                if fe.is_over && fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
-                }
-                else {
-                    self.animator_play(cx, id!(hover.off));
-                }
-                self.dragging = None;
-                dispatch_action(cx, SliderAction::EndSlide);
-            }
-            Hit::FingerMove(fe) => {
-                let rel = fe.abs - fe.abs_start;
-                if let Some(start_pos) = self.dragging {
-                    self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
-                    self.set_internal(self.to_external());
-                    self.draw_slider.redraw(cx);
-                    self.update_text_input(cx);
-                    dispatch_action(cx, SliderAction::Slide(self.to_external()));
-                }
-            }
-            _ => ()
-        }
-    }
-    
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
         self.text_input.text = match self.precision{
@@ -199,16 +129,82 @@ impl Widget for Slider {
         self.draw_slider.redraw(cx);
     }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        self.animator_handle_event(cx, event);
+        for action in self.text_input.handle_event(cx, event, scope).iter() {
+            match action.cast() {
+                TextInputAction::KeyFocus => {
+                    self.animator_play(cx, id!(focus.on));
+                }
+                TextInputAction::KeyFocusLost => {
+                    self.animator_play(cx, id!(focus.off));
+                }
+                TextInputAction::Return(value) => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        self.set_internal(v.max(self.min).min(self.max));
+                    }
+                    self.update_text_input(cx);
+                    actions.push_single(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
+                }
+                TextInputAction::Escape => {
+                    self.update_text_input(cx);
+                }
+                _ => ()
+            }
+        };
+        match event.hits(cx, self.draw_slider.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Arrow);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            },
+            Hit::FingerDown(_fe) => {
+                // cx.set_key_focus(self.slider.area());
+                self.text_input.read_only = true;
+                self.text_input.set_key_focus(cx);
+                self.text_input.select_all();
+                self.text_input.redraw(cx);
+                                
+                self.animator_play(cx, id!(drag.on));
+                self.dragging = Some(self.value);
+                actions.push_single(uid, &scope.path, SliderAction::StartSlide);
+            },
+            Hit::FingerUp(fe) => {
+                self.text_input.read_only = false;
+                // if the finger hasn't moved further than X we jump to edit-all on the text thing
+                self.text_input.create_external_undo();
+                self.animator_play(cx, id!(drag.off));
+                if fe.is_over && fe.device.has_hovers() {
+                    self.animator_play(cx, id!(hover.on));
+                }
+                else {
+                    self.animator_play(cx, id!(hover.off));
+                }
+                self.dragging = None;
+                actions.push_single(uid, &scope.path, SliderAction::EndSlide);
+            }
+            Hit::FingerMove(fe) => {
+                let rel = fe.abs - fe.abs_start;
+                if let Some(start_pos) = self.dragging {
+                    self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
+                    self.set_internal(self.to_external());
+                    self.draw_slider.redraw(cx);
+                    self.update_text_input(cx);
+                    actions.push_single(uid, &scope.path, SliderAction::Slide(self.to_external()));
+                }
+            }
+            _ => ()
+        }
+        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -252,7 +248,7 @@ pub struct SliderRef(WidgetRef);
 impl SliderRef{
     pub fn slided(&self, actions:&WidgetActions)->Option<f64>{
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            match item.action(){
+            match item.cast(){
                 SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                     return Some(v)
                 }

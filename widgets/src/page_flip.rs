@@ -112,22 +112,21 @@ impl Widget for PageFlip {
         self.area.redraw(cx);
     }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        
         if let Some(page) = self.pages.get_mut(&self.active_page) {
             let item_uid = page.widget_uid();
-            page.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
-            });
+            actions.extend_grouped(uid, item_uid, page.handle_event(cx, event, scope));
         }
+        actions
     }
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if let Some(page) = self.page(cx, self.active_page) {
             if self.draw_state.begin_with(cx, &(), | cx, _ | {
                 page.walk(cx)
@@ -135,7 +134,7 @@ impl Widget for PageFlip {
                 self.begin(cx, walk);
             }
             if let Some(walk) = self.draw_state.get() {
-                page.draw_walk_widget(cx, walk) ?;
+                page.draw_walk_widget(cx, scope, walk) ?;
             }
             self.end(cx);
         }

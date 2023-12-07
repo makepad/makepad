@@ -114,126 +114,12 @@ pub enum WindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
-    ViewActions(Vec<WidgetActionItem>),
+    ViewActions(Vec<WidgetActionWrap>),
     None
 }
 
 impl Window {
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WindowAction)) {
-        self.debug_view.handle_event(cx, event);
-        if self.show_performance_view {
-            self.performance_view.handle_widget(cx, event);
-        }
 
-        self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
-        self.overlay.handle_event(cx, event);
-        if self.demo_next_frame.is_event(event).is_some(){
-            if self.demo{
-                self.demo_next_frame = cx.new_next_frame();
-            }
-            cx.repaint_pass_and_child_passes(self.pass.pass_id());
-        }
-        let is_for_other_window = match event {
-            Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
-            Event::WindowClosed(ev) => {
-                if ev.window_id == self.window.window_id() {
-                    return dispatch_action(cx, WindowAction::WindowClosed)
-                }
-                true
-            }
-            Event::WindowGeomChange(ev) => {
-                if ev.window_id == self.window.window_id() {
-                    match cx.os_type() {
-                        OsType::Macos => {
-                            if self.hide_caption_on_fullscreen{
-                                if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    self.view(id!(caption_bar)).set_visible(false);
-                                    self.redraw(cx);
-                                }
-                                else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view(id!(caption_bar)).set_visible(true);
-                                    self.redraw(cx);
-                                };
-                            }
-                        }
-                        _ => ()
-                    }
-                    
-                    return dispatch_action(cx, WindowAction::WindowGeomChange(ev.clone()))
-                }
-                true
-            },
-            Event::WindowDragQuery(dq) => {
-                if dq.window_id == self.window.window_id() {
-                    let size = self.window.get_inner_size(cx);
-                    
-                    if dq.abs.y < 25.{
-                        if dq.abs.x < 50. {
-                            dq.response.set(WindowDragQueryResponse::SysMenu);
-                        }
-                        else if dq.abs.x < size.x - 135.0{
-                            dq.response.set(WindowDragQueryResponse::Caption);
-                        }
-                        cx.set_cursor(MouseCursor::Default);
-                    }
-                    /*
-                    if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
-                    }*/
-                }
-                true
-            }
-            Event::TouchUpdate(ev) => ev.window_id != self.window.window_id(),
-            Event::MouseDown(ev) => ev.window_id != self.window.window_id(),
-            Event::MouseMove(ev) => ev.window_id != self.window.window_id(),
-            Event::MouseUp(ev) => ev.window_id != self.window.window_id(),
-            Event::Scroll(ev) => ev.window_id != self.window.window_id(),
-            _ => false
-        };
-        
-        if is_for_other_window {
-            return dispatch_action(cx, WindowAction::EventForOtherWindow)
-        }
-        else {
-            let actions = self.view.handle_widget_event(cx, event);
-            if actions.not_empty() {
-                if self.button(id!(min)).clicked(&actions) {
-                    self.window.minimize(cx);
-                }
-                if self.button(id!(max)).clicked(&actions) {
-                    if self.window.is_fullscreen(cx) {
-                        self.window.restore(cx);
-                    }
-                    else {
-                        self.window.maximize(cx);
-                    }
-                }
-                if self.button(id!(close)).clicked(&actions) {
-                    self.window.close(cx);
-                }
-                if self.button(id!(xr_on)).clicked(&actions) {
-                    cx.xr_start_presenting();
-                }
-                
-                dispatch_action(cx, WindowAction::ViewActions(actions));
-            }
-        }
-        
-        if let Event::ClearAtlasses = event {
-            Cx2d::reset_fonts_atlas(cx);
-            Cx2d::reset_icon_atlas(cx);
-        }
-        if let Event::MouseMove(ev) = event {
-            if let OsType::LinuxDirect = cx.os_type() {
-                // ok move our mouse cursor
-                self.last_mouse_pos = ev.abs;
-                self.draw_cursor.update_abs(cx, Rect {
-                    pos: ev.abs,
-                    size: self.mouse_cursor_size
-                })
-            }
-        }
-    }
-    
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
 
         if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
@@ -285,7 +171,7 @@ impl Window {
         }
 
         if self.show_performance_view {
-            self.performance_view.draw_widget(cx).unwrap();
+            self.performance_view.draw_widget(cx, &mut WidgetScope::default()).unwrap();
         }
 
         cx.end_pass_sized_turtle();
@@ -296,23 +182,124 @@ impl Window {
 }
 
 impl Widget for Window {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            if let WindowAction::ViewActions(actions) = action {
-                for action in actions {
-                    dispatch_action(cx, action)
+        
+        self.debug_view.handle_event(cx, event);
+        if self.show_performance_view {
+            self.performance_view.handle_widget(cx, event);
+        }
+        
+        self.nav_control.handle_event(cx, event, self.main_draw_list.draw_list_id());
+        self.overlay.handle_event(cx, event);
+        if self.demo_next_frame.is_event(event).is_some(){
+            if self.demo{
+                self.demo_next_frame = cx.new_next_frame();
+            }
+            cx.repaint_pass_and_child_passes(self.pass.pass_id());
+        }
+        let is_for_other_window = match event {
+            Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
+            Event::WindowClosed(ev) => {
+                if ev.window_id == self.window.window_id() {
+                    actions.push_single(uid, &scope.path, WindowAction::WindowClosed)
                 }
+                true
             }
-            else {
-                dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
+            Event::WindowGeomChange(ev) => {
+                if ev.window_id == self.window.window_id() {
+                    match cx.os_type() {
+                        OsType::Macos => {
+                            if self.hide_caption_on_fullscreen{
+                                if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
+                                    self.view(id!(caption_bar)).set_visible(false);
+                                    self.redraw(cx);
+                                }
+                                else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
+                                    self.view(id!(caption_bar)).set_visible(true);
+                                    self.redraw(cx);
+                                };
+                            }
+                        }
+                        _ => ()
+                    }
+                    actions.push_single(uid, &scope.path, WindowAction::WindowGeomChange(ev.clone()));
+                    return actions
+                }
+                true
+            },
+            Event::WindowDragQuery(dq) => {
+                if dq.window_id == self.window.window_id() {
+                    let size = self.window.get_inner_size(cx);
+                                        
+                    if dq.abs.y < 25.{
+                        if dq.abs.x < 50. {
+                            dq.response.set(WindowDragQueryResponse::SysMenu);
+                        }
+                        else if dq.abs.x < size.x - 135.0{
+                            dq.response.set(WindowDragQueryResponse::Caption);
+                        }
+                        cx.set_cursor(MouseCursor::Default);
+                    }
+                    /*
+                    if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
+                    }*/
+                }
+                true
             }
-        });
+            Event::TouchUpdate(ev) => ev.window_id != self.window.window_id(),
+            Event::MouseDown(ev) => ev.window_id != self.window.window_id(),
+            Event::MouseMove(ev) => ev.window_id != self.window.window_id(),
+            Event::MouseUp(ev) => ev.window_id != self.window.window_id(),
+            Event::Scroll(ev) => ev.window_id != self.window.window_id(),
+            _ => false
+        };
+                
+        if is_for_other_window {
+            actions.push_single(uid, &scope.path, WindowAction::EventForOtherWindow);
+            return actions
+        }
+        else {
+            let view_actions = self.view.handle_event(cx, event, scope);
+            if view_actions.not_empty() {
+                if self.button(id!(min)).clicked(&actions) {
+                    self.window.minimize(cx);
+                }
+                if self.button(id!(max)).clicked(&actions) {
+                    if self.window.is_fullscreen(cx) {
+                        self.window.restore(cx);
+                    }
+                    else {
+                        self.window.maximize(cx);
+                    }
+                }
+                if self.button(id!(close)).clicked(&actions) {
+                    self.window.close(cx);
+                }
+                if self.button(id!(xr_on)).clicked(&actions) {
+                    cx.xr_start_presenting();
+                }
+                actions.extend(view_actions);
+            }
+        }
+                
+        if let Event::ClearAtlasses = event {
+            Cx2d::reset_fonts_atlas(cx);
+            Cx2d::reset_icon_atlas(cx);
+        }
+        if let Event::MouseMove(ev) = event {
+            if let OsType::LinuxDirect = cx.os_type() {
+                // ok move our mouse cursor
+                self.last_mouse_pos = ev.abs;
+                self.draw_cursor.update_abs(cx, Rect {
+                    pos: ev.abs,
+                    size: self.mouse_cursor_size
+                })
+            }
+        }
+        
+        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
@@ -325,7 +312,7 @@ impl Widget for Window {
         self.view.find_widgets(path, cached, results);
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();
@@ -334,7 +321,7 @@ impl Widget for Window {
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get() {
-            self.view.draw_walk_widget(cx, walk)?;
+            self.view.draw_walk_widget(cx, scope, walk)?;
             self.draw_state.end();
             self.end(cx);
         }
