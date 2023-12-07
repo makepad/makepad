@@ -41,6 +41,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
         println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
     }
     else{
+        println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
         Cx::send_studio_message(AppToStudio::Log{
             file_name: file_name.to_string(),
             line_start,
@@ -50,6 +51,6 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
             message:message.to_string(),
             level
         });
-        }
+    }
 }
 // alright let log

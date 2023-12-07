@@ -91,10 +91,50 @@ impl Slider {
         old != self.value
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)){
+    pub fn update_text_input(&mut self, cx: &mut Cx) {
+        let e = self.to_external();
+        self.text_input.text = match self.precision{
+            0=>format!("{:.0}",e),
+            1=>format!("{:.1}",e),
+            2=>format!("{:.2}",e),
+            3=>format!("{:.3}",e),
+            4=>format!("{:.4}",e),
+            5=>format!("{:.5}",e),
+            6=>format!("{:.6}",e),
+            7=>format!("{:.7}",e),
+            _=>format!("{}",e)
+        };
+        self.text_input.select_all();
+        self.text_input.redraw(cx)
+    }
+    
+    pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.draw_slider.slide_pos = self.value as f32;
+        self.draw_slider.begin(cx, walk, self.layout);
+        
+        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
+            //, (self.value*100.0) as usize);
+            let walk = self.text_input.walk(cx);
+            self.text_input.draw_walk_text_input(cx, walk);
+            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
+        }
+        
+        self.draw_slider.end(cx);
+    }
+}
+
+
+impl Widget for Slider {
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_slider.redraw(cx);
+    }
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
+        let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-        for action in self.text_input.handle_event(cx, event) {
-            match action {
+        for action in self.text_input.handle_event(cx, event, scope).iter() {
+            match action.cast() {
                 TextInputAction::KeyFocus => {
                     self.animator_play(cx, id!(focus.on));
                 }
@@ -106,7 +146,7 @@ impl Slider {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
-                    dispatch_action(cx, SliderAction::TextSlide(self.to_external()));
+                    actions.push_single(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
                 }
                 TextInputAction::Escape => {
                     self.update_text_input(cx);
@@ -128,10 +168,10 @@ impl Slider {
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
-                
+                                
                 self.animator_play(cx, id!(drag.on));
                 self.dragging = Some(self.value);
-                dispatch_action(cx, SliderAction::StartSlide);
+                actions.push_single(uid, &scope.path, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
                 self.text_input.read_only = false;
@@ -145,7 +185,7 @@ impl Slider {
                     self.animator_play(cx, id!(hover.off));
                 }
                 self.dragging = None;
-                dispatch_action(cx, SliderAction::EndSlide);
+                actions.push_single(uid, &scope.path, SliderAction::EndSlide);
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
@@ -154,62 +194,18 @@ impl Slider {
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input(cx);
-                    dispatch_action(cx, SliderAction::Slide(self.to_external()));
+                    actions.push_single(uid, &scope.path, SliderAction::Slide(self.to_external()));
                 }
             }
             _ => ()
         }
-    }
-    
-    pub fn update_text_input(&mut self, cx: &mut Cx) {
-        let e = self.to_external();
-        self.text_input.text = match self.precision{
-            0=>format!("{:.0}",e),
-            1=>format!("{:.1}",e),
-            2=>format!("{:.2}",e),
-            3=>format!("{:.3}",e),
-            4=>format!("{:.4}",e),
-            5=>format!("{:.5}",e),
-            6=>format!("{:.6}",e),
-            7=>format!("{:.7}",e),
-            _=>format!("{}",e)
-        };
-        self.text_input.select_all();
-        self.text_input.redraw(cx)
-    }
-    
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.value as f32;
-        self.draw_slider.begin(cx, walk, self.layout);
-        
-        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
-            //, (self.value*100.0) as usize);
-            let walk = self.text_input.walk(cx);
-            self.text_input.draw_walk(cx, walk);
-            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
-        }
-        
-        self.draw_slider.end(cx);
-    }
-}
-
-
-impl Widget for Slider {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_slider.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.draw_walk_slider(cx, walk);
         WidgetDraw::done()
     }
     
@@ -252,7 +248,7 @@ pub struct SliderRef(WidgetRef);
 impl SliderRef{
     pub fn slided(&self, actions:&WidgetActions)->Option<f64>{
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            match item.action(){
+            match item.cast(){
                 SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                     return Some(v)
                 }
