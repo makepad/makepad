@@ -96,7 +96,7 @@ impl Widget for FishPatchEditor {
         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
         //let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
-        self.scroll_bars.begin(cx, walk, Layout::default());
+        self.scroll_bars.begin(cx, walk, Layout::flow_overlay());   
 
         let _turtle_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
@@ -124,8 +124,8 @@ impl Widget for FishPatchEditor {
                     abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos) ,
                 },
             );
-            println!("{} {:?} ({:?},{:?})", item_id, i.id, i.x, i.y);
-
+            //println!("{} {:?} ({:?},{:?})", item_id, i.id, i.x, i.y);
+ 
             item.draw_all(cx, &mut WidgetScope::default());
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
@@ -193,7 +193,7 @@ impl Widget for FishPatchEditor {
 
             // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
-
+        
         self.scroll_bars.end(cx);
 
         WidgetDraw::done()
