@@ -46,7 +46,6 @@ pub struct FishPatchEditor{
 impl Widget for FishPatchEditor {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
-               
         let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -59,8 +58,6 @@ impl Widget for FishPatchEditor {
             })
         }
         actions
-
-
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
