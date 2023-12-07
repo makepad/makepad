@@ -511,7 +511,7 @@ impl Widget for View {
         self.walk
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
         // the beginning state
         if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
             if !self.visible {
@@ -593,7 +593,7 @@ impl Widget for View {
                         let walk = child.walk(cx);
                         if resume {
                             scope.with_id(id, |scope|{
-                                child.draw_walk_widget(cx, scope, walk)
+                                child.draw_walk(cx, scope, walk)
                             })?;
                         }
                         else if let Some(fw) = cx.defer_walk(walk) {
@@ -602,7 +602,7 @@ impl Widget for View {
                         else {
                             self.draw_state.set(DrawState::Drawing(step, true));
                             scope.with_id(id, |scope|{
-                                child.draw_walk_widget(cx, scope, walk)
+                                child.draw_walk(cx, scope, walk)
                             })?;
                         }
                     }
@@ -620,7 +620,7 @@ impl Widget for View {
                 if let Some(child) = self.children.get_mut(&id) {
                     let walk = dw.resolve(cx);
                     scope.with_id(*id, |scope|{
-                        child.draw_walk_widget(cx, scope, walk) 
+                        child.draw_walk(cx, scope, walk) 
                     })?;
                 }
                 self.draw_state.set(DrawState::DeferWalk(step + 1));

@@ -77,6 +77,7 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let mut scope = WidgetScope::default();
         match event {
             Event::Signal => {
                 while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
@@ -97,7 +98,7 @@ impl AppMain for App {
                 }
             }
             Event::Draw(event) => {
-                return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+                return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
             }
             Event::Construct => {
                 self.start_inputs(cx);
@@ -109,7 +110,7 @@ impl AppMain for App {
             }
             _ => ()
         }
-        self.ui.handle_widget_event(cx, event);
+        self.ui.handle_event(cx, event, &mut scope);
     }
     
 }

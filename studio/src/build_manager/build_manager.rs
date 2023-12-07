@@ -258,8 +258,8 @@ impl BuildManager {
                             })));
                             actions.push(AppAction::RedrawLog.into_bare())
                         }
-                        AppToStudio::ProfileSample(sample)=>{  
-                            log!("{:?}", sample); 
+                        AppToStudio::ProfileSample(_sample)=>{  
+                            //log!("{:?}", sample); 
                         }
                     }
                 }

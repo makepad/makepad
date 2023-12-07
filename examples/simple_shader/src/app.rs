@@ -90,10 +90,10 @@ impl App{
 
 impl AppMain for App{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let mut scope =  WidgetScope::default();
         if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
         }
-
-        self.ui.handle_widget_event(cx, event);
+        self.ui.handle_event(cx, event, &mut scope);
     }
 }

@@ -582,6 +582,7 @@ impl AppMain for App {
         //if let Event::Timer(_te) = event {
         //   self.handle_slide_show(cx);
         //}
+        let mut scope = WidgetScope::default();
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             
@@ -593,8 +594,7 @@ impl AppMain for App {
                     self.ui.image(id!(second_image.image1)).set_texture(tex);
                 }
             }
-            
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+            while let Some(next) = self.ui.draw_widget(cx, &mut scope).hook_widget() {
                 
                 if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                     // alright now we draw the items
@@ -606,7 +606,7 @@ impl AppMain for App {
                                     let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
                                     let item = image_list.item(cx, item_id, live_id!(PromptGroup)).unwrap();
                                     item.label(id!(prompt)).set_text(&group.prompt.positive);
-                                    item.draw_widget_all(cx);
+                                    item.draw_all(cx, &mut scope);
                                 }
                                 ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
                                     let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
@@ -617,7 +617,7 @@ impl AppMain for App {
                                         let tex = self.db.image_texture(&image_files[index]);
                                         row.image(id!(img)).set_texture(tex);
                                     }
-                                    item.draw_widget_all(cx);
+                                    item.draw_all(cx, &mut scope);
                                 }
                             }
                         }
@@ -629,7 +629,7 @@ impl AppMain for App {
         
         self.handle_network_response(cx, event);
         
-        let actions = self.ui.handle_widget_event(cx, event);
+        let actions = self.ui.handle_event(cx, event, &mut scope);
         match event{
             Event::KeyDown(KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..})=>{
                 self.clear_todo(cx);

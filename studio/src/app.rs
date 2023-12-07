@@ -62,7 +62,6 @@ impl LiveHook for App {
         self.scope.build_manager.init(cx, &root_path);
         self.scope.build_manager.discover_external_ip(cx);
         self.scope.build_manager.start_http_server();
-        //self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
     }
 }
 
@@ -241,7 +240,7 @@ impl AppMain for App {
         let run_list = self.ui.flat_list(id!(run_list));
 
         let mut scope = WidgetScope::new(&mut self.scope);
-        
+
         if let Event::Draw(event) = event {
             //let dt = profile_start();
             let cx = &mut Cx2d::new(cx, event);
@@ -255,12 +254,10 @@ impl AppMain for App {
                     );
                 }
             }
-            //profile_end!(dt);
             return
         }
     
         let mut actions = self.ui.handle_event(cx, event, &mut scope);
-        std::mem::drop(scope);
         
         self.handle_key_event(cx, event, &mut actions);
         self.scope.build_manager.handle_event(cx, event, &mut self.scope.file_system, &mut actions); 
@@ -345,11 +342,13 @@ impl AppMain for App {
         }
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
+            
             // ok lets open the file
             let tab_id = dock.unique_tab_id(file_id.0.0);
             self.scope.file_system.request_open_file(tab_id, file_id);
             // lets add a file tab 'somewhere'
-            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
+            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
+            
             // lets scan the entire doc for duplicates
             self.scope.file_system.ensure_unique_tab_names(cx, &dock)
         }

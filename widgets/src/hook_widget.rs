@@ -39,7 +39,7 @@ impl Widget for HookWidget{
     
     fn redraw(&mut self, _cx:&mut Cx){}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::Hook) {
             return WidgetDraw::hook_above();
         }
