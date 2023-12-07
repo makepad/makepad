@@ -9,11 +9,12 @@ live_design! {
 
     FishBlockEditor = <View>
     {
-        margin: 0
+        margin: 30
         width: 200
         height: Fit
         flow: Down
         optimize: DrawList
+
         title = <View>
         {
             show_bg: true

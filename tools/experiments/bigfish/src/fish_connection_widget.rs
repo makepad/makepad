@@ -14,6 +14,10 @@ pub enum FishConnectionWidgetAction {
 
 #[derive(Live)]
 pub struct FishConnectionWidget {
+    #[live]
+    start_pos: DVec2,
+    #[live]
+    end_pos: DVec2,
     #[animator]
     animator: Animator,
     #[live]
@@ -26,6 +30,10 @@ pub struct FishConnectionWidget {
     grab_key_focus: bool,
     #[live]
     pub text: RcStringMut,
+    #[live]
+    pub color: Vec4,
+    #[live(5.0)]
+    pub line_width: f64,
 }
 
 impl LiveHook for FishConnectionWidget {
@@ -103,6 +111,14 @@ impl FishConnectionWidget {
     pub fn draw_walk_fishconnection(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_line.begin(cx, walk, self.layout);
         self.draw_line.end(cx);
+        self.draw_line.draw_line_abs(
+            cx,
+            self.start_pos,
+            self.end_pos,
+            self.color,
+            self.line_width,
+        );
+        //   self.draw_line.draw_abs(cx, cx.turtle().unscrolled_rect());
     }
 }
 

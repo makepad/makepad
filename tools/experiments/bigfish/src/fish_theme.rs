@@ -46,6 +46,12 @@ live_design! {
     const THEME_COLOR_META = #D9FF7Fff
     const THEME_COLOR_UTILITY = #909090ff
 
+    const CABLE_AUDIO_COLOR = #ffd000ff
+    const CABLE_CONTROL_COLOR = #d0d0d0ff
+    const CABLE_GATE_COLOR = #000040ff
+    const CABLE_MIDI_COLOR = #d0ffd0ff
+//    const CABLE_AUDIO_COLOR = #ffd000ff
+
 /*
     const THEME_COLOR_GENERATOR = #ff0000ff
     const THEME_COLOR_EFFECT = (hsvmod(THEME_COLOR_GENERATOR,60.,0.,0.))
