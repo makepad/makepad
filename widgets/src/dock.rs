@@ -859,39 +859,38 @@ impl Widget for Dock {
         self.area.redraw(cx);
     }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         // call handle on all tab bars, splitters,
         let uid = self.widget_uid();
         let dock_items = &mut self.dock_items;
         for (panel_id, splitter) in self.splitters.iter_mut() {
-            splitter
-                .handle_event_with(cx, event, &mut | cx, action | match action {
-                SplitterAction::Changed {axis, align} => {
-                    // lets move the splitter
-                    if let Some(DockItem::Splitter {axis: _axis, align: _align, ..}) = dock_items.get_mut(&panel_id) {
-                        *_axis = axis;
-                        *_align = align;
-                    }
-                    dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align}.into_action(uid));
-                },
-                _ => ()
-            });
+            for action in splitter.handle_event(cx, event, scope){
+                match action.cast() {
+                    SplitterAction::Changed {axis, align} => {
+                        // lets move the splitter
+                        if let Some(DockItem::Splitter {axis: _axis, align: _align, ..}) = dock_items.get_mut(&panel_id) {
+                            *_axis = axis;
+                            *_align = align;
+                        }
+                        actions.push_single(uid, &scope.path, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
+                    },
+                    _ => ()
+                }
+            };
         }
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
             let contents_view = &mut tab_bar.contents_draw_list;
             for action in tab_bar.tab_bar.handle_event(cx, event) {
                 match action {
-                    TabBarAction::ShouldTabStartDrag(item) => dispatch_action(
-                        cx,
-                        DockAction::ShouldTabStartDrag(item).into_action(uid),
-                    ),
+                    TabBarAction::ShouldTabStartDrag(item) => actions.push_single(uid, &scope.path, DockAction::ShouldTabStartDrag(item)),
                     TabBarAction::TabWasPressed(tab_id) => {
                         self.needs_save = true;
                         if let Some(DockItem::Tabs {tabs, selected, ..}) = dock_items.get_mut(&panel_id) {
                             if let Some(sel) = tabs.iter().position( | v | *v == tab_id) {
                                 *selected = sel;
                                 contents_view.redraw(cx);
-                                dispatch_action(cx, DockAction::TabWasPressed(tab_id).into_action(uid))
+                                actions.push_single(uid, &scope.path, DockAction::TabWasPressed(tab_id))
                             }
                             else {
                                 log!("Cannot find tab {}", tab_id.0);
@@ -899,13 +898,15 @@ impl Widget for Dock {
                         }
                     }
                     TabBarAction::TabCloseWasPressed(tab_id) => {
-                        dispatch_action(cx, DockAction::TabCloseWasPressed(tab_id).into_action(uid))
+                        actions.push_single(uid, &scope.path, DockAction::TabCloseWasPressed(tab_id))
                     }
                 }
             };
         }
-        for (_, item) in self.items.values_mut() {
-            item.handle_widget_event_with(cx, event, dispatch_action);
+        for (item_id, item) in self.items.values_mut() {
+            scope.with_id(*item_id, |scope|{
+                actions.extend(item.handle_event(cx, event, scope));
+            });
         }
         
         if let Event::DragEnd = event {
@@ -921,7 +922,7 @@ impl Widget for Dock {
                 self.drop_target_draw_list.redraw(cx);
                 match f.state {
                     DragState::In | DragState::Over => {
-                        dispatch_action(cx, DockAction::Drag(f.clone()).into_action(uid))
+                        actions.push_single(uid, &scope.path, DockAction::Drag(f.clone()))
                     }
                     DragState::Out => {}
                 }
@@ -929,11 +930,11 @@ impl Widget for Dock {
             DragHit::Drop(f) => {
                 self.drop_state = None;
                 self.drop_target_draw_list.redraw(cx);
-                dispatch_action(cx, DockAction::Drop(f.clone()).into_action(uid))
+                actions.push_single(uid, &scope.path, DockAction::Drop(f.clone()))
             }
             _ => {}
         }
-        
+        actions
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
@@ -954,7 +955,7 @@ impl Widget for Dock {
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
             let id = live_id!(root);
             vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]
@@ -1042,7 +1043,9 @@ impl Widget for Dock {
                             let (_, entry) = self.items.get_or_insert(cx, id, | cx | {
                                 (*kind, WidgetRef::new_from_ptr(cx, Some(*ptr)))
                             });
-                            entry.draw_widget(cx) ?;
+                            scope.with_id(id, |scope|{
+                                entry.draw_widget(cx, scope)
+                            })?;
                         }
                     }
                     stack.pop();
@@ -1101,7 +1104,7 @@ impl DockRef {
     
     pub fn clicked_tab_close(&self, actions: &WidgetActions) -> Option<LiveId> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::TabCloseWasPressed(tab_id) = item.action() {
+            if let DockAction::TabCloseWasPressed(tab_id) = item.cast() {
                 return Some(tab_id)
             }
         }
@@ -1110,7 +1113,7 @@ impl DockRef {
     
     pub fn should_tab_start_drag(&self, actions: &WidgetActions) -> Option<LiveId> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::ShouldTabStartDrag(tab_id) = item.action() {
+            if let DockAction::ShouldTabStartDrag(tab_id) = item.cast() {
                 return Some(tab_id)
             }
         }
@@ -1119,7 +1122,7 @@ impl DockRef {
     
     pub fn should_accept_drag(&self, actions: &WidgetActions) -> Option<DragHitEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::Drag(drag_event) = item.action() {
+            if let DockAction::Drag(drag_event) = item.cast() {
                 return Some(drag_event.clone())
             }
         }
@@ -1128,7 +1131,7 @@ impl DockRef {
     
     pub fn has_drop(&self, actions: &WidgetActions) -> Option<DropHitEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::Drop(drag_event) = item.action() {
+            if let DockAction::Drop(drag_event) = item.cast() {
                 return Some(drag_event.clone())
             }
         }

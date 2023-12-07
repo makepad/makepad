@@ -165,37 +165,29 @@ impl TabBar {
         None
     }
     
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<TabBarAction> {
-        let mut actions = Vec::new();
-        self.handle_event_with(cx, event, &mut | _, a | actions.push(a));
-        actions
-    }
-    
-    pub fn handle_event_with(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, TabBarAction),
-    ) {
-        let view_area = self.view_area;
-        self.scroll_bars.handle_event_with(cx, event, &mut |cx,_|{
-            view_area.redraw(cx);
-        });
+    )->Vec<TabBarAction>{
+        let mut actions = Vec::new();
+        if self.scroll_bars.handle_event(cx, event).len()>0{
+            self.view_area.redraw(cx);
+        };
         
         if let Some(tab_id) = self.next_selected_tab_id.take() {
-            dispatch_action(cx, TabBarAction::TabWasPressed(tab_id));
+            actions.push(TabBarAction::TabWasPressed(tab_id));
         }
         for (tab_id, tab) in self.tabs.iter_mut() {
-            tab.handle_event_with(cx, event, &mut | cx, action | match action {
+            tab.handle_event_with(cx, event, &mut | _cx, action | match action {
                 TabAction::WasPressed => {
-                    dispatch_action(cx, TabBarAction::TabWasPressed(*tab_id));
+                    actions.push(TabBarAction::TabWasPressed(*tab_id));
                 }
                 TabAction::CloseWasPressed => {
-                    dispatch_action(cx, TabBarAction::TabCloseWasPressed(*tab_id));
+                    actions.push(TabBarAction::TabCloseWasPressed(*tab_id));
                 }
                 TabAction::ShouldTabStartDrag=>{
-                    dispatch_action(cx, TabBarAction::ShouldTabStartDrag(*tab_id));
+                    actions.push(TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
                 TabAction::ShouldTabStopDrag=>{
                 }/*
@@ -235,9 +227,9 @@ impl TabBar {
             }
             _ => {}
         }*/
+        actions
     }
 }
-
 
 pub enum TabBarAction {
     TabWasPressed(LiveId),

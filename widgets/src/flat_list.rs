@@ -144,9 +144,10 @@ impl Widget for FlatList {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event(cx, event);
         /*
         let mut scroll_to = None;
         self.scroll_bars.handle_event_with(cx, event, &mut | _cx, action | {
@@ -156,12 +157,13 @@ impl Widget for FlatList {
             }
         });
         */
-        for (_,item) in self.items.values_mut() {
+        for (item_id,item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
-            item.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
-            });
+            scope.with_id(*item_id, |scope|{
+                actions.extend_grouped(uid, item_uid, item.handle_event(cx, event, scope));
+            })
         }
+        actions
         /*
         match &mut self.scroll_state {
             ScrollState::Flick {delta, next_frame} => {
@@ -289,7 +291,7 @@ impl Widget for FlatList {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
             return WidgetDraw::hook_above()
@@ -323,12 +325,12 @@ impl FlatListRef {
     fn items_with_actions_vec(&self, actions: &WidgetActions, set: &mut Vec<(LiveId, WidgetRef)>) {
         let uid = self.widget_uid();
         for action in actions {
-            if action.container_uid == uid {
+            if action.container_uid_eq(uid) {
                 
                 if let Some(inner) = self.borrow() {
                     for (item_id, (_,item)) in inner.items.iter() {
                         
-                        if item.widget_uid() == action.item_uid {
+                        if action.item_uid_eq(item.widget_uid()) {
                             set.push((*item_id, item.clone()))
                         }
                     }
