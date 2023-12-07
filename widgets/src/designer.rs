@@ -136,8 +136,9 @@ impl Designer {
                 });
                 container.widget(id!(label)).set_text(&format!("{}=<{}>", name, class));
                 // lets draw this thing in a neat little container box with a title bar
-                while let Some(_) = container.draw_widget(cx).hook_widget() {
-                    widget.draw_widget_all(cx);
+                let mut scope = WidgetScope::default();
+                while let Some(_) = container.draw_widget(cx, &mut scope).hook_widget() {
+                    widget.draw_widget_all(cx, &mut scope);
                 }
             }
         }
@@ -173,21 +174,23 @@ impl Designer {
 }
 
 impl Widget for Designer {
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let _actions = self.ui.handle_widget_event(cx, event);
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let actions = WidgetActions::new();
+        let _actions = self.ui.handle_event(cx, event, scope);
         for (component, container) in self.components.values_mut() {
-            component.handle_widget_event(cx, event);
-            container.handle_widget_event(cx, event);
+            component.handle_event(cx, event, scope);
+            container.handle_event(cx, event, scope);
         }
+        actions
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
         let outline = self.ui.file_tree(id!(outline));
-        while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+        while let Some(next) = self.ui.draw_widget(cx, scope).hook_widget() {
             if let Some(mut outline) = outline.has_widget(&next).borrow_mut() {
                 self.draw_outline(cx, &mut *outline);
             }

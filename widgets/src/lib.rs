@@ -85,6 +85,7 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     slides_view::{SlidesView},
     widget::{
+        WidgetScope,
         WidgetSet,
         WidgetSetIterator,
         WidgetUid,
@@ -93,7 +94,7 @@ pub use crate::{
         CreateAt,
         WidgetActions,
         WidgetActionsApi,
-        WidgetActionItem,
+        WidgetActionWrap,
         WidgetRef,
         Widget,
         WidgetRegistry,

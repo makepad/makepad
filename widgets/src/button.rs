@@ -42,16 +42,41 @@ impl LiveHook for Button{
 }
 
 impl Widget for Button{
-   fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
-        });
+   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+       let mut actions = WidgetActions::new();
+       let uid = self.widget_uid();
+       self.animator_handle_event(cx, event);
+       match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerDown(_fe) => {
+                if self.grab_key_focus{
+                    cx.set_key_focus(self.draw_bg.area());
+                }
+                actions.push_single(uid, &scope.path, ButtonAction::Pressed);
+                self.animator_play(cx, id!(hover.pressed));
+            },
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => if fe.is_over {
+                actions.push_single(uid, &scope.path, ButtonAction::Clicked);
+                if fe.device.has_hovers() {
+                    self.animator_play(cx, id!(hover.on));
+                }
+                else{
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            else {
+                actions.push_single(uid, &scope.path, ButtonAction::Released);
+                self.animator_play(cx, id!(hover.off));
+            }
+            _ => ()
+        }
+        actions
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{
@@ -62,7 +87,7 @@ impl Widget for Button{
         self.draw_bg.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
         let _ = self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -77,46 +102,6 @@ impl Widget for Button{
 }
 
 impl Button {
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
-        self.animator_handle_event(cx, event);
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                if self.grab_key_focus{
-                    cx.set_key_focus(self.draw_bg.area());
-                }
-                dispatch_action(cx, ButtonAction::Pressed);
-                self.animator_play(cx, id!(hover.pressed));
-            },
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                 self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            }
-            Hit::FingerUp(fe) => if fe.is_over {
-                dispatch_action(cx, ButtonAction::Clicked);
-                if fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
-                }
-                else{
-                    self.animator_play(cx, id!(hover.off));
-                }
-            }
-            else {
-                dispatch_action(cx, ButtonAction::Released);
-                self.animator_play(cx, id!(hover.off));
-            }
-            _ => ()
-        };
-    }
-    /*
-    pub fn draw_text(&mut self, cx: &mut Cx2d, label: &str) {
-        self.draw_bg.begin(cx, self.walk, self.layout);
-        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.draw_bg.end(cx);
-    }*/
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
@@ -133,7 +118,7 @@ impl ButtonRef {
     
     pub fn clicked(&self, actions:&WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ButtonAction::Clicked = item.action() {
+            if let ButtonAction::Clicked = item.cast() {
                 return true
             }
         }
@@ -142,7 +127,7 @@ impl ButtonRef {
 
     pub fn pressed(&self, actions:&WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ButtonAction::Pressed = item.action() {
+            if let ButtonAction::Pressed = item.cast() {
                 return true
             }
         }

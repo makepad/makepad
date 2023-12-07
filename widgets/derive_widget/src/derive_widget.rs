@@ -11,19 +11,20 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
         if let Some(enum_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
+            /*
             tb.add("impl Into<Box<dyn WidgetAction>> for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
             tb.add("{");
             tb.add("    fn into(self)->Box<dyn WidgetAction>{");
             tb.add("        Box::new(self)");
             tb.add("    }");
-            tb.add("}");
-
+            tb.add("}");*/
+/*
             tb.add("impl ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
             tb.add("{");
             tb.add("    fn into_action(self, uid:WidgetUid)->WidgetActionItem{");
             tb.add("        WidgetActionItem::new(self.into(), uid)");
             tb.add("    }");
-            tb.add("}");
+            tb.add("}");*/
             tb.add("impl").stream(generic.clone());
             tb.add("Default for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
             tb.add("    fn default()->Self{Self::None}");

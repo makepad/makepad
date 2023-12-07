@@ -54,10 +54,12 @@ pub struct FileEdge {
     pub file_node_id: FileNodeId,
 }
 
+#[derive(WidgetAction, Clone)]
 pub enum FileSystemAction {
     TreeLoaded,
     RecompileNeeded,
-    LiveReloadNeeded(LiveFileChange)
+    LiveReloadNeeded(LiveFileChange),
+    None
 }
 
 impl FileSystem {
@@ -101,22 +103,14 @@ impl FileSystem {
         None
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef) -> Vec<FileSystemAction> {
-        let mut actions = Vec::new();
-        self.handle_event_with(cx, event, ui, &mut | _, action | actions.push(action));
-        actions
-    }
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, dispatch_action: &mut dyn FnMut(&mut Cx, FileSystemAction)) {
-        
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, actions:&mut WidgetActions) {
         
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
                     FileResponse::LoadFileTree(response) => {
                         self.load_file_tree(response.unwrap());
-                        ui.file_tree(id!(file_tree)).redraw(cx);
-                        dispatch_action(cx, FileSystemAction::TreeLoaded)
+                        actions.push(FileSystemAction::TreeLoaded.into_bare())
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     FileResponse::OpenFile(result) => {
@@ -162,14 +156,14 @@ impl FileSystem {
                                         Ok(new_tokens) => {
                                             // we need the space 'outside' of these tokens
                                             if old_neg != new_neg {
-                                                dispatch_action(cx, FileSystemAction::RecompileNeeded)
+                                                actions.push(FileSystemAction::RecompileNeeded.into_bare())
                                             }
                                             if old_tokens != new_tokens {
                                                 // design code changed, hotreload it
-                                                dispatch_action(cx, FileSystemAction::LiveReloadNeeded(LiveFileChange {
+                                                actions.push( FileSystemAction::LiveReloadNeeded(LiveFileChange {
                                                     file_name: path,
                                                     content: new
-                                                }))
+                                                }).into_bare());
                                             }
                                         }
                                     }
