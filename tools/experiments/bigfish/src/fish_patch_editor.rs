@@ -6,6 +6,7 @@ live_design!
     import makepad_widgets::base::*;
     import crate::fish_block_editor::*;
     import crate::fish_theme::*;
+    import crate::fish_connection_widget::*;
 
     FishPatchEditor = {{FishPatchEditor}} {
         width: Fill,
@@ -18,6 +19,7 @@ live_design!
         BlockTemplateModulator = <FishBlockEditorModulator>{};
         BlockTemplateEnvelope = <FishBlockEditorEnvelope>{};
         BlockTemplateUtility = <FishBlockEditorUtility>{};
+        ConnectorTemplate = <FishConnectionWidget>{};
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let Pos = floor(self.pos*self.rect_size *0.10);
@@ -38,7 +40,8 @@ pub struct FishPatchEditor{
     #[live] scroll_bars: ScrollBars,
     #[live] draw_bg: DrawColor,
     #[rust] unscrolled_rect:Rect,
-
+    
+    #[rust] connections: ComponentMap<LiveId, (LiveId,WidgetRef)>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<LiveId, (LiveId,WidgetRef)>,
 }
@@ -181,9 +184,31 @@ impl FishPatchEditor {
             item.draw_widget_all(cx);
             
 
-            println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
+           // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
-                
+
+        for i in patch.connections.iter() 
+        {
+            
+            let item_id = LiveId::from_num(2, i.id as u64);
+
+            let templateid = live_id!(ConnectorTemplate);
+            let preitem = self.item(cx, item_id, templateid);
+            let item = preitem.unwrap();
+
+            let blockfrom = patch.get_block(i.from_block).unwrap();
+            let blockto = patch.get_block(i.to_block).unwrap();
+            let portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
+            let portto = blockto.get_input_instance(i.to_port).unwrap();
+            
+            item.apply_over(cx, live!{
+         //       abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
+            });
+
+            item.draw_widget_all(cx);
+           // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
+        }
+
         self.scroll_bars.end(cx);
     }
 }

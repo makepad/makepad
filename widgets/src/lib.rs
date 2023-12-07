@@ -18,6 +18,7 @@ pub mod slider;
 pub mod scroll_bar;
 pub mod scroll_bars;
 pub mod splitter;
+pub mod vectorline;
 pub mod fold_header;
 pub mod fold_button;
 pub mod hook_widget;
@@ -148,4 +149,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::slides_view::live_design(cx);
     crate::tab_close_button::live_design(cx);
     crate::keyboard_view::live_design(cx);
+    crate::vectorline::live_design(cx);
 }
