@@ -5,6 +5,7 @@ pub enum ConnectionType {
     Audio,
     Control,
     MIDI,
+    Gate,
     #[default]
     Unknown,
 }

@@ -157,13 +157,35 @@ impl FishBlockLibrary {
         for i in &mut self.allblocks {
             i.inputs.push(FishInputPort {
                 id: 0,
-                name: String::from("in 0"),
+                name: String::from("in 1"),
                 datatype: ConnectionType::Audio,
             });
             i.outputs.push(FishOutputPort {
                 id: 0,
-                name: String::from("out 0"),
+                name: String::from("out 1"),
                 datatype: ConnectionType::Audio,
+            });
+
+            i.inputs.push(FishInputPort {
+                id: 1,
+                name: String::from("in 2"),
+                datatype: ConnectionType::Control,
+            });
+            i.outputs.push(FishOutputPort {
+                id: 1,
+                name: String::from("out 2"),
+                datatype: ConnectionType::Control,
+            });
+
+            i.inputs.push(FishInputPort {
+                id: 2,
+                name: String::from("in 3"),
+                datatype: ConnectionType::MIDI,
+            });
+            i.outputs.push(FishOutputPort {
+                id: 2,
+                name: String::from("out 3"),
+                datatype: ConnectionType::MIDI,
             });
         }
     }

@@ -1,5 +1,6 @@
 use crate::{
-    fish_block_template::FishBlockCategory, fish_doc::FishDoc, makepad_draw::*, makepad_widgets::*,
+    fish_block_template::FishBlockCategory, fish_doc::FishDoc, fish_ports::ConnectionType,
+    makepad_draw::*, makepad_widgets::*,
 };
 
 live_design! {
@@ -20,14 +21,17 @@ live_design! {
         BlockTemplateModulator = <FishBlockEditorModulator>{};
         BlockTemplateEnvelope = <FishBlockEditorEnvelope>{};
         BlockTemplateUtility = <FishBlockEditorUtility>{};
-        ConnectorTemplate = <FishConnectionWidget>{};
 
-        AudioButtonTemplate = <Button>{flow: Overlay};
-        CVButtonTemplate = <Button>{flow: Overlay};
-        GateButtonTemplate = <Button>{flow: Overlay};
+        ConnectorTemplate = <FishConnectionWidget>{color:  #d0d0a0ff};
+
+        AudioButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop: (CABLE_AUDIO_COLOR);}};
+        ControlButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop:  (CABLE_CONTROL_COLOR);}};
+        GateButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop: (CABLE_GATE_COLOR);}};
+        MIDIButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop:(CABLE_MIDI_COLOR);}};
 
         draw_bg: {
             fn pixel(self) -> vec4 {
+
                 let Pos = floor(self.pos*self.rect_size *0.10);
                 let PatternMask = mod(Pos.x + mod(Pos.y, 2.0), 2.0);
                 return mix( vec4(0,0.15*self.pos.y,0.1,1), vec4(.05, 0.03, .23*self.pos.y, 1.0), PatternMask);
@@ -44,8 +48,7 @@ pub struct FishPatchEditor {
     walk: Walk,
     #[live]
     draw_ls: DrawLine,
-    #[rust]
-    area: Area,
+
     #[live]
     scroll_bars: ScrollBars,
     #[live]
@@ -126,7 +129,13 @@ impl Widget for FishPatchEditor {
             item.draw_all(cx, &mut WidgetScope::default());
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
-                let templateid = live_id!(AudioButtonTemplate);
+                let templateid = match inp.datatype {
+                    ConnectionType::Audio => live_id!(AudioButtonTemplate),
+                    ConnectionType::MIDI => live_id!(MIDIButtonTemplate),
+                    ConnectionType::Control => live_id!(ControlButtonTemplate),
+                    ConnectionType::Gate => live_id!(GateButtonTemplate),
+                    _ => live_id!(AudioButtonTemplate),
+                };
                 let item = self.item(cx, item_id, templateid).unwrap();
                 item.apply_over(
                     cx,
@@ -138,14 +147,20 @@ impl Widget for FishPatchEditor {
                 item.draw_all(cx, &mut WidgetScope::default());
             }
 
-            for inp in &i.output_ports {
-                let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
-                let templateid = live_id!(AudioButtonTemplate);
+            for outp in &i.output_ports {
+                let item_id = LiveId::from_num(3000 + i.id, outp.id as u64);
+                let templateid = match outp.datatype {
+                    ConnectionType::Audio => live_id!(AudioButtonTemplate),
+                    ConnectionType::MIDI => live_id!(MIDIButtonTemplate),
+                    ConnectionType::Control => live_id!(ControlButtonTemplate),
+                    ConnectionType::Gate => live_id!(GateButtonTemplate),
+                    _ => live_id!(AudioButtonTemplate),
+                };
                 let item = self.item(cx, item_id, templateid).unwrap();
                 item.apply_over(
                     cx,
                     live! {
-                        abs_pos: (dvec2(i.x as f64 + 240., i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
+                        abs_pos: (dvec2(i.x as f64 + 240., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
                 item.draw_all(cx, &mut WidgetScope::default());
@@ -167,13 +182,14 @@ impl Widget for FishPatchEditor {
             item.apply_over(
                 cx,
                 live! {
+                    start_pos: (dvec2(blockfrom.x as f64 + 250.0, blockfrom.y as f64 + 30.  * _portfrom.id as f64) - scroll_pos),
+                    end_pos: (dvec2(blockto.x as f64, blockto.y as f64) - scroll_pos + 30. * _portto.id as f64),
+
                 //       abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
                    },
             );
 
             item.draw_all(cx, &mut WidgetScope::default());
-
-            self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
             // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
