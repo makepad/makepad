@@ -50,16 +50,9 @@ pub struct CandleStick {
 }
 
 impl Widget for CandleStick {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope)->WidgetActions{
+        let actions = WidgetActions::new();
+        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -68,8 +61,8 @@ impl Widget for CandleStick {
         self.draw_cs.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.draw_cs.draw_walk(cx, walk);
         WidgetDraw::done()
     }
 }
@@ -96,9 +89,6 @@ impl CandleStick {
 }
 
 impl CandleStick {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_cs.draw_walk(cx, walk);
-    }
     
     pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, CandleStickAction),) {
     }

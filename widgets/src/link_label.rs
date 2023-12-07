@@ -23,13 +23,13 @@ impl LiveHook for LinkLabel {
 }
 
 impl Widget for LinkLabel {
-       fn handle_widget_event_with(
+    fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        self.button.handle_widget_event_with(cx,event,dispatch_action);
+        scope: &mut WidgetScope,
+    ) -> WidgetActions {
+        self.button.handle_event(cx, event, scope)
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
@@ -40,8 +40,8 @@ impl Widget for LinkLabel {
         self.button.walk(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.button.draw_walk_widget(cx, walk)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.button.draw_walk(cx, scope, walk)
     }
     
     fn text(&self)->String{
@@ -60,7 +60,7 @@ impl LinkLabelRef {
     pub fn clicked(&self, actions:&WidgetActions) -> bool {
         if let Some(inner) = self.borrow(){ 
             if let Some(item) = actions.find_single_action(inner.button.widget_uid()) {
-                if let ButtonAction::Clicked = item.action() {
+                if let ButtonAction::Clicked = item.cast() {
                     return true
                 }
             }
@@ -71,7 +71,7 @@ impl LinkLabelRef {
     pub fn pressed(&self, actions:&WidgetActions) -> bool {
         if let Some(inner) = self.borrow(){ 
             if let Some(item) = actions.find_single_action(inner.button.widget_uid()) {
-                if let ButtonAction::Pressed = item.action() {
+                if let ButtonAction::Pressed = item.cast() {
                     return true
                 }
             }

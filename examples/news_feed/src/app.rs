@@ -358,9 +358,10 @@ impl LiveHook for App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let news_feeds = self.ui.portal_list_set(ids!(news_feed));
+        let mut scope = WidgetScope::default();
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+            while let Some(next) = self.ui.draw_widget(cx, &mut scope).hook_widget() {
                 if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
 
                     list.set_item_range(cx, 0, 1000);
@@ -381,14 +382,14 @@ impl AppMain for App {
                         item.label(id!(content.text)).set_text(&text);
                         item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
                         item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
-                        item.draw_widget_all(cx);
+                        item.draw_all(cx, &mut scope);
                     }
                 }
             }
             return
         }
         
-        let actions = self.ui.handle_widget_event(cx, event);
+        let actions = self.ui.handle_event(cx, event, &mut scope);
         
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
