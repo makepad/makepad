@@ -205,24 +205,13 @@ impl App{
 
 impl AppMain for App{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let mut scope = WidgetScope::new(&mut self.document);
+        
         if let Event::Draw(event) = event {
-
-          
-            //let dt = profile_start();
-            let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                                    
-                    if let Some(mut patch_editor) = next.as_fish_patch_editor().borrow_mut() {
-                    // lets fetch a session
-                    //  let current_id = dock.drawing_item_id().unwrap();
-                    patch_editor.draw(cx, &mut self.document.patches[0]);
-                    
-                }
-            }
-            //profile_end!(dt);
-            return 
+            return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
         }
-        let actions = self.ui.handle_widget_event(cx, event);
+        
+        let actions = self.ui.handle_event(cx, event, &mut scope);
   
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;

@@ -107,7 +107,7 @@ live_design!{
                 
             file_tree_tabs = Tabs {
                 tabs: [file_tree, search, run_list],
-                selected: 2
+                selected: 0
             }
                 
             edit_tabs = Tabs {
@@ -158,7 +158,7 @@ live_design!{
             file1 = Tab {
                 name: "app.rs",
                 closable: true,
-                kind: CodeEditor
+                kind: StudioEditor
             }
                 
             log_list = Tab {
@@ -167,7 +167,7 @@ live_design!{
                 kind: LogList
             }
                 
-            CodeEditor = <StudioEditor> {}
+            StudioEditor = <StudioEditor> {}
             EditFirst = <RectView> {
                 draw_bg: {color: #052329}
                 <View> {
@@ -211,7 +211,6 @@ live_design!{
                         }
                     }
                 }
-                    
             }
             RunList = <RunList> {
             }

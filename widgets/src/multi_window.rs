@@ -72,13 +72,13 @@ impl Widget for MultiWindow {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
         self.draw_state.begin(cx, DrawState::Window(0));
         if cx.os_type().is_single_window(){
             if let Some(DrawState::Window(_)) = self.draw_state.get(){
                 if let Some(window) = self.windows.get_mut(&live_id!(mobile)){
                     let walk = window.walk(cx);
-                    window.draw_walk_widget(cx, scope, walk)?; 
+                    window.draw_walk(cx, scope, walk)?; 
                     self.draw_state.end();
                 }
             }
@@ -89,7 +89,7 @@ impl Widget for MultiWindow {
             
             if let Some(window) = self.windows.values_mut().nth(step){
                 let walk = window.walk(cx);
-                window.draw_walk_widget(cx, scope, walk)?; 
+                window.draw_walk(cx, scope, walk)?; 
                 self.draw_state.set(DrawState::Window(step+1));
             }
             else{

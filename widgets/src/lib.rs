@@ -89,6 +89,7 @@ pub use crate::{
         WidgetSet,
         WidgetSetIterator,
         WidgetUid,
+        WidgetPath,
         WidgetDraw,
         WidgetDrawApi,
         CreateAt,

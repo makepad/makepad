@@ -91,8 +91,10 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let mut scope = WidgetScope::default();
+        
         if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
         }
         
         for event in event.network_responses() {
@@ -120,7 +122,7 @@ impl AppMain for App {
             }
         }
         
-        let actions = self.ui.handle_widget_event(cx, event);
+        let actions = self.ui.handle_event(cx, event, &mut scope);
         
         if self.ui.button(id!(send_button)).clicked(&actions) {
             let user_prompt = self.ui.text_input(id!(message_input)).text();

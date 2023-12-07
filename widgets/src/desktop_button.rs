@@ -63,8 +63,8 @@ impl Widget for DesktopButton{
         self.draw_bg.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk_desktop_button(cx, walk);
         WidgetDraw::done()
     }
 }
@@ -114,7 +114,7 @@ impl DesktopButton {
     }
     pub fn get_widwalk(&self)->Walk{self.walk}
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
+    pub fn draw_walk_desktop_button(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.draw_bg.draw_walk(cx, walk);
     }
 }
