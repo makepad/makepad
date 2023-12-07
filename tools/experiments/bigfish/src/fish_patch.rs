@@ -22,7 +22,7 @@ pub struct FishPatch
 impl  FishPatch{
 
 
-    pub fn connect(&mut self, blockfrom:i32, outputfrom: i32, blockto: i32, intputto: i32)
+    pub fn connect(&mut self, blockfrom:u64, outputfrom: u64, blockto: u64, intputto: u64)
     {
         self.connections.push( 
             FishConnection {
@@ -35,14 +35,19 @@ impl  FishPatch{
         );
     }
 
+    pub fn get_block(&self, id: u64) ->Option<&FishBlock>
+    {
+       self.blocks.iter().find(|&x| x.id == id)
+    }
+
     pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) 
     {
-        let mut B = lib.create_instance_from_template(&name);
-        B.x = x;
-        B.y = y;
-        B.id = LiveId::unique().0;
+        let mut b = lib.create_instance_from_template(&name);
+        b.x = x;
+        b.y = y;
+        b.id = LiveId::unique().0;
 
-        self.blocks.push(B);
+        self.blocks.push(b);
 
     }
 
@@ -51,22 +56,25 @@ impl  FishPatch{
         let mut patch = FishPatch::default();
         patch.name = String::from(format!("Test Patch {:?}", id));
         patch.id = id;
-
-    let mut i =0 ;
-
-    patch.create_block(lib, String::from("Oscillator"), i%3*300, i/3*300+ 100);i=i+1;
-    patch.create_block(lib, String::from("Filter"), i%3*300, i/3*300+ 100);i=i+1;
-    patch.create_block(lib, String::from("Effect"), i%3*300, i/3*300+ 100);i=i+1;
-    patch.create_block(lib, String::from("Meta"), i%3*300, i/3*300+100);i=i+1;
-    patch.create_block(lib, String::from("Envelope"), i%3*300, i/3*300+100);i=i+1;
-    patch.create_block(lib, String::from("Modulator"), i%3*300, i/3*300+100);i=i+1;
-
-
-    patch.create_block(lib, String::from("Utility"), i%3*300, i/3*300 + 100);i=i+1;
+    
+        let mut i =0 ;
+    
+        patch.create_block(lib, String::from("Oscillator"), i%3*300, i/3*300+ 100);i=i+1;
+        patch.create_block(lib, String::from("Filter"), i%3*300, i/3*300+ 100);i=i+1;
+        patch.create_block(lib, String::from("Effect"), i%3*300, i/3*300+ 100);i=i+1;
+        patch.create_block(lib, String::from("Meta"), i%3*300, i/3*300+100);i=i+1;
+        patch.create_block(lib, String::from("Envelope"), i%3*300, i/3*300+100);i=i+1;
+        patch.create_block(lib, String::from("Modulator"), i%3*300, i/3*300+100);i=i+1;
+    
+    
+        patch.create_block(lib, String::from("Utility"), i%3*300, i/3*300 + 100);//i=i+1;
 
         for i in 0..20{
             patch.presets.push(FishPreset::create_test_preset(i));
-            patch.connect(i, 0, (i + 1)%20, 0);
+            let fromblock = &patch.blocks[(i as usize) % patch.blocks.len()];
+            let toblock = &patch.blocks[(i as usize+1)% patch.blocks.len()];
+            
+            patch.connect(fromblock.id,0, toblock.id,  0);
         }
       
         patch
