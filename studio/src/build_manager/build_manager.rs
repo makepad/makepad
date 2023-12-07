@@ -268,7 +268,8 @@ impl BuildManager {
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            actions.push(AppAction::RecompileStarted.into_bare())
+            actions.push(AppAction::RecompileStarted.into_bare());
+            actions.push(AppAction::ClearLog.into_bare());
         }
                         
         let log = &mut self.log;

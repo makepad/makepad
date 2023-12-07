@@ -88,7 +88,10 @@ impl Widget for Button{
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk_button(cx, walk);
+        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_text.draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_bg.end(cx);
         WidgetDraw::done()
     }
     
@@ -98,16 +101,6 @@ impl Widget for Button{
     
     fn set_text(&mut self, v:&str){
         self.text.as_mut_empty().push_str(v);
-    }
-}
-
-impl Button {
-    
-    pub fn draw_walk_button(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text.draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
-        self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_bg.end(cx);
     }
 }
 
