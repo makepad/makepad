@@ -29,12 +29,8 @@ enum DrawState {
 }
 
 impl Widget for HookWidget{
-   fn handle_widget_event_with(
-        &mut self,
-        _cx: &mut Cx,
-        _event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope)->WidgetActions {
+        WidgetActions::new()
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{
@@ -43,7 +39,7 @@ impl Widget for HookWidget{
     
     fn redraw(&mut self, _cx:&mut Cx){}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::Hook) {
             return WidgetDraw::hook_above();
         }

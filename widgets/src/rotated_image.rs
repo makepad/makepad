@@ -48,13 +48,13 @@ impl Widget for RotatedImage {
         self.walk
     }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk)
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.draw_walk_rotated_image(cx, walk)
     }
 }
 
 impl RotatedImage {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    pub fn draw_walk_rotated_image(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
         }

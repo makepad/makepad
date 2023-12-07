@@ -220,61 +220,34 @@ struct DrawCodeText {
 
 #[derive(Live)]
 pub struct CodeEditor {
-    #[walk]
-    walk: Walk,
-    #[live]
-    scroll_bars: ScrollBars,
-    #[rust]
-    draw_state: DrawStateWrap<Walk>,
-    #[live]
-    draw_gutter: DrawText,
+    #[walk] walk: Walk,
+    #[live] scroll_bars: ScrollBars,
+    #[live] draw_gutter: DrawText,
+    #[live] draw_text: DrawCodeText,
+    #[live] token_colors: TokenColors,
+    #[live] draw_indent_guide: DrawIndentGuide,
+    #[live] draw_decoration: DrawDecoration,
+    #[live] draw_selection: DrawSelection,
+    #[live] draw_cursor: DrawColor,
+    #[live] draw_cursor_bg: DrawColor,
+    #[live] draw_bg: DrawColor,
+    #[rust(KeepCursorInView::Off)] keep_cursor_in_view: KeepCursorInView,
+    #[rust] last_cursor_screen_pos: Option<DVec2>,
 
-    #[live]
-    draw_text: DrawCodeText,
+    #[rust] cell_size: DVec2,
+    #[rust] gutter_rect: Rect,
+    #[rust] viewport_rect: Rect,
+    #[rust] unscrolled_rect: Rect,
+    #[rust] line_start: usize,
+    #[rust] line_end: usize,
 
-    #[live]
-    token_colors: TokenColors,
-    #[live]
-    draw_indent_guide: DrawIndentGuide,
-    #[live]
-    draw_decoration: DrawDecoration,
-    #[live]
-    draw_selection: DrawSelection,
-    #[live]
-    draw_cursor: DrawColor,
-    #[live]
-    draw_cursor_bg: DrawColor,
-    #[live]
-    draw_bg: DrawColor,
-    #[rust(KeepCursorInView::Off)]
-    keep_cursor_in_view: KeepCursorInView,
-    #[rust]
-    last_cursor_screen_pos: Option<DVec2>,
+    #[live(true)] word_wrap: bool,
 
-    #[rust]
-    cell_size: DVec2,
-    #[rust]
-    gutter_rect: Rect,
-    #[rust]
-    viewport_rect: Rect,
-    #[rust]
-    unscrolled_rect: Rect,
-    #[rust]
-    line_start: usize,
-    #[rust]
-    line_end: usize,
+    #[live(0.5)] blink_speed: f64,
 
-    #[live(true)]
-    word_wrap: bool,
+    #[animator] animator: Animator,
 
-    #[live(0.5)]
-    blink_speed: f64,
-
-    #[animator]
-    animator: Animator,
-
-    #[rust]
-    blink_timer: Timer,
+    #[rust] blink_timer: Timer,
 }
 
 enum KeepCursorInView {
@@ -302,7 +275,9 @@ impl KeepCursorInView {
         }
     }
 }
-
+impl LiveHook for CodeEditor {
+}
+/*
 impl LiveHook for CodeEditor {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, CodeEditor)
@@ -314,19 +289,21 @@ impl Widget for CodeEditor {
         self.scroll_bars.redraw(cx);
     }
 
-    fn handle_widget_event_with(
+    fn handle_event(
         &mut self,
         _cx: &mut Cx,
         _event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
+        _scope:&mut WidgetScope,
+        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionWrap),
+    )->WidgetAction{
+        
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, walk) {
             return WidgetDraw::hook_above();
         }
@@ -337,9 +314,18 @@ impl Widget for CodeEditor {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct CodeEditorRef(WidgetRef);
+*/
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+    pub fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_bars.redraw(cx);
+    }
+    
+    pub fn walk(&self, _cx:&mut Cx)->Walk{
+        self.walk
+    }
+    
+    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut Session, walk:Walk) {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
@@ -429,7 +415,6 @@ impl CodeEditor {
             KeepCursorInView::Off => {}
         }
 
-        let walk: Walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
 
         let turtle_rect = cx.turtle().rect();
@@ -550,37 +535,28 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        session: &mut Session,
-    ) -> Vec<CodeEditorAction> {
-        let mut a = Vec::new();
-        self.handle_event_with(cx, event, session, &mut |_, v| a.push(v));
-        a
-    }
-
     pub fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
         self.animator_cut(cx, id!(blink.off));
         cx.stop_timer(self.blink_timer);
         self.blink_timer = cx.start_timeout(self.blink_speed)
     }
 
-    pub fn handle_event_with(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         session: &mut Session,
-        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
-    ) {
+    ) -> Vec<CodeEditorAction> {
+        let mut actions = Vec::new();
+        
         self.animator_handle_event(cx, event);
 
         session.handle_changes();
 
-        self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
-            cx.redraw_all();
-        });
+        if self.scroll_bars.handle_event(cx, event).len()>0{
+            self.redraw(cx);
+        };
+        
         if self.blink_timer.is_event(event).is_some() {
             if self.animator_in_state(cx, id!(blink.off)) {
                 self.animator_play(cx, id!(blink.on));
@@ -773,7 +749,7 @@ impl CodeEditor {
                 session.insert(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::TextInput(TextInputEvent {
                 ref input,
@@ -783,7 +759,7 @@ impl CodeEditor {
                 session.paste(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
@@ -792,7 +768,7 @@ impl CodeEditor {
                 session.enter();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
@@ -802,7 +778,7 @@ impl CodeEditor {
                 session.indent();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Tab,
@@ -812,7 +788,7 @@ impl CodeEditor {
                 session.outdent();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
@@ -821,7 +797,7 @@ impl CodeEditor {
                 session.delete();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -830,7 +806,7 @@ impl CodeEditor {
                 session.backspace();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
-                dispatch_action(cx, CodeEditorAction::TextDidChange);
+                actions.push(CodeEditorAction::TextDidChange);
             }
             Hit::TextCopy(ce) => {
                 *ce.response.borrow_mut() = Some(session.copy());
@@ -854,7 +830,7 @@ impl CodeEditor {
             }) => {
                 if session.undo() {
                     cx.redraw_all();
-                    dispatch_action(cx, CodeEditorAction::TextDidChange);
+                    actions.push(CodeEditorAction::TextDidChange);
                     keyboard_moved_cursor = true;
                 }
             }
@@ -870,7 +846,7 @@ impl CodeEditor {
             }) => {
                 if session.redo() {
                     self.redraw(cx);
-                    dispatch_action(cx, CodeEditorAction::TextDidChange);
+                    actions.push(CodeEditorAction::TextDidChange);
                     keyboard_moved_cursor = true;
                 }
             }
@@ -976,6 +952,7 @@ impl CodeEditor {
                 self.redraw(cx);
             }
         }
+        actions
     }
 
     fn draw_gutter(&mut self, cx: &mut Cx2d, session: &Session) {
@@ -1436,9 +1413,10 @@ impl CodeEditor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, WidgetAction)]
 pub enum CodeEditorAction {
     TextDidChange,
+    None
 }
 
 struct DrawDecorationLayer<'a> {

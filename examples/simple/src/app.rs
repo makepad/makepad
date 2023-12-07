@@ -51,7 +51,7 @@ app_main!(App);
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
-}
+ }
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
@@ -67,11 +67,12 @@ impl App{
 
 impl AppMain for App{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let mut scope = WidgetScope::default();
         if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
         }
-        let actions = self.ui.handle_widget_event(cx, event);
-  
+        let actions = self.ui.handle_event(cx, event, &mut scope);
+ 
         if self.ui.button(id!(button1)).clicked(&actions) {
             log!("BUTTON CLICKED {}", self.counter); 
             self.counter += 1;

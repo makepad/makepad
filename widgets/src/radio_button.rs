@@ -65,35 +65,6 @@ pub enum RadioButtonAction {
 
 
 impl RadioButton {
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, RadioButtonAction)) {
-        self.animator_handle_event(cx, event);
-        
-        match event.hits(cx, self.draw_radio.area()) {
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                cx.set_cursor(MouseCursor::Arrow);
-                self.animator_play(cx, id!(hover.off));
-            },
-            Hit::FingerDown(_fe) => {
-                if self.animator_in_state(cx, id!(selected.off)) {
-                    self.animator_play(cx, id!(selected.on));
-                    dispatch_action(cx, RadioButtonAction::Clicked);
-                }
-            },
-            Hit::FingerUp(_fe) => {
-                
-            }
-            Hit::FingerMove(_fe) => {
-                
-            }
-            _ => ()
-        }
-    }
-    
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
@@ -108,16 +79,40 @@ impl Widget for RadioButton {
         self.draw_radio.redraw(cx);
     }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        self.animator_handle_event(cx, event);
+                
+        match event.hits(cx, self.draw_radio.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Arrow);
+                self.animator_play(cx, id!(hover.off));
+            },
+            Hit::FingerDown(_fe) => {
+                if self.animator_in_state(cx, id!(selected.off)) {
+                    self.animator_play(cx, id!(selected.on));
+                    actions.push_single(uid, &scope.path, RadioButtonAction::Clicked);
+                }
+            },
+            Hit::FingerUp(_fe) => {
+                                
+            }
+            Hit::FingerMove(_fe) => {
+                                
+            }
+            _ => ()
+        }
+        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -141,8 +136,8 @@ impl RadioButtonSet{
     
     pub fn selected(&self, cx: &mut Cx, actions: &WidgetActions)->Option<usize>{
         for action in actions{
-            match action.action() {
-                RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| v.widget_uid() == action.widget_uid){
+            match action.cast() {
+                RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| action.widget_uid_eq(v.widget_uid())){
                     for (i, item) in self.0.iter().enumerate(){
                         if i != index{
                             RadioButtonRef(item).unselect(cx);

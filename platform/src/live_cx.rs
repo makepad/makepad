@@ -269,6 +269,7 @@ impl Cx {
             log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
         }*/
         live_registry.expand_all_documents(&mut errs);
+                
         for err in errs {
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);

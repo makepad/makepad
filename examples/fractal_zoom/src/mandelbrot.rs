@@ -22,13 +22,13 @@ live_design!{
             let magsq = (fractal.w * 256 + fractal.x - 127);
             
             // create a nice palette index
-            let index = abs((1.0 * iter / self.max_iter * 8.0) - .01 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter * 18.0) - .01 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq2(index - self.color_cycle*-3.0),1);
+            return vec4(Pal::iq6(index - self.color_cycle*-1.0),1);
         }
     }
     
@@ -446,11 +446,97 @@ pub enum MandelbrotAction {
 }
 
 impl Widget for Mandelbrot {
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
+               
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+        if let Some(ne) = self.next_frame.is_event(event) {
+            // If we don't have a current layer, initiate the first tile render on the center of the screen
+            if self.had_first_draw && self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
+                self.generate_tiles_around_finger(cx, self.space.zoom, self.space.view_rect.center());
+            }
+                        
+            // try pulling tiles from our message channel from the worker threads
+            let mut tiles_received = 0;
+            while let Ok(msg) = self.to_ui.receiver.try_recv() {
+                match msg {
+                    ToUI::TileDone {tile} => {
+                        self.tile_cache.tile_completed(cx, tile);
+                                                
+                        // when we have all the tiles, and aren't pixel accurate, fire a new tile render
+                        // this is the common path for initiating a tile render
+                        if self.tile_cache.generate_completed() && self.tile_cache.next_zoom != self.space.zoom {
+                            let zoom = self.space.zoom * if self.is_zooming {if self.is_zoom_in {0.8}else {2.0}}else {1.0};
+                            self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
+                        }
+                                                
+                        tiles_received += 1;
+                        // dont process too many tiles at once as this hiccups the renderer
+                        if tiles_received > 10 {
+                            break;
+                        }
+                    }
+                    ToUI::TileBailed {tile} => {
+                        self.tile_cache.tile_bailed(tile);
+                    }
+                }
+            }
+                        
+            // We are zooming, so animate the zoom
+            if self.is_zooming {
+                if let OsType::LinuxDirect = cx.os_type() {
+                    self.space.zoom_around(if self.is_zoom_in {0.92} else {1.08}, self.finger_abs);
+                }
+                else {
+                    self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
+                }
+                // this kickstarts the tile cache generation when zooming, only happens once per zoom
+                if self.tile_cache.generate_completed() {
+                    let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
+                    self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
+                }
+            }
+                        
+            // animate color cycle
+            self.draw_tile.color_cycle = (ne.time * 0.05).fract() as f32;
+            // this triggers a draw_walk call and another 'next frame' event
+            self.view_area.redraw(cx);
+            self.next_frame = cx.new_next_frame();
+        }
+                
+        // check if we click/touch the mandelbrot view in multitouch mode
+        // in this mode we get fingerdown events for each finger.
+        
+        match event.hits(cx, self.view_area) {
+            Hit::FingerDown(fe) => {
+                // ok so we get multiple finger downs
+                self.is_zooming = true;
+                self.finger_abs = fe.abs;
+                self.is_zoom_in = true;
+                cx.set_key_focus(self.view_area);
+                self.view_area.redraw(cx);
+                                            
+                self.next_frame = cx.new_next_frame();
+            },
+            Hit::KeyDown(k)=>{
+                if KeyCode::Space == k.key_code{
+                    self.space.zoom = 0.5;
+                    self.space.center = dvec2(-0.5,0.0);
+                }
+            }
+            Hit::FingerMove(fe) => {
+            //if fe.digit.index == 0 { // only respond to digit 0
+                self.finger_abs = fe.abs;
+                //}
+            }
+            Hit::FingerUp(_) => {
+                self.is_zoom_in = true;
+                self.is_zooming = false;
+            }
+            _ => ()
+        }
+        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -459,8 +545,37 @@ impl Widget for Mandelbrot {
         self.view_area.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        cx.begin_turtle(walk, Layout::flow_right());
+        // lets check our clip
+                
+        self.had_first_draw = true;
+        // store the view information here as its the only place it's known in the codeflow
+        self.space.tile_size = dvec2(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor() as f64;
+        self.space.view_rect = cx.turtle().rect();
+                
+        // update bail window the workers check to skip tiles that are no longer in view
+        self.tile_cache.set_bail_test(BailTest {
+            is_zoom_in: self.is_zoom_in,
+            space: self.space.view_rect_to_fractal()
+        });
+                
+        // pass the max_iter value to the shader
+        self.draw_tile.max_iter = self.max_iter as f32;
+                
+        // iterate the current and next tile caches and draw the fractal tile
+        for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
+            let rect = self.space.fractal_to_screen_rect(tile.fractal);
+            // set texture by index.
+            self.draw_tile.draw_vars.set_texture(0, &self.tile_cache.textures[tile.texture_index]);
+                        
+            // this emits the drawcall onto the drawlists that go to the renderbackend
+            // By changing the texture every time we cause to emit multiple drawcalls.
+            // if we wouldn't change the texture, it would batch all draws into one instanced array.
+            self.draw_tile.draw_abs(cx, rect);
+        }
+                
+        cx.end_turtle_with_area(&mut self.view_area);
         WidgetDraw::done()
     }
 }
@@ -538,151 +653,5 @@ impl Mandelbrot {
                 self.render_tile(tile, zoom, is_zooming)
             }
         }
-    }
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
-        //self.animator_handle_event(cx, event);
-        //if let Event::Signal(_) = event {
-        // this batches up all the input signals into a single animation frame
-        //  self.next_frame = cx.new_next_frame();
-        //}
-        
-        if let Some(ne) = self.next_frame.is_event(event) {
-            // If we don't have a current layer, initiate the first tile render on the center of the screen
-            if self.had_first_draw && self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
-                self.generate_tiles_around_finger(cx, self.space.zoom, self.space.view_rect.center());
-            }
-            
-            // try pulling tiles from our message channel from the worker threads
-            let mut tiles_received = 0;
-            while let Ok(msg) = self.to_ui.receiver.try_recv() {
-                match msg {
-                    ToUI::TileDone {tile} => {
-                        self.tile_cache.tile_completed(cx, tile);
-                        
-                        // when we have all the tiles, and aren't pixel accurate, fire a new tile render
-                        // this is the common path for initiating a tile render
-                        if self.tile_cache.generate_completed() && self.tile_cache.next_zoom != self.space.zoom {
-                            let zoom = self.space.zoom * if self.is_zooming {if self.is_zoom_in {0.8}else {2.0}}else {1.0};
-                            self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
-                        }
-                        
-                        tiles_received += 1;
-                        // dont process too many tiles at once as this hiccups the renderer
-                        if tiles_received > 10 {
-                            break;
-                        }
-                    }
-                    ToUI::TileBailed {tile} => {
-                        self.tile_cache.tile_bailed(tile);
-                    }
-                }
-            }
-            
-            // We are zooming, so animate the zoom
-            if self.is_zooming {
-                if let OsType::LinuxDirect = cx.os_type() {
-                    self.space.zoom_around(if self.is_zoom_in {0.92} else {1.08}, self.finger_abs);
-                }
-                else {
-                    self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
-                }
-                // this kickstarts the tile cache generation when zooming, only happens once per zoom
-                if self.tile_cache.generate_completed() {
-                    let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
-                    self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
-                }
-            }
-            
-            // animate color cycle
-            self.draw_tile.color_cycle = (ne.time * 0.05).fract() as f32;
-            // this triggers a draw_walk call and another 'next frame' event
-            self.view_area.redraw(cx);
-            self.next_frame = cx.new_next_frame();
-        }
-        
-        // check if we click/touch the mandelbrot view in multitouch mode
-        // in this mode we get fingerdown events for each finger.
-
-        match event.hits(cx, self.view_area) {
-            Hit::FingerDown(fe) => {
-                // ok so we get multiple finger downs
-                self.is_zooming = true;
-                // in case of a mouse we check which mousebutton is down
-                //if let Some(button) = fe.digit.mouse_button() {
-                self.finger_abs = fe.abs;
-                //   if button == 0 {
-                self.is_zoom_in = true;
-                //   }
-                //   else {
-                //        self.is_zoom_in = false;
-                //    }
-                /* }
-                else {
-                    if fe.digit.count == 1 {
-                        self.finger_abs = fe.abs;
-                        self.is_zoom_in = true;
-                    }
-                    else if fe.digit.count >= 2 {
-                        self.is_zoom_in = false;
-                    }
-                }*/
-                cx.set_key_focus(self.view_area);
-                self.view_area.redraw(cx);
-                
-                self.next_frame = cx.new_next_frame();
-            },
-            Hit::KeyDown(k)=>{
-                if KeyCode::Space == k.key_code{
-                    self.space.zoom = 0.5;
-                    self.space.center = dvec2(-0.5,0.0);
-                }
-            }
-            Hit::FingerMove(fe) => {
-                //if fe.digit.index == 0 { // only respond to digit 0
-                self.finger_abs = fe.abs;
-                //}
-            }
-            Hit::FingerUp(_) => {
-                self.is_zoom_in = true;
-                self.is_zooming = false;
-            }
-            _ => ()
-        }
-    }
-    
-    // draw the mandelbrot view
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // checks if our view is dirty, exits here if its clean
-        cx.begin_turtle(walk, Layout::flow_right());
-        // lets check our clip
-        
-        self.had_first_draw = true;
-        // store the view information here as its the only place it's known in the codeflow
-        self.space.tile_size = dvec2(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor() as f64;
-        self.space.view_rect = cx.turtle().rect();
-        
-        // update bail window the workers check to skip tiles that are no longer in view
-        self.tile_cache.set_bail_test(BailTest {
-            is_zoom_in: self.is_zoom_in,
-            space: self.space.view_rect_to_fractal()
-        });
-        
-        // pass the max_iter value to the shader
-        self.draw_tile.max_iter = self.max_iter as f32;
-        
-        // iterate the current and next tile caches and draw the fractal tile
-        for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
-            let rect = self.space.fractal_to_screen_rect(tile.fractal);
-            // set texture by index.
-            self.draw_tile.draw_vars.set_texture(0, &self.tile_cache.textures[tile.texture_index]);
-            
-            // this emits the drawcall onto the drawlists that go to the renderbackend
-            // By changing the texture every time we cause to emit multiple drawcalls.
-            // if we wouldn't change the texture, it would batch all draws into one instanced array.
-            self.draw_tile.draw_abs(cx, rect);
-        }
-        
-        cx.end_turtle_with_area(&mut self.view_area);
     }
 }
