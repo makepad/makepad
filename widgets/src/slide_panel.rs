@@ -30,17 +30,22 @@ pub enum SlidePanelAction {
 }
 
 impl Widget for SlidePanel {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.frame.handle_widget_event_with(cx, event, dispatch_action);
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
+        //let uid = self.widget_uid();
+        actions.extend(self.frame.handle_event(cx, event, scope));
+        // lets handle mousedown, setfocus
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.frame.redraw(cx);
+        }
+        
+        match event {
+            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
+                self.frame.redraw(cx);
+            }
+            _ => ()
+        }
+        actions
     }
     
     fn walk(&mut self, cx:&mut Cx) -> Walk {
@@ -55,7 +60,7 @@ impl Widget for SlidePanel {
         self.frame.find_widgets(path, cached, results);
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, mut walk: Walk) -> WidgetDraw {
         // ok lets set abs pos
         let rect = cx.peek_walk_turtle(walk);
         match self.side{
@@ -66,7 +71,7 @@ impl Widget for SlidePanel {
                 walk.abs_pos = Some(dvec2(-rect.size.x * self.closed, 0.0));
             }
         }
-        self.frame.draw_walk_widget(cx, walk)
+        self.frame.draw_walk_widget(cx, scope, walk)
     }
 }
 
@@ -78,19 +83,7 @@ pub enum SlideSide{
 }
 
 impl SlidePanel {
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidePanelAction)) {
-        // lets handle mousedown, setfocus
-        if self.animator_handle_event(cx, event).must_redraw() {
-            self.frame.redraw(cx);
-        }
-        match event {
-            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
-                self.frame.redraw(cx);
-            }
-            _ => ()
-        }
-    }
-    
+
     pub fn open(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }

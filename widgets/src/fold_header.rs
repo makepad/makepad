@@ -37,21 +37,17 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         if self.animator_handle_event(cx, event).must_redraw() {
             if self.animator.is_track_animating(cx, id!(open)) {
                 self.area.redraw(cx);
             }
         };
         
-        for item in self.header.handle_widget_event(cx, event) {
-            if item.widget_uid == self.header.widget(id!(fold_button)).widget_uid(){
-                match item.action.cast() {
+        for item in self.header.handle_event(cx,  event, scope).iter() {
+            if item.widget_uid_eq(self.header.widget(id!(fold_button)).widget_uid()){
+                match item.cast() {
                     FoldButtonAction::Opening => {
                         self.animator_play(cx, id!(open.on))
                     }
@@ -61,10 +57,11 @@ impl Widget for FoldHeader {
                     _ => ()
                 }
             }
-            dispatch_action(cx, item)
+            actions.push(item.clone());
         }
         
-        self.body.handle_widget_event_with(cx, event, dispatch_action);
+        actions.extend(self.body.handle_event(cx, event, scope));
+        return actions
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
@@ -79,12 +76,13 @@ impl Widget for FoldHeader {
         self.body.find_widgets(path, cached, results);
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
         if let Some(DrawState::DrawHeader) = self.draw_state.get() {
-            self.header.draw_widget(cx) ?;
+            let walk = self.header.walk(cx);
+            self.header.draw_walk_widget(cx, scope, walk) ?;
             cx.begin_turtle(
                 self.body_walk,
                 Layout::flow_down()
@@ -93,7 +91,8 @@ impl Widget for FoldHeader {
             self.draw_state.set(DrawState::DrawBody);
         }
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
-            self.body.draw_widget(cx) ?;
+            let walk = self.body.walk(cx);
+            self.body.draw_walk_widget(cx, scope, walk) ?;
             self.rect_size = cx.turtle().used().y;
             cx.end_turtle();
             cx.end_turtle_with_area(&mut self.area);

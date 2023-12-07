@@ -34,54 +34,6 @@ pub enum FoldButtonAction {
 
 impl FoldButton {
     
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
-    ) {
-        if self.animator_handle_event(cx, event).is_animating() {
-            if self.animator.is_track_animating(cx, id!(open)) {
-                let mut value = [0.0];
-                self.draw_bg.get_instance(cx, id!(open),&mut value);
-                dispatch_action(cx, FoldButtonAction::Animating(value[0] as f64))
-            }
-        };
-        
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                if self.animator_in_state(cx, id!(open.yes)) {
-                    self.animator_play(cx, id!(open.no));
-                    dispatch_action(cx, FoldButtonAction::Closing)
-                }
-                else {
-                    self.animator_play(cx, id!(open.yes));
-                    dispatch_action(cx, FoldButtonAction::Opening)
-                }
-                self.animator_play(cx, id!(hover.on));
-            },
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                 self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            }
-            Hit::FingerUp(fe) => if fe.is_over {
-                if fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
-                }
-                else{
-                    self.animator_play(cx, id!(hover.off));
-                }
-            }
-            else {
-                self.animator_play(cx, id!(hover.off));
-            }
-            _ => ()
-        };
-    }
-    
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
         self.animator_toggle(cx, is_open, animate, id!(open.yes), id!(open.no))
     }
@@ -108,16 +60,55 @@ impl Widget for FoldButton {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        if self.animator_handle_event(cx, event).is_animating() {
+            if self.animator.is_track_animating(cx, id!(open)) {
+                let mut value = [0.0];
+                self.draw_bg.get_instance(cx, id!(open),&mut value);
+                actions.push_single(uid, &scope.path, FoldButtonAction::Animating(value[0] as f64))
+            }
+        };
+                
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerDown(_fe) => {
+                if self.animator_in_state(cx, id!(open.yes)) {
+                    self.animator_play(cx, id!(open.no));
+                    actions.push_single(uid, &scope.path, FoldButtonAction::Closing)
+                }
+                else {
+                    self.animator_play(cx, id!(open.yes));
+                    actions.push_single(uid, &scope.path, FoldButtonAction::Opening)
+                }
+                self.animator_play(cx, id!(hover.on));
+            },
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => if fe.is_over {
+                if fe.device.has_hovers() {
+                    self.animator_play(cx, id!(hover.on));
+                }
+                else{
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            else {
+                self.animator_play(cx, id!(hover.off));
+            }
+            _ => ()
+        };
+        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -131,7 +122,7 @@ impl FoldButtonRef {
     
     pub fn opening(&self, actions:&WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FoldButtonAction::Opening = item.action() {
+            if let FoldButtonAction::Opening = item.cast() {
                 return true
             }
         }
@@ -140,7 +131,7 @@ impl FoldButtonRef {
 
     pub fn closing(&self, actions:&WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FoldButtonAction::Closing = item.action() {
+            if let FoldButtonAction::Closing = item.cast() {
                 return true
             }
         }
@@ -149,7 +140,7 @@ impl FoldButtonRef {
     
     pub fn animating(&self, actions:&WidgetActions) -> Option<f64> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FoldButtonAction::Animating(v) = item.action() {
+            if let FoldButtonAction::Animating(v) = item.cast() {
                 return Some(v)
             }
         }

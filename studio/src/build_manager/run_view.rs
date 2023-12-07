@@ -1,4 +1,5 @@
 use crate::{
+    app::{AppScope},
     makepad_widgets::*,
     makepad_platform::os::cx_stdin::*,
     build_manager::build_manager::BuildManager,
@@ -73,7 +74,6 @@ pub struct RunView {
     #[rust] started: bool,
 }
 
-
 impl LiveHook for RunView {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, RunView)
@@ -120,67 +120,6 @@ impl RunView {
         }
         if let Some(te) = self.tick.is_event(event) {
             self.run_tick(cx, te.time, run_view_id, manager)
-        }
-    }
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
-        self.animator_handle_event(cx, event);
-        // lets send mouse events
-        match event.hits(cx, self.draw_app.area()) {
-            Hit::FingerDown(_) => {
-                cx.set_key_focus(self.draw_app.area());
-            }
-            Hit::TextInput(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
-            }
-            Hit::KeyDown(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
-            }
-            Hit::KeyUp(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyUp(e));
-            }
-            _ => ()
-        }
-        let rect = self.draw_app.area().get_rect(cx);
-        match event {
-            Event::MouseDown(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseDown(StdinMouseDown {
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                    button: e.button,
-                }));
-            }
-            Event::MouseMove(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseMove(StdinMouseMove {
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                }));
-            }
-            Event::MouseUp(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseUp(StdinMouseUp {
-                    time: e.time,
-                    button: e.button,
-                    x: rel.x,
-                    y: rel.y,
-                }));
-            }
-            Event::Scroll(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::Scroll(StdinScroll {
-                    is_mouse: e.is_mouse,
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                    sx: e.scroll.x,
-                    sy: e.scroll.y
-                }));
-            }
-            _ => ()
         }
     }
     
@@ -249,8 +188,7 @@ impl RunView {
         self.last_size = dvec2(0.0,0.0);
     }
     
-    
-    pub fn draw(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager) {
+    pub fn draw_run_view(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager) {
         
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
@@ -368,13 +306,80 @@ impl Widget for RunView {
         self.draw_app.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        if self.draw_state.begin(cx, walk) {
-            return WidgetDraw::hook_above();
-        }
-        self.draw_state.end();
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        let run_view_id = scope.path.path_id(0);
+        let manager = &mut scope.data.get_mut::<AppScope>().build_manager;
+        self.draw_run_view(cx, run_view_id, manager);
         WidgetDraw::done()
     }
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
+        let actions = WidgetActions::new();
+        
+        let run_view_id = scope.path.path_id(0);
+        let manager = &scope.data.get::<AppScope>().build_manager;
+        
+        self.animator_handle_event(cx, event);
+        // lets send mouse events
+        match event.hits(cx, self.draw_app.area()) {
+            Hit::FingerDown(_) => {
+                cx.set_key_focus(self.draw_app.area());
+            }
+            Hit::TextInput(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
+            }
+            Hit::KeyDown(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
+            }
+            Hit::KeyUp(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyUp(e));
+            }
+            _ => ()
+        }
+        let rect = self.draw_app.area().get_rect(cx);
+        match event {
+            Event::MouseDown(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseDown(StdinMouseDown {
+                    time: e.time,
+                    x: rel.x,
+                    y: rel.y,
+                    button: e.button,
+                }));
+            }
+            Event::MouseMove(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseMove(StdinMouseMove {
+                    time: e.time,
+                    x: rel.x,
+                    y: rel.y,
+                }));
+            }
+            Event::MouseUp(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseUp(StdinMouseUp {
+                    time: e.time,
+                    button: e.button,
+                    x: rel.x,
+                    y: rel.y,
+                }));
+            }
+            Event::Scroll(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::Scroll(StdinScroll {
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                    x: rel.x,
+                    y: rel.y,
+                    sx: e.scroll.x,
+                    sy: e.scroll.y
+                }));
+            }
+            _ => ()
+        }
+        actions
+    }
+    
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
