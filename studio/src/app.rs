@@ -92,9 +92,8 @@ pub enum AppAction{
     RedrawFile(FileNodeId),
     StartRecompile,
     ReloadFileTree,
-    RecompileNeeded,
     RecompileStarted,
-    ClearLog,
+    ClearLog, 
     None
 }
 
@@ -144,8 +143,6 @@ impl App{
             }
             AppAction::StartRecompile=>{
                 self.scope.build_manager.start_recompile(cx);
-            }
-            AppAction::RecompileNeeded=>{
             }
             AppAction::RecompileStarted=>{
                 if let Some(mut dock) = dock.borrow_mut() {
