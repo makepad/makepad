@@ -903,8 +903,8 @@ impl Widget for Dock {
                 }
             };
         }
-        for (item_id, item) in self.items.values_mut() {
-            scope.with_id(*item_id, |scope|{
+        for (id,(_templ_id, item)) in self.items.iter_mut() {
+            scope.with_id(*id, |scope|{
                 actions.extend(item.handle_event(cx, event, scope));
             });
         }
@@ -955,7 +955,7 @@ impl Widget for Dock {
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
             let id = live_id!(root);
             vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]

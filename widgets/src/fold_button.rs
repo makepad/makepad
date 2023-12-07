@@ -38,7 +38,7 @@ impl FoldButton {
         self.animator_toggle(cx, is_open, animate, id!(open.yes), id!(open.no))
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    pub fn draw_walk_fold_button(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.draw_walk(cx, walk);
     }
     
@@ -108,8 +108,8 @@ impl Widget for FoldButton {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.draw_walk_fold_button(cx, walk);
         WidgetDraw::done()
     }
 }

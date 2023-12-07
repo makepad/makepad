@@ -220,61 +220,34 @@ struct DrawCodeText {
 
 #[derive(Live)]
 pub struct CodeEditor {
-    #[walk]
-    walk: Walk,
-    #[live]
-    scroll_bars: ScrollBars,
-    #[rust]
-    draw_state: DrawStateWrap<Walk>,
-    #[live]
-    draw_gutter: DrawText,
+    #[walk] walk: Walk,
+    #[live] scroll_bars: ScrollBars,
+    #[live] draw_gutter: DrawText,
+    #[live] draw_text: DrawCodeText,
+    #[live] token_colors: TokenColors,
+    #[live] draw_indent_guide: DrawIndentGuide,
+    #[live] draw_decoration: DrawDecoration,
+    #[live] draw_selection: DrawSelection,
+    #[live] draw_cursor: DrawColor,
+    #[live] draw_cursor_bg: DrawColor,
+    #[live] draw_bg: DrawColor,
+    #[rust(KeepCursorInView::Off)] keep_cursor_in_view: KeepCursorInView,
+    #[rust] last_cursor_screen_pos: Option<DVec2>,
 
-    #[live]
-    draw_text: DrawCodeText,
+    #[rust] cell_size: DVec2,
+    #[rust] gutter_rect: Rect,
+    #[rust] viewport_rect: Rect,
+    #[rust] unscrolled_rect: Rect,
+    #[rust] line_start: usize,
+    #[rust] line_end: usize,
 
-    #[live]
-    token_colors: TokenColors,
-    #[live]
-    draw_indent_guide: DrawIndentGuide,
-    #[live]
-    draw_decoration: DrawDecoration,
-    #[live]
-    draw_selection: DrawSelection,
-    #[live]
-    draw_cursor: DrawColor,
-    #[live]
-    draw_cursor_bg: DrawColor,
-    #[live]
-    draw_bg: DrawColor,
-    #[rust(KeepCursorInView::Off)]
-    keep_cursor_in_view: KeepCursorInView,
-    #[rust]
-    last_cursor_screen_pos: Option<DVec2>,
+    #[live(true)] word_wrap: bool,
 
-    #[rust]
-    cell_size: DVec2,
-    #[rust]
-    gutter_rect: Rect,
-    #[rust]
-    viewport_rect: Rect,
-    #[rust]
-    unscrolled_rect: Rect,
-    #[rust]
-    line_start: usize,
-    #[rust]
-    line_end: usize,
+    #[live(0.5)] blink_speed: f64,
 
-    #[live(true)]
-    word_wrap: bool,
+    #[animator] animator: Animator,
 
-    #[live(0.5)]
-    blink_speed: f64,
-
-    #[animator]
-    animator: Animator,
-
-    #[rust]
-    blink_timer: Timer,
+    #[rust] blink_timer: Timer,
 }
 
 enum KeepCursorInView {
@@ -352,7 +325,7 @@ impl CodeEditor {
         self.walk
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut Session, walk:Walk) {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
@@ -442,7 +415,6 @@ impl CodeEditor {
             KeepCursorInView::Off => {}
         }
 
-        let walk: Walk = self.draw_state.get().unwrap();
         self.scroll_bars.begin(cx, walk, Layout::default());
 
         let turtle_rect = cx.turtle().rect();

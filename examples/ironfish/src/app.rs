@@ -189,10 +189,10 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
         //let preset_lists = self.ui.swipe_list_set(ids!(preset_list));
-        
+        let mut scope = WidgetScope::default();
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
+            while let Some(_next) = self.ui.draw_widget(cx, &mut scope).hook_widget() {
                 /*if let Some(mut list) = preset_lists.has_widget(&next).borrow_mut() {
                     for i in 0..10 {
                         if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {
@@ -206,7 +206,7 @@ impl AppMain for App {
         }
         let ui = self.ui.clone();
         let mut synth_db = DataBindingStore::new();
-        let mut actions = ui.handle_widget_event(cx, event);
+        let mut actions = ui.handle_event(cx, event, &mut scope);
         
         // handle preset lists events
         /*for list in preset_lists.iter() {

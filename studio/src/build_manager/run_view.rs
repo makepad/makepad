@@ -61,7 +61,6 @@ live_design!{
 #[derive(Live)]
 pub struct RunView {
     #[walk] walk: Walk,
-    #[rust] draw_state: DrawStateWrap<Walk>,
     #[animator] animator: Animator,
     #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
@@ -188,12 +187,11 @@ impl RunView {
         self.last_size = dvec2(0.0,0.0);
     }
     
-    pub fn draw_run_view(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager) {
+    pub fn draw_run_view(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager, walk:Walk) {
         
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
         let dpi_factor = cx.current_dpi_factor();
-        let walk = if let Some(walk) = self.draw_state.get() {walk}else {panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
 
@@ -306,10 +304,10 @@ impl Widget for RunView {
         self.draw_app.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
         let run_view_id = scope.path.path_id(0);
         let manager = &mut scope.data.get_mut::<AppScope>().build_manager;
-        self.draw_run_view(cx, run_view_id, manager);
+        self.draw_run_view(cx, run_view_id, manager, walk);
         WidgetDraw::done()
     }
     

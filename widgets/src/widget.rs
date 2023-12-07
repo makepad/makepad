@@ -50,11 +50,11 @@ pub trait Widget: LiveApply {
     fn widget_to_data(&self, _cx: &mut Cx, _actions: &WidgetActions, _nodes: &mut LiveNodeVec, _path: &[LiveId]) -> bool {false}
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw;
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw;
     
     fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
         let walk = self.walk(cx);
-        self.draw_walk_widget(cx, scope, walk)
+        self.draw_walk(cx, scope, walk)
     }
         
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
@@ -64,7 +64,7 @@ pub trait Widget: LiveApply {
         true
     }
 
-    fn draw_widget_all(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) {
+    fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) {
         while self.draw_widget(cx, scope).is_hook() {};
     }
     
@@ -128,7 +128,7 @@ pub struct WidgetScopeData<'a>{
 }
 
 impl<'a> WidgetScope<'a>{
-    pub fn new<T:'static+ Any>(v:&'a mut T)->Self{
+    pub fn new<T: Any>(v:&'a mut T)->Self{
         Self{
             path:WidgetPath::default(),
             data:WidgetScopeData{data:Some(v)}
@@ -144,11 +144,11 @@ impl<'a> WidgetScope<'a>{
 }
 
 impl <'a> WidgetScopeData<'a>{
-    pub fn get<T: 'static+ Any>(&mut self) -> &T {
+    pub fn get<T: Any>(&mut self) -> &T {
         self.data.as_ref().unwrap().downcast_ref::<T>().unwrap()
     }
         
-    pub fn get_mut<T: 'static+ Any>(&mut self) -> &mut T {
+    pub fn get_mut<T: Any>(&mut self) -> &mut T {
         self.data.as_mut().unwrap().downcast_mut::<T>().unwrap()
     }
 }
@@ -176,23 +176,6 @@ impl WidgetDrawApi for WidgetDraw {
     
 }
 
-/*
-pub type WidgetResult = Result<(), WidgetRef>;
-pub trait WidgetResultApi {
-    fn found(found: WidgetRef) -> WidgetResult {Result::Err(found)}
-    fn not_found() -> WidgetResult {Result::Ok(())}
-    fn into_found(self) -> Option<WidgetRef>;
-}
-
-impl WidgetResultApi for WidgetResult {
-    fn into_found(self) -> Option<WidgetRef> {
-        match self {
-            Result::Ok(_) => None,
-            Result::Err(found) => Some(found)
-        }
-    }
-}*/
-
 pub type WidgetDraw = Result<(), WidgetRef>;
 
 generate_ref_cast_api!(Widget);
@@ -207,9 +190,8 @@ pub struct WidgetRegistry {
 }
 
 
-pub struct WidgetRefInner{
+pub struct WidgetRefInner{ 
     pub widget: Box<dyn Widget >,
-    pub id: LiveId
 }
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
@@ -416,31 +398,15 @@ impl WidgetRef {
         self.0.borrow().as_ref().is_none()
     }
 
-    pub fn id(&self) -> LiveId {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.id
-        }
-        LiveId(0)
-    }
-    
-    pub fn set_id(&self, id:LiveId) {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.id = id
-        }
-    }
-
-    pub fn new_with_inner(widget: Box<dyn Widget>, id:LiveId) -> Self {
+    pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
         Self (Rc::new(RefCell::new(Some(WidgetRefInner{
             widget,
-            id
         }))))
     }
     
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope) -> WidgetActions {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return scope.with_id(inner.id, |scope|{
-                inner.widget.handle_event(cx, event, scope)
-            });
+            return inner.widget.handle_event(cx, event, scope)
         }
         WidgetActions::new()
     }
@@ -490,32 +456,26 @@ impl WidgetRef {
         WidgetSet::default()
     }
     
-    pub fn draw_walk_widget(&self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    pub fn draw_walk(&self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return scope.with_id(inner.id, |scope|{
-                if let Some(nd) = inner.widget.draw_walk_widget(cx, scope, walk).hook_widget() {
-                    if nd.is_empty() {
-                        return WidgetDraw::hook(self.clone())
-                    }
-                    return WidgetDraw::hook(nd);
+           if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).hook_widget() {
+                if nd.is_empty() {
+                    return WidgetDraw::hook(self.clone())
                 }
-                WidgetDraw::done()
-            })
+                return WidgetDraw::hook(nd);
+            }
         }
         WidgetDraw::done()
     }
     
     pub fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return scope.with_id(inner.id, |scope|{
-                if let Some(nd) = inner.widget.draw_widget(cx, scope).hook_widget() {
-                    if nd.is_empty() {
-                        return WidgetDraw::hook(self.clone())
-                    }
-                    return WidgetDraw::hook(nd);
+        if let Some(nd) = inner.widget.draw_widget(cx, scope).hook_widget() {
+                if nd.is_empty() {
+                    return WidgetDraw::hook(self.clone())
                 }
-                WidgetDraw::done()
-            })
+                return WidgetDraw::hook(nd);
+            }
         }
         WidgetDraw::done()
     }    
@@ -541,9 +501,9 @@ impl WidgetRef {
         true
     }
     
-    pub fn draw_widget_all(&self, cx: &mut Cx2d, scope:&mut WidgetScope) {
+    pub fn draw_all(&self, cx: &mut Cx2d, scope:&mut WidgetScope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.draw_widget_all(cx, scope)
+            return inner.widget.draw_all(cx, scope)
         }
     }
 
@@ -628,7 +588,6 @@ impl WidgetRef {
                     }
                 *inner = Some(WidgetRefInner{
                     widget: component,
-                    id: nodes[index].id
                 });
                 if let Some(component) = &mut *inner {
                     return component.widget.apply(cx, from, index, nodes);
@@ -734,7 +693,10 @@ impl WidgetPath{
 impl Debug for WidgetPath {
     fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
         for i in 0..self.0.len(){
-            write!(f, "{}", self.0[i]);
+            if i!=0{
+                let _ = write!(f, ".");
+            }
+            let _ = write!(f, "{}", self.0[i]);
         }
         Ok(())
     }

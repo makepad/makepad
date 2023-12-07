@@ -140,14 +140,14 @@ impl Widget for KeyboardView {
         self.outer_walk
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &(), |cx,_|{
             self.view.walk(cx)
         }){
             self.begin(cx, walk);
         }
         if let Some(walk) = self.draw_state.get() {
-            self.view.draw_walk_widget(cx, scope, walk)?;
+            self.view.draw_walk(cx, scope, walk)?;
         }
         self.end(cx);
         WidgetDraw::done()

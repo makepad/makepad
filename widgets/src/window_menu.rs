@@ -139,7 +139,7 @@ impl Widget for WindowMenu {
         return Walk::fixed(0.0,0.0);
     }
     
-    fn draw_walk_widget(&mut self, _cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
         WidgetDraw::done()
     }
 }

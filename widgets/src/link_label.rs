@@ -40,8 +40,8 @@ impl Widget for LinkLabel {
         self.button.walk(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
-        self.button.draw_walk_widget(cx, scope, walk)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.button.draw_walk(cx, scope, walk)
     }
     
     fn text(&self)->String{

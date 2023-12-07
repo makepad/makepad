@@ -1,4 +1,4 @@
-use crate::{makepad_draw::*, makepad_widgets::*, fish_patch::FishPatch, fish_block_template::FishBlockCategory};
+use crate::{makepad_draw::*, makepad_widgets::*, fish_doc::FishDoc, fish_block_template::FishBlockCategory};
 
 live_design!
 {
@@ -44,23 +44,21 @@ pub struct FishPatchEditor{
 }
 
 impl Widget for FishPatchEditor {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
+               
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event(cx, event);
 
-
-        for (_,item) in self.items.values_mut() {
+        for (item_id,item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
-            item.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
-            });
+            scope.with_id(*item_id, |scope|{
+                actions.extend_grouped(uid, item_uid, item.handle_event(cx, event, scope));
+            })
         }
+        actions
 
 
     }
@@ -73,11 +71,44 @@ impl Widget for FishPatchEditor {
         self.scroll_bars.redraw(cx)
     }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        if self.draw_state.begin(cx, walk) {
-            return WidgetDraw::hook_above();
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        
+        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);   
+             
+        self.scroll_bars.begin(cx, walk, Layout::default());
+        let turtle_rect = cx.turtle().rect();
+        let scroll_pos = self.scroll_bars.get_scroll_pos();
+        self.unscrolled_rect = cx.turtle().unscrolled_rect();
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+                
+        for i in patch.blocks.iter() {
+            let item_id = LiveId::from_num(1, i.id as u64);
+            
+            let mut templateid = 
+            match i.category
+            {
+                FishBlockCategory::Effect => live_id!(BlockTemplateEffect),
+                FishBlockCategory::Generator => live_id!(BlockTemplateGenerator),
+                FishBlockCategory::Modulator => live_id!(BlockTemplateModulator),
+                FishBlockCategory::Envelope => live_id!(BlockTemplateEnvelope),
+                FishBlockCategory::Filter => live_id!(BlockTemplateFilter),
+                FishBlockCategory::Meta => live_id!(BlockTemplateMeta),
+                FishBlockCategory::Utility => live_id!(BlockTemplateUtility),                
+            };
+            
+            let item = self.item(cx, item_id, templateid).unwrap();
+            
+            item.apply_over(cx, live!{
+                abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
+            });
+            println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
+                        
+            item.draw_all(cx, &mut WidgetScope::default());
         }
-        self.draw_state.end();
+                        
+        self.scroll_bars.end(cx);
+        
         WidgetDraw::done()
     }
 }
@@ -136,56 +167,6 @@ impl FishPatchEditor {
         None
     }
 
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // lets draw a bunch of quads
-        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);        
-    }
-
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-
-    pub fn draw(&mut self, cx: &mut Cx2d, patch: &mut FishPatch) {
-        let walk: Walk = self.draw_state.get().unwrap();
-        self.scroll_bars.begin(cx, walk, Layout::default());
-        let turtle_rect = cx.turtle().rect();
-        let scroll_pos = self.scroll_bars.get_scroll_pos();
-        self.unscrolled_rect = cx.turtle().unscrolled_rect();
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
-        
-        for i in patch.blocks.iter() 
-        {
-            let item_id = LiveId::from_num(1, i.id as u64);
-
-            let mut templateid = 
-            match i.category
-            {
-                FishBlockCategory::Effect => live_id!(BlockTemplateEffect),
-                FishBlockCategory::Generator => live_id!(BlockTemplateGenerator),
-                FishBlockCategory::Modulator => live_id!(BlockTemplateModulator),
-                FishBlockCategory::Envelope => live_id!(BlockTemplateEnvelope),
-                FishBlockCategory::Filter => live_id!(BlockTemplateFilter),
-                FishBlockCategory::Meta => live_id!(BlockTemplateMeta),
-                FishBlockCategory::Utility => live_id!(BlockTemplateUtility),                
-            };
-
-            let item = self.item(cx, item_id, templateid).unwrap();
-
-            item.apply_over(cx, live!{
-                abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
-            });
-
-            item.draw_widget_all(cx);
-            
-
-            println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
-        }
-                
-        self.scroll_bars.end(cx);
-    }
 }
 
 

@@ -126,7 +126,7 @@ impl Widget for PageFlip {
         self.walk
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if let Some(page) = self.page(cx, self.active_page) {
             if self.draw_state.begin_with(cx, &(), | cx, _ | {
                 page.walk(cx)
@@ -134,7 +134,7 @@ impl Widget for PageFlip {
                 self.begin(cx, walk);
             }
             if let Some(walk) = self.draw_state.get() {
-                page.draw_walk_widget(cx, scope, walk) ?;
+                page.draw_walk(cx, scope, walk) ?;
             }
             self.end(cx);
         }

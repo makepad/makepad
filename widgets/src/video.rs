@@ -259,7 +259,7 @@ impl Widget for Video {
         self.walk
     }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         self.draw_bg.draw_walk(cx, walk);
         WidgetDraw::done()
     }

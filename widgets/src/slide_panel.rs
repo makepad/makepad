@@ -60,7 +60,7 @@ impl Widget for SlidePanel {
         self.frame.find_widgets(path, cached, results);
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, mut walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, mut walk: Walk) -> WidgetDraw {
         // ok lets set abs pos
         let rect = cx.peek_walk_turtle(walk);
         match self.side{
@@ -71,7 +71,7 @@ impl Widget for SlidePanel {
                 walk.abs_pos = Some(dvec2(-rect.size.x * self.closed, 0.0));
             }
         }
-        self.frame.draw_walk_widget(cx, scope, walk)
+        self.frame.draw_walk(cx, scope, walk)
     }
 }
 

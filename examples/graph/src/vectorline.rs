@@ -51,14 +51,11 @@ pub enum LineAction {
 
 
 impl Widget for VectorLine {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
-        let uid = self.widget_uid();
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut WidgetScope)->WidgetActions{
+        let actions = WidgetActions::new();
         self.animator_handle_event(cx, event);
+        actions
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -69,30 +66,10 @@ impl Widget for VectorLine {
         self.area.redraw(cx)
     }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-}
-
-
-
-
-impl LiveHook for VectorLine {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, VectorLine)
-    }
-
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
-}
-
-
-
-impl VectorLine {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
-
+        
         let mut rect = fullrect;
         let hw = self.line_width / 2.;
         if self.contained == false
@@ -102,17 +79,17 @@ impl VectorLine {
             rect.pos.x -= hw;
             rect.pos.y -= hw;
         }
-       // self.line_width = 10.5;
-        
+        // self.line_width = 10.5;
+                
         let mut line_start = self.line_start;
         let mut line_end = self.line_end;
-       
-        
+               
+                
         match self.line_align 
         {
             LineAlign::Top =>{
-                 line_start = dvec2(rect.pos.x+hw, rect.pos.y+hw); 
-                 line_end = dvec2(rect.pos.x + rect.size.x - hw, rect.pos.y +hw);
+                line_start = dvec2(rect.pos.x+hw, rect.pos.y+hw); 
+                line_end = dvec2(rect.pos.x + rect.size.x - hw, rect.pos.y +hw);
             }
             LineAlign::Bottom =>{
                 line_start = dvec2(rect.pos.x+hw, rect.pos.y+rect.size.y - hw); 
@@ -144,21 +121,23 @@ impl VectorLine {
             }
             _ => {}
         }
-
-      
-        self.draw_ls.draw_line_abs(cx, line_start, line_end, self.color,self.line_width);
-
         
-    }
-
-
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
+        self.draw_ls.draw_line_abs(cx, line_start, line_end, self.color,self.line_width);
+        
         WidgetDraw::done()
     }
-
 }
+
+
+
+
+impl LiveHook for VectorLine {
+    fn before_live_design(cx: &mut Cx) {
+        register_widget!(cx, VectorLine)
+    }
+
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
+}
+
 
 

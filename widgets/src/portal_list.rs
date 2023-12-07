@@ -714,7 +714,7 @@ impl Widget for PortalList {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
             return WidgetDraw::hook_above()

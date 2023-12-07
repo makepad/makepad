@@ -70,16 +70,8 @@ pub struct DisplayAudio {
 
 
 impl Widget for DisplayAudio {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope)->WidgetActions{
+        WidgetActions::new()
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -88,8 +80,13 @@ impl Widget for DisplayAudio {
         self.draw_wave.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
+        self.draw_wave.vu_left = self.vu[0].0.powf(1.0/3.0)*1.2;
+        self.draw_wave.vu_right = self.vu[0].1.powf(1.0/3.0)*1.2;
+        self.vu[0].0 *= 0.95;
+        self.vu[0].1 *= 0.95;
+        self.draw_wave.draw_walk(cx, walk);
         WidgetDraw::done()
     }
 }
@@ -157,20 +154,6 @@ impl DisplayAudio {
             self.draw_wave.redraw(cx);
             self.active[voice] -= 1;
         }
-    }
-}
-
-impl DisplayAudio {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
-        self.draw_wave.vu_left = self.vu[0].0.powf(1.0/3.0)*1.2;
-        self.draw_wave.vu_right = self.vu[0].1.powf(1.0/3.0)*1.2;
-        self.vu[0].0 *= 0.95;
-        self.vu[0].1 *= 0.95;
-        self.draw_wave.draw_walk(cx, walk);
-    }
-    
-    pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, DisplayAudioAction),) {
     }
 }
 
