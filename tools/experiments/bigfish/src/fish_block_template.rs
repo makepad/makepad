@@ -42,7 +42,7 @@ pub struct FishBlockLibrary{
 impl FishBlockLibrary
 {
 
-    pub fn populate_library(&mut self, basepath: &str)
+    pub fn populate_library(&mut self, _basepath: &str)
     {
         self.nulltemplate =  FishBlockTemplate{
            category: FishBlockCategory::Meta,
