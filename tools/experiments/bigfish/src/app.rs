@@ -1,10 +1,7 @@
 use makepad_widgets::*;
 use makepad_audio_widgets::*;
-use crate::fish_patch_editor::*;
-use crate::homescreen::*;
 use crate::fish_doc::*;
-use crate::fish_block_editor::*;
-
+ 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -70,10 +67,10 @@ live_design!{
                 split2 = Splitter {
                     axis: Horizontal,
                     align: Weighted(0.5),
-                    a: middle_view_tabs,
+                    a: middle_view_tabs, 
                     b: right_view_tabs
                 }
-                mainscreentabs = Tabs{tabs:[homescreentab, patcheditortab, debugcontroltab]}
+                mainscreentabs = Tabs{tabs:[homescreentab, patcheditortab, debugcontroltab], selected:1}
                 homescreentab = Tab{
                     name: "Home"
                     kind: homescreen
@@ -193,6 +190,7 @@ impl LiveHook for App {
         crate::fish_block_editor::live_design(cx);
         crate::fish_theme::live_design(cx);
         crate::homescreen::live_design(cx);
+        crate::fish_connection_widget::live_design(cx);
     }
     // after_new_from_doc 
 }
