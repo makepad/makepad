@@ -66,6 +66,7 @@ impl Widget for FishPatchEditor {
         let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        
         self.scroll_bars.handle_event(cx, event);
 
         for (item_id, item) in self.items.values_mut() {
@@ -87,11 +88,12 @@ impl Widget for FishPatchEditor {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
-        let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
+        //let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
         self.scroll_bars.begin(cx, walk, Layout::default());
+        
         let _turtle_rect = cx.turtle().rect();
-        let _scroll_pos = self.scroll_bars.get_scroll_pos();
+        let scroll_pos = self.scroll_bars.get_scroll_pos();
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
@@ -113,7 +115,7 @@ impl Widget for FishPatchEditor {
             item.apply_over(
                 cx,
                 live! {
-                    abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
+                    abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)-scroll_pos) ,
                 },
             );
             println!("{} {:?} ({:?},{:?})",item_id, i.id, i.x, i.y);
