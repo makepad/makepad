@@ -306,7 +306,7 @@ impl Widget for RunView {
         self.draw_app.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
         let run_view_id = scope.path.path_id(0);
         let manager = &mut scope.data.get_mut::<AppScope>().build_manager;
         self.draw_run_view(cx, run_view_id, manager);

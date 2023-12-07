@@ -4,8 +4,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    import makepad_code_editor::code_editor::CodeEditor;
-     
+    import makepad_studio::studio_editor::StudioEditor;
     import makepad_studio::build_manager::run_view::RunView;
     import makepad_studio::build_manager::log_list::LogList;
     import makepad_studio::build_manager::run_list::RunList;
@@ -31,7 +30,7 @@ live_design!{
         text: ""
     }
     
-    App =  <Window> {
+    AppUI =  <Window> {
         caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
         window: {inner_size: vec2(1600, 900)},
         window_menu = {
@@ -168,7 +167,7 @@ live_design!{
                 kind: LogList
             }
                 
-            CodeEditor = <CodeEditor> {}
+            CodeEditor = <StudioEditor> {}
             EditFirst = <RectView> {
                 draw_bg: {color: #052329}
                 <View> {
