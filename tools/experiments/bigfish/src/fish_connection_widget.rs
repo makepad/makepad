@@ -35,16 +35,46 @@ impl LiveHook for FishConnectionWidget {
 }
 
 impl Widget for FishConnectionWidget {
-    fn handle_widget_event_with(
+    fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
+        scope: &mut WidgetScope,
+    ) -> WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut |cx, action| {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+        self.animator_handle_event(cx, event);
+        match event.hits(cx, self.draw_line.area()) {
+            Hit::FingerDown(_fe) => {
+                if self.grab_key_focus {
+                    cx.set_key_focus(self.draw_line.area());
+                }
+                actions.push_single(uid, &scope.path, ButtonAction::Pressed);
+                self.animator_play(cx, id!(hover.pressed));
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => {
+                if fe.is_over {
+                    actions.push_single(uid, &scope.path, ButtonAction::Clicked);
+                    if fe.device.has_hovers() {
+                        self.animator_play(cx, id!(hover.on));
+                    } else {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                } else {
+                    actions.push_single(uid, &scope.path, ButtonAction::Released);
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            _ => (),
+        }
+        actions
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -55,8 +85,8 @@ impl Widget for FishConnectionWidget {
         self.draw_line.redraw(cx)
     }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk_fishconnection(cx, walk);
         WidgetDraw::done()
     }
 
@@ -70,52 +100,7 @@ impl Widget for FishConnectionWidget {
 }
 
 impl FishConnectionWidget {
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FishConnectionWidgetAction),
-    ) {
-        self.animator_handle_event(cx, event);
-        match event.hits(cx, self.draw_line.area()) {
-            Hit::FingerDown(_fe) => {
-                if self.grab_key_focus {
-                    cx.set_key_focus(self.draw_line.area());
-                }
-                dispatch_action(cx, FishConnectionWidgetAction::Pressed);
-                self.animator_play(cx, id!(hover.pressed));
-            }
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            }
-            Hit::FingerUp(fe) => {
-                if fe.is_over {
-                    dispatch_action(cx, FishConnectionWidgetAction::Clicked);
-                    if fe.device.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
-                    } else {
-                        self.animator_play(cx, id!(hover.off));
-                    }
-                } else {
-                    dispatch_action(cx, FishConnectionWidgetAction::Released);
-                    self.animator_play(cx, id!(hover.off));
-                }
-            }
-            _ => (),
-        };
-    }
-    /*
-    pub fn draw_text(&mut self, cx: &mut Cx2d, label: &str) {
-        self.draw_bg.begin(cx, self.walk, self.layout);
-        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.draw_bg.end(cx);
-    }*/
-
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    pub fn draw_walk_fishconnection(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_line.begin(cx, walk, self.layout);
         self.draw_line.end(cx);
     }
@@ -127,7 +112,7 @@ pub struct FishConnectionWidgetRef(WidgetRef);
 impl FishConnectionWidgetRef {
     pub fn clicked(&self, actions: &WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FishConnectionWidgetAction::Clicked = item.action() {
+            if let FishConnectionWidgetAction::Clicked = item.cast() {
                 return true;
             }
         }
@@ -136,7 +121,7 @@ impl FishConnectionWidgetRef {
 
     pub fn pressed(&self, actions: &WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FishConnectionWidgetAction::Pressed = item.action() {
+            if let FishConnectionWidgetAction::Pressed = item.cast() {
                 return true;
             }
         }
