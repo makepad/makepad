@@ -1,19 +1,19 @@
 use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
     import do_not_run_bigfish::fish_theme::*;
-   
 
-    FishBlockEditor = <View> 
+
+    FishBlockEditor = <View>
     {
-        margin: 20
+        margin: 0
         width: 200
         height: Fit
         flow: Down
-        optimize: DrawList      
+        optimize: DrawList
         title = <View>
         {
             show_bg: true
@@ -21,20 +21,20 @@ live_design!{
             width: Fill
             height: Fit
             padding: 4
-            draw_bg: 
+            draw_bg:
             {
-                fn pixel(self) -> vec4 
+                fn pixel(self) -> vec4
                 {
                     return mix(vec4(1,1,0.6,1), vec4(1,1,0.5,1),self.pos.y);
                 }
             },
             <Label>
             {
-                text:"Synth Block", 
+                text:"Synth Block",
                 draw_text:
                 {
-                        color: #0
-                        text_style: <H2_TEXT_BOLD> {}
+                    color: #0
+                    text_style: <H2_TEXT_BOLD> {}
                 }
             }
         }
@@ -45,7 +45,7 @@ live_design!{
             height: Fit
             flow: Down
             padding: 4
-           
+
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return mix(vec4(1,1,0.9,1), vec4(1,1,0.8,1),self.pos.y);
@@ -56,7 +56,7 @@ live_design!{
             <FishSlider>{text:"Slider!"}
             <FishSlider>{text:"Slider!"}
             <FishSlider>{text:"Slider!"}
-        }      
+        }
     }
 
     FishBlockEditorGenerator = <FishBlockEditor>
