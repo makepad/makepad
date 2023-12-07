@@ -122,7 +122,7 @@ impl App{
                         let tab_id = dock.unique_tab_id(file_id.0.0);
                         self.scope.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
-                        dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
+                        dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
                         // lets scan the entire doc for duplicates
                         self.scope.file_system.ensure_unique_tab_names(cx, &dock)
                     }
@@ -246,7 +246,7 @@ impl App{
                         if let Some(file_id) = self.scope.file_system.path_to_file_node_id(&path) {
                             let tab_id = dock.unique_tab_id(file_id.0.0);
                             self.scope.file_system.request_open_file(tab_id, file_id);
-                            dock.drop_create(cx, drop_event.abs, tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
+                            dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
                             self.scope.file_system.ensure_unique_tab_names(cx, &dock)
                         }
                     }
