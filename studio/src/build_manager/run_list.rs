@@ -171,11 +171,12 @@ impl RunList{
                 draw_bg: {is_even: (if is_even {1.0} else {0.0})}
             });
             item.check_box(id!(check)).set_selected(cx, build_manager.active.any_binary_active(&binary.name));
-            item.draw_widget_all(cx, &mut scope);
+            item.draw_all(cx, &mut scope);
             counter += 1;
                             
             if binary.open>0.001 {
                 for i in 0..BuildTarget::len() {
+                    
                     let is_even = counter & 1 == 0;
                     let item_id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
                     let item = list.item(cx, item_id, live_id!(Target)).unwrap().as_view();
@@ -186,7 +187,7 @@ impl RunList{
                         check = {text: (BuildTarget::from_id(i).name())}
                     });
                     item.check_box(id!(check)).set_selected(cx, build_manager.active.item_id_active(item_id));
-                    item.draw_widget_all(cx, &mut scope);
+                    item.draw_all(cx, &mut scope);
                     counter += 1;
                 }
             }
@@ -200,7 +201,7 @@ impl RunList{
                 height: (height)
                 draw_bg: {is_even: (if is_even {1.0} else {0.0})}
             });
-            item.draw_widget_all(cx, &mut scope);
+            item.draw_all(cx, &mut scope);
             counter += 1;
         }
             
@@ -216,8 +217,8 @@ impl Widget for RunList {
         self.view.walk(cx)
     }
         
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
-        while let Some(next) = self.view.draw_walk_widget(cx, scope, walk).hook_widget(){
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
+        while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
             if let Some(mut list) = next.as_flat_list().borrow_mut(){
                 self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<AppScope>().build_manager)
             }
@@ -233,11 +234,10 @@ impl Widget for RunList {
         let build_manager = &mut scope.data.get_mut::<AppScope>().build_manager;
         
         // ok lets see if someone clicked our
-        for (item_id, item) in run_list.items_with_actions(&actions) {
+        for (item_id, item) in run_list.items_with_actions(&view_actions) {
             for binary in &mut build_manager.binaries {
                 let binary_name = binary.name.clone();
                 let id = LiveId::from_str(&binary.name);
-                
                 if item_id == id{
                     if let Some(v) = item.fold_button(id!(fold)).animating(&view_actions) {
                         binary.open = v;

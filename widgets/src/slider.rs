@@ -108,14 +108,14 @@ impl Slider {
         self.text_input.redraw(cx)
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_slider.slide_pos = self.value as f32;
         self.draw_slider.begin(cx, walk, self.layout);
         
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             let walk = self.text_input.walk(cx);
-            self.text_input.draw_walk(cx, walk);
+            self.text_input.draw_walk_text_input(cx, walk);
             self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
         }
         
@@ -204,8 +204,8 @@ impl Widget for Slider {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+        self.draw_walk_slider(cx, walk);
         WidgetDraw::done()
     }
     

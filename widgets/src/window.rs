@@ -312,7 +312,7 @@ impl Widget for Window {
         self.view.find_widgets(path, cached, results);
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();
@@ -321,7 +321,7 @@ impl Widget for Window {
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get() {
-            self.view.draw_walk_widget(cx, scope, walk)?;
+            self.view.draw_walk(cx, scope, walk)?;
             self.draw_state.end();
             self.end(cx);
         }

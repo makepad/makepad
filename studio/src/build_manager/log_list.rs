@@ -269,7 +269,7 @@ impl LogList{
                             body = {text: (&msg.line)}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_widget_all(cx, &mut scope);
+                        item.draw_all(cx, &mut scope);
                     }
                     LogItem::Location(msg) => {
                         let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
@@ -280,7 +280,7 @@ impl LogList{
                             location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_widget_all(cx, &mut scope);
+                        item.draw_all(cx, &mut scope);
                     }
                     _ => {}
                 }
@@ -288,7 +288,7 @@ impl LogList{
             }
             let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
             item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-            item.draw_widget_all(cx, &mut scope);
+            item.draw_all(cx, &mut scope);
         }
     }
 }
@@ -302,8 +302,8 @@ impl Widget for LogList {
         self.view.walk(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
-        while let Some(next) = self.view.draw_walk_widget(cx, scope, walk).hook_widget(){
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
+        while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
             if let Some(mut list) = next.as_portal_list().borrow_mut(){
                 self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppScope>().build_manager)
             }
