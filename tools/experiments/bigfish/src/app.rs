@@ -193,6 +193,7 @@ impl LiveHook for App {
         crate::fish_block_editor::live_design(cx);
         crate::fish_theme::live_design(cx);
         crate::homescreen::live_design(cx);
+        crate::fish_connection_widget::live_design(cx);
     }
     // after_new_from_doc 
 }

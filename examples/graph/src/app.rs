@@ -5,9 +5,9 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    import crate::vectorline::VectorLine;
     import crate::drawarc::VectorArc;  
     import crate::drawarc::VectorCornerArc;
+    import makepad_widgets::vectorline::*;
     
     App = {{App}} {
         ui: <Window> {
@@ -322,7 +322,7 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        crate::vectorline::live_design(cx);
+
         crate::drawarc::live_design(cx);
     }
     
