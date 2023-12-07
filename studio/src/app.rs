@@ -115,8 +115,8 @@ impl App{
                         // ok lets scroll into view
                         if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
                             if let Some(session) = self.scope.file_system.get_session_mut(tab_id) {
-                                editor.set_cursor_and_scroll(cx, jt.start, session);
-                                editor.set_key_focus(cx);
+                                editor.editor.set_cursor_and_scroll(cx, jt.start, session);
+                                editor.editor.set_key_focus(cx);
                             }
                         }
                     }
