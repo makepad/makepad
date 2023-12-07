@@ -275,7 +275,7 @@ impl BuildManager {
         let active = &mut self.active;        
                 
         //let editor_state = &mut state.editor_state;
-        self.clients[0].handle_event_with(cx, event, &mut | cx, wrap | {
+        self.clients[0].handle_event_with(cx, event, &mut | _cx, wrap | {
             /*match &wrap.item{
                 LogItem::StdinToHost(line) => {
                     log!("GOT {}", line);

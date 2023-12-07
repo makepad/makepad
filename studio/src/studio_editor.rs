@@ -11,21 +11,18 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
+    import makepad_code_editor::code_editor::CodeEditor;
     
     StudioEditor = {{StudioEditor}}{
         editor: <CodeEditor>{}
     }
-}
-
-
-#[derive(Live)]
+} 
+ 
+#[derive(Live)] 
 pub struct StudioEditor{
-    #[deref] editor: CodeEditor
-}
-
+    #[live] pub editor: CodeEditor
+} 
+ 
 impl LiveHook for StudioEditor{
     fn before_live_design(cx:&mut Cx){
         register_widget!(cx, StudioEditor)
