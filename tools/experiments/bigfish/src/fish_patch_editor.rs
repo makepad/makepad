@@ -21,6 +21,11 @@ live_design! {
         BlockTemplateEnvelope = <FishBlockEditorEnvelope>{};
         BlockTemplateUtility = <FishBlockEditorUtility>{};
         ConnectorTemplate = <FishConnectionWidget>{};
+
+        AudioButtonTemplate = <Button>{flow: Overlay};
+        CVButtonTemplate = <Button>{flow: Overlay};
+        GateButtonTemplate = <Button>{flow: Overlay};
+
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let Pos = floor(self.pos*self.rect_size *0.10);
@@ -55,18 +60,16 @@ pub struct FishPatchEditor {
 }
 
 impl Widget for FishPatchEditor {
-
     fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         scope: &mut WidgetScope,
     ) -> WidgetActions {
-
         let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-        
+
         self.scroll_bars.handle_event(cx, event);
 
         for (item_id, item) in self.items.values_mut() {
@@ -91,13 +94,13 @@ impl Widget for FishPatchEditor {
         //let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
         self.scroll_bars.begin(cx, walk, Layout::default());
-        
+
         let _turtle_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
-        for i in patch.blocks.iter() {
+        for i in &mut patch.blocks.iter() {
             let item_id = LiveId::from_num(1, i.id as u64);
 
             let templateid = match i.category {
@@ -115,12 +118,38 @@ impl Widget for FishPatchEditor {
             item.apply_over(
                 cx,
                 live! {
-                    abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)-scroll_pos) ,
+                    abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos) ,
                 },
             );
-            println!("{} {:?} ({:?},{:?})",item_id, i.id, i.x, i.y);
+            println!("{} {:?} ({:?},{:?})", item_id, i.id, i.x, i.y);
 
             item.draw_all(cx, &mut WidgetScope::default());
+            for inp in &i.input_ports {
+                let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
+                let templateid = live_id!(AudioButtonTemplate);
+                let item = self.item(cx, item_id, templateid).unwrap();
+                item.apply_over(
+                    cx,
+                    live! {
+
+                        abs_pos: (dvec2(i.x as f64, i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
+                    },
+                );
+                item.draw_all(cx, &mut WidgetScope::default());
+            }
+
+            for inp in &i.output_ports {
+                let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
+                let templateid = live_id!(AudioButtonTemplate);
+                let item = self.item(cx, item_id, templateid).unwrap();
+                item.apply_over(
+                    cx,
+                    live! {
+                        abs_pos: (dvec2(i.x as f64 + 240., i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
+                    },
+                );
+                item.draw_all(cx, &mut WidgetScope::default());
+            }
         }
 
         for i in patch.connections.iter() {
@@ -143,6 +172,9 @@ impl Widget for FishPatchEditor {
             );
 
             item.draw_all(cx, &mut WidgetScope::default());
+
+            self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+
             // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
 
