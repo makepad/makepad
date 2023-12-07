@@ -17,5 +17,5 @@ mod fish_preset;
 mod fish_processor;
 mod fish_block_template;
 mod fish_theme;
-
+mod fish_connection_widget;
 pub mod app;

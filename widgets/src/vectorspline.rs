@@ -1,5 +1,5 @@
 
-use crate::{makepad_draw::*, makepad_widgets::*};
+use crate::{makepad_draw::*, *};
 
 live_design!
 {
@@ -12,43 +12,28 @@ live_design!
     }
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
-pub enum LineAlign
-{
-    Free,
-    Left,
-    #[pick] Top,
-    DiagonalBottomLeftTopRight,
-    DiagonalTopLeftBottomRight,
-    Right,
-    Bottom,
-    VerticalCenter,
-    HorizontalCenter
-}
 
 #[derive(Live)]
-pub struct VectorLine{
-    #[animator] animator: Animator,
+pub struct VectorSpline{
     #[walk] walk: Walk,
-    #[live] draw_ls: DrawLine,
+    #[live] draw_ls: DrawSpline,
     #[rust] area: Area,
     #[live(15.0)] line_width: f64,
     #[live] color: Vec4,
-    #[live(true)] contained: bool,
-    #[live(LineAlign::Top)] line_align: LineAlign,
-    #[rust(dvec2(350., 10.))] line_start: DVec2,
+    #[rust(dvec2(350., 210.))] line_start: DVec2,
+    #[rust(dvec2(350., 10.))] line_start_controlpoint: DVec2,
+    #[rust(dvec2(1000., 10.))] line_end_controlpoint: DVec2,
     #[rust(dvec2(1000., 1440.))] line_end: DVec2,
 }
 
 #[derive(Clone, WidgetAction)]
-pub enum LineAction {
+pub enum SpineAction {
     None,
     Pressed,
     Clicked,
+    Hovered,
     Released
 }
-
 
 impl Widget for VectorLine {
     fn handle_widget_event_with(
@@ -75,10 +60,7 @@ impl Widget for VectorLine {
     }
 }
 
-
-
-
-impl LiveHook for VectorLine {
+impl LiveHook for VectorSpline {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, VectorLine)
     }
@@ -88,7 +70,7 @@ impl LiveHook for VectorLine {
 
 
 
-impl VectorLine {
+impl VectorSpline {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
