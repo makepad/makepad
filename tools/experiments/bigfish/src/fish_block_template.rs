@@ -154,7 +154,7 @@ impl FishBlockLibrary {
     }
 
     pub fn add_dummy_inputs_and_outputs(&mut self) {
-        self.allblocks.iter()
+        //  self.allblocks.iter()
     }
 
     pub fn find_template(&self, name: &str) -> &FishBlockTemplate {
