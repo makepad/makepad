@@ -1095,47 +1095,10 @@ impl DockRef {
         None
     }
     
-    
     pub fn close_tab(&self, cx: &mut Cx, tab_id: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.close_tab(cx, tab_id, false);
         }
-    }
-    
-    pub fn clicked_tab_close(&self, actions: &WidgetActions) -> Option<LiveId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::TabCloseWasPressed(tab_id) = item.cast() {
-                return Some(tab_id)
-            }
-        }
-        None
-    }
-    
-    pub fn should_tab_start_drag(&self, actions: &WidgetActions) -> Option<LiveId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::ShouldTabStartDrag(tab_id) = item.cast() {
-                return Some(tab_id)
-            }
-        }
-        None
-    }
-    
-    pub fn should_accept_drag(&self, actions: &WidgetActions) -> Option<DragHitEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::Drag(drag_event) = item.cast() {
-                return Some(drag_event.clone())
-            }
-        }
-        None
-    }
-    
-    pub fn has_drop(&self, actions: &WidgetActions) -> Option<DropHitEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::Drop(drag_event) = item.cast() {
-                return Some(drag_event.clone())
-            }
-        }
-        None
     }
     
     // user wants to drag, set dh accordingly
