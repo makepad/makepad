@@ -154,7 +154,18 @@ impl FishBlockLibrary {
     }
 
     pub fn add_dummy_inputs_and_outputs(&mut self) {
-        //  self.allblocks.iter()
+        for i in &mut self.allblocks {
+            i.inputs.push(FishInputPort {
+                id: 0,
+                name: String::from("in 0"),
+                datatype: ConnectionType::Audio,
+            });
+            i.outputs.push(FishOutputPort {
+                id: 0,
+                name: String::from("out 0"),
+                datatype: ConnectionType::Audio,
+            });
+        }
     }
 
     pub fn find_template(&self, name: &str) -> &FishBlockTemplate {
@@ -169,6 +180,28 @@ impl FishBlockLibrary {
         let mut f = FishBlock::default();
         f.category = t.category.clone();
         f.library_id = t.id.clone();
+
+        for i in &t.inputs {
+            f.input_ports.push(FishInputPortInstance {
+                id: i.id,
+                source_id: i.id,
+                name: i.name.clone(),
+                display_x: 0,
+                display_y: 0,
+                datatype: i.datatype,
+            })
+        }
+        for i in &t.outputs {
+            f.output_ports.push(FishOutputPortInstance {
+                id: i.id,
+                source_id: i.id,
+                name: i.name.clone(),
+                display_x: 0,
+                display_y: 0,
+                datatype: i.datatype,
+            })
+        }
+
         f
     }
 }
