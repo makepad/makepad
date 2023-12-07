@@ -4,7 +4,6 @@ use {
         file_system::file_system::FileSystem,
         makepad_micro_serde::*,
         makepad_widgets::*,
-        makepad_widgets::file_tree::FileNodeId,
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_platform::os::cx_stdin::{
             HostToStdin,
@@ -17,13 +16,13 @@ use {
             build_protocol::*,
             build_client::BuildClient
         },
+        app::AppAction,
         makepad_shell::*,
     },
     makepad_code_editor::{text, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
     std::{
         collections::HashMap,
-        env,
         io::prelude::*,
         path::PathBuf,
         path::Path,
@@ -36,15 +35,6 @@ use {
     std::time::{Instant, Duration},
 };
 
-live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    
-    BuildManager = {{BuildManager}} {
-        recompile_timeout: 0.2
-    }
-}
 pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
@@ -81,21 +71,21 @@ impl ActiveBuilds {
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Default)]
 pub struct BuildManager {
-    #[rust] root_path: PathBuf,
-    #[live(0usize)] http_port: usize,
-    #[rust] pub clients: Vec<BuildClient>,
-    #[rust] pub log: Vec<(LiveId, LogItem)>,
-    #[rust] pub profile: HashMap<LiveId, Vec<ProfileSample>>,
-    #[live] recompile_timeout: f64,
-    #[rust] recompile_timer: Timer,
-    #[rust] pub binaries: Vec<BuildBinary>,
-    #[rust] pub active: ActiveBuilds,
-    #[rust] pub studio_http: String,
-    #[rust] pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
-    #[rust] pub recv_external_ip: ToUIReceiver<SocketAddr>,
-    #[rust] pub send_file_change: FromUISender<LiveFileChange>
+    root_path: PathBuf,
+    http_port: usize,
+    pub clients: Vec<BuildClient>,
+    pub log: Vec<(LiveId, LogItem)>,
+    pub profile: HashMap<LiveId, Vec<ProfileSample>>,
+    recompile_timeout: f64,
+    recompile_timer: Timer,
+    pub binaries: Vec<BuildBinary>,
+    pub active: ActiveBuilds,
+    pub studio_http: String,
+    pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
+    pub recv_external_ip: ToUIReceiver<SocketAddr>,
+    pub send_file_change: FromUISender<LiveFileChange>
 }
 
 pub struct BuildBinary {
@@ -103,13 +93,9 @@ pub struct BuildBinary {
     pub name: String
 }
 
+#[derive(Clone, WidgetAction)]
 pub enum BuildManagerAction {
-    RedrawDoc, // {doc_id: DocumentId},
     StdinToHost {run_view_id: LiveId, msg: StdinToHost},
-    RedrawLog,
-    RedrawFile(FileNodeId),
-    RecompileStarted,
-    ClearLog,
     None
 }
 
@@ -208,12 +194,6 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) -> Vec<BuildManagerAction> {
-        let mut actions = Vec::new();
-        self.handle_event_with(cx, event, file_system, &mut | _, action | actions.push(action));
-        actions
-    }
-    
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
        for item_id in self.active.builds.keys() {
@@ -225,7 +205,7 @@ impl BuildManager {
         let _ = self.send_file_change.send(live_file_change);
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, dispatch_action: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, actions:&mut WidgetActions) {
 
         if let Event::Signal = event {
             if let Ok(mut addr) = self.recv_external_ip.try_recv() {
@@ -255,7 +235,7 @@ impl BuildManager {
                                             end,
                                             DecorationType::Warning
                                         ));
-                                        dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                        actions.push(AppAction::RedrawFile(file_id).into_bare())
                                     }
                                     LogLevel::Error=>{
                                         file_system.add_decoration(file_id, Decoration::new(
@@ -264,7 +244,7 @@ impl BuildManager {
                                             end,
                                             DecorationType::Error
                                         ));
-                                        dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                        actions.push(AppAction::RedrawFile(file_id).into_bare())
                                     }
                                     _=>()
                                 }
@@ -276,10 +256,10 @@ impl BuildManager {
                                 end,
                                 message
                             })));
-                            dispatch_action(cx, BuildManagerAction::RedrawLog)
+                            actions.push(AppAction::RedrawLog.into_bare())
                         }
-                        AppToStudio::ProfileSample(sample)=>{  
-                            log!("{:?}", sample); 
+                        AppToStudio::ProfileSample(_sample)=>{  
+                            //log!("{:?}", sample); 
                         }
                     }
                 }
@@ -288,14 +268,14 @@ impl BuildManager {
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            dispatch_action(cx, BuildManagerAction::RecompileStarted)
+            actions.push(AppAction::RecompileStarted.into_bare())
         }
                         
         let log = &mut self.log;
         let active = &mut self.active;        
                 
         //let editor_state = &mut state.editor_state;
-        self.clients[0].handle_event_with(cx, event, &mut | cx, wrap | {
+        self.clients[0].handle_event_with(cx, event, &mut | _cx, wrap | {
             /*match &wrap.item{
                 LogItem::StdinToHost(line) => {
                     log!("GOT {}", line);
@@ -316,7 +296,7 @@ impl BuildManager {
                                     loc.end,
                                     DecorationType::Warning
                                 ));
-                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                actions.push(AppAction::RedrawFile(file_id).into_bare())
                             }
                             LogLevel::Error=>{
                                 file_system.add_decoration(file_id, Decoration::new(
@@ -325,35 +305,35 @@ impl BuildManager {
                                     loc.end,
                                     DecorationType::Error
                                 ));
-                                dispatch_action(cx, BuildManagerAction::RedrawFile(file_id))
+                                actions.push(AppAction::RedrawFile(file_id).into_bare())
                             }
                             _=>()
                         }
                     }
                     log.push((wrap.cmd_id, LogItem::Location(loc)));
-                    dispatch_action(cx, BuildManagerAction::RedrawLog)
+                    actions.push(AppAction::RedrawLog.into_bare())
                 }
                 LogItem::Bare(bare) => {
                     //log!("{:?}", bare);
                     log.push((wrap.cmd_id, LogItem::Bare(bare)));
-                    dispatch_action(cx, BuildManagerAction::RedrawLog)
+                    actions.push(AppAction::RedrawLog.into_bare())
                     //editor_state.messages.push(wrap.msg);
                 }
                 LogItem::StdinToHost(line) => {
                     let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
                     match msg {
                         Ok(msg) => {
-                            dispatch_action(cx, BuildManagerAction::StdinToHost {
+                            actions.push(BuildManagerAction::StdinToHost {
                                 run_view_id: wrap.cmd_id,
                                 msg
-                            });
+                            }.into_bare())
                         }
                         Err(_) => { // we should output a log string
                             log.push((wrap.cmd_id, LogItem::Bare(LogItemBare {
                                 level: LogLevel::Log,
                                 line: line.trim().to_string()
                             })));
-                            dispatch_action(cx, BuildManagerAction::RedrawLog)
+                            actions.push(AppAction::RedrawLog.into_bare())
                             /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                 level: BuildMsgLevel::Log,
                                 line

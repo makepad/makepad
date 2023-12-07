@@ -38,16 +38,20 @@ pub enum MyWidgetAction {
 }
 
 impl Widget for MyWidget{
-    fn handle_widget_event_with(
+    fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
-        });
+        _scope: &mut WidgetScope
+    )->WidgetActions{
+        if let Some(ne) = self.next_frame.is_event(event) {
+            // update time to use for animation
+            self.time = (ne.time * 0.001).fract() as f32;
+            // force updates, so that we can animate in the absence of user-generated events
+            self.redraw(cx);
+            self.next_frame = cx.new_next_frame();
+        }
+        WidgetActions::new()
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{
@@ -58,26 +62,9 @@ impl Widget for MyWidget{
         self.draw.redraw(cx)
     }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-}
-
-impl MyWidget {
-
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, MyWidgetAction)) {
-        if let Some(ne) = self.next_frame.is_event(event) {
-            // update time to use for animation
-            self.time = (ne.time * 0.001).fract() as f32;
-            // force updates, so that we can animate in the absence of user-generated events
-            self.redraw(cx);
-            self.next_frame = cx.new_next_frame();
-        }
-    }
-
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
         self.draw.begin(cx, walk, self.layout);
         self.draw.end(cx);
+        WidgetDraw::done()
     }
 }

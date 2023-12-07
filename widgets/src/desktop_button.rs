@@ -21,16 +21,40 @@ pub struct DesktopButton {
 }
 
 impl Widget for DesktopButton{
-   fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
+        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
-        });
+        self.animator_handle_event(cx, event);
+        
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerDown(_fe) => {
+                actions.push_single(uid, &scope.path, ButtonAction::Pressed);
+                self.animator_play(cx, id!(hover.pressed));
+            },
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => if fe.is_over {
+                actions.push_single(uid, &scope.path, ButtonAction::Clicked);
+                if fe.device.has_hovers() {
+                    self.animator_play(cx, id!(hover.on));
+                }
+                else{
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            else {
+                actions.push_single(uid, &scope.path, ButtonAction::Released);
+                self.animator_play(cx, id!(hover.off));
+            }
+            _ => ()
+        };
+        
+        actions
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{self.walk}
@@ -39,8 +63,8 @@ impl Widget for DesktopButton{
         self.draw_bg.redraw(cx)
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk_desktop_button(cx, walk);
         WidgetDraw::done()
     }
 }
@@ -85,44 +109,12 @@ impl LiveHook for DesktopButton {
 }
 
 impl DesktopButton {
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
-        self.animator_handle_event(cx, event);
-
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                dispatch_action(cx, ButtonAction::Pressed);
-                self.animator_play(cx, id!(hover.pressed));
-            },
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                 self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            }
-            Hit::FingerUp(fe) => if fe.is_over {
-                dispatch_action(cx, ButtonAction::Clicked);
-                if fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
-                }
-                else{
-                    self.animator_play(cx, id!(hover.off));
-                }
-            }
-            else {
-                dispatch_action(cx, ButtonAction::Released);
-                self.animator_play(cx, id!(hover.off));
-            }
-            _ => ()
-        };
-    }
-    
     pub fn area(&mut self)->Area{
         self.draw_bg.area()
     }
     pub fn get_widwalk(&self)->Walk{self.walk}
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
+    pub fn draw_walk_desktop_button(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.draw_bg.draw_walk(cx, walk);
     }
 }
