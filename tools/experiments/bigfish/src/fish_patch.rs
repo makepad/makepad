@@ -100,7 +100,7 @@ impl FishPatch {
             );
         }
 
-        for i in 0..7 {
+        /*  for i in 0..7 {
             let fromidx = i as usize % patch.blocks.len();
             let toidx = (i as usize + 5) % patch.blocks.len();
             let fromblock = &patch.blocks[fromidx];
@@ -114,7 +114,7 @@ impl FishPatch {
                 toblock.id,
                 toblock.input_ports[toport].id,
             );
-        }
+        }*/
 
         patch
     }
