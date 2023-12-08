@@ -95,7 +95,7 @@ pub trait Widget: LiveApply {
         None
     }*/
     
-    fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
+    //fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
 }
 
 #[derive(Clone, Copy)]
@@ -574,12 +574,12 @@ impl WidgetRef {
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
             if let Some(component) = &mut *inner {
                 if component.widget.type_id() != live_type {
-                    *inner = None; // type changed, drop old component
-                    log!("TYPECHANGE");
+                    //*inner = None; // type changed, drop old component
+                    log!("TYPECHANGE {:?}", nodes[index]);
                 }
-                else {
+               // else {
                     return component.widget.apply(cx, from, index, nodes);
-                }
+               // }
             }
             if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<WidgetRegistry>().new(cx, live_type) {
