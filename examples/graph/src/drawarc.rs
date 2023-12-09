@@ -215,9 +215,7 @@ pub struct VectorCornerArc
 }
 
 impl Widget for VectorCornerArc {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope)->WidgetActions{
-       let actions = WidgetActions::new();
-       actions
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -275,7 +273,7 @@ impl Widget for VectorCornerArc {
 }
 
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum VectorCornerArcAction {
     None,
 }
@@ -289,9 +287,7 @@ impl LiveHook for VectorCornerArc {
 }
 
 impl Widget for VectorArc {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope)->WidgetActions{
-        let actions = WidgetActions::new();
-        actions
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -393,7 +389,7 @@ impl Widget for VectorArc {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum ArcAction {
     None,
 }

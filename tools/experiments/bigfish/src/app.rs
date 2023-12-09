@@ -218,22 +218,25 @@ impl AppMain for App {
             return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
         }
 
-        let actions = self.ui.handle_event(cx, event, &mut scope);
-
-        if self.ui.button(id!(button1)).clicked(&actions) {
-            self.counter += 1;
-            let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
+        self.ui.handle_event(cx, event, &mut scope);
+        
+        if let Event::Actions(actions) = event{
+    
+            if self.ui.button(id!(button1)).clicked(&actions) {
+                self.counter += 1;
+                let label = self.ui.label(id!(label1));
+                label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
+            }
+    
+            if self.ui.button(id!(savebutton)).clicked(&actions) {
+                let _ = self.document.save(&"testout.fish").is_ok();
+            }
+    
+            if self.ui.button(id!(loadbutton)).clicked(&actions) {
+                let _ = self.document.load(&"testout.fish").is_ok();
+            }
         }
-
-        if self.ui.button(id!(savebutton)).clicked(&actions) {
-            let _ = self.document.save(&"testout.fish").is_ok();
-        }
-
-        if self.ui.button(id!(loadbutton)).clicked(&actions) {
-            let _ = self.document.load(&"testout.fish").is_ok();
-        }
-
+    
         if let Event::Construct = event {
             self.document = FishDoc::create_test_doc();
         }

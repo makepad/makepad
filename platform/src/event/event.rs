@@ -17,6 +17,7 @@ use {
             network::*,
             video_playback::*,
         },
+        action::ActionsBuf,
         animator::Ease,
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
@@ -26,7 +27,7 @@ use {
 };
 
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Event {
     Construct,
     Destruct,
@@ -72,6 +73,7 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
     
+    Actions(ActionsBuf),
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
@@ -138,16 +140,18 @@ impl Event{
             37=>"MidiPorts",
             38=>"VideoInputs",
             39=>"NetworkResponses",
-            
+
             40=>"VideoPlaybackPrepared",
             41=>"VideoTextureUpdated",
             42=>"VideoPlaybackCompleted",
             43=>"VideoDecodingError",
             44=>"VideoPlaybackResourcesReleased",
-             
-            #[cfg(target_arch = "wasm32")]
-            45=>"ToWasmMsg",
+            45=>"TextureHandleReady",
             46=>"MouseLeave",
+            47=>"Actions",
+                                                 
+            #[cfg(target_arch = "wasm32")]
+            48=>"ToWasmMsg",
             _=>panic!()
         }
     }
@@ -209,9 +213,10 @@ impl Event{
             Self::VideoPlaybackResourcesReleased(_)=>44,
             Self::TextureHandleReady(_)=>45,
             Self::MouseLeave(_)=>46,
+            Self::Actions(_)=>47,
                                      
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>47,
+            Self::ToWasmMsg(_)=>48,
         }
     }
 }

@@ -136,7 +136,7 @@ live_design!{
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum RunListAction{
     Create(LiveId, String),
     Destroy(LiveId),
@@ -226,67 +226,65 @@ impl Widget for RunList {
         WidgetDraw::done()
     }
         
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
                 
         let run_list = self.view.flat_list(id!(list));
-        let view_actions = self.view.handle_event(cx, event, scope);
-        let mut actions = WidgetActions::new();
+        self.view.handle_event(cx, event, scope);
         let build_manager = &mut scope.data.get_mut::<AppScope>().build_manager;
         
-        // ok lets see if someone clicked our
-        for (item_id, item) in run_list.items_with_actions(&view_actions) {
-            for binary in &mut build_manager.binaries {
-                let binary_name = binary.name.clone();
-                let id = LiveId::from_str(&binary.name);
-                if item_id == id{
-                    if let Some(v) = item.fold_button(id!(fold)).animating(&view_actions) {
-                        binary.open = v;
-                        item.redraw(cx);
-                    }
-                    if let Some(change) = item.check_box(id!(check)).changed(&view_actions) {
-                        run_list.redraw(cx);
-                        for i in 0..if change{1}else{BuildTarget::len()} {
-                            if change{
-                                BuildManager::start_active_build(build_manager.studio_http.clone(), &mut build_manager.active, &build_manager.clients[0], &binary_name, i,  &mut actions);
-                            }
-                            else{
-                                BuildManager::stop_active_build(&mut build_manager.active, &build_manager.clients[0], &binary_name, i,  &mut actions);
-                            }
-                            build_manager.log.clear();
+        if let Event::Actions(actions) = event{    
+            for (item_id, item) in run_list.items_with_actions(&actions) {
+                for binary in &mut build_manager.binaries {
+                    let binary_name = binary.name.clone();
+                    let id = LiveId::from_str(&binary.name);
+                    if item_id == id{
+                        if let Some(v) = item.fold_button(id!(fold)).animating(&actions) {
+                            binary.open = v;
+                            item.redraw(cx);
                         }
-                    };
-                }
-                else{
-                    for i in 0..BuildTarget::len() {
-                        let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
-                        if item_id == id{
-                            if let Some(change) = item.check_box(id!(check)).changed(&view_actions) {
-                                run_list.redraw(cx);
+                        if let Some(change) = item.check_box(id!(check)).changed(&actions) {
+                            run_list.redraw(cx);
+                            for i in 0..if change{1}else{BuildTarget::len()} {
                                 if change{
-                                    BuildManager::start_active_build(build_manager.studio_http.clone(), &mut build_manager.active, &build_manager.clients[0], &binary_name, i, &mut actions);
+                                    BuildManager::start_active_build(cx, build_manager.studio_http.clone(), &mut build_manager.active, &build_manager.clients[0], &binary_name, i);
                                 }
                                 else{
-                                    BuildManager::stop_active_build( &mut build_manager.active, &build_manager.clients[0], &binary_name, i,  &mut actions);
+                                    BuildManager::stop_active_build(cx, &mut build_manager.active, &build_manager.clients[0], &binary_name, i);
                                 }
                                 build_manager.log.clear();
+                            }
+                        };
+                    }
+                    else{
+                        for i in 0..BuildTarget::len() {
+                            let id = LiveId::from_str(&binary.name).bytes_append(&i.to_be_bytes());
+                            if item_id == id{
+                                if let Some(change) = item.check_box(id!(check)).changed(&actions) {
+                                    run_list.redraw(cx);
+                                    if change{
+                                        BuildManager::start_active_build(cx, build_manager.studio_http.clone(), &mut build_manager.active, &build_manager.clients[0], &binary_name, i);
+                                    }
+                                    else{
+                                        BuildManager::stop_active_build(cx, &mut build_manager.active, &build_manager.clients[0], &binary_name, i);
+                                    }
+                                    build_manager.log.clear();
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        actions
     }
 }
 
 impl BuildManager {
 
-    pub fn run_app(&mut self, binary_name:&str){
-        let mut out = Vec::new();
-        Self::start_active_build(self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, 0,  &mut out);
+    pub fn run_app(&mut self, cx:&mut Cx, binary_name:&str){
+        Self::start_active_build(cx, self.studio_http.clone(), &mut self.active, &self.clients[0], &binary_name, 0);
     }
     
-    pub fn start_active_build(studio_http:String, active:&mut ActiveBuilds, client:&BuildClient,  binary: &str, tgt: u64,  actions:&mut WidgetActions) {
+    pub fn start_active_build(cx:&mut Cx, studio_http:String, active:&mut ActiveBuilds, client:&BuildClient,  binary: &str, tgt: u64) {
         let target = BuildTarget::from_id(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
@@ -307,12 +305,12 @@ impl BuildManager {
         }
         if process.target.runs_in_studio(){
             // create the runview tab
-            actions.push_bare(RunListAction::Create(item_id, process.binary.clone()))
+            cx.action(RunListAction::Create(item_id, process.binary.clone()))
         }
     }
     
     
-    pub fn stop_active_build(active:&mut ActiveBuilds, client:&BuildClient, binary: &str, tgt: u64 ,actions:&mut WidgetActions) {
+    pub fn stop_active_build(cx:&mut Cx, active:&mut ActiveBuilds, client:&BuildClient, binary: &str, tgt: u64) {
         let target = BuildTarget::from_id(tgt);
         let process = BuildProcess {
             binary: binary.to_string(),
@@ -322,7 +320,7 @@ impl BuildManager {
        if let Some(_) = active.builds.remove(&build_id) {
             client.send_cmd_with_id(build_id, BuildCmd::Stop);
             if process.target.runs_in_studio(){
-                actions.push_bare(RunListAction::Destroy(build_id))
+                cx.action(RunListAction::Destroy(build_id))
             }
         }
     }

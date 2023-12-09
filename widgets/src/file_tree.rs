@@ -121,7 +121,7 @@ impl LiveHook for FileTree {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum FileTreeAction {
     None,
     FileClicked(FileNodeId),
@@ -399,8 +399,7 @@ impl Widget for FileTree {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         
         self.scroll_bars.handle_event(cx, event);
@@ -433,15 +432,15 @@ impl Widget for FileTree {
                     }
                     self.selected_node_id = Some(node_id);
                     if self.is_folder(node_id){
-                        actions.push_single(uid, &scope.path, FileTreeAction::FolderClicked(node_id));
+                        cx.widget_action(uid, &scope.path, FileTreeAction::FolderClicked(node_id));
                     }
                     else{
-                        actions.push_single(uid, &scope.path, FileTreeAction::FileClicked(node_id));
+                        cx.widget_action(uid, &scope.path, FileTreeAction::FileClicked(node_id));
                     }
                 }
                 FileTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
-                        actions.push_single(uid, &scope.path, FileTreeAction::ShouldFileStartDrag(node_id));
+                        cx.widget_action(uid, &scope.path, FileTreeAction::ShouldFileStartDrag(node_id));
                     }
                 }
             }
@@ -460,7 +459,6 @@ impl Widget for FileTree {
             }
             _ => ()
         }
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -482,8 +480,8 @@ impl Widget for FileTree {
 pub struct FileTreeRef(WidgetRef);
 
 impl FileTreeRef{
-    pub fn should_file_start_drag(&self, actions: &WidgetActions) -> Option<FileNodeId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn should_file_start_drag(&self, actions: &Actions) -> Option<FileNodeId> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::ShouldFileStartDrag(file_id) = item.cast() {
                 return Some(file_id)
             }
@@ -491,8 +489,8 @@ impl FileTreeRef{
         None
     }
     
-    pub fn file_clicked(&self, actions: &WidgetActions) -> Option<FileNodeId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn file_clicked(&self, actions: &Actions) -> Option<FileNodeId> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::FileClicked(file_id) = item.cast() {
                 return Some(file_id)
             }

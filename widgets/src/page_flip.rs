@@ -112,14 +112,14 @@ impl Widget for PageFlip {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         if let Some(page) = self.pages.get_mut(&self.active_page) {
             let item_uid = page.widget_uid();
-            actions.extend_grouped(uid, item_uid, page.handle_event(cx, event, scope));
+            cx.group_widget_actions(uid, item_uid, |cx|{
+                page.handle_event(cx, event, scope)
+            });
         }
-        actions
     }
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {

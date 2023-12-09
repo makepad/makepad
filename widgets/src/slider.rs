@@ -64,7 +64,7 @@ impl LiveHook for Slider{
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum SliderAction {
     StartSlide,
     TextSlide(f64),
@@ -129,12 +129,12 @@ impl Widget for Slider {
         self.draw_slider.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-        for action in self.text_input.handle_event(cx, event, scope).iter() {
-            match action.cast() {
+        
+        for action in cx.scope_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
+            match action.cast_widget_action() {
                 TextInputAction::KeyFocus => {
                     self.animator_play(cx, id!(focus.on));
                 }
@@ -146,7 +146,7 @@ impl Widget for Slider {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
-                    actions.push_single(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
+                    cx.widget_action(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
                 }
                 TextInputAction::Escape => {
                     self.update_text_input(cx);
@@ -171,7 +171,7 @@ impl Widget for Slider {
                                 
                 self.animator_play(cx, id!(drag.on));
                 self.dragging = Some(self.value);
-                actions.push_single(uid, &scope.path, SliderAction::StartSlide);
+                cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
                 self.text_input.read_only = false;
@@ -185,7 +185,7 @@ impl Widget for Slider {
                     self.animator_play(cx, id!(hover.off));
                 }
                 self.dragging = None;
-                actions.push_single(uid, &scope.path, SliderAction::EndSlide);
+                cx.widget_action(uid, &scope.path, SliderAction::EndSlide);
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
@@ -194,12 +194,11 @@ impl Widget for Slider {
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input(cx);
-                    actions.push_single(uid, &scope.path, SliderAction::Slide(self.to_external()));
+                    cx.widget_action(uid, &scope.path, SliderAction::Slide(self.to_external()));
                 }
             }
             _ => ()
         }
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -209,8 +208,8 @@ impl Widget for Slider {
         WidgetDraw::done()
     }
     
-    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
-        match actions.single_action(self.widget_uid()) {
+    fn widget_to_data(&self, _cx: &mut Cx, actions:&Actions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+        match actions.find_widget_action_cast(self.widget_uid()) {
             SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                 nodes.write_field_value(path, LiveValue::Float64(v as f64));
                 true
@@ -246,8 +245,8 @@ impl Widget for Slider {
 pub struct SliderRef(WidgetRef);
 
 impl SliderRef{
-    pub fn slided(&self, actions:&WidgetActions)->Option<f64>{
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn slided(&self, actions:&Actions)->Option<f64>{
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast(){
                 SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                     return Some(v)

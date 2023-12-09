@@ -86,16 +86,15 @@ impl Widget for TextInput {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
                 self.animator_play(cx, id!(focus.off));
                 cx.hide_text_ime();
-                actions.push_single(uid, &scope.path, TextInputAction::Return(self.text.clone()));
-                actions.push_single(uid, &scope.path, TextInputAction::KeyFocusLost);
+                cx.widget_action(uid, &scope.path, TextInputAction::Return(self.text.clone()));
+                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
             }
             Hit::KeyFocus(_) => {
                 self.undo_id += 1;
@@ -105,13 +104,13 @@ impl Widget for TextInput {
                     self.select_all();
                 }
                 self.draw_bg.redraw(cx);
-                actions.push_single(uid, &scope.path, TextInputAction::KeyFocus);
+                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             }
             Hit::TextInput(te) => {
                 let mut input = String::new();
                 self.filter_input(&te.input, Some(&mut input));
                 if input.len() == 0 {
-                    return actions
+                    return
                 }
                 let last_undo = self.last_undo.take();
                 if te.replace_last {
@@ -128,7 +127,7 @@ impl Widget for TextInput {
                     // if this one follows a space, it still needs to eat it
                     self.create_undo(UndoGroup::TextInput(self.undo_id));
                 }
-                if self.change(cx, &input){self.push_change_action(uid, scope, &mut actions)}
+                if self.change(cx, &input){self.push_change_action(uid, scope, cx)}
             }
             Hit::TextCopy(ce) => {
                 self.undo_id += 1;
@@ -139,7 +138,7 @@ impl Widget for TextInput {
                 if self.cursor_head != self.cursor_tail {
                     *tc.response.borrow_mut() = Some(self.selected_text());
                     self.create_undo(UndoGroup::Cut(self.undo_id));
-                    if self.change(cx, ""){self.push_change_action(uid, scope, &mut actions)}
+                    if self.change(cx, ""){self.push_change_action(uid, scope, cx)}
                 }
             }
             Hit::KeyDown(ke) => match ke.key_code {
@@ -149,14 +148,14 @@ impl Widget for TextInput {
                 }
                 KeyCode::ReturnKey => {
                     cx.hide_text_ime();
-                    actions.push_single(uid, &scope.path, TextInputAction::Return(self.text.clone()));
+                    cx.widget_action(uid, &scope.path, TextInputAction::Return(self.text.clone()));
                 },
                 KeyCode::Escape => {
-                    actions.push_single(uid, &scope.path, TextInputAction::Escape);
+                    cx.widget_action(uid, &scope.path, TextInputAction::Escape);
                 },
                 KeyCode::KeyZ if ke.modifiers.logo || ke.modifiers.shift => {
                     if self.read_only {
-                        return actions
+                        return
                     }
                     self.undo_id += 1;
                     if ke.modifiers.shift {
@@ -165,7 +164,7 @@ impl Widget for TextInput {
                     else {
                         self.undo();
                     }
-                    self.push_change_action(uid, scope, &mut actions);
+                    self.push_change_action(uid, scope, cx);
                     self.draw_bg.redraw(cx);
                 }
                 KeyCode::KeyA if ke.modifiers.logo || ke.modifiers.control => {
@@ -245,7 +244,7 @@ impl Widget for TextInput {
                             self.cursor_tail -= 1;
                         }
                     }
-                    if self.change(cx, ""){self.push_change_action(uid, scope, &mut actions)}
+                    if self.change(cx, ""){self.push_change_action(uid, scope, cx)}
                 }
                 KeyCode::Delete => {
                     self.create_undo(UndoGroup::Delete(self.undo_id));
@@ -254,7 +253,7 @@ impl Widget for TextInput {
                             self.cursor_head += 1;
                         }
                     }
-                    if self.change(cx, ""){self.push_change_action(uid, scope, &mut actions)}
+                    if self.change(cx, ""){self.push_change_action(uid, scope, cx)}
                 }
                 _ => ()
             }
@@ -344,7 +343,6 @@ impl Widget for TextInput {
             }
             _ => ()
         }
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -364,7 +362,7 @@ impl Widget for TextInput {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetAction)]
+#[derive(Clone, PartialEq, DefaultNone)]
 pub enum TextInputAction {
     Change(String),
     Return(String),
@@ -515,8 +513,8 @@ impl TextInput {
         }
     }
     
-    pub fn push_change_action(&self, uid:WidgetUid, scope:&WidgetScope, actions: &mut WidgetActions){
-        actions.push_single(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+    pub fn push_change_action(&self, uid:WidgetUid, scope:&WidgetScope, cx: &mut Cx){
+        cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
     }
     
     pub fn change(&mut self, cx: &mut Cx, s: &str)->bool{
@@ -644,11 +642,9 @@ impl TextInput {
 pub struct TextInputRef(WidgetRef);
 
 impl TextInputRef {
-    pub fn changed(&self, actions: &WidgetActions) -> Option<String> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let TextInputAction::Change(val) = item.cast() {
-                return Some(val);
-            }
+    pub fn changed(&self, actions: &Actions) -> Option<String> {
+        if let TextInputAction::Change(val) = actions.find_widget_action_cast(self.widget_uid()) {
+            return Some(val);
         }
         None
     }

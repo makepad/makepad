@@ -24,16 +24,15 @@ impl LiveHook for SlidePanel {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum SlidePanelAction {
     None,
 }
 
 impl Widget for SlidePanel {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         //let uid = self.widget_uid();
-        actions.extend(self.frame.handle_event(cx, event, scope));
+        self.frame.handle_event(cx, event, scope);
         // lets handle mousedown, setfocus
         if self.animator_handle_event(cx, event).must_redraw() {
             self.frame.redraw(cx);
@@ -45,7 +44,6 @@ impl Widget for SlidePanel {
             }
             _ => ()
         }
-        actions
     }
     
     fn walk(&mut self, cx:&mut Cx) -> Walk {

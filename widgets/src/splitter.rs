@@ -97,8 +97,7 @@ enum DrawState {
 }
 
 impl Widget for Splitter {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         
         self.animator_handle_event(cx, event);
@@ -161,7 +160,7 @@ impl Widget for Splitter {
                         }
                     };
                     self.draw_splitter.redraw(cx);
-                    actions.push_single(uid, &scope.path, SplitterAction::Changed {axis: self.axis, align: self.align});
+                    cx.widget_action(uid, &scope.path, SplitterAction::Changed {axis: self.axis, align: self.align});
                     
                     self.a.redraw(cx);
                     self.b.redraw(cx);
@@ -169,11 +168,8 @@ impl Widget for Splitter {
             }
             _ => {}
         }
-        
-        actions.extend(self.a.handle_event(cx, event, scope));
-        actions.extend(self.b.handle_event(cx, event, scope));
-        
-        actions
+        self.a.handle_event(cx, event, scope);
+        self.b.handle_event(cx, event, scope);
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {
@@ -294,7 +290,7 @@ impl Splitter {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum SplitterAction {
     None,
     Changed {axis: SplitterAxis, align: SplitterAlign},
