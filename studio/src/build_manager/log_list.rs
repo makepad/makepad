@@ -209,7 +209,7 @@ live_design!{
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum LogListAction {
     JumpTo(JumpTo),
     None
@@ -311,33 +311,31 @@ impl Widget for LogList {
         WidgetDraw::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
         
         let log_list = self.view.portal_list(id!(list));
-        let view_actions = self.view.handle_event(cx, event, scope);
+        self.view.handle_event(cx, event, scope);
         //let app_scope = scope.data.as_mut().unwrap().downcast_mut::<AppScope>().unwrap();
         let app_scope = scope.data.get::<AppScope>();
-                
-        let mut actions = WidgetActions::new();
-        
-        for (item_id, item) in log_list.items_with_actions(&view_actions) {
-            if item.link_label(id!(location)).pressed(&view_actions) {
-                if let Some((_build_id, log_item)) = app_scope.build_manager.log.get(item_id as usize) {
-                    match log_item {
-                        LogItem::Location(msg) => {
-                            actions.push_bare(AppAction::JumpTo(JumpTo{
-                                file_name:msg.file_name.clone(), 
-                                start:Position{
-                                    line_index: msg.start.line_index,
-                                    byte_index: msg.start.byte_index,
-                                },
-                            }));
+        if let Event::Actions(actions) = event{    
+            for (item_id, item) in log_list.items_with_actions(&actions) {
+                if item.link_label(id!(location)).pressed(&actions) {
+                    if let Some((_build_id, log_item)) = app_scope.build_manager.log.get(item_id as usize) {
+                        match log_item {
+                            LogItem::Location(msg) => {
+                                cx.action(AppAction::JumpTo(JumpTo{
+                                    file_name:msg.file_name.clone(), 
+                                    start:Position{
+                                        line_index: msg.start.line_index,
+                                        byte_index: msg.start.byte_index,
+                                    },
+                                }));
+                            }
+                            _ => ()
                         }
-                        _ => ()
                     }
                 }
             }
         }
-        actions
     }
 }

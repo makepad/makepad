@@ -1413,7 +1413,7 @@ impl CodeEditor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, WidgetAction)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, DefaultNone)]
 pub enum CodeEditorAction {
     TextDidChange,
     None

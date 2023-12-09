@@ -21,14 +21,13 @@ pub struct DesktopButton {
 }
 
 impl Widget for DesktopButton{
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
-                actions.push_single(uid, &scope.path, ButtonAction::Pressed);
+                cx.widget_action(uid, &scope.path, ButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
@@ -39,7 +38,7 @@ impl Widget for DesktopButton{
                 self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
-                actions.push_single(uid, &scope.path, ButtonAction::Clicked);
+                cx.widget_action(uid, &scope.path, ButtonAction::Clicked);
                 if fe.device.has_hovers() {
                     self.animator_play(cx, id!(hover.on));
                 }
@@ -48,13 +47,11 @@ impl Widget for DesktopButton{
                 }
             }
             else {
-                actions.push_single(uid, &scope.path, ButtonAction::Released);
+                cx.widget_action(uid, &scope.path, ButtonAction::Released);
                 self.animator_play(cx, id!(hover.off));
             }
             _ => ()
         };
-        
-        actions
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{self.walk}

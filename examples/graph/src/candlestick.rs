@@ -50,10 +50,8 @@ pub struct CandleStick {
 }
 
 impl Widget for CandleStick {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope)->WidgetActions{
-        let actions = WidgetActions::new();
-        actions
-    }
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
+}
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
@@ -67,7 +65,7 @@ impl Widget for CandleStick {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum CandleStickAction {
     None
 }

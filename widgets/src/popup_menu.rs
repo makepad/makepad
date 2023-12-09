@@ -63,7 +63,7 @@ pub enum PopupMenuItemAction {
     None
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum PopupMenuAction {
     WasSweeped(PopupMenuItemId),
     WasSelected(PopupMenuItemId),

@@ -595,11 +595,13 @@ impl AppMain for App {
                 }
             }
             while let Some(next) = self.ui.draw_widget(cx, &mut scope).hook_widget() {
-                
+                log!("{}", next.is_empty());
                 if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                     // alright now we draw the items
                     image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
+                    
                     while let Some(item_id) = image_list.next_visible_item(cx) {
+                        
                         if let Some(item) = self.filtered.list.get(item_id as usize) {
                             match item {
                                 ImageListItem::Prompt {prompt_hash} => {
@@ -629,7 +631,7 @@ impl AppMain for App {
         
         self.handle_network_response(cx, event);
         
-        let actions = self.ui.handle_event(cx, event, &mut scope);
+        self.ui.handle_event(cx, event, &mut scope);
         match event{
             Event::KeyDown(KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..})=>{
                 self.clear_todo(cx);
@@ -754,73 +756,74 @@ impl AppMain for App {
         if self.ui.button(id!(play_button)).clicked(&actions) {
             self.play(cx);
         }*/
-        
-        if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
-            match ke.key_code {
-                KeyCode::ArrowDown => {
-                    self.select_next_image(cx);
-                    //self.set_slide_show(cx, false);
+        if let Event::Actions(actions) = event{
+            if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
+                match ke.key_code {
+                    KeyCode::ArrowDown => {
+                        self.select_next_image(cx);
+                        //self.set_slide_show(cx, false);
+                    }
+                    KeyCode::ArrowUp => {
+                        self.select_prev_image(cx);
+                        //self.set_slide_show(cx, false);
+                    }
+                    _ => ()
                 }
-                KeyCode::ArrowUp => {
-                    self.select_prev_image(cx);
-                    //self.set_slide_show(cx, false);
+            }
+            
+            if self.ui.button(id!(take_photo)).clicked(&actions) {
+                self.clear_todo(cx);
+                self.render(cx, true);
+            }
+            
+            if self.ui.button(id!(render_single)).clicked(&actions) {
+                self.clear_todo(cx);
+                self.render(cx, false);
+            }
+            
+                    
+            if self.ui.button(id!(clear_toodo)).clicked(&actions) {
+                self.clear_todo(cx);
+            }
+            
+            if let Some(change) = self.ui.text_input(id!(search)).changed(&actions) {
+                self.filtered.filter_db(&self.db, &change, false);
+                self.ui.redraw(cx);
+                image_list.set_first_id_and_scroll(0, 0.0);
+            }
+            
+            /*if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
+                if e.tap_count >1 {
+                    self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
                 }
-                _ => ()
-            }
-        }
-        
-        if self.ui.button(id!(take_photo)).clicked(&actions) {
-            self.clear_todo(cx);
-            self.render(cx, true);
-        }
-        
-        if self.ui.button(id!(render_single)).clicked(&actions) {
-            self.clear_todo(cx);
-            self.render(cx, false);
-        }
-        
-                
-        if self.ui.button(id!(clear_toodo)).clicked(&actions) {
-            self.clear_todo(cx);
-        }
-        
-        if let Some(change) = self.ui.text_input(id!(search)).changed(&actions) {
-            self.filtered.filter_db(&self.db, &change, false);
-            self.ui.redraw(cx);
-            image_list.set_first_id_and_scroll(0, 0.0);
-        }
-        
-        /*if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
-            if e.tap_count >1 {
-                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
-            }
-        }*/
-        
-        /*if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
-            if e.tap_count >1 {
-                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, false);
-            }
-        }*/
-        
-        for (item_id, item) in image_list.items_with_actions(&actions) {
-            // check for actions inside the list item
-            let rows = item.view_set(ids!(row1, row2));
-            for (row_index, row) in rows.iter().enumerate() {
-                if let Some(fd) = row.finger_down(&actions) {
-                    self.set_current_image_by_item_id_and_row(cx, item_id, row_index);
-                    //self.set_slide_show(cx, false);
-                    if fd.tap_count == 2 {
-                        if let ImageListItem::ImageRow {prompt_hash, ..} = self.filtered.list[item_id as usize] {
-                            self.load_seed_from_current_image(cx);
-                            self.load_inputs_from_prompt_hash(cx, prompt_hash);
+            }*/
+            
+            /*if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
+                if e.tap_count >1 {
+                    self.ui.view(id!(big_image)).set_visible_and_redraw(cx, false);
+                }
+            }*/
+            
+            for (item_id, item) in image_list.items_with_actions(&actions) {
+                // check for actions inside the list item
+                let rows = item.view_set(ids!(row1, row2));
+                for (row_index, row) in rows.iter().enumerate() {
+                    if let Some(fd) = row.finger_down(&actions) {
+                        self.set_current_image_by_item_id_and_row(cx, item_id, row_index);
+                        //self.set_slide_show(cx, false);
+                        if fd.tap_count == 2 {
+                            if let ImageListItem::ImageRow {prompt_hash, ..} = self.filtered.list[item_id as usize] {
+                                self.load_seed_from_current_image(cx);
+                                self.load_inputs_from_prompt_hash(cx, prompt_hash);
+                            }
                         }
                     }
                 }
-            }
-            if let Some(fd) = item.as_view().finger_down(&actions) {
-                if fd.tap_count == 2 {
-                    if let ImageListItem::Prompt {prompt_hash} = self.filtered.list[item_id as usize] {
-                        self.load_inputs_from_prompt_hash(cx, prompt_hash);
+                if let Some(fd) = item.as_view().finger_down(&actions) {
+                    if fd.tap_count == 2 {
+                        if let ImageListItem::Prompt {prompt_hash} = self.filtered.list[item_id as usize] {
+                            self.load_inputs_from_prompt_hash(cx, prompt_hash);
+                        }
                     }
                 }
             }

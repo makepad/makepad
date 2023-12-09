@@ -57,7 +57,7 @@ impl LiveHook for CheckBox {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum CheckBoxAction {
     Change(bool),
     None
@@ -82,8 +82,8 @@ impl CheckBox {
 
 impl Widget for CheckBox {
     
-    fn widget_to_data(&self, _cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
-        match actions.single_action(self.widget_uid()) {
+    fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
+        match actions.find_widget_action_cast(self.widget_uid()) {
             CheckBoxAction::Change(v) => {
                 nodes.write_field_value(path, LiveValue::Bool(v));
                 true
@@ -104,8 +104,7 @@ impl Widget for CheckBox {
         self.draw_check.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
                 
@@ -120,11 +119,11 @@ impl Widget for CheckBox {
             Hit::FingerDown(_fe) => {
                 if self.animator_in_state(cx, id!(selected.on)) {
                     self.animator_play(cx, id!(selected.off));
-                    actions.push_single(uid, &scope.path, CheckBoxAction::Change(false));
+                    cx.widget_action(uid, &scope.path, CheckBoxAction::Change(false));
                 }
                 else {
                     self.animator_play(cx, id!(selected.on));
-                    actions.push_single(uid, &scope.path, CheckBoxAction::Change(true));
+                    cx.widget_action(uid, &scope.path, CheckBoxAction::Change(true));
                 }
             },
             Hit::FingerUp(_fe) => {
@@ -135,7 +134,6 @@ impl Widget for CheckBox {
             }
             _ => ()
         }
-        actions
     }
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
@@ -158,11 +156,9 @@ impl Widget for CheckBox {
 pub struct CheckBoxRef(WidgetRef);
 
 impl CheckBoxRef {
-    pub fn changed(&self, actions: &WidgetActions) -> Option<bool> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let CheckBoxAction::Change(b) = item.cast() {
-                return Some(b)
-            }
+    pub fn changed(&self, actions: &Actions) -> Option<bool> {
+        if let CheckBoxAction::Change(b) = actions.find_widget_action_cast(self.widget_uid()) {
+            return Some(b)
         }
         None
     }

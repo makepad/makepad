@@ -62,12 +62,10 @@ impl Widget for MultiWindow {
         }
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         for window in self.windows.values_mut() {
-            actions.extend(window.handle_event(cx, event, scope));
+            window.handle_event(cx, event, scope);
         }
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}

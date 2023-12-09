@@ -75,7 +75,7 @@ impl LiveHook for DropDown {
         
     }
 }
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum DropDownAction {
     Select(usize, LiveValue),
     None
@@ -152,8 +152,8 @@ impl DropDown {
 
 impl Widget for DropDown {
     
-    fn widget_to_data(&self, _cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
-        match actions.single_action(self.widget_uid()) {
+    fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
+        match actions.find_widget_action_cast(self.widget_uid()) {
             DropDownAction::Select(_, value) => {
                 nodes.write_field_value(path, value.clone());
                 true
@@ -180,9 +180,8 @@ impl Widget for DropDown {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) -> WidgetActions {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)  {
         self.animator_handle_event(cx, event);
-        let mut actions = WidgetActions::new();
         let uid = self.widget_uid();
                 
         if self.is_open && self.popup_menu.is_some() {
@@ -199,7 +198,7 @@ impl Widget for DropDown {
                     PopupMenuAction::WasSelected(node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                         self.selected_item = node_id.0.0 as usize;
-                        actions.push_single(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
+                        cx.widget_action(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.draw_bg.redraw(cx);
                         close = true;
                     }
@@ -233,7 +232,7 @@ impl Widget for DropDown {
                 KeyCode::ArrowUp => {
                     if self.selected_item > 0 {
                         self.selected_item -= 1;
-                        actions.push_single(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
+                        cx.widget_action(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -241,7 +240,7 @@ impl Widget for DropDown {
                 KeyCode::ArrowDown => {
                     if self.values.len() > 0 && self.selected_item < self.values.len() - 1 {
                         self.selected_item += 1;
-                        actions.push_single(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
+                        cx.widget_action(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -272,7 +271,6 @@ impl Widget for DropDown {
             }
             _ => ()
         };
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -300,8 +298,8 @@ impl DropDownRef {
         }
     }
     
-    pub fn selected(&self, actions: &WidgetActions) -> Option<usize> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn selected(&self, actions: &Actions) -> Option<usize> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let DropDownAction::Select(id, _) = item.cast() {
                 return Some(id)
             }

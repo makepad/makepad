@@ -9,7 +9,7 @@ live_design!{
     ButtonBase = {{Button}} {}
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum ButtonAction {
     None,
     Clicked,
@@ -42,16 +42,15 @@ impl LiveHook for Button{
 }
 
 impl Widget for Button{
-   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-       let mut actions = WidgetActions::new();
-       let uid = self.widget_uid();
+   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+        let uid = self.widget_uid();
        self.animator_handle_event(cx, event);
        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 if self.grab_key_focus{
                     cx.set_key_focus(self.draw_bg.area());
                 }
-                actions.push_single(uid, &scope.path, ButtonAction::Pressed);
+                cx.widget_action(uid, &scope.path, ButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
@@ -62,7 +61,7 @@ impl Widget for Button{
                 self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
-                actions.push_single(uid, &scope.path, ButtonAction::Clicked);
+                cx.widget_action(uid, &scope.path, ButtonAction::Clicked);
                 if fe.device.has_hovers() {
                     self.animator_play(cx, id!(hover.on));
                 }
@@ -71,12 +70,11 @@ impl Widget for Button{
                 }
             }
             else {
-                actions.push_single(uid, &scope.path, ButtonAction::Released);
+                cx.widget_action(uid, &scope.path, ButtonAction::Released);
                 self.animator_play(cx, id!(hover.off));
             }
             _ => ()
         }
-        actions
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{
@@ -109,8 +107,8 @@ pub struct ButtonRef(WidgetRef);
 
 impl ButtonRef {
     
-    pub fn clicked(&self, actions:&WidgetActions) -> bool {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn clicked(&self, actions:&Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ButtonAction::Clicked = item.cast() {
                 return true
             }
@@ -118,8 +116,8 @@ impl ButtonRef {
         false
     }
 
-    pub fn pressed(&self, actions:&WidgetActions) -> bool {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn pressed(&self, actions:&Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ButtonAction::Pressed = item.cast() {
                 return true
             }
@@ -132,7 +130,7 @@ impl ButtonRef {
 #[derive(Clone, Debug, WidgetSet)]
 pub struct ButtonSet(WidgetSet);
 impl ButtonSet{
-    pub fn clicked(&self, actions: &WidgetActions)->bool{
+    pub fn clicked(&self, actions: &Actions)->bool{
         for button in self.iter(){
             if button.clicked(actions){
                 return true
@@ -140,7 +138,7 @@ impl ButtonSet{
         }
         false
     }
-    pub fn pressed(&self, actions: &WidgetActions)->bool{
+    pub fn pressed(&self, actions: &Actions)->bool{
         for button in self.iter(){
             if button.pressed(actions){
                 return true

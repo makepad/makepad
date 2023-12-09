@@ -440,16 +440,14 @@ impl LiveHook for Mandelbrot {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum MandelbrotAction {
     None
 }
 
 impl Widget for Mandelbrot {
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
-               
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
         let uid = self.widget_uid();
         if let Some(ne) = self.next_frame.is_event(event) {
             // If we don't have a current layer, initiate the first tile render on the center of the screen
@@ -536,7 +534,6 @@ impl Widget for Mandelbrot {
             }
             _ => ()
         }
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}

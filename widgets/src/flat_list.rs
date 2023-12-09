@@ -23,7 +23,7 @@ enum ScrollState {
     Pulldown {next_frame: NextFrame},
 }
 */
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum FlatListAction {
     Scroll,
     None
@@ -144,8 +144,8 @@ impl Widget for FlatList {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+
         let uid = self.widget_uid();
         self.scroll_bars.handle_event(cx, event);
         /*
@@ -160,10 +160,11 @@ impl Widget for FlatList {
         for (item_id,item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
             scope.with_id(*item_id, |scope|{
-                actions.extend_grouped(uid, item_uid, item.handle_event(cx, event, scope));
+                cx.group_widget_actions(uid, item_uid, |cx|{
+                    item.handle_event(cx, event, scope)
+                });
             })
         }
-        actions
         /*
         match &mut self.scroll_state {
             ScrollState::Flick {delta, next_frame} => {
@@ -316,22 +317,24 @@ impl FlatListRef {
         }
     }
     
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(LiveId, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(LiveId, WidgetRef)> {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
         set
     }
     
-    fn items_with_actions_vec(&self, actions: &WidgetActions, set: &mut Vec<(LiveId, WidgetRef)>) {
+    fn items_with_actions_vec(&self, actions: &Actions, set: &mut Vec<(LiveId, WidgetRef)>) {
         let uid = self.widget_uid();
         for action in actions {
-            if action.container_uid_eq(uid) {
-                
-                if let Some(inner) = self.borrow() {
-                    for (item_id, (_,item)) in inner.items.iter() {
-                        
-                        if action.item_uid_eq(item.widget_uid()) {
-                            set.push((*item_id, item.clone()))
+            if let Some(action) = action.downcast_ref::<WidgetAction>(){
+                if let Some(group) = &action.group{
+                    if group.group_uid == uid{
+                        if let Some(inner) = self.borrow() {
+                            for (item_id, (_templ_id, item)) in inner.items.iter() {
+                                if group.item_uid == item.widget_uid(){
+                                    set.push((*item_id, item.clone()))
+                                }
+                            }
                         }
                     }
                 }
@@ -344,7 +347,7 @@ impl FlatListRef {
 pub struct FlatListSet(WidgetSet);
 
 impl FlatListSet {
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(LiveId, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(LiveId, WidgetRef)> {
         let mut set = Vec::new();
         for list in self.iter() {
             list.items_with_actions_vec(actions, &mut set)

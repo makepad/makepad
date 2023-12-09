@@ -49,7 +49,7 @@ pub struct VectorLine {
     line_end: DVec2,
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum LineAction {
     None,
     Pressed,
@@ -63,10 +63,8 @@ impl Widget for VectorLine {
         cx: &mut Cx,
         event: &Event,
         _scope: &mut WidgetScope,
-    ) -> WidgetActions {
-        let actions = WidgetActions::new();
+    ) {
         self.animator_handle_event(cx, event);
-        actions
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
