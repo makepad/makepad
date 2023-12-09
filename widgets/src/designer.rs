@@ -174,14 +174,12 @@ impl Designer {
 }
 
 impl Widget for Designer {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let actions = WidgetActions::new();
-        let _actions = self.ui.handle_event(cx, event, scope);
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+        self.ui.handle_event(cx, event, scope);
         for (component, container) in self.components.values_mut() {
             component.handle_event(cx, event, scope);
             container.handle_event(cx, event, scope);
         }
-        actions
     }
     
     fn redraw(&mut self, cx: &mut Cx) {

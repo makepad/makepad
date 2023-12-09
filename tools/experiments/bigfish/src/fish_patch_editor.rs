@@ -68,8 +68,7 @@ impl Widget for FishPatchEditor {
         cx: &mut Cx,
         event: &Event,
         scope: &mut WidgetScope,
-    ) -> WidgetActions {
-        let mut actions = WidgetActions::new();
+    ) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
 
@@ -78,10 +77,11 @@ impl Widget for FishPatchEditor {
         for (item_id, item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
             scope.with_id(*item_id, |scope| {
-                actions.extend_grouped(uid, item_uid, item.handle_event(cx, event, scope));
+                cx.group_widget_actions(uid, item_uid, |cx|{
+                    item.handle_event(cx, event, scope);
+                })
             })
         }
-        actions
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {

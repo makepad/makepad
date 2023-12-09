@@ -87,6 +87,8 @@ pub struct Cx {
     
     pub (crate) new_next_frames: HashSet<NextFrame>,
     
+    pub (crate) new_actions: Vec<Box<dyn Any>>,
+    
     pub (crate) dependencies: HashMap<String, CxDependency>,
     
     pub (crate) triggers: HashMap<Area, Vec<Trigger >>,
@@ -225,6 +227,7 @@ impl Cx {
             draw_shaders: Default::default(),
             
             new_draw_event: Default::default(),
+            new_actions: Default::default(),
             
             start_time: Instant::now(),
             

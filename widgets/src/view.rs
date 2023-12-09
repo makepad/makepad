@@ -170,7 +170,7 @@ pub struct ViewRef(WidgetRef);
 #[derive(Clone, WidgetSet)]
 pub struct ViewSet(WidgetSet);
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum ViewAction {
     None,
     FingerDown(FingerDownEvent),
@@ -181,8 +181,8 @@ pub enum ViewAction {
 }
 
 impl ViewRef {
-    pub fn finger_down(&self, actions: &WidgetActions) -> Option<FingerDownEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn finger_down(&self, actions: &Actions) -> Option<FingerDownEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::FingerDown(fd) = item.cast() {
                 return Some(fd)
             }
@@ -190,8 +190,8 @@ impl ViewRef {
         None
     }
     
-    pub fn finger_up(&self, actions: &WidgetActions) -> Option<FingerUpEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn finger_up(&self, actions: &Actions) -> Option<FingerUpEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::FingerUp(fd) = item.cast() {
                 return Some(fd)
             }
@@ -199,8 +199,8 @@ impl ViewRef {
         None
     }
     
-    pub fn finger_move(&self, actions: &WidgetActions) -> Option<FingerMoveEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn finger_move(&self, actions: &Actions) -> Option<FingerMoveEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::FingerMove(fd) = item.cast() {
                 return Some(fd)
             }
@@ -208,8 +208,8 @@ impl ViewRef {
         None
     }
     
-    pub fn key_down(&self, actions: &WidgetActions) -> Option<KeyEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn key_down(&self, actions: &Actions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::KeyDown(fd) = item.cast() {
                 return Some(fd)
             }
@@ -217,8 +217,8 @@ impl ViewRef {
         None
     }
     
-    pub fn key_up(&self, actions: &WidgetActions) -> Option<KeyEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn key_up(&self, actions: &Actions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::KeyUp(fd) = item.cast() {
                 return Some(fd)
             }
@@ -348,7 +348,7 @@ impl ViewSet {
         }
     }
     
-    pub fn finger_down(&self, actions: &WidgetActions) -> Option<FingerDownEvent> {
+    pub fn finger_down(&self, actions: &Actions) -> Option<FingerDownEvent> {
         for item in self.iter() {
             if let Some(e) = item.finger_down(actions) {
                 return Some(e)
@@ -357,7 +357,7 @@ impl ViewSet {
         None
     }
     
-    pub fn finger_up(&self, actions: &WidgetActions) -> Option<FingerUpEvent> {
+    pub fn finger_up(&self, actions: &Actions) -> Option<FingerUpEvent> {
         for item in self.iter() {
             if let Some(e) = item.finger_up(actions) {
                 return Some(e)
@@ -367,7 +367,7 @@ impl ViewSet {
     }
     
     
-    pub fn finger_move(&self, actions: &WidgetActions) -> Option<FingerMoveEvent> {
+    pub fn finger_move(&self, actions: &Actions) -> Option<FingerMoveEvent> {
         for item in self.iter() {
             if let Some(e) = item.finger_move(actions) {
                 return Some(e)
@@ -376,7 +376,7 @@ impl ViewSet {
         None
     }
     
-    pub fn key_down(&self, actions: &WidgetActions) -> Option<KeyEvent> {
+    pub fn key_down(&self, actions: &Actions) -> Option<KeyEvent> {
         for item in self.iter() {
             if let Some(e) = item.key_down(actions) {
                 return Some(e)
@@ -385,7 +385,7 @@ impl ViewSet {
         None
     }
     
-    pub fn key_up(&self, actions: &WidgetActions) -> Option<KeyEvent> {
+    pub fn key_up(&self, actions: &Actions) -> Option<KeyEvent> {
         for item in self.iter() {
             if let Some(e) = item.key_up(actions) {
                 return Some(e)
@@ -396,8 +396,7 @@ impl ViewSet {
 }
 
 impl Widget for View {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);
@@ -405,7 +404,7 @@ impl Widget for View {
         
         if self.block_signal_event {
             if let Event::Signal = event {
-                return actions
+                return
             }
         }
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
@@ -422,7 +421,7 @@ impl Widget for View {
                     if let Some(child) = self.children.get_mut(id) {
                         if child.is_visible() || !event.requires_visibility() {
                             scope.with_id(*id,|scope|{
-                                actions.extend(child.handle_event(cx, event, scope));
+                                child.handle_event(cx, event, scope);
                             });
                         }
                     }
@@ -433,7 +432,7 @@ impl Widget for View {
                     if let Some(child) = self.children.get_mut(id) {
                         if child.is_visible() || !event.requires_visibility() {
                             scope.with_id(*id,|scope|{
-                                actions.extend(child.handle_event(cx, event, scope));
+                                child.handle_event(cx, event, scope);
                             })
                         }
                     }
@@ -444,7 +443,7 @@ impl Widget for View {
                     if let Some(child) = self.children.get_mut(id) {
                         if child.is_visible() || !event.requires_visibility() {
                             scope.with_id(*id,|scope|{
-                                actions.extend(child.handle_event(cx, event, scope));
+                                child.handle_event(cx, event, scope);
                             })
                         }
                     }
@@ -459,16 +458,16 @@ impl Widget for View {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
-                    actions.push_single(uid, &scope.path, ViewAction::FingerDown(e));
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerDown(e));
                     if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(down.on));
                     }
                 }
                 Hit::FingerMove(e) => {
-                    actions.push_single(uid, &scope.path, ViewAction::FingerMove(e))
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerMove(e))
                 }
                 Hit::FingerUp(e) => {
-                    actions.push_single(uid, &scope.path, ViewAction::FingerUp(e));
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerUp(e));
                     if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(down.off));
                     }
@@ -487,10 +486,10 @@ impl Widget for View {
                     }
                 }
                 Hit::KeyDown(e) => {
-                    actions.push_single(uid, &scope.path, ViewAction::KeyDown(e))
+                    cx.widget_action(uid, &scope.path, ViewAction::KeyDown(e))
                 }
                 Hit::KeyUp(e) => {
-                    actions.push_single(uid, &scope.path, ViewAction::KeyUp(e))
+                    cx.widget_action(uid, &scope.path, ViewAction::KeyUp(e))
                 }
                 _ => ()
             }
@@ -499,8 +498,6 @@ impl Widget for View {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.handle_scroll_event(cx, event, &mut Vec::new());
         }
-        
-        actions
     }
     
     fn is_visible(&self) -> bool {

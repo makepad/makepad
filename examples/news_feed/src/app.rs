@@ -389,11 +389,13 @@ impl AppMain for App {
             return
         }
         
-        let actions = self.ui.handle_event(cx, event, &mut scope);
+        self.ui.handle_event(cx, event, &mut scope);
         
-        for (item_id, item) in news_feeds.items_with_actions(&actions) {
-            if item.button(id!(likes)).clicked(&actions) {
-                log!("hello {}", item_id);
+        if let Event::Actions(actions) = event{
+            for (item_id, item) in news_feeds.items_with_actions(&actions) {
+                if item.button(id!(likes)).clicked(&actions) {
+                    log!("hello {}", item_id);
+                }
             }
         }
     }

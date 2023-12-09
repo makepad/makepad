@@ -24,7 +24,7 @@ impl LiveHook for FoldButton{
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum FoldButtonAction {
     None,
     Opening,
@@ -60,14 +60,13 @@ impl Widget for FoldButton {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).is_animating() {
             if self.animator.is_track_animating(cx, id!(open)) {
                 let mut value = [0.0];
                 self.draw_bg.get_instance(cx, id!(open),&mut value);
-                actions.push_single(uid, &scope.path, FoldButtonAction::Animating(value[0] as f64))
+                cx.widget_action(uid, &scope.path, FoldButtonAction::Animating(value[0] as f64))
             }
         };
                 
@@ -75,11 +74,11 @@ impl Widget for FoldButton {
             Hit::FingerDown(_fe) => {
                 if self.animator_in_state(cx, id!(open.yes)) {
                     self.animator_play(cx, id!(open.no));
-                    actions.push_single(uid, &scope.path, FoldButtonAction::Closing)
+                    cx.widget_action(uid, &scope.path, FoldButtonAction::Closing)
                 }
                 else {
                     self.animator_play(cx, id!(open.yes));
-                    actions.push_single(uid, &scope.path, FoldButtonAction::Opening)
+                    cx.widget_action(uid, &scope.path, FoldButtonAction::Opening)
                 }
                 self.animator_play(cx, id!(hover.on));
             },
@@ -103,7 +102,6 @@ impl Widget for FoldButton {
             }
             _ => ()
         };
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -120,8 +118,8 @@ pub struct FoldButtonRef(WidgetRef);
 
 impl FoldButtonRef {
     
-    pub fn opening(&self, actions:&WidgetActions) -> bool {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn opening(&self, actions:&Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FoldButtonAction::Opening = item.cast() {
                 return true
             }
@@ -129,8 +127,8 @@ impl FoldButtonRef {
         false
     }
 
-    pub fn closing(&self, actions:&WidgetActions) -> bool {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn closing(&self, actions:&Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FoldButtonAction::Closing = item.cast() {
                 return true
             }
@@ -138,8 +136,8 @@ impl FoldButtonRef {
         false
     }
     
-    pub fn animating(&self, actions:&WidgetActions) -> Option<f64> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+    pub fn animating(&self, actions:&Actions) -> Option<f64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FoldButtonAction::Animating(v) = item.cast() {
                 return Some(v)
             }

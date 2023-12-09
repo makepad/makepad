@@ -175,7 +175,7 @@ pub struct PianoNote {
     pub velocity: u8
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum PianoAction {
     Note(PianoNote),
     None
@@ -259,9 +259,8 @@ impl Piano {
 }
 
 impl Widget for Piano{
-   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
+   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
        
-       let mut actions = WidgetActions::new();
        let uid = self.widget_uid();
        let mut key_actions = Vec::new();
        
@@ -273,14 +272,14 @@ impl Widget for Piano{
            match action {
                PianoKeyAction::Pressed(velocity) => {
                    self.set_key_focus(cx);
-                   actions.push_single(uid, &scope.path, PianoAction::Note(PianoNote {
+                   cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
                        is_on: true,
                        note_number: node_id.0.0 as u8,
                        velocity
                    }));
                }
                PianoKeyAction::Up => {
-                   actions.push_single(uid, &scope.path, PianoAction::Note(PianoNote {
+                   cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
                        is_on: false,
                        note_number: node_id.0.0 as u8,
                        velocity: 127
@@ -321,7 +320,7 @@ impl Widget for Piano{
                    let note_number = nn + self.keyboard_octave * 12;
                    self.keyboard_keys_down[nn as usize] = note_number;
                    self.set_note(cx, true, note_number);
-                   actions.push_single(uid, &scope.path, PianoAction::Note(PianoNote {
+                   cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
                        is_on: true,
                        note_number,
                        velocity: self.keyboard_velocity
@@ -351,7 +350,7 @@ impl Widget for Piano{
                let note_number = self.keyboard_keys_down[nn as usize];
                self.keyboard_keys_down[nn as usize] = 0;
                self.set_note(cx, false, note_number);
-               actions.push_single(uid, &scope.path, PianoAction::Note(PianoNote {
+               cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
                    is_on: false,
                    note_number,
                    velocity: self.keyboard_velocity
@@ -373,7 +372,6 @@ impl Widget for Piano{
            }
            _ => ()
        }
-       actions
    }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{self.walk}
@@ -458,13 +456,14 @@ pub struct PianoKeyId(pub LiveId);
 pub struct PianoRef(WidgetRef);
 
 impl PianoRef {
-    pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
+    pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
         for action in actions {
-            if action.widget_uid_eq(self.widget_uid()) {
-                if let PianoAction::Note(note) = action.cast() {
+            match action.cast_widget_uid_eq(self.widget_uid()) {
+                PianoAction::Note(note) => {
                     notes.push(note)
                 }
+                PianoAction::None=>()
             }
         }
         notes
@@ -487,12 +486,12 @@ impl PianoRef {
 pub struct PianoSet(WidgetSet);
 
 impl PianoSet {
-    pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
+    pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
         for item in self.iter() {
              for action in actions {
                 if action.widget_uid_eq(item.widget_uid()){
-                    if let PianoAction::Note(note) = action.cast() {
+                    if let PianoAction::Note(note) = action.cast_widget_action() {
                         notes.push(note)
                     }
                 }
