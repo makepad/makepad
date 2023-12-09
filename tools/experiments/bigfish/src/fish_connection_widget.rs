@@ -70,7 +70,7 @@ live_design! {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum FishConnectionWidgetAction {
     None,
     Clicked,
@@ -114,8 +114,7 @@ impl Widget for FishConnectionWidget {
         cx: &mut Cx,
         event: &Event,
         scope: &mut WidgetScope,
-    ) -> WidgetActions {
-        let mut actions = WidgetActions::new();
+    )  {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_line.area()) {
@@ -123,7 +122,7 @@ impl Widget for FishConnectionWidget {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_line.area());
                 }
-                actions.push_single(uid, &scope.path, ButtonAction::Pressed);
+                cx.widget_action(uid, &scope.path, ButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             }
             Hit::FingerHoverIn(_) => {
@@ -135,20 +134,19 @@ impl Widget for FishConnectionWidget {
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over {
-                    actions.push_single(uid, &scope.path, ButtonAction::Clicked);
+                    cx.widget_action(uid, &scope.path, ButtonAction::Clicked);
                     if fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));
                     } else {
                         self.animator_play(cx, id!(hover.off));
                     }
                 } else {
-                    actions.push_single(uid, &scope.path, ButtonAction::Released);
+                    cx.widget_action(uid, &scope.path, ButtonAction::Released);
                     self.animator_play(cx, id!(hover.off));
                 }
             }
             _ => (),
         }
-        actions
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {

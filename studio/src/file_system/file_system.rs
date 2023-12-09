@@ -54,7 +54,7 @@ pub struct FileEdge {
     pub file_node_id: FileNodeId,
 }
 
-#[derive(WidgetAction, Clone)]
+#[derive(DefaultNone, Clone)]
 pub enum FileSystemAction {
     TreeLoaded,
     RecompileNeeded,
@@ -103,14 +103,14 @@ impl FileSystem {
         None
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, actions:&mut WidgetActions) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef) {
         
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
                     FileResponse::LoadFileTree(response) => {
                         self.load_file_tree(response.unwrap());
-                        actions.push(FileSystemAction::TreeLoaded.into_bare())
+                        cx.action(FileSystemAction::TreeLoaded)
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     FileResponse::OpenFile(result) => {
@@ -155,14 +155,14 @@ impl FileSystem {
                                         Ok(new_tokens) => {
                                             // we need the space 'outside' of these tokens
                                             if old_neg != new_neg {
-                                                actions.push(FileSystemAction::RecompileNeeded.into_bare())
+                                                cx.action(FileSystemAction::RecompileNeeded)
                                             }
                                             if old_tokens != new_tokens {
                                                 // design code changed, hotreload it
-                                                actions.push( FileSystemAction::LiveReloadNeeded(LiveFileChange {
+                                                cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
                                                     file_name: path,
                                                     content: new
-                                                }).into_bare());
+                                                }));
                                             }
                                         }
                                     }

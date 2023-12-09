@@ -2,7 +2,7 @@ use proc_macro::{TokenStream};
 
 use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
-pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
+pub fn derive_default_none_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();

@@ -93,7 +93,7 @@ pub struct BuildBinary {
     pub name: String
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum BuildManagerAction {
     StdinToHost {run_view_id: LiveId, msg: StdinToHost},
     None
@@ -205,7 +205,7 @@ impl BuildManager {
         let _ = self.send_file_change.send(live_file_change);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem, actions:&mut WidgetActions) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
 
         if let Event::Signal = event {
             if let Ok(mut addr) = self.recv_external_ip.try_recv() {
@@ -235,7 +235,7 @@ impl BuildManager {
                                             end,
                                             DecorationType::Warning
                                         ));
-                                        actions.push(AppAction::RedrawFile(file_id).into_bare())
+                                        cx.action(AppAction::RedrawFile(file_id))
                                     }
                                     LogLevel::Error=>{
                                         file_system.add_decoration(file_id, Decoration::new(
@@ -244,7 +244,7 @@ impl BuildManager {
                                             end,
                                             DecorationType::Error
                                         ));
-                                        actions.push(AppAction::RedrawFile(file_id).into_bare())
+                                        cx.action(AppAction::RedrawFile(file_id))
                                     }
                                     _=>()
                                 }
@@ -256,7 +256,7 @@ impl BuildManager {
                                 end,
                                 message
                             })));
-                            actions.push(AppAction::RedrawLog.into_bare())
+                            cx.action(AppAction::RedrawLog)
                         }
                         AppToStudio::ProfileSample(_sample)=>{  
                             //log!("{:?}", sample); 
@@ -268,15 +268,15 @@ impl BuildManager {
         
         if self.recompile_timer.is_event(event).is_some() {
             self.start_recompile(cx);
-            actions.push(AppAction::RecompileStarted.into_bare());
-            actions.push(AppAction::ClearLog.into_bare());
+            cx.action(AppAction::RecompileStarted);
+            cx.action(AppAction::ClearLog);
         }
                         
         let log = &mut self.log;
         let active = &mut self.active;        
                 
         //let editor_state = &mut state.editor_state;
-        self.clients[0].handle_event_with(cx, event, &mut | _cx, wrap | {
+        self.clients[0].handle_event_with(cx, event, &mut | cx, wrap | {
             /*match &wrap.item{
                 LogItem::StdinToHost(line) => {
                     log!("GOT {}", line);
@@ -297,7 +297,7 @@ impl BuildManager {
                                     loc.end,
                                     DecorationType::Warning
                                 ));
-                                actions.push(AppAction::RedrawFile(file_id).into_bare())
+                                cx.action(AppAction::RedrawFile(file_id))
                             }
                             LogLevel::Error=>{
                                 file_system.add_decoration(file_id, Decoration::new(
@@ -306,35 +306,35 @@ impl BuildManager {
                                     loc.end,
                                     DecorationType::Error
                                 ));
-                                actions.push(AppAction::RedrawFile(file_id).into_bare())
+                                cx.action(AppAction::RedrawFile(file_id))
                             }
                             _=>()
                         }
                     }
                     log.push((wrap.cmd_id, LogItem::Location(loc)));
-                    actions.push(AppAction::RedrawLog.into_bare())
+                    cx.action(AppAction::RedrawLog)
                 }
                 LogItem::Bare(bare) => {
                     //log!("{:?}", bare);
                     log.push((wrap.cmd_id, LogItem::Bare(bare)));
-                    actions.push(AppAction::RedrawLog.into_bare())
+                    cx.action(AppAction::RedrawLog)
                     //editor_state.messages.push(wrap.msg);
                 }
                 LogItem::StdinToHost(line) => {
                     let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
                     match msg {
                         Ok(msg) => {
-                            actions.push(BuildManagerAction::StdinToHost {
+                            cx.action(BuildManagerAction::StdinToHost {
                                 run_view_id: wrap.cmd_id,
                                 msg
-                            }.into_bare())
+                            })
                         }
                         Err(_) => { // we should output a log string
                             log.push((wrap.cmd_id, LogItem::Bare(LogItemBare {
                                 level: LogLevel::Log,
                                 line: line.trim().to_string()
                             })));
-                            actions.push(AppAction::RedrawLog.into_bare())
+                            cx.action(AppAction::RedrawLog)
                             /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                 level: BuildMsgLevel::Log,
                                 line
