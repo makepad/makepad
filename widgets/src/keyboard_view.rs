@@ -64,8 +64,7 @@ impl Widget for KeyboardView {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         if let Some(e) = self.next_frame.is_event(event){
             match &self.anim_state{
                 AnimState::Opening{duration, start_time, ease, height}=>{
@@ -132,8 +131,7 @@ impl Widget for KeyboardView {
             }
             _=>()
         }
-        actions.extend(self.view.handle_event(cx, event, scope));
-        actions
+        self.view.handle_event(cx, event, scope);
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {

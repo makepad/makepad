@@ -70,15 +70,13 @@ impl LiveHook for SlidesView {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum SlidesViewAction {
     None,
 }
 
 impl Widget for SlidesView {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
-        
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         // lets handle mousedown, setfocus
         match event {
             Event::Construct => {
@@ -116,7 +114,7 @@ impl Widget for SlidesView {
         if let Some(current_id) = self.draw_order.get(current) {
             if let Some(current) = self.children.get(&current_id) {
                 scope.with_id(*current_id, |scope|{
-                    actions.extend(current.handle_event(cx, event, scope));
+                    current.handle_event(cx, event, scope);
                 })
             }
         }
@@ -125,12 +123,11 @@ impl Widget for SlidesView {
             if let Some(next_id) = self.draw_order.get(next) {
                 if let Some(next) = self.children.get(&next_id) {
                     scope.with_id(*next_id, |scope|{
-                        actions.extend(next.handle_event(cx, event, scope));
+                        next.handle_event(cx, event, scope);
                     })
                 }
             }
         }
-        actions
     }
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {

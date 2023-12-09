@@ -36,12 +36,12 @@ pub struct DataBindingMap<'a> {
     pub debug_missing: bool,
     pub cx: &'a mut Cx,
     direction: Direction,
-    pub actions: &'a WidgetActions,
+    pub actions: &'a Actions,
     pub ui: &'a WidgetRef,
 }
 
 impl DataBindingStore {
-    pub fn data_to_widgets<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a WidgetActions, ui: &'a WidgetRef) -> DataBindingMap {
+    pub fn data_to_widgets<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a Actions, ui: &'a WidgetRef) -> DataBindingMap {
         DataBindingMap {
             debug_missing: false,
             direction: Direction::DataToWidgets,
@@ -52,7 +52,7 @@ impl DataBindingStore {
         }
     }
     
-    pub fn widgets_to_data<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a WidgetActions, ui: &'a WidgetRef) -> DataBindingMap {
+    pub fn widgets_to_data<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a Actions, ui: &'a WidgetRef) -> DataBindingMap {
         DataBindingMap {
             debug_missing: false,
             direction: Direction::WidgetsToData,

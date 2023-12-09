@@ -39,7 +39,7 @@ pub struct WindowMenu{
     #[rust] menu_items: HashMap<LiveId, WindowMenuItem>,
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum WindowMenuAction {
     Command(LiveId),
     None
@@ -123,7 +123,7 @@ impl Widget for WindowMenu {
     fn redraw(&mut self, _cx: &mut Cx) {
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut WidgetScope)->WidgetActions {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut WidgetScope) {
         match event{
             Event::MacosMenuCommand(item)=>{
                 if *item == live_id!(quit){
@@ -132,7 +132,6 @@ impl Widget for WindowMenu {
             }
             _=>()
         }
-        WidgetActions::new()
     }
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {

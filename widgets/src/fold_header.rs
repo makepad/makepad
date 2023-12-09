@@ -37,17 +37,18 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             if self.animator.is_track_animating(cx, id!(open)) {
                 self.area.redraw(cx);
             }
         };
         
-        for item in self.header.handle_event(cx,  event, scope).iter() {
-            if item.widget_uid_eq(self.header.widget(id!(fold_button)).widget_uid()){
-                match item.cast() {
+        self.header.handle_event(cx,  event, scope);
+        
+        if let Event::Actions(actions) = event{
+            if let Some(action) = actions.find_widget_action(self.header.widget(id!(fold_button)).widget_uid()){
+                match action.cast() {
                     FoldButtonAction::Opening => {
                         self.animator_play(cx, id!(open.on))
                     }
@@ -57,11 +58,7 @@ impl Widget for FoldHeader {
                     _ => ()
                 }
             }
-            actions.push(item.clone());
         }
-        
-        actions.extend(self.body.handle_event(cx, event, scope));
-        return actions
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
@@ -102,7 +99,7 @@ impl Widget for FoldHeader {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum FoldHeaderAction {
     Opening,
     Closing,

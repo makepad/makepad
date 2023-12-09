@@ -1,7 +1,8 @@
 use {
-    
     crate::{
+        makepad_derive_widget::*,
         makepad_draw::*,
+        widget::*,
         scroll_bars::ScrollBars,
         tab::{TabAction, Tab, TabClosable},
     },
@@ -21,6 +22,8 @@ pub struct TabBar {
     #[walk] walk: Walk,
     #[live] tab: Option<LivePtr>,
     
+    #[rust] draw_state: DrawStateWrap<()>,
+    
     #[rust] view_area: Area,
 
     #[rust] tab_order: Vec<LiveId>,
@@ -36,6 +39,10 @@ pub struct TabBar {
 
 
 impl LiveHook for TabBar {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, TabBar)
+    }
+    
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab).as_field()) {
             for tab in self.tabs.values_mut() {
@@ -46,13 +53,99 @@ impl LiveHook for TabBar {
     }
 }
 
+impl Widget for TabBar{
+    fn walk(&mut self, _cx:&mut Cx)->Walk{
+        self.walk
+    }
+        
+    fn redraw(&mut self, cx:&mut Cx){
+        self.scroll_bars.redraw(cx)
+    }
+    
+    fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        scope: &mut WidgetScope
+    ){
+        let uid = self.widget_uid();
+        if self.scroll_bars.handle_event(cx, event).len()>0{
+            self.view_area.redraw(cx);
+        };
+                
+        if let Some(tab_id) = self.next_selected_tab_id.take() {
+            cx.widget_action(uid, &scope.path, TabBarAction::TabWasPressed(tab_id));
+        }
+        for (tab_id, tab) in self.tabs.iter_mut() {
+            tab.handle_event_with(cx, event, &mut | cx, action | match action {
+                TabAction::WasPressed => {
+                    cx.widget_action(uid, &scope.path, TabBarAction::TabWasPressed(*tab_id));
+                }
+                TabAction::CloseWasPressed => {
+                    cx.widget_action(uid, &scope.path, TabBarAction::TabCloseWasPressed(*tab_id));
+                }
+                TabAction::ShouldTabStartDrag=>{
+                    cx.widget_action(uid, &scope.path, TabBarAction::ShouldTabStartDrag(*tab_id));
+                }
+                TabAction::ShouldTabStopDrag=>{
+                }/*
+                TabAction::DragHit(hit)=>{
+                    dispatch_action(cx, TabBarAction::DragHitTab(hit, *tab_id));
+                }*/
+            });
+        }
+        /*
+        match event.drag_hits(cx, self.scroll_bars.area()) {
+            DragHit::NoHit=>(),
+            hit=>dispatch_action(cx, TabBarAction::DragHitTabBar(hit))
+        }*/
+        /*
+        match event.drag_hits(cx, self.scroll_view.area()) {
+            DragHit::Drag(f) => match f.state {
+                DragState::In => {
+                    self.is_dragged = true;
+                    self.redraw(cx);
+                    f.action.set(DragAction::Copy);
+                }
+                DragState::Out => {
+                    self.is_dragged = false;
+                    self.redraw(cx);
+                }
+                DragState::Over => match event {
+                    Event::Drag(event) => {
+                        event.action.set(DragAction::Copy);
+                    }
+                    _ => panic!(),
+                },
+            },
+            DragHit::Drop(f) => {
+                self.is_dragged = false;
+                self.redraw(cx);
+                dispatch_action(cx, TabBarAction::ReceivedDraggedItem(f.dragged_item.clone()))
+            }
+            _ => {}
+        }*/
+    }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
+        if self.draw_state.begin(cx, ()) {
+            return WidgetDraw::hook_above()
+        }
+        if let Some(()) = self.draw_state.get() {
+            self.draw_state.end();
+        }
+        WidgetDraw::done()
+    }
+}
+
+
 impl TabBar {
-    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) {
+    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>, walk:Walk) {
         self.selected_tab = selected_tab;
         //if selected_tab.is_some(){
         //    self.selected_tab_id = None
         // }
-        self.scroll_bars.begin(cx, self.walk, Layout::flow_right());
+        self.scroll_bars.begin(cx, walk, Layout::flow_right());
         self.tab_order.clear();
     }
     
@@ -165,76 +258,15 @@ impl TabBar {
         None
     }
     
-    pub fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-    )->Vec<TabBarAction>{
-        let mut actions = Vec::new();
-        if self.scroll_bars.handle_event(cx, event).len()>0{
-            self.view_area.redraw(cx);
-        };
-        
-        if let Some(tab_id) = self.next_selected_tab_id.take() {
-            actions.push(TabBarAction::TabWasPressed(tab_id));
-        }
-        for (tab_id, tab) in self.tabs.iter_mut() {
-            tab.handle_event_with(cx, event, &mut | _cx, action | match action {
-                TabAction::WasPressed => {
-                    actions.push(TabBarAction::TabWasPressed(*tab_id));
-                }
-                TabAction::CloseWasPressed => {
-                    actions.push(TabBarAction::TabCloseWasPressed(*tab_id));
-                }
-                TabAction::ShouldTabStartDrag=>{
-                    actions.push(TabBarAction::ShouldTabStartDrag(*tab_id));
-                }
-                TabAction::ShouldTabStopDrag=>{
-                }/*
-                TabAction::DragHit(hit)=>{
-                    dispatch_action(cx, TabBarAction::DragHitTab(hit, *tab_id));
-                }*/
-            });
-        }
-        /*
-        match event.drag_hits(cx, self.scroll_bars.area()) {
-            DragHit::NoHit=>(),
-            hit=>dispatch_action(cx, TabBarAction::DragHitTabBar(hit))
-        }*/
-        /*
-        match event.drag_hits(cx, self.scroll_view.area()) {
-            DragHit::Drag(f) => match f.state {
-                DragState::In => {
-                    self.is_dragged = true;
-                    self.redraw(cx);
-                    f.action.set(DragAction::Copy);
-                }
-                DragState::Out => {
-                    self.is_dragged = false;
-                    self.redraw(cx);
-                }
-                DragState::Over => match event {
-                    Event::Drag(event) => {
-                        event.action.set(DragAction::Copy);
-                    }
-                    _ => panic!(),
-                },
-            },
-            DragHit::Drop(f) => {
-                self.is_dragged = false;
-                self.redraw(cx);
-                dispatch_action(cx, TabBarAction::ReceivedDraggedItem(f.dragged_item.clone()))
-            }
-            _ => {}
-        }*/
-        actions
-    }
+
 }
 
+#[derive(Clone, DefaultNone)]
 pub enum TabBarAction {
     TabWasPressed(LiveId),
     ShouldTabStartDrag(LiveId),
     TabCloseWasPressed(LiveId),
+    None
     //DragHitTab(DragHit, LiveId),
     //DragHitTabBar(DragHit)
 }

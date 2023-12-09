@@ -48,18 +48,15 @@ impl Widget for StudioEditor {
         WidgetDraw::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
         let session_id = scope.path.path_id(0);
         let app_scope = scope.data.get_mut::<AppScope>();
         let uid = self.widget_uid();
-        let mut actions = WidgetActions::new(); 
+        
         if let Some(session) = app_scope.file_system.get_session_mut(session_id){
-            for action in self.editor.handle_event(cx, event, session){
-                actions.push_single(uid, &scope.path, action);
-            }
+            self.editor.handle_event(cx, event, session);
             app_scope.file_system.handle_sessions();
         }
-        actions
     }
 }
 #[derive(Clone, Debug, PartialEq, WidgetRef)]
