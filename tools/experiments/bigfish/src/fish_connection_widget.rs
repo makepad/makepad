@@ -1,7 +1,73 @@
 use crate::{makepad_draw::*, makepad_widgets::widget::*, makepad_widgets::*};
 
 live_design! {
-    FishConnectionWidget = {{FishConnectionWidget}} {}
+    FishConnectionWidget = {{FishConnectionWidget}} {
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_radio: {hover: 0.0}
+                        draw_text: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_radio: {hover: 1.0}
+                        draw_text: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_radio: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_radio: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                    }
+                }
+            }
+            selected = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_radio: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
+                        draw_text: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_radio: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
+                        draw_text: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
+                    }
+                }
+            }
+        }
+
+
+
+    }
 }
 
 #[derive(Clone, WidgetAction)]
