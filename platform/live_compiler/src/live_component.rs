@@ -24,7 +24,7 @@ pub struct LiveComponentInfo {
 }
 
 pub trait LiveComponentRegistry {
-    fn type_id(&self) -> LiveType;
+    fn ref_cast_type_id(&self) -> LiveType;
     fn get_component_info(&self, name: LiveId) -> Option<LiveComponentInfo>;
     fn component_type(&self) -> LiveId;
     fn get_module_set(&self, set: &mut BTreeSet<LiveModuleId>);

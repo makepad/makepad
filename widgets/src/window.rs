@@ -109,12 +109,11 @@ impl LiveHook for Window {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum WindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
-    ViewActions(Vec<WidgetActionWrap>),
     None
 }
 
@@ -182,8 +181,7 @@ impl Window {
 }
 
 impl Widget for Window {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions {
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         
         self.debug_view.handle_event(cx, event);
@@ -203,7 +201,7 @@ impl Widget for Window {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    actions.push_single(uid, &scope.path, WindowAction::WindowClosed)
+                    cx.widget_action(uid, &scope.path, WindowAction::WindowClosed)
                 }
                 true
             }
@@ -224,8 +222,8 @@ impl Widget for Window {
                         }
                         _ => ()
                     }
-                    actions.push_single(uid, &scope.path, WindowAction::WindowGeomChange(ev.clone()));
-                    return actions
+                    cx.widget_action(uid, &scope.path, WindowAction::WindowGeomChange(ev.clone()));
+                    return
                 }
                 true
             },
@@ -255,32 +253,32 @@ impl Widget for Window {
             Event::Scroll(ev) => ev.window_id != self.window.window_id(),
             _ => false
         };
-                
+        
         if is_for_other_window {
-            actions.push_single(uid, &scope.path, WindowAction::EventForOtherWindow);
-            return actions
+            cx.widget_action(uid, &scope.path, WindowAction::EventForOtherWindow);
+            return
         }
         else {
-            let view_actions = self.view.handle_event(cx, event, scope);
-            if view_actions.not_empty() {
-                if self.button(id!(min)).clicked(&actions) {
-                    self.window.minimize(cx);
+            self.view.handle_event(cx, event, scope);
+        }
+        
+        if let Event::Actions(actions) = event{
+            if self.button(id!(min)).clicked(&actions) {
+                self.window.minimize(cx);
+            }
+            if self.button(id!(max)).clicked(&actions) {
+                if self.window.is_fullscreen(cx) {
+                    self.window.restore(cx);
                 }
-                if self.button(id!(max)).clicked(&actions) {
-                    if self.window.is_fullscreen(cx) {
-                        self.window.restore(cx);
-                    }
-                    else {
-                        self.window.maximize(cx);
-                    }
+                else {
+                    self.window.maximize(cx);
                 }
-                if self.button(id!(close)).clicked(&actions) {
-                    self.window.close(cx);
-                }
-                if self.button(id!(xr_on)).clicked(&actions) {
-                    cx.xr_start_presenting();
-                }
-                actions.extend(view_actions);
+            }
+            if self.button(id!(close)).clicked(&actions) {
+                self.window.close(cx);
+            }
+            if self.button(id!(xr_on)).clicked(&actions) {
+                cx.xr_start_presenting();
             }
         }
                 
@@ -288,6 +286,7 @@ impl Widget for Window {
             Cx2d::reset_fonts_atlas(cx);
             Cx2d::reset_icon_atlas(cx);
         }
+        
         if let Event::MouseMove(ev) = event {
             if let OsType::LinuxDirect = cx.os_type() {
                 // ok move our mouse cursor
@@ -298,8 +297,6 @@ impl Widget for Window {
                 })
             }
         }
-        
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}

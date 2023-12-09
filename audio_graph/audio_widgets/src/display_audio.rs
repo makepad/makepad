@@ -70,8 +70,7 @@ pub struct DisplayAudio {
 
 
 impl Widget for DisplayAudio {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope)->WidgetActions{
-        WidgetActions::new()
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -91,7 +90,7 @@ impl Widget for DisplayAudio {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum DisplayAudioAction {
     None
 }

@@ -122,11 +122,12 @@ impl AppMain for App {
             }
         }
         
-        let actions = self.ui.handle_event(cx, event, &mut scope);
-        
-        if self.ui.button(id!(send_button)).clicked(&actions) {
-            let user_prompt = self.ui.text_input(id!(message_input)).text();
-            Self::send_message(cx, user_prompt);
+        self.ui.handle_event(cx, event, &mut scope);
+        if let Event::Actions(actions) = event{
+            if self.ui.button(id!(send_button)).clicked(&actions) {
+                let user_prompt = self.ui.text_input(id!(message_input)).text();
+                Self::send_message(cx, user_prompt);
+            }
         }
     }
 }
