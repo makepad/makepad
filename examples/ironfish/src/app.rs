@@ -206,7 +206,7 @@ impl AppMain for App {
         }
         let ui = self.ui.clone();
         let mut synth_db = DataBindingStore::new();
-        let mut actions = ui.handle_event(cx, event, &mut scope);
+        ui.handle_event(cx, event, &mut scope);
         
         // handle preset lists events
         /*for list in preset_lists.iter() {
@@ -234,32 +234,7 @@ impl AppMain for App {
             cx.use_audio_outputs(&devices.default_output());
         }
         
-        ui.radio_button_set(ids!(
-            oscillators.tab1,
-            oscillators.tab2,
-        )).selected_to_visible(cx, &ui, &actions, ids!(
-            oscillators.osc1,
-            oscillators.osc2,
-        ));
-        
-        ui.radio_button_set(ids!(
-            filter_modes.tab1,
-            filter_modes.tab2,
-        )).selected_to_visible(cx, &ui, &actions, ids!(
-            preset_pages.tab1_frame,
-            preset_pages.tab2_frame,
-        ));
-        
-        ui.radio_button_set(ids!(
-            mobile_modes.tab1,
-            mobile_modes.tab2,
-            mobile_modes.tab3,
-        )).selected_to_visible(cx, &ui, &actions, ids!(
-            application_pages.tab1_frame,
-            application_pages.tab2_frame,
-            application_pages.tab3_frame,
-        ));
-        
+       
         let display_audio = ui.display_audio_set(ids!(display_audio));
         
         let mut buffers = 0;
@@ -284,41 +259,70 @@ impl AppMain for App {
             }
         }
         
-        for note in piano.notes_played(&actions) {
-            self.audio_graph.send_midi_data(MidiNote {
-                channel: 0,
-                is_on: note.is_on,
-                note_number: note.note_number,
-                velocity: note.velocity
-            }.into());
+        if let Event::Actions(actions) = event{
+            
+            ui.radio_button_set(ids!(
+                oscillators.tab1,
+                oscillators.tab2,
+            )).selected_to_visible(cx, &ui, actions, ids!(
+                oscillators.osc1,
+                oscillators.osc2,
+            ));
+                    
+            ui.radio_button_set(ids!(
+                filter_modes.tab1,
+                filter_modes.tab2,
+            )).selected_to_visible(cx, &ui, actions, ids!(
+                preset_pages.tab1_frame,
+                preset_pages.tab2_frame,
+            ));
+                    
+            ui.radio_button_set(ids!(
+                mobile_modes.tab1,
+                mobile_modes.tab2,
+                mobile_modes.tab3,
+            )).selected_to_visible(cx, &ui, actions, ids!(
+                application_pages.tab1_frame,
+                application_pages.tab2_frame,
+                application_pages.tab3_frame,
+            ));
+            
+            
+            for note in piano.notes_played(&actions) {
+                self.audio_graph.send_midi_data(MidiNote {
+                    channel: 0,
+                    is_on: note.is_on,
+                    note_number: note.note_number,
+                    velocity: note.velocity
+                }.into());
+            }
+            
+            if ui.button_set(ids!(panic)).clicked(&actions) {
+                //log!("hello world"); 
+                cx.midi_reset();
+                self.audio_graph.all_notes_off();
+            }
+            
+            let sequencer = ui.sequencer(id!(sequencer));
+            // lets fetch and update the tick.
+            
+            if ui.button_set(ids!(clear_grid)).clicked(&actions) {
+                sequencer.clear_grid(cx);
+            }
+            
+            if ui.button_set(ids!(grid_down)).clicked(&actions) {
+                sequencer.grid_down(cx);
+            }
+            
+            if ui.button_set(ids!(grid_up)).clicked(&actions) {
+                sequencer.grid_up(cx);
+            }
+            
+            self.data_bind(synth_db.widgets_to_data(cx, actions, &ui));
+            self.data_bind(synth_db.data_to_widgets(cx, actions, &ui));
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            ironfish.settings.apply_over(cx, &synth_db.nodes);
         }
-        
-        if ui.button_set(ids!(panic)).clicked(&actions) {
-            //log!("hello world"); 
-            cx.midi_reset();
-            self.audio_graph.all_notes_off();
-        }
-        
-        let sequencer = ui.sequencer(id!(sequencer));
-        // lets fetch and update the tick.
-        
-        if ui.button_set(ids!(clear_grid)).clicked(&actions) {
-            sequencer.clear_grid(cx, &mut actions);
-        }
-        
-        if ui.button_set(ids!(grid_down)).clicked(&actions) {
-            sequencer.grid_down(cx, &mut actions);
-        }
-        
-        if ui.button_set(ids!(grid_up)).clicked(&actions) {
-            sequencer.grid_up(cx, &mut actions);
-        }
-        
-        self.data_bind(synth_db.widgets_to_data(cx, &actions, &ui));
-        self.data_bind(synth_db.data_to_widgets(cx, &actions, &ui));
-        
-        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        ironfish.settings.apply_over(cx, &synth_db.nodes);
     }
     /*
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {

@@ -11,6 +11,7 @@ mod cx_api;
 
 #[macro_use]
 pub mod log;
+pub mod action;
 
 pub mod live_traits;
 pub mod live_cx;
@@ -196,6 +197,12 @@ pub use {
             HitOptions,
             DragHitEvent,
             DropHitEvent,
+        },
+        action::{
+            Action,
+            Actions,
+            ActionsBuf, 
+            ActionCast
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,

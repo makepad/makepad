@@ -157,10 +157,27 @@ impl Cx {
         }
     }
     
+    pub fn handle_actions(&mut self) {
+        // post op events like signals, triggers and key-focus
+        let mut counter = 0;
+        while self.new_actions.len() != 0 {
+            counter += 1;
+            let mut actions = Vec::new();
+            std::mem::swap(&mut self.new_actions, &mut actions);
+            self.inner_call_event_handler(&Event::Actions(actions));
+            self.inner_key_focus_change();
+            if counter > 100 {
+                crate::error!("Action feedback loop detected");
+                break
+            }
+        }
+    }
+    
     pub (crate) fn call_event_handler(&mut self, event: &Event) {
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
         self.handle_triggers();
+        self.handle_actions();
     }
 
     // helpers

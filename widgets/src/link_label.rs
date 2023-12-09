@@ -28,7 +28,7 @@ impl Widget for LinkLabel {
         cx: &mut Cx,
         event: &Event,
         scope: &mut WidgetScope,
-    ) -> WidgetActions {
+    ) {
         self.button.handle_event(cx, event, scope)
     }
     
@@ -57,9 +57,9 @@ impl Widget for LinkLabel {
 pub struct LinkLabelRef(WidgetRef);
 
 impl LinkLabelRef {
-    pub fn clicked(&self, actions:&WidgetActions) -> bool {
+    pub fn clicked(&self, actions:&Actions) -> bool {
         if let Some(inner) = self.borrow(){ 
-            if let Some(item) = actions.find_single_action(inner.button.widget_uid()) {
+            if let Some(item) = actions.find_widget_action(inner.button.widget_uid()) {
                 if let ButtonAction::Clicked = item.cast() {
                     return true
                 }
@@ -68,9 +68,9 @@ impl LinkLabelRef {
         false
     }
     
-    pub fn pressed(&self, actions:&WidgetActions) -> bool {
+    pub fn pressed(&self, actions:&Actions) -> bool {
         if let Some(inner) = self.borrow(){ 
-            if let Some(item) = actions.find_single_action(inner.button.widget_uid()) {
+            if let Some(item) = actions.find_widget_action(inner.button.widget_uid()) {
                 if let ButtonAction::Pressed = item.cast() {
                     return true
                 }

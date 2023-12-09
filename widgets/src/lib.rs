@@ -94,14 +94,15 @@ pub use crate::{
         WidgetDraw,
         WidgetDrawApi,
         CreateAt,
-        WidgetActions,
+        WidgetActionCxExt,
         WidgetActionsApi,
-        WidgetActionWrap,
+        WidgetActionApi,
+        WidgetAction,
+        WidgetActionCast,
         WidgetRef,
         Widget,
         WidgetRegistry,
         WidgetFactory,
-        WidgetAction,
         DrawStateWrap,
     }
 };

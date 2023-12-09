@@ -311,8 +311,7 @@ impl Widget for RunView {
         WidgetDraw::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
-        let actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
         
         let run_view_id = scope.path.path_id(0);
         let manager = &scope.data.get::<AppScope>().build_manager;
@@ -375,7 +374,6 @@ impl Widget for RunView {
             }
             _ => ()
         }
-        actions
     }
     
 }
