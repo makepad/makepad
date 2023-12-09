@@ -240,7 +240,7 @@ impl LiveHook for Video {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum VideoAction {
     None,
     PlaybackPrepared,
@@ -264,31 +264,30 @@ impl Widget for Video {
         WidgetDraw::done()
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope)->WidgetActions{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope){
         let uid = self.widget_uid();
-        let mut actions = WidgetActions::new();
         match event{
             Event::VideoPlaybackPrepared(event)=> if event.video_id == self.id {
                 self.handle_playback_prepared(cx, event);
-                actions.push_single(uid, &scope.path, VideoAction::PlaybackPrepared);
+                cx.widget_action(uid, &scope.path, VideoAction::PlaybackPrepared);
             }
             Event::VideoTextureUpdated(event)=>if event.video_id == self.id {
                 self.redraw(cx);
                 if self.playback_state == PlaybackState::Prepared {
                     self.playback_state = PlaybackState::Playing;
-                    actions.push_single(uid, &scope.path, VideoAction::PlaybackBegan);
+                    cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
                 }
-                actions.push_single(uid, &scope.path, VideoAction::TextureUpdated);
+                cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
             }
             Event::VideoPlaybackCompleted(event) =>  if event.video_id == self.id {
                 if !self.is_looping {
                     self.playback_state = PlaybackState::Completed;
-                    actions.push_single(uid, &scope.path, VideoAction::PlaybackCompleted);
+                    cx.widget_action(uid, &scope.path, VideoAction::PlaybackCompleted);
                 }
             }
             Event::VideoPlaybackResourcesReleased(event) => if event.video_id == self.id {
                 self.playback_state = PlaybackState::Unprepared;
-                actions.push_single(uid, &scope.path, VideoAction::PlayerReset);
+                cx.widget_action(uid, &scope.path, VideoAction::PlayerReset);
             }
             Event::TextureHandleReady(event) => {
                 if event.texture_id == self.texture.clone().unwrap().texture_id() {
@@ -302,7 +301,6 @@ impl Widget for Video {
         self.handle_gestures(cx, event);
         self.handle_activity_events(cx, event);
         self.handle_errors(event);
-        actions
     }
 }
 

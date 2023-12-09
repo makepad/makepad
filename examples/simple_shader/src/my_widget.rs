@@ -32,7 +32,7 @@ impl LiveHook for MyWidget{
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum MyWidgetAction {
     None
 }
@@ -43,7 +43,7 @@ impl Widget for MyWidget{
         cx: &mut Cx,
         event: &Event,
         _scope: &mut WidgetScope
-    )->WidgetActions{
+    ){
         if let Some(ne) = self.next_frame.is_event(event) {
             // update time to use for animation
             self.time = (ne.time * 0.001).fract() as f32;
@@ -51,7 +51,6 @@ impl Widget for MyWidget{
             self.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
-        WidgetActions::new()
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{

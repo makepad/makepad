@@ -121,7 +121,7 @@ impl LiveHook for Sequencer {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum SequencerAction {
     Change,
     None
@@ -239,15 +239,13 @@ impl Widget for Sequencer {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)->WidgetActions{
-        let mut actions = WidgetActions::new();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         let uid = self.widget_uid();
         for button in self.buttons.values_mut() {
             if button.handle_event_changed(cx, event, self.area){
-                actions.push_single(uid, &scope.path, SequencerAction::Change);
+                cx.widget_action(uid, &scope.path, SequencerAction::Change);
             }
         }
-        actions
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -282,9 +280,9 @@ impl Widget for Sequencer {
         WidgetDraw::done()
     }
     
-    fn widget_to_data(&self, cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
+    fn widget_to_data(&self, cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         let uid = self.widget_uid();
-        if actions.find_single_action(uid).is_some() {
+        if actions.find_widget_action(uid).is_some() {
             self.write_state_to_data(cx, nodes, path);
             true
         }
@@ -313,16 +311,16 @@ pub struct SequencerRef(WidgetRef);
 
 impl SequencerRef {
     
-    pub fn clear_grid(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+    pub fn clear_grid(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {*step = 0};
             inner.set_steps(cx, &steps);
-            actions.push_single(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
+            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
         }
     }
     
-    pub fn grid_down(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+    pub fn grid_down(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {
@@ -331,11 +329,11 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            actions.push_single(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
+            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
         }
     }
     
-    pub fn grid_up(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+    pub fn grid_up(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {
@@ -344,7 +342,7 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            actions.push_single(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
+            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
         }
     }
 }
