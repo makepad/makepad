@@ -109,13 +109,37 @@ impl FishConnectionWidget {
     pub fn draw_walk_fishconnection(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_line.begin(cx, walk, self.layout);
         self.draw_line.end(cx);
-        self.draw_line.draw_line_abs(
-            cx,
-            self.start_pos,
-            self.end_pos,
-            self.color,
-            self.line_width,
-        );
+
+        if self.end_pos.x < self.start_pos.x {
+        } else {
+            let midpoint = (self.end_pos + self.start_pos) * 0.5;
+            let deltatomid = midpoint - self.start_pos;
+
+            self.draw_line.draw_line_abs(
+                cx,
+                self.start_pos,
+                self.start_pos + dvec2(deltatomid.x, 0.),
+                self.color,
+                self.line_width,
+            );
+
+            self.draw_line.draw_line_abs(
+                cx,
+                self.end_pos - dvec2(deltatomid.x, 0.),
+                self.start_pos + dvec2(deltatomid.x, 0.),
+                self.color,
+                self.line_width,
+            );
+
+            self.draw_line.draw_line_abs(
+                cx,
+                self.end_pos,
+                self.end_pos - dvec2(deltatomid.x, 0.),
+                self.color,
+                self.line_width,
+            );
+        }
+
         //   self.draw_line.draw_abs(cx, cx.turtle().unscrolled_rect());
     }
 }
