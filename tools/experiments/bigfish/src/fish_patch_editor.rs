@@ -96,7 +96,7 @@ impl Widget for FishPatchEditor {
         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
         //let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
-        self.scroll_bars.begin(cx, walk, Layout::flow_overlay());   
+        self.scroll_bars.begin(cx, walk, Layout::flow_overlay());
 
         let _turtle_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
@@ -125,7 +125,7 @@ impl Widget for FishPatchEditor {
                 },
             );
             //println!("{} {:?} ({:?},{:?})", item_id, i.id, i.x, i.y);
- 
+
             item.draw_all(cx, &mut WidgetScope::default());
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
@@ -184,8 +184,8 @@ impl Widget for FishPatchEditor {
                 live! {
                     start_pos: (dvec2(blockfrom.x as f64 + 250.0, blockfrom.y as f64 + 30.  * _portfrom.id as f64) - scroll_pos),
                     end_pos: (dvec2(blockto.x as f64, blockto.y as f64) - scroll_pos + 30. * _portto.id as f64),
-
-                //       abs_pos: (dvec2(i.x as f64, i.y as f64 + 30.)),
+                    color: #ff0,
+                      abs_pos: (dvec2(0.,0.)),
                    },
             );
 
@@ -193,7 +193,7 @@ impl Widget for FishPatchEditor {
 
             // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
-        
+
         self.scroll_bars.end(cx);
 
         WidgetDraw::done()
