@@ -226,9 +226,6 @@ struct LogList{
     #[deref] view:View
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct LogListRef(WidgetRef);
-
 impl LogList{
     fn draw_log(&mut self, cx: &mut Cx2d, list:&mut PortalList, build_manager:&mut BuildManager){
         let mut scope =  WidgetScope::default();

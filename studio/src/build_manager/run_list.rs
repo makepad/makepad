@@ -148,9 +148,6 @@ struct RunList{
     #[deref] view:View
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct RunListRef(WidgetRef);
-
 impl RunList{
     fn draw_run_list(&mut self, cx: &mut Cx2d, list:&mut FlatList, build_manager:&mut BuildManager){
         let mut scope =  WidgetScope::default();
