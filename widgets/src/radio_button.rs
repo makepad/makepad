@@ -57,7 +57,7 @@ impl LiveHook for RadioButton{
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum RadioButtonAction {
     Clicked,
     None

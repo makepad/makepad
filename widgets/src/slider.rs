@@ -64,7 +64,7 @@ impl LiveHook for Slider{
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum SliderAction {
     StartSlide,
     TextSlide(f64),

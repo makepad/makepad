@@ -5,7 +5,8 @@ use {
     std::any::TypeId,
     std::cell::RefCell,
     std::rc::Rc,
-    std::any::Any
+    std::any::Any,
+    std::fmt
 };
 pub use crate::register_widget;
 
@@ -551,7 +552,7 @@ impl WidgetRef {
     pub fn borrow_mut<T: 'static + Widget>(&self) -> Option<std::cell::RefMut<'_, T >> {
         if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), | inner | {
             if let Some(inner) = inner.as_mut() {
-                inner.widget.cast_mut::<T>()
+                inner.widget.downcast_mut::<T>()
             }
             else {
                 None
@@ -567,7 +568,7 @@ impl WidgetRef {
     pub fn borrow<T: 'static + Widget>(&self) -> Option<std::cell::Ref<'_, T >> {
         if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), | inner | {
             if let Some(inner) = inner.as_ref() {
-                inner.widget.cast::<T>()
+                inner.widget.downcast_ref::<T>()
             }
             else {
                 None
@@ -650,16 +651,26 @@ impl LiveNew for WidgetRef {
 
 pub trait WidgetActionApi: 'static {
     fn ref_cast_type_id(&self) -> TypeId;
+    fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn box_clone(&self) -> Box<dyn WidgetActionApi>;
 }
 
-impl<T: 'static + ? Sized + Clone> WidgetActionApi for T {
+impl<T: 'static + ? Sized + Clone + Debug> WidgetActionApi for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
         
     fn box_clone(&self) -> Box<dyn WidgetActionApi> {
         Box::new((*self).clone())
+    }
+    fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
+        self.fmt(f)
+    }
+}
+
+impl Debug for dyn WidgetActionApi{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
+        self.debug_fmt(f)
     }
 }
 
@@ -710,12 +721,12 @@ pub struct WidgetActionGroup{
     pub group_uid: WidgetUid,
     pub item_uid: WidgetUid,
 }
-/*
-impl Debug for WidgetActionWrap {
+
+impl Debug for WidgetAction {
     fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
-        write!(f, "WidgetActionItem {:?}", self.kind)
+        write!(f, "WidgetAction {:?} {:?} {:?} {:?}", self.action, self.widget_uid, self.path, self.group)
     }
-}*/
+}
 
 pub trait WidgetActionCxExt {
     fn widget_action(&mut self, uid:WidgetUid, path:&WidgetPath, t:impl WidgetActionApi);

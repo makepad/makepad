@@ -13,14 +13,14 @@ pub fn generate_ref_cast_api_impl(input:TokenStream)->TokenStream{
         tb.add("        let concrete = self.ref_cast_type_id();");
         tb.add("        t == concrete");
         tb.add("    }");
-        tb.add("    pub fn cast<T: ").ident(&ident).add(" + 'static >(&self) -> Option<&T> {");
+        tb.add("    pub fn downcast_ref<T: ").ident(&ident).add(" + 'static >(&self) -> Option<&T> {");
         tb.add("        if self.is::<T>() {");
         tb.add("            Some(unsafe {&*(self as *const dyn ").ident(&ident).add(" as *const T)})");
         tb.add("        } else {");
         tb.add("            None");
         tb.add("        }");
         tb.add("    }");
-        tb.add("    pub fn cast_mut<T: ").ident(&ident).add(" + 'static >(&mut self) -> Option<&mut T> {");
+        tb.add("    pub fn downcast_mut<T: ").ident(&ident).add(" + 'static >(&mut self) -> Option<&mut T> {");
         tb.add("        if self.is::<T>() {");
         tb.add("            Some(unsafe {&mut *(self as *const dyn ").ident(&ident).add(" as *mut T)})");
         tb.add("        } else {");

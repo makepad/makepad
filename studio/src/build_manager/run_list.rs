@@ -136,7 +136,7 @@ live_design!{
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum RunListAction{
     Create(LiveId, String),
     Destroy(LiveId),

@@ -121,7 +121,7 @@ impl LiveHook for FileTree {
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum FileTreeAction {
     None,
     FileClicked(FileNodeId),

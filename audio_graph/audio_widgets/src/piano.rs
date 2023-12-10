@@ -168,14 +168,14 @@ impl LiveHook for Piano {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone,  Debug)]
 pub struct PianoNote {
     pub is_on: bool,
     pub note_number: u8,
     pub velocity: u8
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum PianoAction {
     Note(PianoNote),
     None
