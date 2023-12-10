@@ -57,7 +57,7 @@ impl LiveHook for CheckBox {
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum CheckBoxAction {
     Change(bool),
     None

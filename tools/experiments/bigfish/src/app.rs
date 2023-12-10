@@ -204,41 +204,31 @@ impl LiveHook for App {
     // after_new_from_doc
 }
 
-impl App {
-    async fn _do_network_request(_cx: CxRef, _ui: WidgetRef, _url: &str) -> String {
-        "".to_string()
+impl MatchEvent for App {
+    fn handle_startup(&mut self, _cx:&mut Cx){
+        self.document = FishDoc::create_test_doc();
+    }
+    
+    fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
+        if self.ui.button(id!(button1)).clicked(&actions) {
+            self.counter += 1;
+            let label = self.ui.label(id!(label1));
+            label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
+        }
+            
+        if self.ui.button(id!(savebutton)).clicked(&actions) {
+            let _ = self.document.save(&"testout.fish").is_ok();
+        }
+            
+        if self.ui.button(id!(loadbutton)).clicked(&actions) {
+            let _ = self.document.load(&"testout.fish").is_ok();
+        }
     }
 }
 
 impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut scope = WidgetScope::new(&mut self.document);
-
-        if let Event::Draw(event) = event {
-            return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
-        }
-
-        self.ui.handle_event(cx, event, &mut scope);
-        
-        if let Event::Actions(actions) = event{
-    
-            if self.ui.button(id!(button1)).clicked(&actions) {
-                self.counter += 1;
-                let label = self.ui.label(id!(label1));
-                label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
-            }
-    
-            if self.ui.button(id!(savebutton)).clicked(&actions) {
-                let _ = self.document.save(&"testout.fish").is_ok();
-            }
-    
-            if self.ui.button(id!(loadbutton)).clicked(&actions) {
-                let _ = self.document.load(&"testout.fish").is_ok();
-            }
-        }
-    
-        if let Event::Construct = event {
-            self.document = FishDoc::create_test_doc();
-        }
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) { 
+        self.match_event(cx, event); 
+        self.ui.handle_event(cx, event, &mut WidgetScope::new(&mut self.document));
     }
 }

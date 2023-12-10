@@ -52,6 +52,7 @@ pub mod nav_control;
 
 pub mod view;
 pub mod widget;
+pub mod widget_match_event;
 
 #[macro_use]
 pub mod data_binding;
@@ -85,6 +86,7 @@ pub use crate::{
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
     slides_view::{SlidesView},
+    widget_match_event::WidgetMatchEvent,
     widget::{
         WidgetScope,
         WidgetSet,
@@ -96,9 +98,10 @@ pub use crate::{
         CreateAt,
         WidgetActionCxExt,
         WidgetActionsApi,
-        WidgetActionApi,
+        WidgetActionTrait,
         WidgetAction,
         WidgetActionCast,
+        WidgetActionOptionApi,
         WidgetRef,
         Widget,
         WidgetRegistry,

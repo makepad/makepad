@@ -111,7 +111,7 @@ impl Cx {
         let mut swapchain = None;
         let mut present_index = 0;
         
-        self.call_event_handler(&Event::Construct);
+        self.call_event_handler(&Event::Startup);
 
         let mut previous_tick_time_s: Option<f64> = None;
         let mut previous_elapsed_s = 0f64;
