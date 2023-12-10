@@ -98,7 +98,7 @@ pub use crate::{
         CreateAt,
         WidgetActionCxExt,
         WidgetActionsApi,
-        WidgetActionApi,
+        WidgetActionTrait,
         WidgetAction,
         WidgetActionCast,
         WidgetActionOptionApi,
