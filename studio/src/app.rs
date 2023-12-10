@@ -86,7 +86,7 @@ pub struct AppScope{
 
 // all global app commands coming in from keybindings, and UI components
 
-#[derive(DefaultNone, Clone)]
+#[derive(DefaultNone, Debug, Clone)]
 pub enum AppAction{
     JumpTo(JumpTo),
     RedrawLog,
@@ -100,6 +100,7 @@ pub enum AppAction{
 
 impl MatchEvent for App{
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
+        log!("REDRAW LOG {:?}", action);
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.file_tree(id!(file_tree));
         let log_list = self.ui.log_list(id!(log_list));
@@ -139,6 +140,7 @@ impl MatchEvent for App{
                 self.scope.file_system.reload_file_tree();
             }
             AppAction::RedrawLog=>{
+                
                 self.ui.log_list(id!(log_list)).redraw(cx);
             }
             AppAction::StartRecompile=>{
