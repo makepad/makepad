@@ -704,38 +704,39 @@ pub trait WidgetActionsApi {
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
 }
 
-pub trait WidgetActionCast {
-    fn widget_uid_eq(&self, widget_uid: WidgetUid) -> bool;
-    fn cast_widget_uid_eq<T: WidgetActionApi + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
-    fn cast_widget_action<T: WidgetActionApi + 'static >(&self) -> T where T: Default + Clone;
+pub trait WidgetActionOptionApi{
+    fn widget_uid_eq(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
+    fn cast<T: WidgetActionApi + 'static >(&self) -> T where T: Default + Clone;
 }
 
-impl WidgetActionCast for Action{
-    fn widget_uid_eq(&self, widget_uid: WidgetUid) -> bool{
-        if let Some(item) = self.downcast_ref::<WidgetAction>() {
-            item.widget_uid == widget_uid
-        }
-        else {
-            false
-        }
-    }
-    
-    fn cast_widget_uid_eq<T: WidgetActionApi + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone{
-        if let Some(item) = self.downcast_ref::<WidgetAction>() {
+impl WidgetActionOptionApi for Option<&WidgetAction>{
+    fn widget_uid_eq(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>{
+        if let Some(item) = self {
             if item.widget_uid == widget_uid{
-                return item.action.cast::<T>()
+                return Some(item)
+                                
             }
         }
-        T::default()
+        None
     }
     
-    fn cast_widget_action<T: WidgetActionApi + 'static >(&self) -> T where T: Default + Clone{
-        if let Some(item) = self.downcast_ref::<WidgetAction>() {
+    fn cast<T: WidgetActionApi + 'static >(&self) -> T where T: Default + Clone{
+        if let Some(item) = self{
             item.action.cast::<T>()
         }
         else {
             T::default()
         }
+    }
+}
+
+pub trait WidgetActionCast {
+    fn as_widget_action(&self) -> Option<&WidgetAction>;
+}
+    
+impl WidgetActionCast for Action{
+    fn as_widget_action(&self) -> Option<&WidgetAction>{
+        self.downcast_ref::<WidgetAction>()
     }
 }
 
@@ -795,7 +796,6 @@ impl WidgetAction {
         self.action.cast::<T>()
     }
 }
-
 
 pub struct DrawStateWrap<T: Clone> {
     state: Option<T>,
