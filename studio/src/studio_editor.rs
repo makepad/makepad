@@ -51,7 +51,6 @@ impl Widget for StudioEditor {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
         let session_id = scope.path.path_id(0);
         let app_scope = scope.data.get_mut::<AppScope>();
-        let uid = self.widget_uid();
         
         if let Some(session) = app_scope.file_system.get_session_mut(session_id){
             self.editor.handle_event(cx, event, session);
