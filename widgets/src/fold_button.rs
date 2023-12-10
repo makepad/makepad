@@ -8,7 +8,7 @@ live_design!{
     FoldButtonBase = {{FoldButton}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct FoldButton {
     #[animator] animator: Animator,
     
@@ -16,12 +16,6 @@ pub struct FoldButton {
     #[live] abs_size: DVec2,
     #[live] abs_offset: DVec2,
     #[walk] walk: Walk,
-}
-
-impl LiveHook for FoldButton{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,FoldButton)
-    }
 }
 
 #[derive(Clone, Debug, DefaultNone)]

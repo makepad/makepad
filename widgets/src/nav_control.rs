@@ -7,7 +7,7 @@ live_design!{
     NavControlBase = {{NavControl}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct NavControl {
     #[live] draw_list: DrawList2d,
     #[live] draw_focus: DrawQuad,

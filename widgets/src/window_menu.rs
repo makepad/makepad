@@ -32,7 +32,7 @@ pub enum WindowMenuItem {
     Line
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct WindowMenu{
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -45,6 +45,7 @@ pub enum WindowMenuAction {
     None
 }
 
+    
 impl LiveHook for WindowMenu {
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
@@ -113,9 +114,6 @@ impl LiveHook for WindowMenu {
         }
     }
     
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, WindowMenu);
-    }
 }
 
 

@@ -33,8 +33,8 @@ pub struct App {
     #[rust] data: StudioData,
 }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App{
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::makepad_code_editor::live_design(cx);
         crate::build_manager::run_list::live_design(cx);
@@ -46,7 +46,9 @@ impl LiveHook for App {
         // for macos
         cx.start_stdin_service();
     }
-    
+}
+
+impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         let mut root = "./".to_string();
         for arg in std::env::args(){

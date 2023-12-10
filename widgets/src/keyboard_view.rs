@@ -1,4 +1,5 @@
 use crate::{
+    makepad_derive_widget::*,
     makepad_draw::*,
     view::*,
     widget::*,
@@ -9,7 +10,7 @@ live_design!{
 }
 
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct KeyboardView {
     #[deref] view: View,
     #[rust] area: Area,
@@ -29,12 +30,6 @@ enum AnimState{
     Opening{duration:f64, start_time:f64, ease:Ease, height:f64},
     Open,
     Closing{duration:f64, start_time:f64,  ease:Ease, height:f64}
-}
-
-impl LiveHook for KeyboardView {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, KeyboardView)
-    }
 }
 
 impl KeyboardView {

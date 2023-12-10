@@ -42,7 +42,7 @@ pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 3500;
 // the shader struct used to draw
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawTile {
     // this shader structs inherits from the super class DrawQuad
@@ -393,7 +393,7 @@ impl FractalSpace {
 }
 
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct Mandelbrot {
     // DSL accessible
     #[live] draw_tile: DrawTile,
@@ -430,9 +430,6 @@ pub struct Mandelbrot {
 }
 
 impl LiveHook for Mandelbrot {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, Mandelbrot)
-    }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         // starts the animation cycle on startup

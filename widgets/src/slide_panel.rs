@@ -9,19 +9,13 @@ live_design!{
     SlidePanelBase = {{SlidePanel}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct SlidePanel {
     #[deref] frame: View,
     #[animator] animator: Animator,
     #[live] closed: f64,
     #[live] side: SlideSide,
     #[rust] next_frame: NextFrame
-}
-
-impl LiveHook for SlidePanel {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, SlidePanel)
-    }
 }
 
 #[derive(Clone, DefaultNone)]

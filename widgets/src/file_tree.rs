@@ -21,7 +21,7 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawBgQuad {
     #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
@@ -33,7 +33,7 @@ struct DrawBgQuad {
     #[live] opened: f32,
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawNameText {
     #[deref] draw_super: DrawText,
     #[live] is_even: f32,
@@ -45,7 +45,7 @@ struct DrawNameText {
     #[live] opened: f32,
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawIconQuad {
     #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
@@ -57,7 +57,7 @@ struct DrawIconQuad {
     #[live] opened: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct FileTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
@@ -81,7 +81,7 @@ pub struct FileTreeNode {
     #[live] selected: f32,
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct FileTree {
     #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
@@ -107,10 +107,6 @@ pub struct FileTree {
 }
 
 impl LiveHook for FileTree {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, FileTree)
-    }
-
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
             if let Some(index) = nodes.child_by_name(index, id.as_field()) {

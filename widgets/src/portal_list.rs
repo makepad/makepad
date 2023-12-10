@@ -45,7 +45,7 @@ impl ListDrawState {
         }
     }
 }
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct PortalList {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -90,10 +90,6 @@ struct AlignItem {
 }
 
 impl LiveHook for PortalList {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PortalList)
-    }
-    
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {
             self.templates.clear();

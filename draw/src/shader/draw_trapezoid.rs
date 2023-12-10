@@ -113,7 +113,7 @@ live_design!{
 }
 
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 #[repr(C)]
 pub struct DrawTrapezoidVector {
     #[rust] pub trapezoidator: Trapezoidator,

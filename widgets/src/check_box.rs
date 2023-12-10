@@ -11,7 +11,7 @@ live_design!{
     CheckBoxBase = {{CheckBox}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawCheckBox {
     #[deref] draw_super: DrawQuad,
@@ -21,7 +21,7 @@ pub struct DrawCheckBox {
     #[live] selected: f32
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[live_ignore]
 #[repr(u32)]
 pub enum CheckType {
@@ -31,7 +31,7 @@ pub enum CheckType {
     None = shader_enum(4),
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct CheckBox {
     
     #[walk] walk: Walk,
@@ -51,19 +51,13 @@ pub struct CheckBox {
     #[live] bind: String,
 }
 
-impl LiveHook for CheckBox {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, CheckBox)
-    }
-}
-
 #[derive(Clone, Debug, DefaultNone)]
 pub enum CheckBoxAction {
     Change(bool),
     None
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawLabelText {
     #[deref] draw_super: DrawText,
     #[live] hover: f32,

@@ -29,7 +29,7 @@ pub enum FlatListAction {
     None
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct FlatList {
     //#[rust] area: Area,
     #[walk] walk: Walk,
@@ -56,12 +56,8 @@ pub struct FlatList {
     /*#[rust(ScrollState::Stopped)] scroll_state: ScrollState*/
 }
 
-
 impl LiveHook for FlatList {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, FlatList)
-    }
-    
+            
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {
             self.templates.clear();

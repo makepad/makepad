@@ -9,7 +9,7 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct SlidesView {
     #[layout] layout: Layout,
     #[rust] area: Area,
@@ -30,10 +30,6 @@ enum DrawState {
 }
 
 impl LiveHook for SlidesView {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, SlidesView)
-    }
-    
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {
             //self.children.clear();

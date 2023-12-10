@@ -11,7 +11,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct PopupMenuItem {
     
     #[live] draw_bg: DrawQuad,
@@ -29,7 +29,7 @@ pub struct PopupMenuItem {
     #[live] selected: f32,
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 pub struct PopupMenu {
     #[live] draw_list: DrawList2d,
     #[live] menu_item: Option<LivePtr>,
