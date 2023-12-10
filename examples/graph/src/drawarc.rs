@@ -91,7 +91,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawArc {
     #[deref]
@@ -106,7 +106,7 @@ struct DrawArc {
     #[calc] color: Vec4,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawCornerArc {
     #[deref]
@@ -180,7 +180,7 @@ pub enum Winding{
     CounterClockWise
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct VectorArc{
     #[walk] walk: Walk,
     #[live] draw_arc: DrawArc,
@@ -200,8 +200,7 @@ pub struct VectorArc{
    
 }
 
-
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct VectorCornerArc
 {
     #[walk] walk: Walk,
@@ -270,20 +269,6 @@ impl Widget for VectorCornerArc {
                     
         WidgetDraw::done()
     }
-}
-
-
-#[derive(Clone, DefaultNone)]
-pub enum VectorCornerArcAction {
-    None,
-}
-
-impl LiveHook for VectorCornerArc {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, VectorCornerArc)
-    }
-
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
 }
 
 impl Widget for VectorArc {
@@ -389,15 +374,3 @@ impl Widget for VectorArc {
     }
 }
 
-#[derive(Clone, DefaultNone)]
-pub enum ArcAction {
-    None,
-}
-
-impl LiveHook for VectorArc {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, VectorArc)
-    }
-
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
-}

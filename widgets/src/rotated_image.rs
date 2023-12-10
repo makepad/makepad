@@ -1,10 +1,11 @@
 use crate::{image_cache::*, makepad_draw::*, widget::*};
+use crate::makepad_derive_widget::*;
 
 live_design! {
     RotatedImageBase = {{RotatedImage}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct RotatedImage {
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -26,9 +27,6 @@ impl ImageCacheImpl for RotatedImage {
 }
 
 impl LiveHook for RotatedImage {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, RotatedImage)
-    }
 
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         self.lazy_create_image_cache(cx);

@@ -58,7 +58,7 @@ live_design!{
 }
 
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct RunView {
     #[walk] walk: Walk,
     #[animator] animator: Animator,
@@ -74,10 +74,6 @@ pub struct RunView {
 }
 
 impl LiveHook for RunView {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, RunView)
-    }
-    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.tick = cx.new_next_frame(); //start_interval(self.frame_delta);
         self.time = 0.0;

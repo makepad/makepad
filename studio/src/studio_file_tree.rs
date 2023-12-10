@@ -18,17 +18,11 @@ live_design!{
     }
 } 
  
-#[derive(Live)] 
+#[derive(Live, LiveHook, WidgetRegister)] 
 pub struct StudioFileTree{
     #[live] pub file_tree: FileTree
 } 
  
-impl LiveHook for StudioFileTree{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, StudioFileTree)
-    }
-}
-
 impl Widget for StudioFileTree {
     fn redraw(&mut self, cx: &mut Cx) {
         self.file_tree.redraw(cx);
@@ -54,5 +48,3 @@ impl Widget for StudioFileTree {
         self.file_tree.handle_event(cx, event, scope);
     }
 }
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct StudioFileTreeRef(WidgetRef);

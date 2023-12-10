@@ -22,7 +22,7 @@ pub enum SliderType {
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
@@ -30,7 +30,7 @@ pub struct DrawSlider {
     #[live] slider_type: SliderType
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct Slider {
     #[live] draw_slider: DrawSlider,
     
@@ -58,11 +58,6 @@ pub struct Slider {
     #[rust] pub dragging: Option<f64>,
 }
 
-impl LiveHook for Slider{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,Slider)
-    }
-}
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum SliderAction {

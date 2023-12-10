@@ -11,7 +11,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawSplitter {
     #[deref] draw_super: DrawQuad,
@@ -57,7 +57,7 @@ impl SplitterAlign {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct Splitter {
     #[live(SplitterAxis::Horizontal)] pub axis: SplitterAxis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
@@ -81,12 +81,6 @@ pub struct Splitter {
     #[live] a: WidgetRef,
     #[live] b: WidgetRef,
     #[walk] walk: Walk,
-}
-
-impl LiveHook for Splitter{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,Splitter)
-    }
 }
 
 #[derive(Clone)]

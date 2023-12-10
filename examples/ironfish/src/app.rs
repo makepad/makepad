@@ -47,7 +47,7 @@ pub struct SynthPreset {
     pub fav: bool,
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] _presets: Vec<SynthPreset>,
@@ -55,16 +55,14 @@ pub struct App {
     #[rust] midi_input: MidiInput,
 }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App {
+    fn live_register(cx: &mut Cx) {
         crate::makepad_audio_widgets::live_design(cx);
         crate::makepad_audio_graph::live_design(cx);
         crate::makepad_synth_ironfish::live_design(cx);
         crate::sequencer::live_design(cx);
         crate::app_desktop::live_design(cx);
         crate::app_mobile::live_design(cx);
-       //makepad_example_fractal_zoom::mandelbrot::live_design(cx);
-        //makepad_example_numbers::number_grid::live_design(cx);
     }
 }
 

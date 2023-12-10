@@ -40,7 +40,7 @@ live_design! {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct FishPatchEditor {
     #[animator]
     animator: Animator,
@@ -201,10 +201,6 @@ impl Widget for FishPatchEditor {
 }
 
 impl LiveHook for FishPatchEditor {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, FishPatchEditor)
-    }
-
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
 
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {

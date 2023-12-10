@@ -221,19 +221,13 @@ pub struct JumpTo{
     pub start:Position
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 struct LogList{
     #[deref] view:View
 }
 
 #[derive(Clone, Debug, PartialEq, WidgetRef)]
 pub struct LogListRef(WidgetRef);
-
-impl LiveHook for LogList{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, LogList)
-    }
-}
 
 impl LogList{
     fn draw_log(&mut self, cx: &mut Cx2d, list:&mut PortalList, build_manager:&mut BuildManager){
