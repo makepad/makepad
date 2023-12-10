@@ -290,7 +290,7 @@ impl Splitter {
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum SplitterAction {
     None,
     Changed {axis: SplitterAxis, align: SplitterAlign},

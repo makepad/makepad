@@ -54,7 +54,7 @@ pub struct FileEdge {
     pub file_node_id: FileNodeId,
 }
 
-#[derive(DefaultNone, Clone)]
+#[derive(DefaultNone, Debug, Clone)]
 pub enum FileSystemAction {
     TreeLoaded,
     RecompileNeeded,

@@ -209,13 +209,13 @@ live_design!{
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum LogListAction {
     JumpTo(JumpTo),
     None
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JumpTo{
     pub file_name:String, 
     pub start:Position

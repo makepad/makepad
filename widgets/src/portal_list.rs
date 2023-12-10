@@ -32,7 +32,7 @@ enum ListDrawState {
     End {viewport: Rect}
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum PortalListAction {
     Scroll,
     None
