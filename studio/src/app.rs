@@ -181,7 +181,7 @@ impl App{
             FileSystemAction::None=>()
         }
         
-        if let Some(action) = action.downcast_ref::<WidgetAction>(){
+        if let Some(action) = action.as_widget_action(){
             match action.cast(){
                 CodeEditorAction::TextDidChange => {
                     // lets write the file
@@ -189,6 +189,7 @@ impl App{
                 }
                 CodeEditorAction::None=>{}
             }
+            
             match action.cast(){
                 DockAction::TabCloseWasPressed(tab_id)=>{
                     dock.close_tab(cx, tab_id);
@@ -240,7 +241,7 @@ impl App{
                 _=>()
             }
         }
-                
+
         match action.cast(){
             RunListAction::Create(run_view_id, name) => {
                 let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
