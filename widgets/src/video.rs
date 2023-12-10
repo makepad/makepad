@@ -240,7 +240,7 @@ impl LiveHook for Video {
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum VideoAction {
     None,
     PlaybackPrepared,

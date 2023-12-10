@@ -170,7 +170,7 @@ pub struct ViewRef(WidgetRef);
 #[derive(Clone, WidgetSet)]
 pub struct ViewSet(WidgetSet);
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum ViewAction {
     None,
     FingerDown(FingerDownEvent),

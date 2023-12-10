@@ -55,7 +55,7 @@ impl LiveComponentRegistries {
             self.0.borrow(),
             | v | v
                 .get(&TypeId::of::<T>()).unwrap()
-                .cast::<T>().unwrap()
+                .downcast_ref::<T>().unwrap()
         )
     }
     
@@ -69,7 +69,7 @@ impl LiveComponentRegistries {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert(Box::<T>::default())
             }
-            .cast_mut::<T>().unwrap()
+            .downcast_mut::<T>().unwrap()
         )
     }
 }

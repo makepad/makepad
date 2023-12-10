@@ -24,7 +24,7 @@ impl LiveHook for FoldButton{
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum FoldButtonAction {
     None,
     Opening,

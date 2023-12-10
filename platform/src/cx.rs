@@ -31,6 +31,7 @@ use {
             CxKeyboard,
             NextFrame,
         },
+        action::ActionsBuf,
         cx_api::CxOsOp,
         area::Area,
         gpu_info::GpuInfo,
@@ -87,7 +88,7 @@ pub struct Cx {
     
     pub (crate) new_next_frames: HashSet<NextFrame>,
     
-    pub (crate) new_actions: Vec<Box<dyn Any>>,
+    pub (crate) new_actions: ActionsBuf,
     
     pub (crate) dependencies: HashMap<String, CxDependency>,
     

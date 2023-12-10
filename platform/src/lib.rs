@@ -202,7 +202,8 @@ pub use {
             Action,
             Actions,
             ActionsBuf, 
-            ActionCast
+            ActionCast,
+            ActionTrait
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,

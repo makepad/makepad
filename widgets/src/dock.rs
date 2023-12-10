@@ -149,7 +149,7 @@ impl DrawStackItem {
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum DockAction {
     SplitPanelChanged {panel_id: LiveId, axis: SplitterAxis, align: SplitterAlign},
     TabWasPressed(LiveId),
