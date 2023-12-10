@@ -1,7 +1,7 @@
 
 use {
     crate::{
-        app::{AppScope},
+        app::{StudioData},
         makepad_widgets::*,
         makepad_widgets::file_tree::FileTree,
     },
@@ -41,7 +41,7 @@ impl Widget for StudioFileTree {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
         while let Some(_) = self.file_tree.draw_walk(cx, scope, walk).hook_widget() {
             self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
-             scope.data.get_mut::<AppScope>().file_system.draw_file_node(
+             scope.data.get_mut::<StudioData>().file_system.draw_file_node(
                 cx,
                 live_id!(root).into(),
                 &mut self.file_tree
