@@ -143,15 +143,9 @@ pub enum RunListAction{
     None
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 struct RunList{
     #[deref] view:View
-}
-
-impl LiveHook for RunList{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, RunList)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, WidgetRef)]

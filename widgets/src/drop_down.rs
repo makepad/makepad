@@ -14,7 +14,7 @@ live_design!{
     DropDownBase = {{DropDown}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct DropDown {
     #[animator] animator: Animator,
     
@@ -45,7 +45,7 @@ struct PopupMenuGlobal {
     map: Rc<RefCell<ComponentMap<LivePtr, PopupMenu >> >
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawLabelText {
     #[deref] draw_super: DrawText,
     #[live] focus: f32,
@@ -54,10 +54,6 @@ struct DrawLabelText {
 }
 
 impl LiveHook for DropDown {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, DropDown)
-    }
-    
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.popup_menu.is_none() || !from.is_from_doc() {
             return

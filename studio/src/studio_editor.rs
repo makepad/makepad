@@ -18,16 +18,10 @@ live_design!{
     }
 } 
  
-#[derive(Live)] 
+#[derive(Live, LiveHook, WidgetRegister)] 
 pub struct StudioEditor{
     #[live] pub editor: CodeEditor
 } 
- 
-impl LiveHook for StudioEditor{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, StudioEditor)
-    }
-}
 
 impl Widget for StudioEditor {
     fn redraw(&mut self, cx: &mut Cx) {

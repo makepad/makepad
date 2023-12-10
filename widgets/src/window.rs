@@ -13,7 +13,7 @@ live_design!{
     WindowBase = {{Window}} {demo:false}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct Window {
     //#[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
@@ -56,10 +56,6 @@ enum DrawState {
 }
 
 impl LiveHook for Window {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Window)
-    }
-    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));

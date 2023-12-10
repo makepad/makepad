@@ -26,7 +26,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawCandleStick {
     #[deref] draw_super: DrawQuad,
     #[calc] open: f32,
@@ -40,7 +40,7 @@ struct _CandleStickData{
     close: f64,
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct CandleStick {
     #[walk] walk: Walk,
     #[live] draw_cs: DrawCandleStick,
@@ -68,16 +68,6 @@ impl Widget for CandleStick {
 #[derive(Clone, DefaultNone)]
 pub enum CandleStickAction {
     None
-}
-
-impl LiveHook for CandleStick {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, CandleStick)
-    }
-    
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-
-    }
 }
 
 impl CandleStick {

@@ -116,7 +116,7 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawKey {
     #[deref] draw_super: DrawQuad,
     #[live] is_black: f32,
@@ -125,13 +125,13 @@ struct DrawKey {
     #[live] hover: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct PianoKey {
     #[live] draw_key: DrawKey,
     #[animator] animator: Animator,
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct Piano {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -154,10 +154,6 @@ pub struct Piano {
 }
 
 impl LiveHook for Piano {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, Piano)
-    }
-    
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
             if let Some(index) = nodes.child_by_name(index, live_id!(piano_key).as_field()) {

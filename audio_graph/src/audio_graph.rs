@@ -28,7 +28,7 @@ pub enum AudioGraphAction<'a> {
     VoiceOff {voice: usize}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 pub struct AudioGraph {
     #[live] root: AudioComponentRef,
     #[rust] from_ui: FromUISender<FromUI>,
