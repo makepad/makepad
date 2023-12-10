@@ -49,6 +49,8 @@ impl LiveRegister for App{
 }
 
 impl LiveHook for App {
+    
+    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         let mut root = "./".to_string();
         for arg in std::env::args(){
@@ -103,9 +105,9 @@ pub enum AppAction{
 impl MatchEvent for App{
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
         let dock = self.ui.dock(id!(dock));
-        //let file_tree = self.ui.view(id!(file_tree));
-        //let log_list = self.ui.view(id!(log_list));
-        //let run_list = self.ui.view(id!(run_list));
+        let file_tree = self.ui.view(id!(file_tree));
+        let log_list = self.ui.view(id!(log_list));
+        let run_list = self.ui.view(id!(run_list));
         match action.cast(){
             AppAction::JumpTo(jt)=>{
                 if let Some(file_id) = self.data.file_system.path_to_file_node_id(&jt.file_name) {
@@ -135,14 +137,13 @@ impl MatchEvent for App{
             }
             AppAction::ClearLog=>{
                 self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
-                self.ui.view(id!(log_list)).redraw(cx);
+                log_list.redraw(cx);
             }
             AppAction::ReloadFileTree=>{
                 self.data.file_system.reload_file_tree();
             }
             AppAction::RedrawLog=>{
-                
-                self.ui.view(id!(log_list)).redraw(cx);
+                log_list.redraw(cx);
             }
             AppAction::StartRecompile=>{
                 self.data.build_manager.start_recompile(cx);
@@ -170,7 +171,7 @@ impl MatchEvent for App{
                 
         match action.cast(){
             FileSystemAction::TreeLoaded => {
-                self.ui.view(id!(file_tree)).redraw(cx);
+                file_tree.redraw(cx);
                 //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
             }
             FileSystemAction::RecompileNeeded => {
@@ -179,7 +180,7 @@ impl MatchEvent for App{
             FileSystemAction::LiveReloadNeeded(live_file_change) => {
                 self.data.build_manager.live_reload_needed(live_file_change);
                 self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
-                self.ui.view(id!(log_list)).redraw(cx);
+                log_list.redraw(cx);
             }
             FileSystemAction::None=>()
         }
@@ -197,8 +198,8 @@ impl MatchEvent for App{
                 DockAction::TabCloseWasPressed(tab_id)=>{
                     dock.close_tab(cx, tab_id);
                     if self.data.build_manager.handle_tab_close(tab_id) {
-                        self.ui.view(id!(log_list)).redraw(cx);
-                        self.ui.view(id!(run_list)).redraw(cx);
+                        log_list.redraw(cx);
+                        run_list.redraw(cx);
                     }
                     self.data.file_system.remove_tab(tab_id);
                     self.data.file_system.ensure_unique_tab_names(cx, &dock);
@@ -250,12 +251,12 @@ impl MatchEvent for App{
                 let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
                 dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::Yes);
                 dock.redraw(cx);
-                self.ui.view(id!(log_list)).redraw(cx);
+                log_list.redraw(cx);
             }
             RunListAction::Destroy(run_view_id) => {
                 dock.close_tab(cx, run_view_id);
                 dock.redraw(cx);
-                self.ui.view(id!(log_list)).redraw(cx);
+                log_list.redraw(cx);
             }
             RunListAction::None=>{}
         }
