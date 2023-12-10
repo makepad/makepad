@@ -121,7 +121,7 @@ impl Cx {
 
         let mut swapchain = None;
 
-        self.call_event_handler(&Event::Construct);
+        self.call_event_handler(&Event::Startup);
         let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
 
         while let Ok(msg) =  json_msg_rx.recv(){

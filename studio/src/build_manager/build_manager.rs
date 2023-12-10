@@ -93,7 +93,7 @@ pub struct BuildBinary {
     pub name: String
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum BuildManagerAction {
     StdinToHost {run_view_id: LiveId, msg: StdinToHost},
     None

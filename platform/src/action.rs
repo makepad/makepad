@@ -1,8 +1,29 @@
-
+use crate::generate_any_trait_api;
 use crate::cx::Cx;
-use std::any::Any;
+use std::any::{TypeId};
+use std::fmt::Debug;
+use std::fmt;
 
-pub type Action = Box<dyn Any>;
+pub trait ActionTrait: 'static  {
+    fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn ref_cast_type_id(&self) -> TypeId where Self: 'static {TypeId::of::<Self>()}
+}
+
+impl<T: 'static + Debug + ?Sized > ActionTrait for T {
+    fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
+        self.fmt(f)
+    }
+}
+
+generate_any_trait_api!(ActionTrait);
+
+impl Debug for dyn ActionTrait{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
+        self.debug_fmt(f)
+    }
+}
+
+pub type Action = Box<dyn ActionTrait>;
 pub type ActionsBuf = Vec<Action>;
 pub type Actions = [Action];
 
@@ -10,9 +31,9 @@ pub trait ActionCast<T> {
     fn cast(&self) -> T;
 }
 
-impl<T: Any + 'static + Default + Clone> ActionCast<T> for Box<dyn Any>{
+impl<T: ActionTrait + Default + Clone> ActionCast<T> for Box<dyn ActionTrait>{
     fn cast(&self) -> T where T: Default + Clone{
-        if let Some(item) = self.downcast_ref::<T>() {
+        if let Some(item) = (*self).downcast_ref::<T>() {
             item.clone()
         }
         else {
@@ -22,7 +43,7 @@ impl<T: Any + 'static + Default + Clone> ActionCast<T> for Box<dyn Any>{
 }
 
 impl Cx{
-    pub fn action(&mut self, action: impl Any){
+    pub fn action(&mut self, action: impl ActionTrait){
         self.new_actions.push(Box::new(action));
     }
     

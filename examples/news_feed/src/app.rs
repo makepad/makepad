@@ -355,48 +355,50 @@ impl LiveHook for App {
     } 
 }
 
+impl MatchEvent for App {
+    fn handle_draw_2d(&mut self, cx:&mut Cx2d){
+        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
+        while let Some(next) = self.ui.draw_widget_no_scope(cx).hook_widget() {
+            if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
+                list.set_item_range(cx, 0, 1000);
+                                    
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let template = match item_id {
+                        0 => live_id!(TopSpace),
+                        x if x % 5 == 0 => live_id!(PostImage),
+                        _ => live_id!(Post)
+                    };
+                    let item = list.item(cx, item_id, template).unwrap();
+                    let text = match item_id % 4 {
+                        1 => format!("Hello! {}", item_id),
+                        2 => format!("Hello GOSIM\n With lines {}", item_id),
+                        3 => format!("Random numbers {}", item_id),
+                        _ => format!("Text body 4 id {}", item_id),
+                    };
+                    item.label(id!(content.text)).set_text(&text);
+                    item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
+                    item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
+                    item.draw_all_no_scope(cx);
+                }
+            }
+        }
+    }
+    
+    fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
+        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
+        for (item_id, item) in news_feeds.items_with_actions(&actions) {
+            if item.button(id!(likes)).clicked(&actions) {
+                log!("hello {}", item_id);
+            }
+        }
+    }
+}
+
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
-        let mut scope = WidgetScope::default();
-        if let Event::Draw(event) = event {
-            let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(cx, &mut scope).hook_widget() {
-                if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
-
-                    list.set_item_range(cx, 0, 1000);
-                    
-                    while let Some(item_id) = list.next_visible_item(cx) {
-                        let template = match item_id {
-                            0 => live_id!(TopSpace),
-                            x if x % 5 == 0 => live_id!(PostImage),
-                            _ => live_id!(Post)
-                        };
-                        let item = list.item(cx, item_id, template).unwrap();
-                        let text = match item_id % 4 {
-                            1 => format!("Hello! {}", item_id),
-                            2 => format!("Hello GOSIM\n With lines {}", item_id),
-                            3 => format!("Random numbers {}", item_id),
-                            _ => format!("Text body 4 id {}", item_id),
-                        };
-                        item.label(id!(content.text)).set_text(&text);
-                        item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
-                        item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
-                        item.draw_all(cx, &mut scope);
-                    }
-                }
-            }
+        if self.match_event_with_draw_2d(cx, event).is_ok(){
             return
         }
-        
-        self.ui.handle_event(cx, event, &mut scope);
-        
-        if let Event::Actions(actions) = event{
-            for (item_id, item) in news_feeds.items_with_actions(&actions) {
-                if item.button(id!(likes)).clicked(&actions) {
-                    log!("hello {}", item_id);
-                }
-            }
-        }
+        self.ui.handle_event_no_scope(cx, event);
     }
 }

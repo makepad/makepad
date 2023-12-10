@@ -121,7 +121,7 @@ impl LiveHook for Sequencer {
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum SequencerAction {
     Change,
     None
