@@ -682,7 +682,7 @@ impl Clone for Box<dyn WidgetActionTrait> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WidgetAction {
     action: Box<dyn WidgetActionTrait>,
     pub widget_uid: WidgetUid,
@@ -720,12 +720,6 @@ impl Debug for WidgetPath {
 pub struct WidgetActionGroup{
     pub group_uid: WidgetUid,
     pub item_uid: WidgetUid,
-}
-
-impl Debug for WidgetAction {
-    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
-        write!(f, "WidgetAction {:?} {:?} {:?} {:?}", self.action, self.widget_uid, self.path, self.group)
-    }
 }
 
 pub trait WidgetActionCxExt {
