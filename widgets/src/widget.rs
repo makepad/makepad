@@ -402,8 +402,17 @@ impl WidgetRef {
         }))))
     }
     
+    pub fn handle_event_no_scope(&self, cx: &mut Cx, event: &Event){
+        self.handle_event(cx, event, &mut WidgetScope::default())
+    }
+    
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
+            // if we're in a draw event, do taht here
+            if let Event::Draw(e) = event{
+                let cx = &mut Cx2d::new(cx, e);
+                return inner.widget.draw_all(cx, scope);
+            }
             return inner.widget.handle_event(cx, event, scope)
         }
     }
@@ -465,6 +474,10 @@ impl WidgetRef {
         WidgetDraw::done()
     }
     
+    pub fn draw_walk_no_scope(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.draw_walk(cx, &mut WidgetScope::default(), walk)
+    }
+    
     pub fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
         if let Some(nd) = inner.widget.draw_widget(cx, scope).hook_widget() {
@@ -475,7 +488,11 @@ impl WidgetRef {
             }
         }
         WidgetDraw::done()
-    }    
+    }
+    
+    pub fn draw_widget_no_scope(&mut self, cx: &mut Cx2d) -> WidgetDraw{
+        self.draw_widget(cx, &mut WidgetScope::default())
+    }        
     
     pub fn walk(&self, cx:&mut Cx) -> Walk {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
@@ -503,7 +520,13 @@ impl WidgetRef {
             return inner.widget.draw_all(cx, scope)
         }
     }
-
+    
+    pub fn draw_all_no_scope(&self, cx: &mut Cx2d) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.draw_all(cx, &mut WidgetScope::default())
+        }
+    }
+    
     pub fn text(&self) -> String {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.text()

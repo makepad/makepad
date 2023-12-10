@@ -173,7 +173,8 @@ impl Cx {
         // lets set our signal poll timer
         // final bit of initflow
         get_macos_app_global().start_timer(0, 0.008, true);
-        cx.borrow_mut().call_event_handler(&Event::Construct);
+        
+        cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
         MacosApp::event_loop();
     }
@@ -232,7 +233,7 @@ impl Cx {
     ) -> EventFlow {
         
         if let  EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx){
-            self.call_event_handler(&Event::Destruct);
+            self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit
         }
         
@@ -325,7 +326,7 @@ impl Cx {
                 if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
                     metal_windows.remove(index);
                     if metal_windows.len() == 0 {
-                        self.call_event_handler(&Event::Destruct);
+                        self.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit
                     }
                 }
