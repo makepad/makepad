@@ -169,7 +169,7 @@ impl Cx {
             }
             IosEvent::Init=>{
                 get_ios_app_global().start_timer(0, 0.008, true);
-                self.call_event_handler(&Event::Construct);
+                self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }
             IosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
