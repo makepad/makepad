@@ -65,52 +65,42 @@ impl LiveHook for App {
     }
 }
 
-impl App {
+impl MatchEvent for App{
+    fn handle_signal(&mut self, cx:&mut Cx){
+        while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
+            self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8_32{
+                data: vec![],
+                width: vfb.format.width / 2,
+                height: vfb.format.height
+            });
+            if let Some(buf) = vfb.as_vec_u32() {
+                self.video_input[id].swap_vec_u32(cx, buf);
+            }
+            let image_size = [vfb.format.width as f32, vfb.format.height as f32];
+            let v = self.ui.view(id!(video_input0));
+            v.as_image().set_texture(Some(self.video_input[id].clone()));
+            v.set_uniform(cx, id!(image_size), &image_size);
+            v.set_uniform(cx, id!(is_rgb), &[0.0]);
+            v.redraw(cx);
+        }
+    }
     
-    pub fn start_inputs(&mut self, cx: &mut Cx) {
+    fn handle_startup(&mut self, cx:&mut Cx){
         let video_sender = self.video_recv.sender();
         cx.video_input(0, move | img | {
             let _ = video_sender.send((0, img.to_buffer()));
         });
     }
+    
+    fn handle_video_inputs(&mut self, cx:&mut Cx, devices:&VideoInputsEvent){
+        log!("{:?}", devices);
+        let input = devices.find_highest_at_res(devices.find_device("FaceTime HD Camera"), 1920, 1080, 30.0);
+        cx.use_video_input(&input);
+    }
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut scope = WidgetScope::default();
-        match event {
-            Event::Signal => {
-                while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
-                    self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8_32{
-                        data: vec![],
-                        width: vfb.format.width / 2,
-                        height: vfb.format.height
-                    });
-                    if let Some(buf) = vfb.as_vec_u32() {
-                        self.video_input[id].swap_vec_u32(cx, buf);
-                    }
-                    let image_size = [vfb.format.width as f32, vfb.format.height as f32];
-                    let v = self.ui.view(id!(video_input0));
-                    v.as_image().set_texture(Some(self.video_input[id].clone()));
-                    v.set_uniform(cx, id!(image_size), &image_size);
-                    v.set_uniform(cx, id!(is_rgb), &[0.0]);
-                    v.redraw(cx);
-                }
-            }
-            Event::Draw(event) => {
-                return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
-            }
-            Event::Construct => {
-                self.start_inputs(cx);
-            }
-            Event::VideoInputs(devices) => {
-                log!("{:?}", devices);
-                let input = devices.find_highest_at_res(devices.find_device("FaceTime HD Camera"), 1920, 1080, 30.0);
-                cx.use_video_input(&input);
-            }
-            _ => ()
-        }
-        self.ui.handle_event(cx, event, &mut scope);
+        self.ui.handle_event_no_scope(cx, event);
     }
-    
 }

@@ -75,7 +75,7 @@ impl LiveHook for DropDown {
         
     }
 }
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum DropDownAction {
     Select(usize, LiveValue),
     None

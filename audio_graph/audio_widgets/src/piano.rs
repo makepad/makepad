@@ -168,14 +168,14 @@ impl LiveHook for Piano {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone,  Debug)]
 pub struct PianoNote {
     pub is_on: bool,
     pub note_number: u8,
     pub velocity: u8
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum PianoAction {
     Note(PianoNote),
     None
@@ -459,7 +459,7 @@ impl PianoRef {
     pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
         for action in actions {
-            match action.cast_widget_uid_eq(self.widget_uid()) {
+            match action.as_widget_action().widget_uid_eq(self.widget_uid()).cast() {
                 PianoAction::Note(note) => {
                     notes.push(note)
                 }
@@ -490,10 +490,11 @@ impl PianoSet {
         let mut notes = Vec::new();
         for item in self.iter() {
              for action in actions {
-                if action.widget_uid_eq(item.widget_uid()){
-                    if let PianoAction::Note(note) = action.cast_widget_action() {
+                 match action.as_widget_action().widget_uid_eq(item.widget_uid()).cast() {
+                    PianoAction::Note(note) =>{
                         notes.push(note)
                     }
+                    PianoAction::None=>()
                 }
             }
         }

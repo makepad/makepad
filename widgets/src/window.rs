@@ -109,7 +109,7 @@ impl LiveHook for Window {
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum WindowAction {
     EventForOtherWindow,
     WindowClosed,

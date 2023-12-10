@@ -261,7 +261,7 @@ impl TabBar {
 
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum TabBarAction {
     TabWasPressed(LiveId),
     ShouldTabStartDrag(LiveId),

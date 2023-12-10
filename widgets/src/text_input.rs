@@ -362,7 +362,7 @@ impl Widget for TextInput {
     }
 }
 
-#[derive(Clone, PartialEq, DefaultNone)]
+#[derive(Clone, Debug, PartialEq, DefaultNone)]
 pub enum TextInputAction {
     Change(String),
     Return(String),

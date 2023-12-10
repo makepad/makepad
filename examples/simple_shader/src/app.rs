@@ -77,23 +77,12 @@ pub struct App {
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        // important: call live design for mywidget
         crate::my_widget::live_design(cx);
     }
 }
 
-impl App{
-    async fn _do_network_request(_cx:CxRef, _ui:WidgetRef, _url:&str)->String{
-        "".to_string()
-    }
-}
-
-impl AppMain for App{
+impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut scope =  WidgetScope::default();
-        if let Event::Draw(event) = event {
-            return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
-        }
-        self.ui.handle_event(cx, event, &mut scope);
+        self.ui.handle_event_no_scope(cx, event);
     }
 }
