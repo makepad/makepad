@@ -778,7 +778,7 @@ impl PortalListRef {
     fn items_with_actions_vec(&self, actions: &Actions, set: &mut Vec<(u64, WidgetRef)>) {
         let uid = self.widget_uid();
         for action in actions {
-            if let Some(action) = action.downcast_ref::<WidgetAction>(){
+            if let Some(action) = action.as_widget_action(){
                 if let Some(group) = &action.group{
                     if group.group_uid == uid{
                         if let Some(inner) = self.borrow() {
