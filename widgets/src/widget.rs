@@ -694,7 +694,7 @@ pub struct WidgetAction {
 pub struct WidgetPath(pub Vec<LiveId>);
 
 impl WidgetPath{
-    pub fn path_id(&self, id:usize)->LiveId{
+    pub fn get(&self, id:usize)->LiveId{
         if id >= self.0.len(){
             return LiveId(0)
         }

@@ -437,7 +437,6 @@ impl App {
 impl MatchEvent for App {
         
     fn handle_signal(&mut self, cx: &mut Cx){
-        let image_list = self.ui.portal_list(id!(image_list));
         for m in 0..self.machines.len(){
             if let Some(socket) = self.machines[m].web_socket.as_mut(){
                 match socket.try_recv(){
