@@ -5,7 +5,7 @@ use {
             build_manager::*,
             build_protocol::*,
         },
-        app::{AppAction, AppScope},
+        app::{AppAction, StudioData},
         makepad_widgets::*,
         makepad_code_editor::text::{Position},
         makepad_widgets::portal_list::PortalList,
@@ -221,18 +221,9 @@ pub struct JumpTo{
     pub start:Position
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 struct LogList{
     #[deref] view:View
-}
-
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct LogListRef(WidgetRef);
-
-impl LiveHook for LogList{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, LogList)
-    }
 }
 
 impl LogList{
@@ -305,7 +296,7 @@ impl Widget for LogList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
         while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
             if let Some(mut list) = next.as_portal_list().borrow_mut(){
-                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppScope>().build_manager)
+                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<StudioData>().build_manager)
             }
         }
         WidgetDraw::done()
@@ -315,11 +306,11 @@ impl Widget for LogList {
         
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        let app_scope = scope.data.get::<AppScope>();
+        let data = scope.data.get::<StudioData>();
         if let Event::Actions(actions) = event{    
             for (item_id, item) in log_list.items_with_actions(&actions) {
                 if item.link_label(id!(location)).pressed(&actions) {
-                    if let Some((_build_id, log_item)) = app_scope.build_manager.log.get(item_id as usize) {
+                    if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {
                         match log_item {
                             LogItem::Location(msg) => {
                                 cx.action(AppAction::JumpTo(JumpTo{

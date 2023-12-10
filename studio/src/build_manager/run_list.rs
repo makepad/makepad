@@ -5,7 +5,7 @@ use {
             build_protocol::*,
             build_client::BuildClient
         },
-        app::{AppScope},
+        app::{StudioData},
         makepad_widgets::*,
     },
     std::env,
@@ -143,19 +143,10 @@ pub enum RunListAction{
     None
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 struct RunList{
     #[deref] view:View
 }
-
-impl LiveHook for RunList{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, RunList)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct RunListRef(WidgetRef);
 
 impl RunList{
     fn draw_run_list(&mut self, cx: &mut Cx2d, list:&mut FlatList, build_manager:&mut BuildManager){
@@ -210,7 +201,7 @@ impl RunList{
 
 impl WidgetMatchEvent for RunList{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut WidgetScope){
-        let build_manager = &mut scope.data.get_mut::<AppScope>().build_manager;
+        let build_manager = &mut scope.data.get_mut::<StudioData>().build_manager;
         let run_list = self.view.flat_list(id!(list));
         for (item_id, item) in run_list.items_with_actions(&actions) {
             for binary in &mut build_manager.binaries {
@@ -268,7 +259,7 @@ impl Widget for RunList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
         while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
             if let Some(mut list) = next.as_flat_list().borrow_mut(){
-                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<AppScope>().build_manager)
+                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<StudioData>().build_manager)
             }
         }
         WidgetDraw::done()
@@ -310,7 +301,6 @@ impl BuildManager {
             cx.action(RunListAction::Create(item_id, process.binary.clone()))
         }
     }
-    
     
     pub fn stop_active_build(cx:&mut Cx, active:&mut ActiveBuilds, client:&BuildClient, binary: &str, tgt: u64) {
         let target = BuildTarget::from_id(tgt);

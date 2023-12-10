@@ -77,6 +77,7 @@ pub struct KeyFrame {
     #[live(LiveValue::None)]
     pub value: LiveValue,
 }
+impl LiveRegister for KeyFrame{}
 
 #[derive(Copy, Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Play {

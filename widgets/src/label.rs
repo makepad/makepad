@@ -10,7 +10,7 @@ live_design!{
     LabelBase = {{Label}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct Label {
     #[live] draw_text: DrawText,
     #[walk] walk: Walk,
@@ -19,12 +19,6 @@ pub struct Label {
     //margin: Margin,
     #[live] text: RcStringMut,
 } 
-
-impl LiveHook for Label{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,Label)
-    }
-}
 
 impl Widget for Label {
     fn redraw(&mut self, cx:&mut Cx){

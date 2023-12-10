@@ -17,7 +17,7 @@ pub enum ButtonAction {
     Released
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct Button {
     #[animator] animator: Animator,
 
@@ -33,12 +33,6 @@ pub struct Button {
     #[live(true)] grab_key_focus: bool,
 
     #[live] pub text: RcStringMut,
-}
-
-impl LiveHook for Button{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, Button)
-    }
 }
 
 impl Widget for Button{

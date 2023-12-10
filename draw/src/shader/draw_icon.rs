@@ -69,7 +69,7 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 #[repr(C)]
 pub struct DrawIcon {
     #[live(1.0)] pub brightness: f32,

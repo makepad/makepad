@@ -74,14 +74,14 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawButton {
     #[deref] draw_super: DrawQuad,
     #[live] active: f32,
     #[live] hover: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct SeqButton {
     #[live] draw_button: DrawButton,
     #[animator] animator: Animator,
@@ -92,7 +92,7 @@ pub struct SeqButton {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct Sequencer {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -107,11 +107,7 @@ pub struct Sequencer {
 }
 
 impl LiveHook for Sequencer {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, Sequencer)
-    }
-    
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for button in self.buttons.values_mut() {
             if let Some(index) = nodes.child_by_name(index, live_id!(button).as_field()) {
                 button.apply(cx, from, index, nodes);

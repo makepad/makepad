@@ -51,6 +51,12 @@ pub fn derive_live_apply(input: TokenStream) -> TokenStream {
     derive_live_hook_impl(input)
 }
 
+#[proc_macro_derive(LiveRegister)]
+pub fn derive_live_register(input: TokenStream) -> TokenStream {
+    derive_live_register_impl(input)
+}
+
+
 #[proc_macro_derive(LiveRead)]
 pub fn derive_live_read(input: TokenStream) -> TokenStream {
     derive_live_read_impl(input)

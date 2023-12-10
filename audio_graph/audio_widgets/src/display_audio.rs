@@ -50,7 +50,7 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawWave {
     #[deref] draw_super: DrawQuad,
     #[live] gain: f32,
@@ -58,7 +58,7 @@ struct DrawWave {
     #[live] vu_right: f32
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct DisplayAudio {
     #[walk] walk: Walk,
     #[live] draw_wave: DrawWave,
@@ -98,10 +98,7 @@ const WAVE_SIZE_X: usize = 1024;
 const WAVE_SIZE_Y: usize = 16;
 
 impl LiveHook for DisplayAudio {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, DisplayAudio)
-    }
-    
+
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.wave_texture.set_format(cx, TextureFormat::VecBGRAu8_32 {
             data: {
