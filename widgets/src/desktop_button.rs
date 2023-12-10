@@ -1,5 +1,6 @@
 use {
     crate::{
+        makepad_derive_widget::*,
         button::ButtonAction,
         makepad_draw::*,
         widget::*
@@ -13,7 +14,7 @@ live_design!{
     DesktopButtonBase = {{DesktopButton}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct DesktopButton {
     #[animator] animator: Animator,
     #[walk] walk: Walk,
@@ -78,7 +79,7 @@ pub enum DesktopButtonType {
     #[pick] Fullscreen = shader_enum(6),
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawDesktopButton {
     #[deref] draw_super: DrawQuad,
@@ -88,9 +89,6 @@ pub struct DrawDesktopButton {
 }
 
 impl LiveHook for DesktopButton {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, DesktopButton)
-    }
     
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         let (w, h) = match self.draw_bg.button_type {

@@ -11,15 +11,9 @@ live_design!{
     LinkLabelBase = {{LinkLabel}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct LinkLabel {
     #[deref] button: Button
-}
-
-impl LiveHook for LinkLabel {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, LinkLabel)
-    }
 }
 
 impl Widget for LinkLabel {

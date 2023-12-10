@@ -205,7 +205,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("            _=> self.").ident(&deref_field.name).add(".apply_value(cx, apply_from, index, nodes)");
         }
         else {
-            tb.add("        _=> self.apply_value_unknown(cx, apply_from, index, nodes)");
+            tb.add("        _=> <Self as LiveHook>::apply_value_unknown(self, cx, apply_from, index, nodes)");
         }
         tb.add("            }");
         tb.add("        } else {");
@@ -214,7 +214,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply_from, index, nodes)");
         }
         else {
-            tb.add("        self.apply_value_instance(cx, apply_from, index, nodes)");
+            tb.add("        <Self as LiveHook>::apply_value_instance(self, cx, apply_from, index, nodes)");
         }
         tb.add("        }");
         tb.add("    }");
@@ -223,7 +223,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("impl").stream(generic.clone());
         tb.add("LiveHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         tb.add("    fn deref_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-        tb.add("        self.before_apply(cx, apply_from, index, nodes);");
+        tb.add("        <Self as LiveHook>::before_apply(self, cx, apply_from, index, nodes);");
         
         if let Some(deref_field) = deref_field {
             tb.add("    self.").ident(&deref_field.name).add(".deref_before_apply(cx, apply_from, index, nodes);");
@@ -231,12 +231,12 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("    }");
         
         tb.add("    fn deref_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-        tb.add("        self.after_apply(cx, apply_from, index, nodes);");
+        tb.add("        <Self as LiveHook>::after_apply(self, cx, apply_from, index, nodes);");
         
         if let Some(deref_field) = deref_field {
             tb.add("    self.").ident(&deref_field.name).add(".deref_after_apply(cx, apply_from, index, nodes);");
         }
-        tb.add("        self.after_apply_from(cx, apply_from);");
+        tb.add("        <Self as LiveHook>::after_apply_from(self, cx, apply_from);");
         tb.add("    }");
         tb.add("}");
         
@@ -248,11 +248,11 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         if animator_field.is_some() { // apply the default states
             tb.add("    let mut animator_index = None;");
         }
-        tb.add("        let index = if let Some(index) = self.skip_apply(cx, apply_from, start_index, nodes){index} else {");
+        tb.add("        let index = if let Some(index) = <Self as LiveHook>::skip_apply(self, cx, apply_from, start_index, nodes){index} else {");
         tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).0).add(");");
         tb.add("            if !nodes[start_index].value.is_structy_type(){");
         tb.add("                cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
-        tb.add("                self.after_apply(cx, apply_from, start_index, nodes);");
+        tb.add("                <Self as LiveHook>::after_apply(self, cx, apply_from, start_index, nodes);");
         tb.add("                return nodes.skip_node(start_index);");
         tb.add("            }");
         
@@ -333,7 +333,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("    }");
         
         tb.add("    fn live_design_with(cx: &mut Cx) {");
-        tb.add("<Self as LiveHook>::before_live_design(cx);");
+        tb.add("<Self as LiveRegister>::live_register(cx);");
         // we need this here for shader enums to register without hassle
         for field in &fields {
             let attr = &field.attrs[0];
@@ -370,7 +370,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add(",");
         }
         tb.add("        };");
-        tb.add("        ret.after_new_before_apply(cx);");
+        tb.add("        <Self as LiveHook>::after_new_before_apply(&mut ret, cx);");
         tb.add("        ret");
         tb.add("    }");
         

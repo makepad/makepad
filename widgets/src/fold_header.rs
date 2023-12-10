@@ -9,7 +9,7 @@ live_design!{
     FoldHeaderBase = {{FoldHeader}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
@@ -22,12 +22,6 @@ pub struct FoldHeader {
     #[layout] layout: Layout,
     #[walk] walk: Walk,
     #[live] body_walk: Walk,
-}
-
-impl LiveHook for FoldHeader{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,FoldHeader)
-    }
 }
 
 #[derive(Clone)]

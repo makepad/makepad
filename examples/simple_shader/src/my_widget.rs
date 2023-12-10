@@ -12,7 +12,7 @@ live_design!{
     MyWidget = {{MyWidget}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct MyWidget {
     #[live] draw: DrawQuad,
     #[walk] walk: Walk,
@@ -22,10 +22,6 @@ pub struct MyWidget {
 }
 
 impl LiveHook for MyWidget{
-    fn before_live_design(cx:&mut Cx) {
-        register_widget!(cx, MyWidget)
-    }
-
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         // starts the animation cycle on startup
         self.next_frame = cx.new_next_frame();

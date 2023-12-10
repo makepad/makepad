@@ -5,7 +5,7 @@ use {
     }
 };
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Layout {
     #[live] pub scroll: DVec2,
@@ -31,7 +31,7 @@ impl Default for Layout{
     }
 }
 
-#[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Default, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Walk {
     #[live] pub abs_pos: Option<DVec2>,
@@ -40,14 +40,14 @@ pub struct Walk {
     #[live] pub height: Size,
 }
 
-#[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Align {
     #[live] pub x: f64,
     #[live] pub y: f64
 }
 
-#[derive(Clone, Copy, Default, Debug, Live)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveRegister)]
 #[live_ignore]
 pub struct Padding {
     #[live] pub left: f64,

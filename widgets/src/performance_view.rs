@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 
-use makepad_derive_widget::WidgetRef;
-
+use makepad_derive_widget::*;
 use crate::{label::*, makepad_draw::*, view::*, widget::*};
 
 live_design! {
@@ -76,7 +75,7 @@ live_design! {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct PerformanceView {
     #[deref]
     view: View,
@@ -87,10 +86,6 @@ pub struct PerformanceView {
 }
 
 impl LiveHook for PerformanceView {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PerformanceView);
-    }
-
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
         self.next_refresh_at = 2.0;
@@ -141,7 +136,7 @@ impl PerformanceView {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct PerformanceLiveGraph {
     #[deref]
     view: View,
@@ -162,10 +157,6 @@ pub struct PerformanceLiveGraph {
 }
 
 impl LiveHook for PerformanceLiveGraph {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PerformanceLiveGraph);
-    }
-
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         self.label(id!(graph_label))
             .set_text(&format!("{}", self.graph_label));

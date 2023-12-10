@@ -15,7 +15,7 @@ live_design!{
     DockBase = {{Dock}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawRoundCorner {
     #[deref] draw_super: DrawQuad,
@@ -39,7 +39,7 @@ impl DrawRoundCorner {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[walk] walk: Walk,
@@ -318,10 +318,6 @@ impl LiveHook for Dock {
         for (item_id, kind) in items {
             self.item_or_create(cx, item_id, kind);
         }
-    }
-    
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Dock)
     }
 }
 
