@@ -5,9 +5,6 @@ use {
         makepad_widgets::*,
         makepad_widgets::file_tree::FileTree,
     },
-    std::{
-        env,
-    },
 };
 
 live_design!{
