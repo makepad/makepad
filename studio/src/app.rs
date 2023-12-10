@@ -189,6 +189,56 @@ impl App{
                 }
                 CodeEditorAction::None=>{}
             }
+            match action.cast(){
+                DockAction::TabCloseWasPressed(tab_id)=>{
+                    dock.close_tab(cx, tab_id);
+                    if self.scope.build_manager.handle_tab_close(tab_id) {
+                        log_list.redraw(cx);
+                        run_list.redraw(cx);
+                    }
+                    self.scope.file_system.remove_tab(tab_id);
+                    self.scope.file_system.ensure_unique_tab_names(cx, &dock);
+                }
+                DockAction::ShouldTabStartDrag(tab_id)=>{
+                    dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
+                        path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
+                        internal_id: Some(tab_id)
+                    });
+                }
+                DockAction::Drag(drag_event)=>{
+                    if drag_event.items.len() == 1 {
+                        if drag_event.modifiers.logo {
+                            dock.accept_drag(cx, drag_event, DragResponse::Copy);
+                        }
+                        else {
+                            dock.accept_drag(cx, drag_event, DragResponse::Move);
+                        }
+                    }
+                }
+                DockAction::Drop(drop_event)=>{
+                    if let DragItem::FilePath {path, internal_id} = &drop_event.items[0] {
+                        if let Some(internal_id) = internal_id { // from inside the dock
+                            if drop_event.modifiers.logo {
+                                let tab_id = dock.unique_tab_id(internal_id.0);
+                                dock.drop_clone(cx, drop_event.abs, *internal_id, tab_id);
+                            }
+                            else {
+                                dock.drop_move(cx, drop_event.abs, *internal_id);
+                            }
+                            self.scope.file_system.ensure_unique_tab_names(cx, &dock);
+                        }
+                        else { // external file, we have to create a new tab
+                            if let Some(file_id) = self.scope.file_system.path_to_file_node_id(&path) {
+                                let tab_id = dock.unique_tab_id(file_id.0.0);
+                                self.scope.file_system.request_open_file(tab_id, file_id);
+                                dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
+                                self.scope.file_system.ensure_unique_tab_names(cx, &dock)
+                            }
+                        }
+                    }
+                },
+                _=>()
+            }
         }
                 
         match action.cast(){
@@ -204,57 +254,6 @@ impl App{
                 log_list.redraw(cx);
             }
             RunListAction::None=>{}
-        }
-            
-        match action.cast_widget_action(){
-            DockAction::TabCloseWasPressed(tab_id)=>{
-                dock.close_tab(cx, tab_id);
-                if self.scope.build_manager.handle_tab_close(tab_id) {
-                    log_list.redraw(cx);
-                    run_list.redraw(cx);
-                }
-                self.scope.file_system.remove_tab(tab_id);
-                self.scope.file_system.ensure_unique_tab_names(cx, &dock);
-            }
-            DockAction::ShouldTabStartDrag(tab_id)=>{
-                dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
-                    path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
-                    internal_id: Some(tab_id)
-                });
-            }
-            DockAction::Drag(drag_event)=>{
-                if drag_event.items.len() == 1 {
-                    if drag_event.modifiers.logo {
-                        dock.accept_drag(cx, drag_event, DragResponse::Copy);
-                    }
-                    else {
-                        dock.accept_drag(cx, drag_event, DragResponse::Move);
-                    }
-                }
-            }
-            DockAction::Drop(drop_event)=>{
-                if let DragItem::FilePath {path, internal_id} = &drop_event.items[0] {
-                    if let Some(internal_id) = internal_id { // from inside the dock
-                        if drop_event.modifiers.logo {
-                            let tab_id = dock.unique_tab_id(internal_id.0);
-                            dock.drop_clone(cx, drop_event.abs, *internal_id, tab_id);
-                        }
-                        else {
-                            dock.drop_move(cx, drop_event.abs, *internal_id);
-                        }
-                        self.scope.file_system.ensure_unique_tab_names(cx, &dock);
-                    }
-                    else { // external file, we have to create a new tab
-                        if let Some(file_id) = self.scope.file_system.path_to_file_node_id(&path) {
-                            let tab_id = dock.unique_tab_id(file_id.0.0);
-                            self.scope.file_system.request_open_file(tab_id, file_id);
-                            dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
-                            self.scope.file_system.ensure_unique_tab_names(cx, &dock)
-                        }
-                    }
-                }
-            },
-            _=>()
         }
     }        
         

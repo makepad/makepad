@@ -99,6 +99,7 @@ pub use crate::{
         WidgetActionApi,
         WidgetAction,
         WidgetActionCast,
+        WidgetActionOptionApi,
         WidgetRef,
         Widget,
         WidgetRegistry,

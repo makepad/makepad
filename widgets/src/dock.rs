@@ -865,7 +865,7 @@ impl Widget for Dock {
         let dock_items = &mut self.dock_items;
         for (panel_id, splitter) in self.splitters.iter_mut() {
             for action in cx.scope_actions(|cx| splitter.handle_event(cx, event, scope)) {
-                match action.cast_widget_action() {
+                match action.as_widget_action().cast() {
                     SplitterAction::Changed {axis, align} => {
                         // lets move the splitter
                         if let Some(DockItem::Splitter {axis: _axis, align: _align, ..}) = dock_items.get_mut(&panel_id) {
@@ -881,7 +881,7 @@ impl Widget for Dock {
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
             let contents_view = &mut tab_bar.contents_draw_list;
             for action in cx.scope_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope)) {
-                match action.cast_widget_action() {
+                match action.as_widget_action().cast() {
                     TabBarAction::ShouldTabStartDrag(item) => cx.widget_action(uid, &scope.path, DockAction::ShouldTabStartDrag(item)),
                     TabBarAction::TabWasPressed(tab_id) => {
                         self.needs_save = true;
