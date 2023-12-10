@@ -57,7 +57,7 @@ impl LiveHook for RadioButton{
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum RadioButtonAction {
     Clicked,
     None
@@ -134,7 +134,7 @@ impl RadioButtonSet{
     
     pub fn selected(&self, cx: &mut Cx, actions: &Actions)->Option<usize>{
         for action in actions{
-            if let Some(action) = action.downcast_ref::<WidgetAction>(){
+            if let Some(action) = action.as_widget_action(){
                 match action.cast(){
                     RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| action.widget_uid == v.widget_uid()){
                         for (i, item) in self.0.iter().enumerate(){

@@ -152,7 +152,7 @@ pub use {
             HttpResponse,
             HttpMethod,
             NetworkResponse,
-            NetworkResponseEvent,
+            NetworkResponsesEvent,
             Margin,
             KeyCode,
             Event,
@@ -202,7 +202,8 @@ pub use {
             Action,
             Actions,
             ActionsBuf, 
-            ActionCast
+            ActionCast,
+            ActionTrait
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,

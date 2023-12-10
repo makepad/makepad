@@ -71,15 +71,9 @@ pub fn live_object(input: TokenStream) -> TokenStream {
     live_object_impl(input)
 }
 
-
 #[proc_macro]
-pub fn generate_ref_cast_api(input: TokenStream) -> TokenStream {
-    generate_ref_cast_api_impl(input)
-}
-
-#[proc_macro]
-pub fn generate_clone_cast_api(input: TokenStream) -> TokenStream {
-    generate_clone_cast_api_impl(input)
+pub fn generate_any_trait_api(input: TokenStream) -> TokenStream {
+    generate_any_trait_api_impl(input)
 }
 
 #[proc_macro]

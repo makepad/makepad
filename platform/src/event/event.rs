@@ -29,8 +29,8 @@ use {
 
 #[derive(Debug)]
 pub enum Event {
-    Construct,
-    Destruct,
+    Startup,
+    Shutdown,
     
     Pause,
     Resume,
@@ -77,7 +77,7 @@ pub enum Event {
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
-    NetworkResponses(Vec<NetworkResponseEvent>),
+    NetworkResponses(NetworkResponsesEvent),
 
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoTextureUpdated(VideoTextureUpdatedEvent),
@@ -93,8 +93,8 @@ pub enum Event {
 impl Event{
     pub fn name_from_u32(v:u32)->&'static str{
         match v{
-            1=>"Construct",
-            2=>"Destruct",
+            1=>"Startup",
+            2=>"Shutdown",
                 
             3=>"Pause",
             4=>"Resume",
@@ -158,8 +158,8 @@ impl Event{
     
     pub fn to_u32(&self)->u32{
         match self{
-            Self::Construct=>1,
-            Self::Destruct=>2,
+            Self::Startup=>1,
+            Self::Shutdown=>2,
                             
             Self::Pause=>3,
             Self::Resume=>4,

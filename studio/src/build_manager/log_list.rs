@@ -209,13 +209,13 @@ live_design!{
     }
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum LogListAction {
     JumpTo(JumpTo),
     None
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JumpTo{
     pub file_name:String, 
     pub start:Position
@@ -315,7 +315,6 @@ impl Widget for LogList {
         
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        //let app_scope = scope.data.as_mut().unwrap().downcast_mut::<AppScope>().unwrap();
         let app_scope = scope.data.get::<AppScope>();
         if let Event::Actions(actions) = event{    
             for (item_id, item) in log_list.items_with_actions(&actions) {

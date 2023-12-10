@@ -9,7 +9,7 @@ live_design!{
     ButtonBase = {{Button}} {}
 }
 
-#[derive(Clone, DefaultNone)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum ButtonAction {
     None,
     Clicked,

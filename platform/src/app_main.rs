@@ -5,6 +5,7 @@ use crate::cx::Cx;
 pub trait AppMain{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
 }
+
 #[macro_export]
 macro_rules!app_main {
     ( $ app: ident) => {
@@ -17,7 +18,7 @@ macro_rules!app_main {
             
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
-                if let Event::Construct = event {
+                if let Event::Startup = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
                 if let Event::LiveEdit = event{
@@ -64,7 +65,7 @@ macro_rules!app_main {
             Cx::android_entry(activity, ||{
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
-                    if let Event::Construct = event {
+                    if let Event::Startup = event {
                         *app.borrow_mut() = Some($app::new_main(cx));
                     }
                     if let Event::LiveEdit = event{
@@ -88,7 +89,7 @@ macro_rules!app_main {
             
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
-                if let Event::Construct = event {
+                if let Event::Startup = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
                 if let Event::LiveEdit = event{

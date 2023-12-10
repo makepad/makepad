@@ -32,7 +32,7 @@ pub trait AudioGraphNode {
     );
 }
 
-generate_ref_cast_api!(AudioComponent);
+generate_any_trait_api!(AudioComponent);
 
 
 // Audio component registry
