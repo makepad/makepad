@@ -214,15 +214,17 @@ enum AudioState {
     Muted,
 }
 
-impl LiveHook for Video {
+impl LiveRegister for Video{
     #[allow(unused)]
-    fn before_live_design(cx: &mut Cx) {
+    fn live_register(cx: &mut Cx) {
         #[cfg(target_os = "android")]
         {
             register_widget!(cx, Video);
         }
     }
+}
 
+impl LiveHook for Video {
     #[allow(unused)]
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.id = LiveId::unique();

@@ -29,7 +29,7 @@ pub enum UndoGroup {
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawLabel {
     #[deref] draw_super: DrawText,
@@ -37,7 +37,7 @@ pub struct DrawLabel {
 }
 
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct TextInput {
     #[animator] animator: Animator,
     
@@ -73,12 +73,6 @@ pub struct TextInput {
     #[rust] redo_stack: Vec<UndoItem>,
     #[rust] cursor_tail: usize,
     #[rust] cursor_head: usize
-}
-
-impl LiveHook for TextInput {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, TextInput)
-    }
 }
 
 impl Widget for TextInput {

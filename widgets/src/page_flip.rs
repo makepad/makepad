@@ -9,7 +9,7 @@ live_design!{
     PageFlipBase = {{PageFlip}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct PageFlip {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -22,9 +22,6 @@ pub struct PageFlip {
 }
 
 impl LiveHook for PageFlip {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PageFlip)
-    }
     
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {

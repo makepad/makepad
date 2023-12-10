@@ -11,7 +11,7 @@ live_design!{
     RadioButtonBase = {{RadioButton}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawRadioButton {
     #[deref] draw_super: DrawQuad,
@@ -30,7 +30,7 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct RadioButton {
     #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
@@ -49,12 +49,6 @@ pub struct RadioButton {
     #[live] label: String,
     
     #[live] bind: String,
-}
-
-impl LiveHook for RadioButton{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,RadioButton)
-    }
 }
 
 #[derive(Clone, Debug, DefaultNone)]

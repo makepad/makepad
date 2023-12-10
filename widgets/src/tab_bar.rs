@@ -12,7 +12,7 @@ live_design!{
     TabBarBase = {{TabBar}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct TabBar {
     
     #[live] scroll_bars: ScrollBars,
@@ -37,12 +37,7 @@ pub struct TabBar {
     #[rust] next_selected_tab_id: Option<LiveId>,
 }
 
-
 impl LiveHook for TabBar {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, TabBar)
-    }
-    
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab).as_field()) {
             for tab in self.tabs.values_mut() {

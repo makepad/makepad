@@ -44,7 +44,7 @@ impl ViewOptimize {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct View { // draw info per UI element
     #[live] pub draw_bg: DrawColor,
     
@@ -92,10 +92,6 @@ struct ViewTextureCache {
 }
 
 impl LiveHook for View {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, View)
-    }
-    
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {
             //self.children.clear();

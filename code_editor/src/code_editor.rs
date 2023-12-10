@@ -209,7 +209,7 @@ live_design! {
 
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawCodeText {
     #[deref]
@@ -218,7 +218,7 @@ struct DrawCodeText {
     outline: f32,
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 pub struct CodeEditor {
     #[walk] walk: Walk,
     #[live] scroll_bars: ScrollBars,
@@ -1863,7 +1863,7 @@ struct ActiveSelection {
     start_x: f64,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 struct TokenColors {
     #[live]
     unknown: Vec4,
@@ -1901,7 +1901,7 @@ struct TokenColors {
     warning_decoration: Vec4,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawIndentGuide {
     #[deref]
@@ -1910,7 +1910,7 @@ pub struct DrawIndentGuide {
     color: Vec4,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 struct DrawDecoration {
     #[deref]
     draw_super: DrawQuad,
@@ -1918,7 +1918,7 @@ struct DrawDecoration {
     color: Vec4,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawSelection {
     #[deref]

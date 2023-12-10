@@ -16,7 +16,7 @@ use {
             LiveTypeInfo,
             LiveNodeSliceApi
         },
-        live_traits::{LiveNew, LiveHook, LiveHookDeref, LiveApplyValue, LiveApply, ApplyFrom},
+        live_traits::{LiveNew, LiveHook, LiveRegister, LiveHookDeref, LiveApplyValue, LiveApply, ApplyFrom},
         makepad_derive_live::*,
         makepad_math::*,
         makepad_live_id::{FromLiveId, live_id, live_id_num},
@@ -134,7 +134,7 @@ pub struct Margin {
     #[live] pub right: f64,
     #[live] pub bottom: f64
 }
-
+impl LiveRegister for Margin{}
 
 impl LiveHook for Margin {
     fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {

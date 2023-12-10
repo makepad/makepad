@@ -1,5 +1,6 @@
 use {
     crate::{
+        makepad_derive_widget::*,
         makepad_draw::*,
         widget::*
     }
@@ -10,17 +11,11 @@ live_design!{
     HookWidgetBase = {{HookWidget}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct HookWidget {
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-}
-
-impl LiveHook for HookWidget{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,HookWidget)
-    }
 }
 
 #[derive(Clone)]
