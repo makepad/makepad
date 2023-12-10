@@ -1,4 +1,4 @@
-use crate::generate_ref_cast_api;
+use crate::generate_any_trait_api;
 use crate::cx::Cx;
 use std::any::{TypeId};
 use std::fmt::Debug;
@@ -15,7 +15,7 @@ impl<T: 'static + Debug + ?Sized > ActionTrait for T {
     }
 }
 
-generate_ref_cast_api!(ActionTrait);
+generate_any_trait_api!(ActionTrait);
 
 impl Debug for dyn ActionTrait{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
