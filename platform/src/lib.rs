@@ -152,7 +152,7 @@ pub use {
             HttpResponse,
             HttpMethod,
             NetworkResponse,
-            NetworkResponseEvent,
+            NetworkResponsesEvent,
             Margin,
             KeyCode,
             Event,
