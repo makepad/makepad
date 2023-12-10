@@ -315,7 +315,6 @@ impl Widget for LogList {
         
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        //let app_scope = scope.data.as_mut().unwrap().downcast_mut::<AppScope>().unwrap();
         let app_scope = scope.data.get::<AppScope>();
         if let Event::Actions(actions) = event{    
             for (item_id, item) in log_list.items_with_actions(&actions) {
