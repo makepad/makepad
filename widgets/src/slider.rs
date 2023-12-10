@@ -134,7 +134,7 @@ impl Widget for Slider {
         self.animator_handle_event(cx, event);
         
         for action in cx.scope_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
-            match action.cast_widget_action() {
+            match action.as_widget_action().cast() {
                 TextInputAction::KeyFocus => {
                     self.animator_play(cx, id!(focus.on));
                 }
