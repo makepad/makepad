@@ -127,9 +127,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("    }");
             
             tb.add("    fn animator_apply_state(&mut self, cx: &mut Cx) {");
-            tb.add("        let state = self.").ident(&animator_field.name).add(".swap_out_state();");
-            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,live_id!(state).as_field()).unwrap(), &state);");
-            tb.add("        self.").ident(&animator_field.name).add(".swap_in_state(state);");
+            tb.add("        if let Some(state) = self.").ident(&animator_field.name).add(".swap_out_state(){");
+            tb.add("            self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,live_id!(state).as_field()).unwrap(), &state);");
+            tb.add("            self.").ident(&animator_field.name).add(".swap_in_state(state);");
+            tb.add("        }");
             tb.add("    }");
             
             tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event)->AnimatorAction{");

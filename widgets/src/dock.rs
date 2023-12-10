@@ -865,6 +865,8 @@ impl Widget for Dock {
         let dock_items = &mut self.dock_items;
         for (panel_id, splitter) in self.splitters.iter_mut() {
             for action in cx.scope_actions(|cx| splitter.handle_event(cx, event, scope)) {
+                // alright so here we need to redraw the left/right area.. how?
+                
                 match action.as_widget_action().cast() {
                     SplitterAction::Changed {axis, align} => {
                         // lets move the splitter

@@ -31,14 +31,7 @@ impl LiveHook for App {
 }
 
 impl AppMain for App {
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut scope = WidgetScope::default();
-        if let Event::Draw(event) = event {
-            self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
-            return
-        }
-        
-        self.ui.handle_event(cx, event, &mut scope);
+        self.ui.handle_event_no_scope(cx, event);
     }
 }
