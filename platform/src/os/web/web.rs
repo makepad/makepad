@@ -17,7 +17,7 @@ use {
         },
         event::{
             ToWasmMsgEvent,
-            NetworkResponseEvent,
+            NetworkResponseItem,
             HttpResponse,
             NetworkResponse,
             Event,
@@ -86,7 +86,7 @@ impl Cx {
                     self.os.window_geom = tw.window_info.into();
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
                     
-                    self.call_event_handler(&Event::Construct);
+                    self.call_event_handler(&Event::Startup);
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 },
                 
@@ -222,7 +222,7 @@ impl Cx {
 
                 live_id!(ToWasmHTTPResponse) => {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpResponse(HttpResponse::new(
                             LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
@@ -235,7 +235,7 @@ impl Cx {
 
                 live_id!(ToWasmHttpRequestError) => {
                     let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpRequestError(tw.error)
                     });
@@ -243,7 +243,7 @@ impl Cx {
 
                 live_id!(ToWasmHttpResponseProgress) => {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
                     });
@@ -251,7 +251,7 @@ impl Cx {
 
                 live_id!(ToWasmHttpUploadProgress) => {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
                     });
