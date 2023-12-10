@@ -178,7 +178,7 @@ impl WidgetDrawApi for WidgetDraw {
 
 pub type WidgetDraw = Result<(), WidgetRef>;
 
-generate_ref_cast_api!(Widget);
+generate_any_trait_api!(Widget);
 
 pub trait WidgetFactory {
     fn new(&self, cx: &mut Cx) -> Box<dyn Widget>;
@@ -649,18 +649,18 @@ impl LiveNew for WidgetRef {
     }
 }
 
-pub trait WidgetActionApi: 'static {
+pub trait WidgetActionTrait: 'static {
     fn ref_cast_type_id(&self) -> TypeId;
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
-    fn box_clone(&self) -> Box<dyn WidgetActionApi>;
+    fn box_clone(&self) -> Box<dyn WidgetActionTrait>;
 }
 
-impl<T: 'static + ? Sized + Clone + Debug> WidgetActionApi for T {
+impl<T: 'static + ? Sized + Clone + Debug> WidgetActionTrait for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
         
-    fn box_clone(&self) -> Box<dyn WidgetActionApi> {
+    fn box_clone(&self) -> Box<dyn WidgetActionTrait> {
         Box::new((*self).clone())
     }
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
@@ -668,23 +668,23 @@ impl<T: 'static + ? Sized + Clone + Debug> WidgetActionApi for T {
     }
 }
 
-impl Debug for dyn WidgetActionApi{
+impl Debug for dyn WidgetActionTrait{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
         self.debug_fmt(f)
     }
 }
 
-generate_clone_cast_api!(WidgetActionApi);
+generate_any_trait_api!(WidgetActionTrait);
 
-impl Clone for Box<dyn WidgetActionApi> {
-    fn clone(&self) -> Box<dyn WidgetActionApi> {
+impl Clone for Box<dyn WidgetActionTrait> {
+    fn clone(&self) -> Box<dyn WidgetActionTrait> {
         self.as_ref().box_clone()
     }
 }
 
 #[derive(Clone)]
 pub struct WidgetAction {
-    action: Box<dyn WidgetActionApi>,
+    action: Box<dyn WidgetActionTrait>,
     pub widget_uid: WidgetUid,
     pub path: WidgetPath,
     pub group: Option<WidgetActionGroup>
@@ -729,18 +729,18 @@ impl Debug for WidgetAction {
 }
 
 pub trait WidgetActionCxExt {
-    fn widget_action(&mut self, uid:WidgetUid, path:&WidgetPath, t:impl WidgetActionApi);
+    fn widget_action(&mut self, uid:WidgetUid, path:&WidgetPath, t:impl WidgetActionTrait);
     fn group_widget_actions<F, R>(&mut self, group_id:WidgetUid, item_id:WidgetUid, f:F) -> R where F: FnOnce(&mut Cx) -> R;
 }
 
 pub trait WidgetActionsApi {
-    fn find_widget_action_cast<T: WidgetActionApi + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
 }
 
 pub trait WidgetActionOptionApi{
     fn widget_uid_eq(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
-    fn cast<T: WidgetActionApi + 'static >(&self) -> T where T: Default + Clone;
+    fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone;
 }
 
 impl WidgetActionOptionApi for Option<&WidgetAction>{
@@ -754,13 +754,13 @@ impl WidgetActionOptionApi for Option<&WidgetAction>{
         None
     }
     
-    fn cast<T: WidgetActionApi + 'static >(&self) -> T where T: Default + Clone{
+    fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone{
         if let Some(item) = self{
-            item.action.cast::<T>()
+            if let Some(item) = item.action.downcast_ref::<T>(){
+                return item.clone()
+            }
         }
-        else {
-            T::default()
-        }
+        T::default()
     }
 }
 
@@ -786,19 +786,19 @@ impl WidgetActionsApi for Actions{
         None
     }
     
-    fn find_widget_action_cast<T: WidgetActionApi + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone {
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone {
         if let Some(item) = self.find_widget_action(widget_uid) {
-            item.action.cast::<T>()
+            if let Some(item) = item.action.downcast_ref::<T>(){
+                return item.clone()
+            }
         }
-        else {
-            T::default()
-        }
+        T::default()
     }
     
 }
 
 impl WidgetActionCxExt for Cx {
-    fn widget_action(&mut self, widget_uid:WidgetUid, path:&WidgetPath, t:impl WidgetActionApi){
+    fn widget_action(&mut self, widget_uid:WidgetUid, path:&WidgetPath, t:impl WidgetActionTrait){
         self.action(WidgetAction{
             widget_uid,
             path: path.clone(),
@@ -826,8 +826,11 @@ impl WidgetActionCxExt for Cx {
 }
 
 impl WidgetAction {
-    pub fn cast<T: WidgetActionApi + 'static >(&self) -> T where T: Default + Clone {
-        self.action.cast::<T>()
+    pub fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone {
+        if let Some(item) = self.action.downcast_ref::<T>(){
+            return item.clone()
+        }
+        T::default()
     }
 }
 
