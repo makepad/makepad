@@ -27,7 +27,7 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] data: StudioData,
@@ -45,26 +45,6 @@ impl LiveRegister for App{
         crate::app_ui::live_design(cx);
         // for macos
         cx.start_stdin_service();
-    }
-}
-
-impl LiveHook for App {
-    
-    
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        let mut root = "./".to_string();
-        for arg in std::env::args(){
-            if let Some(prefix) = arg.strip_prefix("--root="){
-                root = prefix.to_string();
-                break;
-            }
-        }
-        let root_path = env::current_dir().unwrap().join(root);
-        
-        self.data.file_system.init(cx, &root_path);
-        self.data.build_manager.init(cx, &root_path);
-        self.data.build_manager.discover_external_ip(cx);
-        self.data.build_manager.start_http_server();
     }
 }
 
@@ -103,6 +83,22 @@ pub enum AppAction{
 }
 
 impl MatchEvent for App{
+    fn handle_startup(&mut self, cx:&mut Cx){
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+        let root_path = env::current_dir().unwrap().join(root);
+                
+        self.data.file_system.init(cx, &root_path);
+        self.data.build_manager.init(cx, &root_path);
+        self.data.build_manager.discover_external_ip(cx);
+        self.data.build_manager.start_http_server();
+    }
+    
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.view(id!(file_tree));
