@@ -302,7 +302,6 @@ impl BuildManager {
         }
     }
     
-    
     pub fn stop_active_build(cx:&mut Cx, active:&mut ActiveBuilds, client:&BuildClient, binary: &str, tgt: u64) {
         let target = BuildTarget::from_id(tgt);
         let process = BuildProcess {
