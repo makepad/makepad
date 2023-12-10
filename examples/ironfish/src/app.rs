@@ -205,7 +205,6 @@ impl AppMain for App {
             return
         }
         let ui = self.ui.clone();
-        let mut synth_db = DataBindingStore::new();
         ui.handle_event(cx, event, &mut scope);
         
         // handle preset lists events
@@ -221,7 +220,8 @@ impl AppMain for App {
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            synth_db.nodes = ironfish.settings.live_read();
+            let mut db = DataBindingStore::from_nodes(ironfish.settings.live_read());
+            self.data_bind(db.data_to_widgets(cx, &ui));
             ui.piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
         }
@@ -260,7 +260,8 @@ impl AppMain for App {
         }
         
         if let Event::Actions(actions) = event{
-            
+            let mut synth_db = DataBindingStore::new();
+                        
             ui.radio_button_set(ids!(
                 oscillators.tab1,
                 oscillators.tab2,
@@ -319,7 +320,7 @@ impl AppMain for App {
             }
             
             self.data_bind(synth_db.widgets_to_data(cx, actions, &ui));
-            self.data_bind(synth_db.data_to_widgets(cx, actions, &ui));
+            self.data_bind(synth_db.data_to_widgets(cx, &ui));
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(cx, &synth_db.nodes);
         }
