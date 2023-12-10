@@ -1,4 +1,5 @@
 use crate::{
+    makepad_derive_widget::*,
     makepad_draw::*,
     file_tree::*,
     view::View,
@@ -59,7 +60,7 @@ enum OutlineNode {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct Designer {
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,
@@ -68,9 +69,6 @@ pub struct Designer {
 }
 
 impl LiveHook for Designer {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Designer)
-    }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         // lets take the doc we need (app_mobile for instance)

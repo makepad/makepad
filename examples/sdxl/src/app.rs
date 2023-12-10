@@ -76,7 +76,7 @@ impl Workflow {
     fn new(name: &str) -> Self {Self {name: name.to_string()}}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
@@ -108,26 +108,13 @@ pub struct App {
     //#[rust(Instant::now())] last_flip: Instant
 }
 
-     
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App{
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::app_ui::live_design(cx);
     }
-    
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.open_web_socket();
-        let _ = self.db.load_database();
-        self.filtered.filter_db(&self.db, "", false);
-        let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
-        let dd = self.ui.drop_down(id!(workflow_dropdown));
-        dd.set_labels(workflows);
-        cx.start_interval(0.016);
-        self.update_seed_display(cx);
-        self.start_video_inputs(cx);
-    }
 }
-
+     
 impl App {
     pub fn start_video_inputs(&mut self, cx: &mut Cx) {
         let video_sender = self.video_recv.sender();
@@ -435,9 +422,19 @@ impl App {
 }
 
 impl MatchEvent for App {
-        
+    fn handle_startup(&mut self, cx:&mut Cx){
+        self.open_web_socket();
+        let _ = self.db.load_database();
+        self.filtered.filter_db(&self.db, "", false);
+        let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
+        let dd = self.ui.drop_down(id!(workflow_dropdown));
+        dd.set_labels(workflows);
+        cx.start_interval(0.016);
+        self.update_seed_display(cx);
+        self.start_video_inputs(cx);
+    }
+    
     fn handle_signal(&mut self, cx: &mut Cx){
-        let image_list = self.ui.portal_list(id!(image_list));
         for m in 0..self.machines.len(){
             if let Some(socket) = self.machines[m].web_socket.as_mut(){
                 match socket.try_recv(){

@@ -230,6 +230,7 @@ pub use {
         live_traits::{
             LiveHookDeref,
             LiveBody,
+            LiveRegister,
             LiveNew,
             LiveApply,
             LiveHook,

@@ -78,7 +78,7 @@ pub enum FishConnectionWidgetAction {
     Released,
 }
 
-#[derive(Live)]
+#[derive(Live,LiveHook,  WidgetRegister)]
 pub struct FishConnectionWidget {
     #[live]
     start_pos: DVec2,
@@ -100,12 +100,6 @@ pub struct FishConnectionWidget {
     pub color: Vec4,
     #[live(5.0)]
     pub line_width: f64,
-}
-
-impl LiveHook for FishConnectionWidget {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, FishConnectionWidget)
-    }
 }
 
 impl Widget for FishConnectionWidget {

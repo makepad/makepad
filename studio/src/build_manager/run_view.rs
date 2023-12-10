@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppScope},
+    app::{StudioData},
     makepad_widgets::*,
     makepad_platform::os::cx_stdin::*,
     build_manager::build_manager::BuildManager,
@@ -58,7 +58,7 @@ live_design!{
 }
 
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct RunView {
     #[walk] walk: Walk,
     #[animator] animator: Animator,
@@ -74,10 +74,6 @@ pub struct RunView {
 }
 
 impl LiveHook for RunView {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, RunView)
-    }
-    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.tick = cx.new_next_frame(); //start_interval(self.frame_delta);
         self.time = 0.0;
@@ -305,16 +301,16 @@ impl Widget for RunView {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
-        let run_view_id = scope.path.path_id(0);
-        let manager = &mut scope.data.get_mut::<AppScope>().build_manager;
+        let run_view_id = scope.path.get(0);
+        let manager = &mut scope.data.get_mut::<StudioData>().build_manager;
         self.draw_run_view(cx, run_view_id, manager, walk);
         WidgetDraw::done()
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
         
-        let run_view_id = scope.path.path_id(0);
-        let manager = &scope.data.get::<AppScope>().build_manager;
+        let run_view_id = scope.path.get(0);
+        let manager = &scope.data.get::<StudioData>().build_manager;
         
         self.animator_handle_event(cx, event);
         // lets send mouse events

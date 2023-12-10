@@ -4,7 +4,7 @@ live_design!{
     DrawScrollShadowBase = {{DrawScrollShadow}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawScrollShadow {
     #[live] shadow_size: f32,
