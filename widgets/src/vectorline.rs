@@ -25,7 +25,7 @@ pub enum LineAlign {
     HorizontalCenter,
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, WidgetRegister)]
 pub struct VectorLine {
     #[animator]
     animator: Animator,
@@ -132,12 +132,4 @@ impl Widget for VectorLine {
 
         WidgetDraw::done()
     }
-}
-
-impl LiveHook for VectorLine {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, VectorLine)
-    }
-
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
 }

@@ -27,14 +27,14 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[rust] scope: AppScope,
+    #[rust] data: StudioData,
 }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App{
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::makepad_code_editor::live_design(cx);
         crate::build_manager::run_list::live_design(cx);
@@ -46,40 +46,24 @@ impl LiveHook for App {
         // for macos
         cx.start_stdin_service();
     }
-    
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        let mut root = "./".to_string();
-        for arg in std::env::args(){
-            if let Some(prefix) = arg.strip_prefix("--root="){
-                root = prefix.to_string();
-                break;
-            }
-        }
-        let root_path = env::current_dir().unwrap().join(root);
-        
-        self.scope.file_system.init(cx, &root_path);
-        self.scope.build_manager.init(cx, &root_path);
-        self.scope.build_manager.discover_external_ip(cx);
-        self.scope.build_manager.start_http_server();
-    }
 }
 
 app_main!(App);
 
 impl App {
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
-        if let Some(file_id) = self.scope.file_system.path_to_file_node_id(&path) {
+        if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
             let dock = self.ui.dock(id!(dock));            
             let tab_id = dock.unique_tab_id(file_id.0.0);
-            self.scope.file_system.request_open_file(tab_id, file_id);
+            self.data.file_system.request_open_file(tab_id, file_id);
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
-            self.scope.file_system.ensure_unique_tab_names(cx, &dock)
+            self.data.file_system.ensure_unique_tab_names(cx, &dock)
         }
     }
 }
 
 #[derive(Default)]
-pub struct AppScope{
+pub struct StudioData{
     pub build_manager: BuildManager,
     pub file_system: FileSystem,
 }
@@ -99,20 +83,35 @@ pub enum AppAction{
 }
 
 impl MatchEvent for App{
+    fn handle_startup(&mut self, cx:&mut Cx){
+        let mut root = "./".to_string();
+        for arg in std::env::args(){
+            if let Some(prefix) = arg.strip_prefix("--root="){
+                root = prefix.to_string();
+                break;
+            }
+        }
+        let root_path = env::current_dir().unwrap().join(root);
+                
+        self.data.file_system.init(cx, &root_path);
+        self.data.build_manager.init(cx, &root_path);
+        self.data.build_manager.discover_external_ip(cx);
+        self.data.build_manager.start_http_server();
+    }
+    
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
-        log!("REDRAW LOG {:?}", action);
         let dock = self.ui.dock(id!(dock));
-        let file_tree = self.ui.file_tree(id!(file_tree));
-        let log_list = self.ui.log_list(id!(log_list));
-        let run_list = self.ui.run_list(id!(run_list));
+        let file_tree = self.ui.view(id!(file_tree));
+        let log_list = self.ui.view(id!(log_list));
+        let run_list = self.ui.view(id!(run_list));
         match action.cast(){
             AppAction::JumpTo(jt)=>{
-                if let Some(file_id) = self.scope.file_system.path_to_file_node_id(&jt.file_name) {
-                    if let Some(tab_id) = self.scope.file_system.file_node_id_to_tab_id(file_id){
+                if let Some(file_id) = self.data.file_system.path_to_file_node_id(&jt.file_name) {
+                    if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
                         if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
-                            if let Some(session) = self.scope.file_system.get_session_mut(tab_id) {
+                            if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
                                 editor.editor.set_cursor_and_scroll(cx, jt.start, session);
                                 editor.editor.set_key_focus(cx);
                             }
@@ -121,30 +120,29 @@ impl MatchEvent for App{
                     else{
                         // lets open the editor
                         let tab_id = dock.unique_tab_id(file_id.0.0);
-                        self.scope.file_system.request_open_file(tab_id, file_id);
+                        self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
                         dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
                         // lets scan the entire doc for duplicates
-                        self.scope.file_system.ensure_unique_tab_names(cx, &dock)
+                        self.data.file_system.ensure_unique_tab_names(cx, &dock)
                     }
                 }
             }
             AppAction::RedrawFile(file_id)=>{
-                self.scope.file_system.redraw_view_by_file_id(cx, file_id, &dock);
+                self.data.file_system.redraw_view_by_file_id(cx, file_id, &dock);
             }
             AppAction::ClearLog=>{
-                self.scope.build_manager.clear_log(cx, &dock, &mut self.scope.file_system);
-                self.ui.log_list(id!(log_list)).redraw(cx);
+                self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
+                log_list.redraw(cx);
             }
             AppAction::ReloadFileTree=>{
-                self.scope.file_system.reload_file_tree();
+                self.data.file_system.reload_file_tree();
             }
             AppAction::RedrawLog=>{
-                
-                self.ui.log_list(id!(log_list)).redraw(cx);
+                log_list.redraw(cx);
             }
             AppAction::StartRecompile=>{
-                self.scope.build_manager.start_recompile(cx);
+                self.data.build_manager.start_recompile(cx);
             }
             AppAction::RecompileStarted=>{
                 if let Some(mut dock) = dock.borrow_mut() {
@@ -161,7 +159,7 @@ impl MatchEvent for App{
         match action.cast(){
             BuildManagerAction::StdinToHost {run_view_id, msg} => {
                 if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut() {
-                    run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.scope.build_manager);
+                    run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.data.build_manager);
                 }
             }
             BuildManagerAction::None=>()
@@ -173,11 +171,11 @@ impl MatchEvent for App{
                 //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
             }
             FileSystemAction::RecompileNeeded => {
-                self.scope.build_manager.start_recompile_timer(cx, &self.ui);
+                self.data.build_manager.start_recompile_timer(cx, &self.ui);
             }
             FileSystemAction::LiveReloadNeeded(live_file_change) => {
-                self.scope.build_manager.live_reload_needed(live_file_change);
-                self.scope.build_manager.clear_log(cx, &dock, &mut self.scope.file_system);
+                self.data.build_manager.live_reload_needed(live_file_change);
+                self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
                 log_list.redraw(cx);
             }
             FileSystemAction::None=>()
@@ -187,7 +185,7 @@ impl MatchEvent for App{
             match action.cast(){
                 CodeEditorAction::TextDidChange => {
                     // lets write the file
-                    self.scope.file_system.request_save_file(action.path.path_id(0))
+                    self.data.file_system.request_save_file(action.path.get(0))
                 }
                 CodeEditorAction::None=>{}
             }
@@ -195,12 +193,12 @@ impl MatchEvent for App{
             match action.cast(){
                 DockAction::TabCloseWasPressed(tab_id)=>{
                     dock.close_tab(cx, tab_id);
-                    if self.scope.build_manager.handle_tab_close(tab_id) {
+                    if self.data.build_manager.handle_tab_close(tab_id) {
                         log_list.redraw(cx);
                         run_list.redraw(cx);
                     }
-                    self.scope.file_system.remove_tab(tab_id);
-                    self.scope.file_system.ensure_unique_tab_names(cx, &dock);
+                    self.data.file_system.remove_tab(tab_id);
+                    self.data.file_system.ensure_unique_tab_names(cx, &dock);
                 }
                 DockAction::ShouldTabStartDrag(tab_id)=>{
                     dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
@@ -228,14 +226,14 @@ impl MatchEvent for App{
                             else {
                                 dock.drop_move(cx, drop_event.abs, *internal_id);
                             }
-                            self.scope.file_system.ensure_unique_tab_names(cx, &dock);
+                            self.data.file_system.ensure_unique_tab_names(cx, &dock);
                         }
                         else { // external file, we have to create a new tab
-                            if let Some(file_id) = self.scope.file_system.path_to_file_node_id(&path) {
+                            if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
                                 let tab_id = dock.unique_tab_id(file_id.0.0);
-                                self.scope.file_system.request_open_file(tab_id, file_id);
+                                self.data.file_system.request_open_file(tab_id, file_id);
                                 dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
-                                self.scope.file_system.ensure_unique_tab_names(cx, &dock)
+                                self.data.file_system.ensure_unique_tab_names(cx, &dock)
                             }
                         }
                     }
@@ -286,7 +284,7 @@ impl MatchEvent for App{
             self.handle_action(cx, action);
         }
         if let Some(file_id) = file_tree.should_file_start_drag(&actions) {
-            let path = self.scope.file_system.file_node_path(file_id);
+            let path = self.data.file_system.file_node_path(file_id);
             file_tree.file_start_drag(cx, file_id, DragItem::FilePath {
                 path,
                 internal_id: None
@@ -296,17 +294,17 @@ impl MatchEvent for App{
         if let Some(file_id) = file_tree.file_clicked(&actions) {
             // ok lets open the file
             let tab_id = dock.unique_tab_id(file_id.0.0);
-            self.scope.file_system.request_open_file(tab_id, file_id);
+            self.data.file_system.request_open_file(tab_id, file_id);
             // lets add a file tab 'somewhere'
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
                                         
             // lets scan the entire doc for duplicates
-            self.scope.file_system.ensure_unique_tab_names(cx, &dock)
+            self.data.file_system.ensure_unique_tab_names(cx, &dock)
         }
     }
     
     fn handle_shutdown(&mut self, _cx:&mut Cx){
-        self.scope.build_manager.clear_active_builds();
+        self.data.build_manager.clear_active_builds();
     }
 }
 
@@ -314,17 +312,17 @@ impl AppMain for App {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut WidgetScope::new(&mut self.scope));
+        self.ui.handle_event(cx, event, &mut WidgetScope::new(&mut self.data));
         
-        let dock = self.ui.dock(id!(dock));
-        self.scope.file_system.handle_event(cx, event, &self.ui);
-        self.scope.build_manager.handle_event(cx, event, &mut self.scope.file_system); 
+        self.data.file_system.handle_event(cx, event, &self.ui);
+        self.data.build_manager.handle_event(cx, event, &mut self.data.file_system); 
 
         // process events on all run_views
+        let dock = self.ui.dock(id!(dock));
         if let Some(mut dock) = dock.borrow_mut() {
             for (id, (_, item)) in dock.items().iter() {
                 if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                    run_view.pump_event_loop(cx, event, *id, &mut self.scope.build_manager);
+                    run_view.pump_event_loop(cx, event, *id, &mut self.data.build_manager);
                 }
             }
         }

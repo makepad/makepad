@@ -9,7 +9,7 @@ live_design!{
     ImageBase = {{Image}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRegister)]
 pub struct Image {
     #[walk] walk: Walk,
     #[live] draw_bg: DrawQuad,
@@ -31,11 +31,7 @@ impl ImageCacheImpl for Image {
     }
 }
 
-impl LiveHook for Image {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Image)
-    }
-    
+impl LiveHook for Image{
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         self.lazy_create_image_cache(cx);
         let source = self.source.clone();

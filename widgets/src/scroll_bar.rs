@@ -11,7 +11,7 @@ pub enum ScrollAxis {
     #[pick] Horizontal,
     Vertical
 }
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBar {
     #[live] draw_bar: DrawScrollBar,
     #[live] pub bar_size: f64,
@@ -36,7 +36,7 @@ pub struct ScrollBar {
     #[rust] drag_point: Option<f64>, // the point in pixels where we are dragging
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawScrollBar {
     #[deref] draw_super: DrawQuad,

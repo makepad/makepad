@@ -75,11 +75,13 @@ impl AudioGraphNode for Node {
     }
 }
 
-impl LiveHook for Instrument {
-    fn before_live_design(cx:&mut Cx){
+impl LiveRegister for Instrument{
+    fn live_register(cx: &mut Cx){
         register_audio_component!(cx, Instrument)
     }
-    
+}
+
+impl LiveHook for Instrument {
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if from.is_from_doc() {
             self.step_order.push(nodes[index].id);

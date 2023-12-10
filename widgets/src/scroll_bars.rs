@@ -7,7 +7,7 @@ live_design!{
     ScrollBarsBase = {{ScrollBars}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBars {
     #[live] show_scroll_x: bool,
     #[live] show_scroll_y: bool,

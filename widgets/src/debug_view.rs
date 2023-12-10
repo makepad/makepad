@@ -25,7 +25,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawRect {
     #[deref] draw_super: DrawQuad,
@@ -33,7 +33,7 @@ pub struct DrawRect {
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct DebugView {
     #[live] draw_list: DrawList2d,
     #[live] rect: DrawRect,
