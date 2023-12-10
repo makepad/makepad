@@ -5,6 +5,7 @@ pub mod app_ui;
 pub mod build_manager;
 pub mod file_system;
 pub mod studio_editor;
+pub mod studio_file_tree;
 //pub use makepad_code_editor;
 
 pub use makepad_widgets::makepad_draw;

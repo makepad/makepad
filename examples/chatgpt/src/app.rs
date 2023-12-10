@@ -89,46 +89,47 @@ impl App {
     }
 }
 
+impl MatchEvent for App {
+
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        if self.ui.button(id!(send_button)).clicked(&actions) {
+            let user_prompt = self.ui.text_input(id!(message_input)).text();
+            Self::send_message(cx, user_prompt);
+        }
+    }
+    
+    fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
+       for event in responses{
+           match &event.response {
+               NetworkResponse::HttpResponse(response) => {
+                   let label = self.ui.label(id!(message_label));
+                   match event.request_id {
+                       live_id!(SendChatMessage) => {
+                           if response.status_code == 200 {
+                               let chat_response = response.get_json_body::<ChatResponse>().unwrap();
+                               label.set_text_and_redraw(cx, &chat_response.choices[0].message.content);
+                           } else {
+                               label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
+                           }
+                           label.redraw(cx);
+                       },
+                       _ => (),
+                   }
+               }
+               NetworkResponse::HttpRequestError(error) => {
+                   let label = self.ui.label(id!(message_label));
+                   label.set_text_and_redraw(cx, &format!("Failed to connect with OpenAI {:?}", error));
+               }
+               _ => ()
+           }
+       } 
+    }
+}
+
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut scope = WidgetScope::default();
-        
-        if let Event::Draw(event) = event {
-            return self.ui.draw_all(&mut Cx2d::new(cx, event), &mut scope);
-        }
-        
-        for event in event.network_responses() {
-            match &event.response {
-                NetworkResponse::HttpResponse(response) => {
-                    let label = self.ui.label(id!(message_label));
-                    match event.request_id {
-                        live_id!(SendChatMessage) => {
-                            if response.status_code == 200 {
-                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
-                                label.set_text_and_redraw(cx, &chat_response.choices[0].message.content);
-                            } else {
-                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
-                            }
-                            label.redraw(cx);
-                        },
-                        _ => (),
-                    }
-                }
-                NetworkResponse::HttpRequestError(error) => {
-                    let label = self.ui.label(id!(message_label));
-                    label.set_text_and_redraw(cx, &format!("Failed to connect with OpenAI {:?}", error));
-                }
-                _ => ()
-            }
-        }
-        
-        self.ui.handle_event(cx, event, &mut scope);
-        if let Event::Actions(actions) = event{
-            if self.ui.button(id!(send_button)).clicked(&actions) {
-                let user_prompt = self.ui.text_input(id!(message_input)).text();
-                Self::send_message(cx, user_prompt);
-            }
-        }
+        self.match_event(cx, event);
+        self.ui.handle_event_no_scope(cx, event);
     }
 }
 

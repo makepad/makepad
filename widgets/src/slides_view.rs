@@ -68,6 +68,11 @@ impl LiveHook for SlidesView {
             }
         }
     }
+    
+    fn after_new_from_doc(&mut self, cx: &mut Cx){
+        self.next_frame(cx);
+    }
+    
 }
 
 #[derive(Clone, DefaultNone)]
@@ -79,9 +84,6 @@ impl Widget for SlidesView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
         // lets handle mousedown, setfocus
         match event {
-            Event::Construct => {
-                self.next_frame(cx);
-            }
             Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
                 self.current_slide = self.current_slide * self.anim_speed + self.goal_slide * (1.0 - self.anim_speed);
                 if (self.current_slide - self.goal_slide).abs()>0.00001 {

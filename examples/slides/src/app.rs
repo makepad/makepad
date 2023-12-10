@@ -147,22 +147,8 @@ impl LiveHook for App {
     }
 }
 
-impl App {
-}
-
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut scope = WidgetScope::default();
-        if let Event::Draw(event) = event {
-            //let dt = profile_start();
-            let cx = &mut Cx2d::new(cx, event);
-            while let Some(_next) = self.ui.draw_widget(cx, &mut scope).hook_widget() {
-              
-            }
-            //profile_end!(dt);
-            return
-        }
-        
-        let _actions = self.ui.handle_event(cx, event, &mut scope);
+        self.ui.handle_event_no_scope(cx, event);
     }
 }
