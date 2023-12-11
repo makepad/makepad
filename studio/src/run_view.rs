@@ -1,5 +1,5 @@
 use crate::{
-    app::{StudioData},
+    app::{AppData},
     makepad_widgets::*,
     makepad_platform::os::cx_stdin::*,
     build_manager::build_manager::BuildManager,
@@ -302,7 +302,7 @@ impl Widget for RunView {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
         let run_view_id = scope.path.get(0);
-        let manager = &mut scope.data.get_mut::<StudioData>().build_manager;
+        let manager = &mut scope.data.get_mut::<AppData>().build_manager;
         self.draw_run_view(cx, run_view_id, manager, walk);
         WidgetDraw::done()
     }
@@ -310,7 +310,7 @@ impl Widget for RunView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
         
         let run_view_id = scope.path.get(0);
-        let manager = &scope.data.get::<StudioData>().build_manager;
+        let manager = &scope.data.get::<AppData>().build_manager;
         
         self.animator_handle_event(cx, event);
         // lets send mouse events

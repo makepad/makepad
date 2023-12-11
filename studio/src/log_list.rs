@@ -5,7 +5,7 @@ use {
             build_manager::*,
             build_protocol::*,
         },
-        app::{AppAction, StudioData},
+        app::{AppAction, AppData},
         makepad_widgets::*,
         makepad_code_editor::text::{Position},
         makepad_widgets::portal_list::PortalList,
@@ -296,7 +296,7 @@ impl Widget for LogList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
         while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
             if let Some(mut list) = next.as_portal_list().borrow_mut(){
-                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<StudioData>().build_manager)
+                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
             }
         }
         WidgetDraw::done()
@@ -306,7 +306,7 @@ impl Widget for LogList {
         
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        let data = scope.data.get::<StudioData>();
+        let data = scope.data.get::<AppData>();
         if let Event::Actions(actions) = event{    
             for (item_id, item) in log_list.items_with_actions(&actions) {
                 if item.link_label(id!(location)).pressed(&actions) {
