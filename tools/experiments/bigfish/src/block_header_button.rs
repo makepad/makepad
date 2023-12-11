@@ -75,6 +75,7 @@ live_design! {
             }
         }
 
+        
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -103,10 +104,7 @@ live_design! {
                 
                 return vec4(0.,0.,0.,0.);
             }
-        }
-
-        
-
+        }        
     }
 }
 
