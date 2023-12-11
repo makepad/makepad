@@ -91,6 +91,10 @@ pub enum Event {
 }
 
 impl Event{
+    pub fn name(&self)->&'static str{
+        Self::name_from_u32(self.to_u32())
+    }
+    
     pub fn name_from_u32(v:u32)->&'static str{
         match v{
             1=>"Startup",

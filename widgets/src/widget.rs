@@ -116,6 +116,65 @@ pub trait WidgetDrawApi {
     fn hook_widget(self) -> Option<WidgetRef>;
 }
 
+#[derive(Default, Clone)]
+pub struct WidgetPath{
+    static_path:[LiveId;16], 
+    static_len:usize, 
+    dyn_path:Vec<LiveId>,
+}
+
+impl WidgetPath{
+    pub fn get(&self, id:usize)->LiveId{
+        if id >= self.dyn_path.len(){
+            if id >= self.static_len{
+                return LiveId(0)
+            }
+            else{
+                let idx = self.static_len - id - 1;
+                self.static_path[idx]
+            }
+        }
+        else{
+            let idx = self.dyn_path.len() - id - 1;
+            *self.dyn_path.get(idx).unwrap_or(&LiveId(0))
+        }
+    }
+    pub fn push(&mut self, id:LiveId){
+        if self.static_len < self.static_path.len(){
+            self.static_path[self.static_len] = id;
+            self.static_len += 1;
+        }
+        else{
+            self.dyn_path.push(id);
+        }
+    }
+    pub fn pop(&mut self){
+        if self.dyn_path.len()>0{
+            self.dyn_path.pop();
+        }
+        else if self.static_len>0{
+            self.static_len -= 1;
+        }
+    }
+}
+
+impl Debug for WidgetPath {
+    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
+        for i in 0..self.static_len{
+            if i!=0{
+                let _ = write!(f, ".");
+            }
+            let _ = write!(f, "{}", self.static_path[i]);
+        }
+        for i in 0..self.dyn_path.len(){
+            let _ = write!(f, ".");
+            let _ = write!(f, "{}", self.dyn_path[i]);
+        }
+        Ok(())
+    }
+}
+
+
 #[derive(Default)]
 pub struct WidgetScope<'a>{
     pub path: WidgetPath,
@@ -136,9 +195,9 @@ impl<'a> WidgetScope<'a>{
     }
     
     pub fn with_id<F, R>(&mut self, id:LiveId, f: F) -> R where F: FnOnce(&mut WidgetScope) -> R{
-        self.path.0.push(id);
+        self.path.push(id);
         let r = f(self);
-        self.path.0.pop();
+        self.path.pop();
         r
     }
 }
@@ -688,31 +747,6 @@ pub struct WidgetAction {
     pub widget_uid: WidgetUid,
     pub path: WidgetPath,
     pub group: Option<WidgetActionGroup>
-}
-
-#[derive(Default, Clone)]
-pub struct WidgetPath(pub Vec<LiveId>);
-
-impl WidgetPath{
-    pub fn get(&self, id:usize)->LiveId{
-        if id >= self.0.len(){
-            return LiveId(0)
-        }
-        let idx = self.0.len() - id - 1;
-        *self.0.get(idx).unwrap_or(&LiveId(0))
-    }
-}
-
-impl Debug for WidgetPath {
-    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
-        for i in 0..self.0.len(){
-            if i!=0{
-                let _ = write!(f, ".");
-            }
-            let _ = write!(f, "{}", self.0[i]);
-        }
-        Ok(())
-    }
 }
 
 
