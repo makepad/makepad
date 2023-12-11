@@ -136,7 +136,7 @@ pub struct BlockHeaderButton {
 
     #[rust] pub blockid: u64,
     #[rust] pub dragging: bool,
-}
+} 
 
 
 impl Widget for BlockHeaderButton{

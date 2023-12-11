@@ -17,20 +17,22 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
     walk,
     deref,
     redraw,
-    walk_redraw
+    find,
+    wrap
 ))]
 pub fn derive_widget(input: TokenStream) -> TokenStream {
     derive_widget_impl(input)
 }
 
-#[proc_macro_derive(WidgetRedraw, attributes(
+#[proc_macro_derive(WidgetWrap, attributes(
     walk,
     deref,
     redraw,
-    walk_redraw
+    find,
+    wrap
 ))]
-pub fn derive_widget_redraw(input: TokenStream) -> TokenStream {
-    derive_widget_redraw_impl(input)
+pub fn derive_widget_node(input: TokenStream) -> TokenStream {
+    derive_widget_node_impl(input)
 }
 
 #[proc_macro_derive(WidgetRef)]

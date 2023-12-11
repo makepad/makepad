@@ -4,14 +4,14 @@ use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
 pub fn derive_widget_impl(input: TokenStream) ->  TokenStream {
     let mut out = TokenStream::new();
-    out.extend(derive_widget_redraw_impl(input.clone()));
+    out.extend(derive_widget_node_impl(input.clone()));
     out.extend(derive_widget_register_impl(input.clone()));
     out.extend(derive_widget_ref_impl(input.clone()));
     out.extend(derive_widget_set_impl(input.clone()));
     out
 }
 
-pub fn derive_widget_redraw_impl(input: TokenStream) ->  TokenStream {
+pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
@@ -35,7 +35,8 @@ pub fn derive_widget_redraw_impl(input: TokenStream) ->  TokenStream {
         // alright now. we have a field
         let mut walk_field = None;
         let mut deref_field = None;
-        let mut walk_redraw_field = None;
+        let mut wrap_field = None;
+        let mut find_fields = Vec::new();
         let mut redraw_fields = Vec::new();
         for field in &mut fields {
             if field.attrs.iter().find(|v| v.name == "walk").is_some(){
@@ -47,15 +48,19 @@ pub fn derive_widget_redraw_impl(input: TokenStream) ->  TokenStream {
             if field.attrs.iter().find(|v| v.name == "redraw").is_some(){
                 redraw_fields.push(field.name.clone());
             }
-            if field.attrs.iter().find(|v| v.name == "walk_redraw").is_some(){
-                walk_redraw_field = Some(field.name.clone());
+            if field.attrs.iter().find(|v| v.name == "find").is_some(){
+                find_fields.push(field.name.clone());
+            }
+            if field.attrs.iter().find(|v| v.name == "wrap").is_some(){
+                wrap_field = Some(field.name.clone());
             }
         }
         tb.add("impl").stream(generic.clone());
-        tb.add("WidgetRedraw for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
-        if let Some(walk_redraw_field) = &walk_redraw_field{
-               tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&walk_redraw_field).add(".walk(cx)}");            
-                tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&walk_redraw_field).add(".redraw(cx)}");
+        tb.add("WidgetNode for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
+        if let Some(wrap_field) = &wrap_field{
+            tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&wrap_field).add(".walk(cx)}");            
+            tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&wrap_field).add(".redraw(cx)}");
+            tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
         }
         else{
             if let Some(walk_field) = &walk_field{
@@ -78,8 +83,22 @@ pub fn derive_widget_redraw_impl(input: TokenStream) ->  TokenStream {
                 tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&deref_field).add(".redraw(cx)}");
             }
             else{
-                return error("Need either a field marked redraw or deref to find redraw method")
+                return error("Need either a field marked redraw or deref or wrap to find redraw method")
             }
+            if find_fields.len()>0{
+                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){");
+                for find_field in find_fields{
+                    tb.add("    self.").ident(&find_field).add(".find_widgets(path, cached, results);");
+                }
+                tb.add("    }");
+            }
+            else if let Some(deref_field) = &deref_field{
+                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&deref_field).add(".find_widgets(path, cached, results)}");                
+            }
+            else{
+                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
+            }
+            
         }
         tb.add("}");
         return tb.end();

@@ -17,7 +17,7 @@ live_design!{
  
 #[derive(Live, LiveHook, Widget)] 
 pub struct StudioFileTree{
-    #[walk_redraw] #[live] pub file_tree: FileTree
+    #[wrap] #[live] pub file_tree: FileTree
 }
 
 impl Widget for StudioFileTree {

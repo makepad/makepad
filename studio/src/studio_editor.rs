@@ -20,7 +20,7 @@ live_design!{
  
 #[derive(Live, LiveHook, Widget)] 
 pub struct StudioEditor{
-    #[walk_redraw] #[live] pub editor: CodeEditor
+    #[wrap] #[live] pub editor: CodeEditor
 } 
 
 impl Widget for StudioEditor {
