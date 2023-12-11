@@ -291,7 +291,18 @@ live_design!{
         }
     }
     
-    
+    NewsFeed ={{NewsFeed}}{
+        height: Fill,
+        width: Fill
+        flow: Down
+        list = <PortalList>{
+            TopSpace = <View> {height: 80}
+            Post = <Post> {}
+            PostImage = <PostImage> {}
+            BottomSpace = <View> {height: 100}
+        }
+    }
+            
     App = {{App}} {
         ui: <Window> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
@@ -313,15 +324,7 @@ live_design!{
                 },
                 
                 
-                news_feed = <PortalList> {
-                    height: Fill,
-                    width: Fill
-                    flow: Down
-                    TopSpace = <View> {height: 80}
-                    Post = <Post> {}
-                    PostImage = <PostImage> {}
-                    BottomSpace = <View> {height: 100}
-                }
+                news_feed = <NewsFeed>{}
                 
                 <View> {
                     height: Fill,
@@ -339,20 +342,14 @@ live_design!{
 
 app_main!(App);
 
-#[derive(Live, LiveHook)]
-pub struct App {
-    #[live] ui: WidgetRef,
+#[derive(Live, LiveHook, Widget)]
+struct NewsFeed{
+    #[deref] view:View
 }
 
-impl LiveRegister for App {
-    fn live_register(cx: &mut Cx) {
-        crate::makepad_widgets::live_design(cx);
-    } 
-}
-
-impl MatchEvent for App {
-    fn handle_draw_2d(&mut self, cx:&mut Cx2d){
-        while let Some(item) =  self.ui.draw(cx, &mut Scope::empty()).step(){
+impl Widget for NewsFeed{
+    fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+        while let Some(item) =  self.view.draw(cx, &mut Scope::empty()).step(){
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 1000);
                 while let Some(item_id) = list.next_visible_item(cx) {
@@ -375,10 +372,27 @@ impl MatchEvent for App {
                 }
             }
         }
+        DrawStep::done()
     }
-    
+    fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope){
+        self.view.handle_event(cx, event, scope)
+    }
+}
+
+#[derive(Live, LiveHook)]
+pub struct App {
+    #[live] ui: WidgetRef,
+}
+
+impl LiveRegister for App {
+    fn live_register(cx: &mut Cx) {
+        crate::makepad_widgets::live_design(cx);
+    } 
+}
+
+impl MatchEvent for App {
     fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
-        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
+        let news_feeds = self.ui.portal_list_set(ids!(news_feed.list));
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
                 log!("hello {}", item_id);
@@ -389,9 +403,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if self.match_event_with_draw_2d(cx, event).is_ok(){
-            return
-        }
+        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
