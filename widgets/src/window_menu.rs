@@ -32,7 +32,7 @@ pub enum WindowMenuItem {
     Line
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct WindowMenu{
     #[walk] walk: Walk,
     #[layout] layout: Layout,

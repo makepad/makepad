@@ -11,7 +11,7 @@ live_design!{
     LinkLabelBase = {{LinkLabel}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct LinkLabel {
     #[deref] button: Button
 }

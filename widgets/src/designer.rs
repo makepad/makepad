@@ -60,7 +60,7 @@ enum OutlineNode {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct Designer {
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,

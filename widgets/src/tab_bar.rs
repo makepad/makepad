@@ -12,7 +12,7 @@ live_design!{
     TabBarBase = {{TabBar}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct TabBar {
     
     #[live] scroll_bars: ScrollBars,

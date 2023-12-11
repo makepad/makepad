@@ -12,7 +12,7 @@ live_design!{
     MultiWindowBase = {{MultiWindow}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct MultiWindow {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] windows: ComponentMap<LiveId, Window>,

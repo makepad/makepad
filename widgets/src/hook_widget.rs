@@ -11,7 +11,7 @@ live_design!{
     HookWidgetBase = {{HookWidget}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct HookWidget {
     #[walk] walk: Walk,
     #[layout] layout: Layout,

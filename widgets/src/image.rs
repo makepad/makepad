@@ -9,7 +9,7 @@ live_design!{
     ImageBase = {{Image}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct Image {
     #[walk] walk: Walk,
     #[live] draw_bg: DrawQuad,
