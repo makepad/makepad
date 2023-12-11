@@ -23,17 +23,16 @@ pub struct WidgetUid(pub u64);
 pub trait WidgetDesign {
 }
 
-pub trait WidgetRedraw: LiveApply{
+pub trait WidgetNode: LiveApply{
+    fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
     fn redraw(&mut self, _cx: &mut Cx);
 }
 
-pub trait Widget: WidgetRedraw {
+pub trait Widget: WidgetNode {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 
-    fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
-    
     fn widget(&mut self, path: &[LiveId]) -> WidgetRef {
         let mut results = WidgetSet::default();
         self.find_widgets(path, WidgetCache::Yes, &mut results);
@@ -61,9 +60,8 @@ pub trait Widget: WidgetRedraw {
         self.draw_walk(cx, scope, walk)
     }
     
-    fn draw_walk_all(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk:Walk) -> DrawStep{
+    fn draw_walk_all(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk:Walk){
         while self.draw_walk(cx, scope, walk).is_step(){}
-        DrawStep::done()
     }
     
     fn is_visible(&self) -> bool {

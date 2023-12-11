@@ -60,9 +60,11 @@ struct Profiler{
 
 impl Widget for Profiler {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
-        self.view.draw_walk_all(cx, scope, walk)
+        self.view.draw_walk_all(cx, scope, walk);
+        DrawStep::done()
     }
     
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        self.view.handle_event(cx, event, scope);
     }
 }
