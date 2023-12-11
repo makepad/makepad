@@ -9,7 +9,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct SlidesView {
     #[layout] layout: Layout,
     #[rust] area: Area,
@@ -227,10 +227,6 @@ impl SlidesView {
     }
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SlidesViewRef(WidgetRef);
-
 impl SlidesViewRef {
     pub fn next_slide(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -243,9 +239,6 @@ impl SlidesViewRef {
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct SlidesViewSet(WidgetSet);
 
 impl SlidesViewSet {
     pub fn next_slide(&self, cx: &mut Cx) {

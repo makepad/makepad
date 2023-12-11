@@ -28,7 +28,7 @@ live_design! {
     VideoBase = {{Video}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, WidgetRef, WidgetSet)]
 pub struct Video {
     // Drawing
     #[live]
@@ -75,9 +75,6 @@ pub struct Video {
     #[rust]
     id: LiveId,
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct VideoRef(WidgetRef);
 
 impl VideoRef {
     pub fn prepare_playback(&mut self, cx: &mut Cx) {
@@ -186,11 +183,6 @@ impl VideoRef {
         false
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct VideoSet(WidgetSet);
-
-impl VideoSet {}
 
 #[derive(Default, PartialEq, Debug)]
 enum PlaybackState {

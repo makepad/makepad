@@ -30,7 +30,7 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct RadioButton {
     #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
@@ -110,9 +110,6 @@ impl Widget for RadioButton {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct RadioButtonRef(WidgetRef);
-
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
         if let Some(mut inner) = self.borrow_mut(){
@@ -120,9 +117,6 @@ impl RadioButtonRef{
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct RadioButtonSet(WidgetSet);
 
 impl RadioButtonSet{
     

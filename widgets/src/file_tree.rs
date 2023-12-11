@@ -81,7 +81,7 @@ pub struct FileTreeNode {
     #[live] selected: f32,
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FileTree {
     #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
@@ -472,9 +472,6 @@ impl Widget for FileTree {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, WidgetRef)]
-pub struct FileTreeRef(WidgetRef);
-
 impl FileTreeRef{
     pub fn should_file_start_drag(&self, actions: &Actions) -> Option<FileNodeId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
@@ -499,6 +496,3 @@ impl FileTreeRef{
         cx.start_dragging(vec![item]);
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct FileTreeSet(WidgetSet);

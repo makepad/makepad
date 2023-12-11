@@ -44,7 +44,7 @@ impl ViewOptimize {
     }
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct View { // draw info per UI element
     #[live] pub draw_bg: DrawColor,
     
@@ -159,12 +159,6 @@ impl LiveHook for View {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct ViewRef(WidgetRef);
-
-
-#[derive(Clone, WidgetSet)]
-pub struct ViewSet(WidgetSet);
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum ViewAction {

@@ -58,7 +58,7 @@ struct DrawWave {
     #[live] vu_right: f32
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct DisplayAudio {
     #[walk] walk: Walk,
     #[live] draw_wave: DrawWave,
@@ -153,10 +153,6 @@ impl DisplayAudio {
     }
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct DisplayAudioRef(WidgetRef);
-
 impl DisplayAudioRef {
     pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer, gain:f32) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -167,10 +163,6 @@ impl DisplayAudioRef {
     pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
     }
 }
-
-// ImGUI convenience API for Piano
-#[derive(Clone, WidgetSet)]
-pub struct DisplayAudioSet(WidgetSet);
 
 impl DisplayAudioSet {
     pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer, gain:f32) {

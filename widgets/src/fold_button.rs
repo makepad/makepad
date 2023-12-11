@@ -8,7 +8,7 @@ live_design!{
     FoldButtonBase = {{FoldButton}} {}
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FoldButton {
     #[animator] animator: Animator,
     
@@ -106,9 +106,6 @@ impl Widget for FoldButton {
     }
 }
 
-
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct FoldButtonRef(WidgetRef); 
 
 impl FoldButtonRef {
     

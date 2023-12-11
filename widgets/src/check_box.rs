@@ -31,7 +31,7 @@ pub enum CheckType {
     None = shader_enum(4),
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct CheckBox {
     
     #[walk] walk: Walk,
@@ -145,9 +145,6 @@ impl Widget for CheckBox {
         self.text.as_mut_empty().push_str(v);
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct CheckBoxRef(WidgetRef);
 
 impl CheckBoxRef {
     pub fn changed(&self, actions: &Actions) -> Option<bool> {
