@@ -44,7 +44,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         // alright now. we have a field
         
         for field in &mut fields {
-            if field.attrs.len() == 1
+            /*if field.attrs.len() == 1
                 && field.attrs[0].name != "walk"
                 && field.attrs[0].name != "layout"
                 && field.attrs[0].name != "live"
@@ -53,7 +53,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 && field.attrs[0].name != "rust"
                 && field.attrs[0].name != "deref" {
                 return error_result(&format!("Field {} does not have a live, calc, rust, animator, deref, walk, layout attribute", field.name));
-            }
+            }*/
             if field.attrs.is_empty() { // need field def
                 return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[live] for live DSL mapped fields and #[deref] for a base class");
             }
@@ -162,10 +162,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            match nodes[index].id {");
         
         for field in &fields {
-            if field.attrs[0].name == "live" || field.attrs[0].name == "animator" {
+            if field.attrs.iter().any( | a | a.name == "live") || field.attrs.iter().any( | a | a.name == "animator") {
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
-            else if field.attrs[0].name == "walk" {
+            else if field.attrs.iter().any( | a | a.name == "walk") {
                 for field in &fields {
                     if field.name == "abs_pos" ||
                       field.name == "margin" ||
@@ -179,7 +179,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("        live_id!(width)=>self.").ident(&field.name).add(".width.apply(cx, apply_from, index, nodes),");
                 tb.add("        live_id!(height)=>self.").ident(&field.name).add(".height.apply(cx, apply_from, index, nodes),");
             }
-            else if field.attrs[0].name == "layout" {
+            else if field.attrs.iter().any( | a | a.name == "layout") {
                 for field in &fields {
                     if field.name == "scroll" ||
                       field.name == "clip_x" ||
@@ -218,7 +218,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         }
         tb.add("        }");
         tb.add("    }");
-        tb.add("}");
+        tb.add("}"); 
         
         tb.add("impl").stream(generic.clone());
         tb.add("LiveHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
@@ -289,8 +289,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        let mut fields = Vec::new();");
         
         for field in &fields {
-            let attr = &field.attrs[0];
-            if attr.name == "animator" || attr.name == "live" || attr.name == "calc" || attr.name == "deref" {
+            if  let Some(attr) = 
+                field.attrs.iter().find( | a | a.name == "animator" || a.name == "live" || a.name == "calc" ||a.name == "deref"){
                 tb.add("fields.push(LiveTypeField{id:LiveId::from_str_with_lut(").string(&field.name).add(").unwrap(),");
                 // ok so what do we do if we have an Option<..>
                 // how about LiveOrCalc becomes LiveFieldType::Option
@@ -336,8 +336,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("<Self as LiveRegister>::live_register(cx);");
         // we need this here for shader enums to register without hassle
         for field in &fields {
-            let attr = &field.attrs[0];
-            if attr.name == "live" || attr.name == "calc" || attr.name == "deref" {
+            if  field.attrs.iter().any( | a | a.name == "live" || a.name == "calc" ||a.name == "deref"){
                 match unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
                         tb.add("<").stream(Some(inside)).add("as LiveNew>::live_design_with(cx);");
@@ -354,18 +353,23 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("    fn new(cx: &mut Cx) -> Self {");
         tb.add("        let mut ret = Self {");
         for field in &fields {
-            let attr = &field.attrs[0];
             tb.ident(&field.name).add(":");
-            if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                if attr.name == "live" || attr.name == "deref" {
-                    tb.add("LiveNew::new(cx)");
+            
+            if let Some(attr) = field.attrs.iter().find( | a | a.name == "live" ||a.name == "deref" || a.name == "rust" || a.name == "calc"){
+                if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
+                    if attr.name == "live" || attr.name == "deref" {
+                        tb.add("LiveNew::new(cx)");
+                    }
+                    else {
+                        tb.add("Default::default()");
+                    }
                 }
                 else {
-                    tb.add("Default::default()");
+                    tb.add("(").stream(attr.args.clone()).add(").into()");
                 }
             }
-            else {
-                tb.add("(").stream(attr.args.clone()).add(").into()");
+            else{
+                tb.add("Default::default()");
             }
             tb.add(",");
         }

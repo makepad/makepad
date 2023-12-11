@@ -17,11 +17,11 @@ pub enum ButtonAction {
     Released
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, Widget)]
 pub struct Button {
     #[animator] animator: Animator,
 
-    #[live] draw_bg: DrawQuad,
+    #[redraw] #[live] draw_bg: DrawQuad,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     #[live] icon_walk: Walk,
@@ -70,14 +70,6 @@ impl Widget for Button{
             _ => ()
         }
     }
-
-    fn walk(&mut self, _cx:&mut Cx)->Walk{
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx:&mut Cx){
-        self.draw_bg.redraw(cx)
-    }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
@@ -99,19 +91,15 @@ impl Widget for Button{
 impl ButtonRef {
     
     pub fn clicked(&self, actions:&Actions) -> bool {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let ButtonAction::Clicked = item.cast() {
-                return true
-            }
+        if let ButtonAction::Clicked = actions.find_widget_action(self.widget_uid()).cast() {
+            return true
         }
         false
     }
 
     pub fn pressed(&self, actions:&Actions) -> bool {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let ButtonAction::Pressed = item.cast() {
-                return true
-            }
+        if let ButtonAction::Pressed = actions.find_widget_action(self.widget_uid()).cast() {
+            return true
         }
         false
     }
@@ -120,20 +108,10 @@ impl ButtonRef {
 
 impl ButtonSet{
     pub fn clicked(&self, actions: &Actions)->bool{
-        for button in self.iter(){
-            if button.clicked(actions){
-                return true
-            }
-        }
-        false
+        self.iter().any(|v| v.clicked(actions))
     }
     pub fn pressed(&self, actions: &Actions)->bool{
-        for button in self.iter(){
-            if button.pressed(actions){
-                return true
-            }
-        }
-        false
+        self.iter().any(|v| v.pressed(actions))
     }
 }
 

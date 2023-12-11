@@ -57,7 +57,7 @@ impl SplitterAlign {
     }
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, Widget)]
 pub struct Splitter {
     #[live(SplitterAxis::Horizontal)] pub axis: SplitterAxis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
@@ -73,7 +73,7 @@ pub struct Splitter {
     #[live] min_horizontal: f64,
     #[live] max_horizontal: f64,
     
-    #[live] draw_splitter: DrawSplitter,
+    #[redraw] #[live] draw_splitter: DrawSplitter,
     #[live] split_bar_size: f64,
     
     // framecomponent mode
@@ -164,14 +164,6 @@ impl Widget for Splitter {
         }
         self.a.handle_event(cx, event, scope);
         self.b.handle_event(cx, event, scope);
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx:&mut Cx){
-        self.draw_splitter.redraw(cx)
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet) {

@@ -221,7 +221,7 @@ pub struct JumpTo{
     pub start:Position
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, Widget)]
 struct LogList{
     #[deref] view:View
 }
@@ -283,14 +283,6 @@ impl LogList{
 }
 
 impl Widget for LogList {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
-    }
-    
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.view.walk(cx)
-    }
-    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = step.as_portal_list().borrow_mut(){

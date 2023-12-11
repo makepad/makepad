@@ -675,6 +675,8 @@ live_design! {
     }
 
     WindowMenu = <WindowMenuBase>{
+        height: 0,
+        width: 0
     }
 
     Window = <WindowBase> {
@@ -715,6 +717,7 @@ live_design! {
                 xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
             }
         }
+        
         window_menu = <WindowMenu>{
             main = Main{items:[app]}
             app = Sub{name:"Makepad",items:[quit]}

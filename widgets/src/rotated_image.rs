@@ -5,11 +5,11 @@ live_design! {
     RotatedImageBase = {{RotatedImage}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, Widget)]
 pub struct RotatedImage {
     #[walk] walk: Walk,
     #[layout] layout: Layout,
-    #[live] draw_bg: DrawColor,
+    #[redraw] #[live] draw_bg: DrawColor,
 
     #[live] source: LiveDependency,
     #[rust(Texture::new(cx))] texture: Option<Texture>,
@@ -38,14 +38,6 @@ impl LiveHook for RotatedImage {
 }
 
 impl Widget for RotatedImage {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx)
-    }
-
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
-        self.walk
-    }
-
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk_rotated_image(cx, walk)
     }

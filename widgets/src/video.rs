@@ -28,10 +28,10 @@ live_design! {
     VideoBase = {{Video}} {}
 }
 
-#[derive(Live, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct Video {
     // Drawing
-    #[live]
+    #[redraw] #[live]
     draw_bg: DrawColor,
     #[walk]
     walk: Walk,
@@ -206,16 +206,6 @@ enum AudioState {
     Muted,
 }
 
-impl LiveRegister for Video{
-    #[allow(unused)]
-    fn live_register(cx: &mut Cx) {
-        #[cfg(target_os = "android")]
-        {
-            register_widget!(cx, Video);
-        }
-    }
-}
-
 impl LiveHook for Video {
     #[allow(unused)]
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
@@ -245,14 +235,7 @@ pub enum VideoAction {
 }
 
 impl Widget for Video {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()

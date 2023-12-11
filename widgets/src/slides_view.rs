@@ -9,10 +9,10 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct SlidesView {
     #[layout] layout: Layout,
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>,
@@ -126,14 +126,6 @@ impl Widget for SlidesView {
                 }
             }
         }
-    }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
