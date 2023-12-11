@@ -292,9 +292,6 @@ live_design!{
     }
     
     NewsFeed ={{NewsFeed}}{
-        height: Fill,
-        width: Fill
-        flow: Down
         list = <PortalList>{
             TopSpace = <View> {height: 80}
             Post = <Post> {}
@@ -307,8 +304,6 @@ live_design!{
         ui: <Window> {
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
-            
-            
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return (COLOR_BG);
@@ -323,15 +318,11 @@ live_design!{
                     y: 0.0
                 },
                 
-                
                 news_feed = <NewsFeed>{}
                 
                 <View> {
-                    height: Fill,
-                    width: Fill
                     flow: Down
-                    
-                        <Header> {}
+                    <Header> {}
                     <FillerY> {}
                     <Menu> {}
                 }
@@ -343,13 +334,13 @@ live_design!{
 app_main!(App);
 
 #[derive(Live, LiveHook, Widget)]
-struct NewsFeed{
+struct NewsFeed{ 
     #[deref] view:View
 }
 
 impl Widget for NewsFeed{
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
-        while let Some(item) =  self.view.draw(cx, &mut Scope::empty()).step(){
+        while let Some(item) =  self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 1000);
                 while let Some(item_id) = list.next_visible_item(cx) {
