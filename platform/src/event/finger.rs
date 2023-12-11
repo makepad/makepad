@@ -165,7 +165,7 @@ impl Margin {
         self.top + self.bottom
     }
     
-    pub fn rect_contains_with_margin(rect: &Rect, pos: DVec2, margin: &Option<Margin>) -> bool {
+    pub fn rect_contains_with_margin(pos: DVec2, rect: &Rect, margin: &Option<Margin>) -> bool {
         if let Some(margin) = margin {
             return
             pos.x >= rect.pos.x - margin.left
@@ -606,17 +606,29 @@ impl Event {
     pub fn hits(&self, cx: &mut Cx, area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::default())
     }
-    
+
+    pub fn hits_with_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
+    where F: Fn(DVec2, &Rect, &Option<Margin>)->bool{
+        self.hits_with_options_and_test(cx, area,  HitOptions::new(), hit_test)
+    }
+
     pub fn hits_with_sweep_area(&self, cx: &mut Cx, area: Area, sweep_area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::new().with_sweep_area(sweep_area))
     }
-    
     
     pub fn hits_with_capture_overload(&self, cx: &mut Cx, area: Area, capture_overload: bool) -> Hit {
         self.hits_with_options(cx, area, HitOptions::new().with_capture_overload(capture_overload))
     }
     
     pub fn hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
+        self.hits_with_options_and_test(cx, area, options, |abs, rect, margin|{
+            Margin::rect_contains_with_margin(abs, rect, margin)
+        })
+    }
+    
+    pub fn hits_with_options_and_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
+    where F: Fn(DVec2, &Rect, &Option<Margin>)->bool
+    {
         if !area.is_valid(cx) {
             return Hit::Nothing
         }
@@ -658,7 +670,7 @@ impl Event {
                 let digit_id = live_id!(mouse).into();
                 
                 let rect = area.get_clipped_rect(&cx);
-                if Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                if hit_test(e.abs, &rect, &options.margin) {
                     //fe.handled = true;
                     let device = DigitDevice::Mouse {
                         button: 0,
@@ -697,7 +709,7 @@ impl Event {
                             }
                             
                             let rect = area.get_clipped_rect(&cx);
-                            if !Margin::rect_contains_with_margin(&rect, t.abs, &options.margin) {
+                            if !hit_test(t.abs, &rect, &options.margin) {
                                 continue;
                             }
                             
@@ -744,7 +756,7 @@ impl Event {
                             if !options.sweep_area.is_empty() {
                                 if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
                                     if capture.switch_capture.is_none()
-                                        && Margin::rect_contains_with_margin(&rect, t.abs, &options.margin) {
+                                        && hit_test(t.abs, &rect, &options.margin) {
                                         if t.handled.get().is_empty() {
                                             t.handled.set(area);
                                             if capture.area == area {
@@ -808,7 +820,7 @@ impl Event {
                                     time: e.time,
                                     abs_start: capture.abs_start,
                                     rect,
-                                    is_over: Margin::rect_contains_with_margin(&rect, t.abs, &options.margin),
+                                    is_over: hit_test(t.abs, &rect, &options.margin),
                                 })
                             }
                         }
@@ -835,7 +847,7 @@ impl Event {
                     if !options.sweep_area.is_empty() {
                         if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
                             if capture.switch_capture.is_none()
-                                && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                                && hit_test(e.abs, &rect, &options.margin) {
                                 if e.handled.get().is_empty() {
                                     e.handled.set(area);
                                     if capture.area == area {
@@ -901,7 +913,7 @@ impl Event {
                             time: e.time,
                             abs_start: capture.abs_start,
                             rect,
-                            is_over: Margin::rect_contains_with_margin(&rect, e.abs, &options.margin),
+                            is_over: hit_test(e.abs, &rect, &options.margin),
                         });
                         cx.fingers.new_hover_area(digit_id, area);
                         return event
@@ -925,7 +937,7 @@ impl Event {
                     };
                     
                     if hover_last == area {
-                        if handled_area.is_empty() && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                        if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
                             e.handled.set(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             return Hit::FingerHoverOver(fhe)
@@ -935,7 +947,7 @@ impl Event {
                         }
                     }
                     else {
-                        if handled_area.is_empty() && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                        if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
                             //let any_captured = cx.fingers.get_digit_for_captured_area(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             e.handled.set(area);
@@ -960,7 +972,7 @@ impl Event {
                 }
                 
                 let rect = area.get_clipped_rect(&cx);
-                if !Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                if !hit_test(e.abs, &rect, &options.margin) {
                     return Hit::Nothing
                 }
                 
@@ -1004,7 +1016,7 @@ impl Event {
                 let rect = area.get_clipped_rect(&cx);
                 
                 if let Some(capture) = cx.fingers.get_area_capture(area) {
-                    let is_over = rect.contains(e.abs);
+                    let is_over = hit_test(e.abs, &rect, &options.margin);
                     let event = Hit::FingerUp(FingerUpEvent {
                         abs_start: capture.abs_start,
                         rect: rect,
