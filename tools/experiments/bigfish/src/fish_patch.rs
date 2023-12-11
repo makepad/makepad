@@ -30,15 +30,15 @@ impl FishPatch {
         self.blocks.iter().find(|&x| x.id == id)
     }
 
-    pub fn move_block(&mut self, id: u64, dx: f64, dy: f64) {
+    pub fn move_block(&mut self, id: u64, x: f64, y: f64) {
         let g = self.blocks.iter_mut().find(|x| x.id == id);
         if g.is_none() {
             return;
         }
         let b = g.unwrap();
         //let g = self.get_block(id).unwrap();
-        b.x += dx as i32;
-        b.y += dy as i32;
+        b.x = x as i32;
+        b.y = y as i32;
     }
 
     pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) {
