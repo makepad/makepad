@@ -124,7 +124,7 @@ impl Widget for TabBar{
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ()) {
-            return WidgetDraw::hook_above()
+            return WidgetDraw::make_step()
         }
         if let Some(()) = self.draw_state.get() {
             self.draw_state.end();
