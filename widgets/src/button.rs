@@ -91,19 +91,15 @@ impl Widget for Button{
 impl ButtonRef {
     
     pub fn clicked(&self, actions:&Actions) -> bool {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let ButtonAction::Clicked = item.cast() {
-                return true
-            }
+        if let ButtonAction::Clicked = actions.find_widget_action(self.widget_uid()).cast() {
+            return true
         }
         false
     }
 
     pub fn pressed(&self, actions:&Actions) -> bool {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let ButtonAction::Pressed = item.cast() {
-                return true
-            }
+        if let ButtonAction::Pressed = actions.find_widget_action(self.widget_uid()).cast() {
+            return true
         }
         false
     }
