@@ -313,7 +313,7 @@ impl AppMain for App {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::data(&mut self.data));
+        self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.data));
         
         self.data.file_system.handle_event(cx, event, &self.ui);
         self.data.build_manager.handle_event(cx, event, &mut self.data.file_system); 
