@@ -69,7 +69,6 @@ impl Widget for FishPatchEditor {
         self.animator_handle_event(cx, event);
 
         self.scroll_bars.handle_event(cx, event);
-        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
 
         for (item_id, item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
@@ -77,6 +76,7 @@ impl Widget for FishPatchEditor {
             for action in cx.scope_actions(|cx| item.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     BlockHeaderButtonAction::Move { id, x, y } => {
+                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
                         patch.move_block(id, x, y);
                     }
                     _ => {}
@@ -117,6 +117,7 @@ impl Widget for FishPatchEditor {
             item.apply_over(
                 cx,
                 live! {
+                    header: {blockid: i.id},
                     abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos) ,
                 },
             );
