@@ -352,29 +352,25 @@ impl LiveRegister for App {
 
 impl MatchEvent for App {
     fn handle_draw_2d(&mut self, cx:&mut Cx2d){
-        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
-        while let Some(next) = self.ui.draw_widget_no_scope(cx).step() {
-            if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
-                list.set_item_range(cx, 0, 1000);
-                                    
-                while let Some(item_id) = list.next_visible_item(cx) {
-                    let template = match item_id {
-                        0 => live_id!(TopSpace),
-                        x if x % 5 == 0 => live_id!(PostImage),
-                        _ => live_id!(Post)
-                    };
-                    let item = list.item(cx, item_id, template).unwrap();
-                    let text = match item_id % 4 {
-                        1 => format!("Hello! {}", item_id),
-                        2 => format!("Hello GOSIM\n With lines {}", item_id),
-                        3 => format!("Random numbers {}", item_id),
-                        _ => format!("Text body 4 id {}", item_id),
-                    };
-                    item.label(id!(content.text)).set_text(&text);
-                    item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
-                    item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
-                    item.draw_all_no_scope(cx);
-                }
+        while let Some(mut list) = self.ui.draw_no_scope(cx).single().as_portal_list().borrow_mut() {
+            list.set_item_range(cx, 0, 1000);
+            while let Some(item_id) = list.next_visible_item(cx) {
+                let template = match item_id {
+                    0 => live_id!(TopSpace),
+                    x if x % 5 == 0 => live_id!(PostImage),
+                    _ => live_id!(Post)
+                };
+                let item = list.item(cx, item_id, template).unwrap();
+                let text = match item_id % 4 {
+                    1 => format!("Hello! {}", item_id),
+                    2 => format!("Hello GOSIM\n With lines {}", item_id),
+                    3 => format!("Random numbers {}", item_id),
+                    _ => format!("Text body 4 id {}", item_id),
+                };
+                item.label(id!(content.text)).set_text(&text);
+                item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
+                item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
+                item.draw_all_no_scope(cx);
             }
         }
     }

@@ -166,7 +166,7 @@ impl Window {
         }
 
         if self.show_performance_view {
-            self.performance_view.draw_widget(cx, &mut WidgetScope::default()).unwrap();
+            self.performance_view.draw(cx, &mut WidgetScope::default()).unwrap();
         }
 
         cx.end_pass_sized_turtle();
