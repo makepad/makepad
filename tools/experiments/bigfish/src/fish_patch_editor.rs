@@ -40,7 +40,7 @@ live_design! {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct FishPatchEditor {
     #[animator]
     animator: Animator,

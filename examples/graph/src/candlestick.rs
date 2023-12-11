@@ -40,7 +40,7 @@ struct _CandleStickData{
     close: f64,
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct CandleStick {
     #[walk] walk: Walk,
     #[live] draw_cs: DrawCandleStick,

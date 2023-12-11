@@ -13,7 +13,7 @@ live_design!{
     WindowBase = {{Window}} {demo:false}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct Window {
     //#[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,

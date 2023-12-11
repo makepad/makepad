@@ -700,7 +700,6 @@ impl MatchEvent for App {
     fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
         let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 30.0);
         cx.use_video_input(&input);
-                
     }
     
     fn handle_midi_ports(&mut self, cx: &mut Cx, ports:&MidiPortsEvent){

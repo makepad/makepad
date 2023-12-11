@@ -15,7 +15,7 @@ live_design!{
     }
 } 
  
-#[derive(Live, LiveHook, WidgetRegister)] 
+#[derive(Live, LiveHook, LiveRegisterWidget)] 
 pub struct StudioFileTree{
     #[live] pub file_tree: FileTree
 } 

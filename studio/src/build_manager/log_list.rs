@@ -221,7 +221,7 @@ pub struct JumpTo{
     pub start:Position
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 struct LogList{
     #[deref] view:View
 }

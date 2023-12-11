@@ -57,7 +57,7 @@ impl SplitterAlign {
     }
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct Splitter {
     #[live(SplitterAxis::Horizontal)] pub axis: SplitterAxis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,

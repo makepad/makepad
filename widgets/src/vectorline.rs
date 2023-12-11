@@ -25,7 +25,7 @@ pub enum LineAlign {
     HorizontalCenter,
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct VectorLine {
     #[animator]
     animator: Animator,

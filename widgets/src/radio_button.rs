@@ -30,7 +30,7 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct RadioButton {
     #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,

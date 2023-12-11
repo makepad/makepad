@@ -81,7 +81,7 @@ pub struct FileTreeNode {
     #[live] selected: f32,
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct FileTree {
     #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,

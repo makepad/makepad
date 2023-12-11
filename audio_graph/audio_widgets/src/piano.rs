@@ -131,7 +131,7 @@ pub struct PianoKey {
     #[animator] animator: Animator,
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct Piano {
     #[rust] area: Area,
     #[walk] walk: Walk,
