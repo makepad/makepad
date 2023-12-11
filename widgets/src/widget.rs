@@ -178,7 +178,7 @@ pub struct WidgetScopeData<'a>{
 }
 
 impl<'a> Scope<'a>{
-    pub fn data<T: Any>(v:&'a mut T)->Self{
+    pub fn with_data<T: Any>(v:&'a mut T)->Self{
         Self{
             path:WidgetPath::default(),
             data:WidgetScopeData{data:Some(v)}
