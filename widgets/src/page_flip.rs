@@ -89,7 +89,7 @@ impl PageFlip {
     }
 }
 
-impl WidgetWrap for PageFlip{
+impl WidgetNode for PageFlip{
     fn walk(&mut self, _cx:&mut Cx) -> Walk{
         self.walk
     }

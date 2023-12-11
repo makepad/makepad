@@ -45,7 +45,7 @@ enum DrawState {
     Window(usize),
 }
 
-impl WidgetWrap for MultiWindow{
+impl WidgetNode for MultiWindow{
     fn redraw(&mut self, cx: &mut Cx) {
         for window in self.windows.values_mut() {
             window.redraw(cx);

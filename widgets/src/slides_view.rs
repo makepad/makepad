@@ -23,7 +23,7 @@ pub struct SlidesView {
     #[rust] draw_state: DrawStateWrap<DrawState>,
 }
 
-impl WidgetWrap for SlidesView{
+impl WidgetNode for SlidesView{
     fn walk(&mut self, _cx:&mut Cx) -> Walk{
         self.walk
     }

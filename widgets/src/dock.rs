@@ -66,7 +66,7 @@ pub struct Dock {
     #[rust] dock_item_iter_stack: Vec<(LiveId, usize)>,
 }
 
-impl WidgetWrap for Dock{
+impl WidgetNode for Dock{
     fn walk(&mut self, _cx:&mut Cx) -> Walk{
         self.walk
     }

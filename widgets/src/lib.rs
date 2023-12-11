@@ -104,7 +104,7 @@ pub use crate::{
         WidgetActionOptionApi,
         WidgetRef,
         Widget,
-        WidgetWrap,
+        WidgetNode,
         WidgetRegistry,
         WidgetFactory,
         DrawStateWrap,
