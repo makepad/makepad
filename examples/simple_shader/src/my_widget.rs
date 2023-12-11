@@ -12,9 +12,9 @@ live_design!{
     MyWidget = {{MyWidget}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, Widget)]
 pub struct MyWidget {
-    #[live] draw: DrawQuad,
+    #[redraw] #[live] draw: DrawQuad,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[live] time: f32,
@@ -47,14 +47,6 @@ impl Widget for MyWidget{
             self.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
-    }
-
-    fn walk(&mut self, _cx:&mut Cx)->Walk{
-        self.walk
-    }
-
-    fn redraw(&mut self, cx:&mut Cx){
-        self.draw.redraw(cx)
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {

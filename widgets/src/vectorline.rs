@@ -1,4 +1,10 @@
-use crate::{makepad_draw::*, *};
+use {
+    crate::{
+        makepad_derive_widget::*,
+        makepad_draw::*,
+        widget::*
+    }
+};
 
 live_design! {
     VectorLine = {{VectorLine}} {
@@ -25,7 +31,7 @@ pub enum LineAlign {
     HorizontalCenter,
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, Widget)]
 pub struct VectorLine {
     #[animator]
     animator: Animator,
@@ -33,7 +39,7 @@ pub struct VectorLine {
     walk: Walk,
     #[live]
     draw_ls: DrawLine,
-    #[rust]
+    #[redraw] #[rust]
     area: Area,
     #[live(15.0)]
     line_width: f64,
@@ -67,13 +73,6 @@ impl Widget for VectorLine {
         self.animator_handle_event(cx, event);
     }
 
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
-    }
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let fullrect = cx.walk_turtle_with_area(&mut self.area, walk);

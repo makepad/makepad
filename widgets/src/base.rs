@@ -13,7 +13,6 @@ live_design!{
     import crate::file_tree::FileTreeNodeBase;
     import crate::fold_button::FoldButtonBase;
     import crate::fold_header::FoldHeaderBase;
-    import crate::hook_widget::HookWidgetBase;
     import crate::image::ImageBase;
     import crate::rotated_image::RotatedImageBase;
     import crate::video::VideoBase;
@@ -224,14 +223,6 @@ live_design!{
     MultiWindow = <MultiWindowBase> {}
     View = <ViewBase> {}
 
-    HookWidget = <HookWidgetBase> {
-        width: Fit,
-        height: Fit,
-        margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
-        align: {x: 0.5, y: 0.5}
-        padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
-    }
-    
     SolidView = <ViewBase> {show_bg: true, draw_bg: {
         fn get_color(self) -> vec4 {
             return self.color
@@ -554,7 +545,6 @@ live_design!{
     FileTreeNodeBase = <FileTreeNodeBase> {}
     FoldButtonBase = <FoldButtonBase> {}
     FoldHeaderBase = <FoldHeaderBase> {}
-    HookWidgetBase = <HookWidgetBase> {}
     ImageBase = <ImageBase> {}
     RotatedImageBase = <RotatedImageBase> {}
     VideoBase = <VideoBase> {}

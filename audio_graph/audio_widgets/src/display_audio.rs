@@ -58,10 +58,10 @@ struct DrawWave {
     #[live] vu_right: f32
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct DisplayAudio {
     #[walk] walk: Walk,
-    #[live] draw_wave: DrawWave,
+    #[redraw] #[live] draw_wave: DrawWave,
     #[rust(Texture::new(cx))] wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
     #[rust([0; 32])] active: [usize; 32],
@@ -71,12 +71,6 @@ pub struct DisplayAudio {
 
 impl Widget for DisplayAudio {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_wave.redraw(cx)
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep { 
