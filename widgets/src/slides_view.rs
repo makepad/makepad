@@ -9,10 +9,10 @@ live_design!{
     }
 }
 
-#[derive(Live, Widget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct SlidesView {
     #[layout] layout: Layout,
-    #[redraw] #[rust] area: Area,
+     #[rust] area: Area,
     #[walk] walk: Walk,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>,
@@ -22,6 +22,24 @@ pub struct SlidesView {
     #[live] anim_speed: f64,
     #[rust] draw_state: DrawStateWrap<DrawState>,
 }
+
+impl WidgetWrap for SlidesView{
+    fn walk(&mut self, _cx:&mut Cx) -> Walk{
+        self.walk
+    }
+            
+    fn redraw(&mut self, cx: &mut Cx){
+        self.area.redraw(cx)
+    }
+    
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        for child in self.children.values_mut() {
+            child.find_widgets(path, cached, results);
+        }
+    }
+}   
+
+    
 
 #[derive(Clone)]
 enum DrawState {
@@ -125,12 +143,6 @@ impl Widget for SlidesView {
                     })
                 }
             }
-        }
-    }
-    
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        for child in self.children.values_mut() {
-            child.find_widgets(path, cached, results);
         }
     }
     

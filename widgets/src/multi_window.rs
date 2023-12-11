@@ -45,22 +45,23 @@ enum DrawState {
     Window(usize),
 }
 
-impl WidgetRedraw for MultiWindow{
+impl WidgetWrap for MultiWindow{
     fn redraw(&mut self, cx: &mut Cx) {
         for window in self.windows.values_mut() {
             window.redraw(cx);
         }
     }
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
-}
-
-impl Widget for MultiWindow {
-    
+        
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
         for window in self.windows.values_mut() {
             window.find_widgets(path, cached, results);
         }
     }
+        
+}
+
+impl Widget for MultiWindow {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for window in self.windows.values_mut() {

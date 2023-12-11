@@ -40,10 +40,6 @@ impl Widget for SlidePanel {
         }
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.frame.find_widgets(path, cached, results);
-    }
-    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> DrawStep {
         // ok lets set abs pos
         let rect = cx.peek_walk_turtle(walk);
