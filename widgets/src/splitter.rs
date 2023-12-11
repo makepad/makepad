@@ -184,7 +184,7 @@ impl Widget for Splitter {
             self.begin(cx, walk);
         }
         if let Some(DrawState::DrawA) = self.draw_state.get() {
-            self.a.draw_widget(cx, scope) ?;
+            self.a.draw(cx, scope) ?;
             self.draw_state.set(DrawState::DrawSplit);
         }
         if let Some(DrawState::DrawSplit) = self.draw_state.get() {
@@ -192,7 +192,7 @@ impl Widget for Splitter {
             self.draw_state.set(DrawState::DrawB)
         }
         if let Some(DrawState::DrawB) = self.draw_state.get() {
-            self.b.draw_widget(cx, scope) ?;
+            self.b.draw(cx, scope) ?;
             self.end(cx);
             self.draw_state.end();
         }
