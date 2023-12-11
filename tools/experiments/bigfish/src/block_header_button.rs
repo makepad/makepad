@@ -92,7 +92,7 @@ live_design! {
         }
 
         draw_bg: {
-            instance hover: 0.0Q
+            instance hover: 0.0
             instance pressed: 0.0
             uniform border_radius: 3.0
             instance bodytop: #53
@@ -138,7 +138,7 @@ pub struct BlockHeaderButton {
 
     #[rust] pub blockid: u64,
     #[rust] pub dragging: bool,
-}
+} 
 
 
 impl Widget for BlockHeaderButton{

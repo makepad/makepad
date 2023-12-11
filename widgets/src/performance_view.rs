@@ -93,10 +93,6 @@ impl LiveHook for PerformanceView {
 }
 
 impl Widget for PerformanceView {
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.view.find_widgets(path, cached, results);
-    }
-
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope,  walk: Walk) -> DrawStep {
         let _ = self.view.draw_walk(cx, scope, walk);
         DrawStep::done()
@@ -156,10 +152,6 @@ impl LiveHook for PerformanceLiveGraph {
 }
 
 impl Widget for PerformanceLiveGraph {
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.view.find_widgets(path, cached, results);
-    }
-
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         let _ = self.view.draw_walk(cx, scope, walk);
         let _ = self.draw_walk(cx, walk);

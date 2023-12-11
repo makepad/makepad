@@ -78,8 +78,8 @@ pub struct Splitter {
     
     // framecomponent mode
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[live] a: WidgetRef,
-    #[live] b: WidgetRef,
+    #[find] #[live] a: WidgetRef,
+    #[find] #[live] b: WidgetRef,
     #[walk] walk: Walk,
 }
 
@@ -164,11 +164,6 @@ impl Widget for Splitter {
         }
         self.a.handle_event(cx, event, scope);
         self.b.handle_event(cx, event, scope);
-    }
-    
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet) {
-        self.a.find_widgets(path, cached, results);
-        self.b.find_widgets(path, cached, results);
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
