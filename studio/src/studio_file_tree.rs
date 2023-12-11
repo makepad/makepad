@@ -30,7 +30,7 @@ impl Widget for StudioFileTree {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
-        while let Some(_) = self.file_tree.draw_walk(cx, scope, walk).hook_widget() {
+        while self.file_tree.draw_walk(cx, scope, walk).is_step() {
             self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
              scope.data.get_mut::<AppData>().file_system.draw_file_node(
                 cx,

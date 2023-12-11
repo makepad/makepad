@@ -65,7 +65,7 @@ pub trait Widget: LiveApply {
     }
 
     fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) {
-        while self.draw_widget(cx, scope).is_hook() {};
+        while self.draw_widget(cx, scope).is_step() {};
     }
     
     fn text(&self) -> String {
@@ -105,15 +105,6 @@ pub enum CreateAt {
     After(LiveId),
     Before(LiveId),
     End
-}
-
-pub trait WidgetDrawApi {
-    fn done() -> WidgetDraw {Result::Ok(())}
-    fn hook(arg: WidgetRef) -> WidgetDraw {Result::Err(arg)}
-    fn hook_above() -> WidgetDraw {Result::Err(WidgetRef::empty())}
-    fn is_done(&self) -> bool;
-    fn is_hook(&self) -> bool;
-    fn hook_widget(self) -> Option<WidgetRef>;
 }
 
 #[derive(Default, Clone)]
@@ -212,6 +203,16 @@ impl <'a> WidgetScopeData<'a>{
     }
 }
 
+pub trait WidgetDrawApi {
+    fn done() -> WidgetDraw {Result::Ok(())}
+    fn make_step_here(arg: WidgetRef) -> WidgetDraw {Result::Err(arg)}
+    fn make_step() -> WidgetDraw {Result::Err(WidgetRef::empty())}
+    fn is_done(&self) -> bool;
+    fn is_step(&self) -> bool;
+    fn step(self) -> Option<WidgetRef>;
+    fn single(self) -> WidgetRef;
+}
+
 impl WidgetDrawApi for WidgetDraw {
     fn is_done(&self) -> bool {
         match *self {
@@ -219,20 +220,27 @@ impl WidgetDrawApi for WidgetDraw {
             Result::Err(_) => false
         }
     }
-    fn is_hook(&self) -> bool {
+    fn is_step(&self) -> bool {
         match *self {
             Result::Ok(_) => false,
             Result::Err(_) => true
         }
     }
     
-    fn hook_widget(self) -> Option<WidgetRef> {
+    fn step(self) -> Option<WidgetRef> {
         match self {
             Result::Ok(_) => None,
             Result::Err(nd) => Some(nd)
         }
     }
     
+    fn single(self) -> WidgetRef {
+        match self {
+            Result::Ok(_) => WidgetRef::empty(),
+            Result::Err(nd) => nd
+        }
+    }
+        
 }
 
 pub type WidgetDraw = Result<(), WidgetRef>;
@@ -524,11 +532,11 @@ impl WidgetRef {
     
     pub fn draw_walk(&self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-           if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).hook_widget() {
+           if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).step() {
                 if nd.is_empty() {
-                    return WidgetDraw::hook(self.clone())
+                    return WidgetDraw::make_step_here(self.clone())
                 }
-                return WidgetDraw::hook(nd);
+                return WidgetDraw::make_step_here(nd);
             }
         }
         WidgetDraw::done()
@@ -540,11 +548,11 @@ impl WidgetRef {
     
     pub fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-        if let Some(nd) = inner.widget.draw_widget(cx, scope).hook_widget() {
+        if let Some(nd) = inner.widget.draw_widget(cx, scope).step() {
                 if nd.is_empty() {
-                    return WidgetDraw::hook(self.clone())
+                    return WidgetDraw::make_step_here(self.clone())
                 }
-                return WidgetDraw::hook(nd);
+                return WidgetDraw::make_step_here(nd);
             }
         }
         WidgetDraw::done()

@@ -713,7 +713,7 @@ impl Widget for PortalList {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return WidgetDraw::make_step()
         }
         // ok so if we are
         if let Some(_) = self.draw_state.get() {
