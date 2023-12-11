@@ -294,10 +294,8 @@ impl Widget for LogList {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
-        while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
-            if let Some(mut list) = next.as_portal_list().borrow_mut(){
-                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
-            }
+        while let Some(mut list) = self.view.draw_walk(cx, scope, walk).single().as_portal_list().borrow_mut(){
+            self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
         }
         WidgetDraw::done()
     }
