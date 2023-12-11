@@ -92,7 +92,7 @@ pub struct SeqButton {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct Sequencer {
     #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,

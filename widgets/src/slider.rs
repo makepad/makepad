@@ -30,7 +30,7 @@ pub struct DrawSlider {
     #[live] slider_type: SliderType
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, LiveHook, Widget)]
 pub struct Slider {
     #[redraw] #[live] draw_slider: DrawSlider,
     

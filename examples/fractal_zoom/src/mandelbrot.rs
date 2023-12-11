@@ -393,7 +393,7 @@ impl FractalSpace {
 }
 
 
-#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct Mandelbrot {
     // DSL accessible
     #[live] draw_tile: DrawTile,
