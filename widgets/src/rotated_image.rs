@@ -46,7 +46,7 @@ impl Widget for RotatedImage {
         self.walk
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> WidgetDraw {
         self.draw_walk_rotated_image(cx, walk)
     }
 }

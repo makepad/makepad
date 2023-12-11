@@ -253,12 +253,12 @@ impl Widget for Video {
         self.walk
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> WidgetDraw {
         self.draw_bg.draw_walk(cx, walk);
         WidgetDraw::done()
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope){
         let uid = self.widget_uid();
         match event{
             Event::VideoPlaybackPrepared(event)=> if event.video_id == self.id {

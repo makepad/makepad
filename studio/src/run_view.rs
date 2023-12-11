@@ -300,14 +300,14 @@ impl Widget for RunView {
         self.draw_app.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw {
         let run_view_id = scope.path.get(0);
         let manager = &mut scope.data.get_mut::<AppData>().build_manager;
         self.draw_run_view(cx, run_view_id, manager, walk);
         WidgetDraw::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         
         let run_view_id = scope.path.get(0);
         let manager = &scope.data.get::<AppData>().build_manager;

@@ -855,7 +855,7 @@ impl Widget for Dock {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         // call handle on all tab bars, splitters,
         let uid = self.widget_uid();
         let dock_items = &mut self.dock_items;
@@ -952,7 +952,7 @@ impl Widget for Dock {
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
             let id = live_id!(root);
             vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]

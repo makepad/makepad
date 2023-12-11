@@ -41,7 +41,7 @@ impl Widget for FishConnectionWidget {
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        scope: &mut WidgetScope,
+        scope: &mut Scope,
     )  {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -85,7 +85,7 @@ impl Widget for FishConnectionWidget {
         self.draw_line.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
         let _ = self.draw_walk_fishconnection(cx, walk);
         WidgetDraw::done()
     }

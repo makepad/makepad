@@ -80,7 +80,7 @@ impl Widget for TextInput {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
@@ -341,7 +341,7 @@ impl Widget for TextInput {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> WidgetDraw {
         self.draw_walk_text_input(cx, walk);
         WidgetDraw::done()
     }
@@ -507,7 +507,7 @@ impl TextInput {
         }
     }
     
-    pub fn push_change_action(&self, uid:WidgetUid, scope:&WidgetScope, cx: &mut Cx){
+    pub fn push_change_action(&self, uid:WidgetUid, scope:&Scope, cx: &mut Cx){
         cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
     }
     
