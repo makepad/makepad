@@ -385,7 +385,7 @@ impl ViewSet {
     }
 }
 
-impl WidgetWrap for View{
+impl WidgetNode for View{
     fn walk(&mut self, _cx:&mut Cx)->Walk{
         self.walk
     }    

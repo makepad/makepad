@@ -23,13 +23,13 @@ pub struct WidgetUid(pub u64);
 pub trait WidgetDesign {
 }
 
-pub trait WidgetWrap: LiveApply{
+pub trait WidgetNode: LiveApply{
     fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
     fn redraw(&mut self, _cx: &mut Cx);
 }
 
-pub trait Widget: WidgetWrap {
+pub trait Widget: WidgetNode {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 

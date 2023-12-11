@@ -4,14 +4,14 @@ use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
 pub fn derive_widget_impl(input: TokenStream) ->  TokenStream {
     let mut out = TokenStream::new();
-    out.extend(derive_widget_wrap_impl(input.clone()));
+    out.extend(derive_widget_node_impl(input.clone()));
     out.extend(derive_widget_register_impl(input.clone()));
     out.extend(derive_widget_ref_impl(input.clone()));
     out.extend(derive_widget_set_impl(input.clone()));
     out
 }
 
-pub fn derive_widget_wrap_impl(input: TokenStream) ->  TokenStream {
+pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
@@ -56,7 +56,7 @@ pub fn derive_widget_wrap_impl(input: TokenStream) ->  TokenStream {
             }
         }
         tb.add("impl").stream(generic.clone());
-        tb.add("WidgetWrap for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
+        tb.add("WidgetNode for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
         if let Some(wrap_field) = &wrap_field{
             tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&wrap_field).add(".walk(cx)}");            
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&wrap_field).add(".redraw(cx)}");
