@@ -40,7 +40,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FishPatchEditor {
     #[animator]
     animator: Animator,
@@ -253,6 +253,3 @@ impl FishPatchEditor {
         None
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct FishPatchEditorRef(WidgetRef);

@@ -32,7 +32,7 @@ pub enum WindowMenuItem {
     Line
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct WindowMenu{
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -140,10 +140,6 @@ impl Widget for WindowMenu {
         WidgetDraw::done()
     }
 }
-
-
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct WindowMenuRef(WidgetRef);
 
 impl WindowMenuRef {
     pub fn command(&self) -> Option<LiveId> {

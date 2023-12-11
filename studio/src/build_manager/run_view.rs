@@ -58,7 +58,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct RunView {
     #[walk] walk: Walk,
     #[animator] animator: Animator,
@@ -373,9 +373,6 @@ impl Widget for RunView {
     }
     
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct RunViewRef(WidgetRef);
 
 impl RunViewRef {
     

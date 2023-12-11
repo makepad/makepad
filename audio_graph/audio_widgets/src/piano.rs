@@ -131,7 +131,7 @@ pub struct PianoKey {
     #[animator] animator: Animator,
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Piano {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -448,9 +448,6 @@ impl Widget for Piano{
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PianoKeyId(pub LiveId);
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct PianoRef(WidgetRef);
-
 impl PianoRef {
     pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
@@ -477,9 +474,6 @@ impl PianoRef {
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct PianoSet(WidgetSet);
 
 impl PianoSet {
     pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {

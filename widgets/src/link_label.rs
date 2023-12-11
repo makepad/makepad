@@ -11,7 +11,7 @@ live_design!{
     LinkLabelBase = {{LinkLabel}} {}
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct LinkLabel {
     #[deref] button: Button
 }
@@ -46,9 +46,6 @@ impl Widget for LinkLabel {
         self.button.set_text(v);
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct LinkLabelRef(WidgetRef);
 
 impl LinkLabelRef {
     pub fn clicked(&self, actions:&Actions) -> bool {

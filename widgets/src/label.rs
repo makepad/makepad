@@ -10,7 +10,7 @@ live_design!{
     LabelBase = {{Label}} {}
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Label {
     #[live] draw_text: DrawText,
     #[walk] walk: Walk,
@@ -41,12 +41,4 @@ impl Widget for Label {
     fn set_text(&mut self, v:&str){
         self.text.as_mut_empty().push_str(v);
     }
-}
-
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct LabelRef(WidgetRef); 
-
-impl LabelRef{
-  
 }

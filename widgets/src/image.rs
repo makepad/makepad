@@ -9,7 +9,7 @@ live_design!{
     ImageBase = {{Image}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Image {
     #[walk] walk: Walk,
     #[live] draw_bg: DrawQuad,
@@ -109,9 +109,6 @@ impl Image {
     }
 }
 
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct ImageRef(WidgetRef);
-
 impl ImageRef {
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -142,10 +139,4 @@ impl ImageRef {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }
     }    
-}
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct ImageSet(WidgetSet);
-
-impl ImageSet {
 }

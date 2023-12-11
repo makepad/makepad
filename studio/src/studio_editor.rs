@@ -18,7 +18,7 @@ live_design!{
     }
 } 
  
-#[derive(Live, LiveHook, LiveRegisterWidget)] 
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)] 
 pub struct StudioEditor{
     #[live] pub editor: CodeEditor
 } 
@@ -52,5 +52,3 @@ impl Widget for StudioEditor {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct StudioEditorRef(WidgetRef);

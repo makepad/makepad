@@ -30,7 +30,7 @@ pub struct DrawSlider {
     #[live] slider_type: SliderType
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Slider {
     #[live] draw_slider: DrawSlider,
     
@@ -235,9 +235,6 @@ impl Widget for Slider {
     }
         
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SliderRef(WidgetRef);
 
 impl SliderRef{
     pub fn slided(&self, actions:&Actions)->Option<f64>{

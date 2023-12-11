@@ -9,7 +9,7 @@ live_design!{
     SlidePanelBase = {{SlidePanel}} {}
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct SlidePanel {
     #[deref] frame: View,
     #[animator] animator: Animator,
@@ -89,10 +89,6 @@ impl SlidePanel {
     }
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SlidePanelRef(WidgetRef);
-
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -115,9 +111,6 @@ impl SlidePanelRef {
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct SlidePanelSet(WidgetSet);
 
 impl SlidePanelSet {
     pub fn close(&self, cx: &mut Cx) {

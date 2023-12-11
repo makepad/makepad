@@ -9,7 +9,7 @@ live_design!{
     PageFlipBase = {{PageFlip}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct PageFlip {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -143,9 +143,6 @@ impl Widget for PageFlip {
     }
 }
 
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct PageFlipRef(WidgetRef);
-
 impl PageFlipRef {
     pub fn set_active_page(&self, page: LiveId) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -159,9 +156,6 @@ impl PageFlipRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct PageFlipSet(WidgetSet);
 
 impl PageFlipSet {
 }

@@ -14,7 +14,7 @@ live_design!{
     DropDownBase = {{DropDown}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct DropDown {
     #[animator] animator: Animator,
     
@@ -276,9 +276,6 @@ impl Widget for DropDown {
         WidgetDraw::done()
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct DropDownRef(WidgetRef);
 
 impl DropDownRef {
     pub fn set_labels(&self, labels: Vec<String>) {

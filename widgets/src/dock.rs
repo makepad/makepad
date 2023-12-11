@@ -39,7 +39,7 @@ impl DrawRoundCorner {
     }
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[walk] walk: Walk,
@@ -1071,12 +1071,7 @@ impl Widget for Dock {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct DockRef(WidgetRef);
-
 impl DockRef {
-    
-    
     pub fn item(&self, entry_id: LiveId) -> WidgetRef {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(item) = dock.item(entry_id) {
@@ -1203,6 +1198,3 @@ impl DockRef {
         cx.start_dragging(vec![item]);
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct DockSet(WidgetSet);
