@@ -303,9 +303,9 @@ impl BuildConnection {
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
         // it will definitely arrive before C->H ReadyToStart triggers anything).
-        msg_sender.send_message(LogItemWrap{
+        msg_sender.send_message(BuildClientMessageWrap{
             cmd_id,
-            item: LogItem::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
+            message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
         });
 
        // let mut stderr_state = StdErrState::First;
@@ -405,38 +405,38 @@ impl BuildConnection {
 
 pub trait MsgSender: Send {
     fn box_clone(&self) -> Box<dyn MsgSender>;
-    fn send_message(&self, wrap: LogItemWrap);
+    fn send_message(&self, wrap: BuildClientMessageWrap);
     
     fn send_bare_message(&self, cmd_id: LiveId, level: LogLevel, line: String) {
         let line = line.trim();
-        self.send_message(LogItemWrap{
+        self.send_message(BuildClientMessageWrap{
             cmd_id,
-            item:LogItem::Bare(LogItemBare {
+            message:BuildClientMessage::LogItem(LogItem::Bare(LogItemBare {
                 line: line.to_string(),
                 level
-            })
+            }))
         });
     }
     
     fn send_stdin_to_host_msg(&self, cmd_id: LiveId, line: String) {
-        self.send_message(LogItemWrap{
+        self.send_message(BuildClientMessageWrap{
             cmd_id,
-            item:LogItem::StdinToHost(line)
+            message:BuildClientMessage::LogItem(LogItem::StdinToHost(line))
         });
     }
     
 
     fn send_location_msg(&self, cmd_id: LiveId, level: LogLevel, file_name: String, start: Position, end: Position, message: String) {
         self.send_message(
-            LogItemWrap{
+            BuildClientMessageWrap{
                 cmd_id,
-                item:LogItem::Location(LogItemLocation {
+                message:BuildClientMessage::LogItem(LogItem::Location(LogItemLocation {
                 level,
                 file_name,
                 start,
                 end,
                 message
-            })
+            }))
         });
     }
     
@@ -481,12 +481,12 @@ pub trait MsgSender: Send {
     }
 }
 
-impl<F: Clone + Fn(LogItemWrap) + Send + 'static> MsgSender for F {
+impl<F: Clone + Fn(BuildClientMessageWrap) + Send + 'static> MsgSender for F {
     fn box_clone(&self) -> Box<dyn MsgSender> {
         Box::new(self.clone())
     }
     
-    fn send_message(&self, wrap: LogItemWrap) {
+    fn send_message(&self, wrap: BuildClientMessageWrap) {
         self (wrap)
     }
 }

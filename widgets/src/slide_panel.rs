@@ -9,7 +9,7 @@ live_design!{
     SlidePanelBase = {{SlidePanel}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct SlidePanel {
     #[deref] frame: View,
     #[animator] animator: Animator,
@@ -24,7 +24,7 @@ pub enum SlidePanelAction {
 }
 
 impl Widget for SlidePanel {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         //let uid = self.widget_uid();
         self.frame.handle_event(cx, event, scope);
         // lets handle mousedown, setfocus
@@ -52,7 +52,7 @@ impl Widget for SlidePanel {
         self.frame.find_widgets(path, cached, results);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, mut walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> DrawStep {
         // ok lets set abs pos
         let rect = cx.peek_walk_turtle(walk);
         match self.side{
@@ -89,10 +89,6 @@ impl SlidePanel {
     }
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SlidePanelRef(WidgetRef);
-
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -115,9 +111,6 @@ impl SlidePanelRef {
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct SlidePanelSet(WidgetSet);
 
 impl SlidePanelSet {
     pub fn close(&self, cx: &mut Cx) {

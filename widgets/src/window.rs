@@ -13,7 +13,7 @@ live_design!{
     WindowBase = {{Window}} {demo:false}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct Window {
     //#[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
@@ -166,7 +166,7 @@ impl Window {
         }
 
         if self.show_performance_view {
-            self.performance_view.draw_widget(cx, &mut WidgetScope::default()).unwrap();
+            self.performance_view.draw(cx, &mut Scope::empty()).unwrap();
         }
 
         cx.end_pass_sized_turtle();
@@ -177,7 +177,7 @@ impl Window {
 }
 
 impl Widget for Window {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
         self.debug_view.handle_event(cx, event);
@@ -305,11 +305,11 @@ impl Widget for Window {
         self.view.find_widgets(path, cached, results);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();
-                return WidgetDraw::done();
+                return DrawStep::done();
             }
         }
         
@@ -319,6 +319,6 @@ impl Widget for Window {
             self.end(cx);
         }
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

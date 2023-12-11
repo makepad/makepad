@@ -40,7 +40,7 @@ struct _CandleStickData{
     close: f64,
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct CandleStick {
     #[walk] walk: Walk,
     #[live] draw_cs: DrawCandleStick,
@@ -50,8 +50,8 @@ pub struct CandleStick {
 }
 
 impl Widget for CandleStick {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
-}
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
@@ -59,9 +59,9 @@ impl Widget for CandleStick {
         self.draw_cs.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_cs.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -82,10 +82,6 @@ impl CandleStick {
     }
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct CandleStickRef(WidgetRef);
-
 impl CandleStickRef {
     pub fn process_buffer(&self, cx: &mut Cx ){
         if let Some(mut inner) = self.borrow_mut() {
@@ -96,10 +92,6 @@ impl CandleStickRef {
     pub fn voice_off(&self, _cx: &mut Cx, _voice: usize) {
     }
 }
-
-// ImGUI convenience API for Piano
-#[derive(Clone, WidgetSet)]
-pub struct CandleStickSet(WidgetSet);
 
 impl CandleStickSet {
     pub fn process_buffer(&self, cx: &mut Cx) {

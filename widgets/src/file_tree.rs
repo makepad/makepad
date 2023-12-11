@@ -81,7 +81,7 @@ pub struct FileTreeNode {
     #[live] selected: f32,
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FileTree {
     #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
@@ -395,7 +395,7 @@ impl Widget for FileTree {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
         self.scroll_bars.handle_event(cx, event);
@@ -459,21 +459,18 @@ impl Widget for FileTree {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope,walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope,walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         if let Some(()) = self.draw_state.get() {
             self.end(cx);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Debug, Clone, Default, PartialEq, WidgetRef)]
-pub struct FileTreeRef(WidgetRef);
 
 impl FileTreeRef{
     pub fn should_file_start_drag(&self, actions: &Actions) -> Option<FileNodeId> {
@@ -499,6 +496,3 @@ impl FileTreeRef{
         cx.start_dragging(vec![item]);
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct FileTreeSet(WidgetSet);

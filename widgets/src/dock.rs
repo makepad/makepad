@@ -39,7 +39,7 @@ impl DrawRoundCorner {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[walk] walk: Walk,
@@ -855,7 +855,7 @@ impl Widget for Dock {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         // call handle on all tab bars, splitters,
         let uid = self.widget_uid();
         let dock_items = &mut self.dock_items;
@@ -952,7 +952,7 @@ impl Widget for Dock {
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
             let id = live_id!(root);
             vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]
@@ -1042,7 +1042,7 @@ impl Widget for Dock {
                                 (*kind, WidgetRef::new_from_ptr(cx, Some(*ptr)))
                             });
                             scope.with_id(id, |scope|{
-                                entry.draw_widget(cx, scope)
+                                entry.draw(cx, scope)
                             })?;
                         }
                     }
@@ -1067,16 +1067,11 @@ impl Widget for Dock {
         self.end(cx);
         self.draw_state.end();
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct DockRef(WidgetRef);
-
 impl DockRef {
-    
-    
     pub fn item(&self, entry_id: LiveId) -> WidgetRef {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(item) = dock.item(entry_id) {
@@ -1203,6 +1198,3 @@ impl DockRef {
         cx.start_dragging(vec![item]);
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct DockSet(WidgetSet);

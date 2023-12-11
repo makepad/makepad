@@ -282,7 +282,7 @@ impl DrawVars {
                             err.span.start.column,
                             err.span.end.line,
                             err.span.end.column,
-                            &err.message,
+                            err.message,
                             crate::log::LogLevel::Error
                         );
                     }
