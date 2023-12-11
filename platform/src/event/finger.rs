@@ -607,7 +607,7 @@ impl Event {
         self.hits_with_options(cx, area, HitOptions::default())
     }
 
-    pub fn hits_with_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
+    pub fn hits_with_test<F>(&self, cx: &mut Cx, area: Area, hit_test:F) -> Hit 
     where F: Fn(DVec2, &Rect, &Option<Margin>)->bool{
         self.hits_with_options_and_test(cx, area,  HitOptions::new(), hit_test)
     }
