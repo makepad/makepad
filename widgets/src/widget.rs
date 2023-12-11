@@ -217,7 +217,6 @@ pub trait WidgetDrawApi {
     fn is_done(&self) -> bool;
     fn is_step(&self) -> bool;
     fn step(self) -> Option<WidgetRef>;
-    fn single(self) -> WidgetRef;
 }
 
 impl WidgetDrawApi for WidgetDraw {
@@ -240,14 +239,6 @@ impl WidgetDrawApi for WidgetDraw {
             Result::Err(nd) => Some(nd)
         }
     }
-    
-    fn single(self) -> WidgetRef {
-        match self {
-            Result::Ok(_) => WidgetRef::empty(),
-            Result::Err(nd) => nd
-        }
-    }
-        
 }
 
 pub type WidgetDraw = Result<(), WidgetRef>;
