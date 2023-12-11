@@ -292,9 +292,6 @@ live_design!{
     }
     
     NewsFeed ={{NewsFeed}}{
-        height: Fill,
-        width: Fill
-        flow: Down
         list = <PortalList>{
             TopSpace = <View> {height: 80}
             Post = <Post> {}
