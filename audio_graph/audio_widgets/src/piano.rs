@@ -131,9 +131,9 @@ pub struct PianoKey {
     #[animator] animator: Animator,
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct Piano {
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[live] piano_key: Option<LivePtr>,
     
@@ -369,12 +369,6 @@ impl Widget for Piano{
            _ => ()
        }
    }
-
-    fn walk(&mut self, _cx:&mut Cx)->Walk{self.walk}
-    
-    fn redraw(&mut self, cx:&mut Cx){
-        self.area.redraw(cx)
-    }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         

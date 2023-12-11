@@ -32,9 +32,10 @@ pub enum WindowMenuItem {
     Line
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef)]
+#[derive(Live, Widget)]
 pub struct WindowMenu{
     #[walk] walk: Walk,
+    #[redraw] #[rust] area: Area,
     #[layout] layout: Layout,
     #[rust] menu_items: HashMap<LiveId, WindowMenuItem>,
 }
@@ -118,8 +119,6 @@ impl LiveHook for WindowMenu {
 
 
 impl Widget for WindowMenu {
-    fn redraw(&mut self, _cx: &mut Cx) {
-    }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut Scope) {
         match event{
@@ -130,10 +129,6 @@ impl Widget for WindowMenu {
             }
             _=>()
         }
-    }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        return Walk::fixed(0.0,0.0);
     }
     
     fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {

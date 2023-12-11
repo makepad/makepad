@@ -39,7 +39,7 @@ impl DrawRoundCorner {
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[walk] walk: Walk,
@@ -55,7 +55,7 @@ pub struct Dock {
     
     #[rust] needs_save: bool,
     
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     
     #[rust] tab_bars: ComponentMap<LiveId, TabBarWrap>,
     #[rust] splitters: ComponentMap<LiveId, Splitter>,
@@ -851,9 +851,6 @@ impl Dock {
 
 
 impl Widget for Dock {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         // call handle on all tab bars, splitters,
@@ -949,8 +946,6 @@ impl Widget for Dock {
             }
         }
     }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {

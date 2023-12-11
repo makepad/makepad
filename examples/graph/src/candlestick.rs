@@ -40,10 +40,10 @@ struct _CandleStickData{
     close: f64,
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, Widget)]
 pub struct CandleStick {
     #[walk] walk: Walk,
-    #[live] draw_cs: DrawCandleStick,
+    #[redraw] #[live] draw_cs: DrawCandleStick,
     #[rust(Texture::new(cx))] _data_texture: Texture,
     #[rust] _screen_view: Rect,
     #[rust] _data_view: Rect
@@ -51,12 +51,6 @@ pub struct CandleStick {
 
 impl Widget for CandleStick {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_cs.redraw(cx)
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {

@@ -10,10 +10,10 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, Widget)]
 pub struct KeyboardView {
     #[deref] view: View,
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[live] outer_layout: Layout,
     #[live] outer_walk: Walk,
     #[live] keyboard_walk: Walk,
@@ -55,9 +55,6 @@ impl KeyboardView {
 }
 
 impl Widget for KeyboardView {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(e) = self.next_frame.is_event(event){
@@ -129,9 +126,6 @@ impl Widget for KeyboardView {
         self.view.handle_event(cx, event, scope);
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
-        self.outer_walk
-    }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &(), |cx,_|{

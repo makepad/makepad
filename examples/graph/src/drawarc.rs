@@ -180,11 +180,11 @@ pub enum Winding{
     CounterClockWise
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, Widget)]
 pub struct VectorArc{
     #[walk] walk: Walk,
     #[live] draw_arc: DrawArc,
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[live(true)] contained: bool,
     
     #[live(15.0)] line_width: f64,
@@ -200,12 +200,12 @@ pub struct VectorArc{
    
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, Widget)]
 pub struct VectorCornerArc
 {
     #[walk] walk: Walk,
     #[live] draw_arc: DrawCornerArc,
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[live(true)] contained: bool,
     
     #[live(15.0)] line_width: f64,
@@ -216,15 +216,7 @@ pub struct VectorCornerArc
 impl Widget for VectorCornerArc {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
-    }
-
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
@@ -273,14 +265,6 @@ impl Widget for VectorCornerArc {
 
 impl Widget for VectorArc {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {

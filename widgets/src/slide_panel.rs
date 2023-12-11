@@ -9,7 +9,7 @@ live_design!{
     SlidePanelBase = {{SlidePanel}} {}
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, Widget)]
 pub struct SlidePanel {
     #[deref] frame: View,
     #[animator] animator: Animator,
@@ -38,14 +38,6 @@ impl Widget for SlidePanel {
             }
             _ => ()
         }
-    }
-    
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.frame.walk(cx)
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.frame.redraw(cx)
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {

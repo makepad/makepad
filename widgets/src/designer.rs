@@ -24,7 +24,6 @@ live_design!{
                 draw_bg:{color:#5}
                 label = <Label> {text: "HI", draw_text:{color:#f}}
             }
-            inner = <HookWidget> {}
         }
         <Splitter> {
             align: FromStart(300),
@@ -37,7 +36,6 @@ live_design!{
                 draw_bg: {color: #4}
                 width: Fill, height: Fill
                 flow: Down
-                design = <HookWidget> {}
             },
         }
     }
@@ -60,7 +58,7 @@ enum OutlineNode {
     }
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, Widget)]
 pub struct Designer {
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,
@@ -177,10 +175,6 @@ impl Widget for Designer {
             component.handle_event(cx, event, scope);
             container.handle_event(cx, event, scope);
         }
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.ui.redraw(cx)
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {

@@ -75,7 +75,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef)]
+#[derive(Live, Widget)]
 pub struct PerformanceView {
     #[deref]
     view: View,
@@ -93,16 +93,8 @@ impl LiveHook for PerformanceView {
 }
 
 impl Widget for PerformanceView {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
-    }
-
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
-    }
-
-    fn walk(&mut self, cx: &mut Cx) -> Walk {
-        self.view.walk(cx)
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope,  walk: Walk) -> DrawStep {
@@ -136,13 +128,13 @@ impl PerformanceView {
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct PerformanceLiveGraph {
-    #[deref]
+    #[redraw] #[deref]
     view: View,
-    #[live]
+    #[redraw] #[live]
     draw_graph: DrawColor,
-    #[live]
+    #[redraw] #[live]
     draw_bar: DrawColor,
     #[rust]
     data: VecDeque<i64>,
@@ -164,16 +156,6 @@ impl LiveHook for PerformanceLiveGraph {
 }
 
 impl Widget for PerformanceLiveGraph {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
-        self.draw_graph.redraw(cx);
-        self.draw_bar.redraw(cx);
-    }
-
-    fn walk(&mut self, cx: &mut Cx) -> Walk {
-        self.view.walk(cx)
-    }
-
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
     }
