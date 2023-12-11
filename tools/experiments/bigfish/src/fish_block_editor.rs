@@ -1,11 +1,13 @@
 use crate::makepad_widgets::*;
 
+
+
 live_design! {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
     import do_not_run_bigfish::fish_theme::*;
-
+    import crate::block_header_button::*;
 
     FishBlockEditor = <View>
     {
@@ -28,8 +30,8 @@ live_design! {
                 {
                     return mix(vec4(1,1,0.6,1), vec4(1,1,0.5,1),self.pos.y);
                 }
-            },
-            <Label>
+            },            
+            <BlockHeaderButton>
             {
                 text:"Synth Block",
                 draw_text:
@@ -54,9 +56,7 @@ live_design! {
             }
             <Label>{text:"Synth Block", draw_text:{color: #0, text_style: <H2_TEXT_REGULAR>{}}}
             <FishSlider>{text:"Slider!"}
-            <FishSlider>{text:"Slider!"}
-            <FishSlider>{text:"Slider!"}
-            <FishSlider>{text:"Slider!"}
+          
         }
     }
 
@@ -101,3 +101,8 @@ live_design! {
         body = {draw_bg: { fn pixel(self) -> vec4 { return THEME_COLOR_FILTER_FADE} }  }
     }
 }
+
+
+
+
+
