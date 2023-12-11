@@ -596,7 +596,7 @@ impl MatchEvent for App {
         
         let image_list = self.ui.portal_list(id!(image_list));
         
-        while let Some(next) = self.ui.draw_no_scope(cx).step() {
+        while let Some(next) = self.ui.draw(cx, &mut Scope::empty()).step() {
             if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                 // alright now we draw the items
                 image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
@@ -609,7 +609,7 @@ impl MatchEvent for App {
                                 let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
                                 let item = image_list.item(cx, item_id, live_id!(PromptGroup)).unwrap();
                                 item.label(id!(prompt)).set_text(&group.prompt.positive);
-                                item.draw_all_no_scope(cx);
+                                item.draw_all(cx, &mut Scope::empty());
                             }
                             ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
                                 let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
@@ -620,7 +620,7 @@ impl MatchEvent for App {
                                     let tex = self.db.image_texture(&image_files[index]);
                                     row.image(id!(img)).set_texture(tex);
                                 }
-                                item.draw_all_no_scope(cx);
+                                item.draw_all(cx, &mut Scope::empty());
                             }
                         }
                     }
@@ -791,6 +791,6 @@ impl AppMain for App {
         if self.db.handle_decoded_images(cx) {
             self.ui.redraw(cx);
         }
-        self.ui.handle_event_no_scope(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

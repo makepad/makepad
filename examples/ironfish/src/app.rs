@@ -284,7 +284,7 @@ impl MatchEvent for App {
 impl AppMain for App{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
-        self.ui.handle_event_no_scope(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
         
         self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
              let display_audio = self.ui.display_audio_set(ids!(display_audio));

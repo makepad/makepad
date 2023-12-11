@@ -2,14 +2,14 @@
 use crate::*;
 
 pub trait WidgetMatchEvent{
-    fn handle_next_frame(&mut self, _cx: &mut Cx, _e:&NextFrameEvent, _scope: &mut WidgetScope){}
-    fn handle_actions(&mut self, _cx: &mut Cx, _e:&Actions, _scope: &mut WidgetScope){}
-    fn handle_signal(&mut self, _cx: &mut Cx, _scope: &mut WidgetScope){}
-    fn handle_audio_devices(&mut self, _cx: &mut Cx, _e:&AudioDevicesEvent, _scope: &mut WidgetScope){}
-    fn handle_midi_ports(&mut self, _cx: &mut Cx, _e:&MidiPortsEvent, _scope: &mut WidgetScope){}
-    fn handle_video_inputs(&mut self, _cx: &mut Cx, _e:&VideoInputsEvent, _scope: &mut WidgetScope){}
-    fn handle_network_responses(&mut self, _cx: &mut Cx, _e:&NetworkResponsesEvent, _scope: &mut WidgetScope){}
-    fn widget_match_event(&mut self, cx:&mut Cx, event:&Event, scope: &mut WidgetScope){
+    fn handle_next_frame(&mut self, _cx: &mut Cx, _e:&NextFrameEvent, _scope: &mut Scope){}
+    fn handle_actions(&mut self, _cx: &mut Cx, _e:&Actions, _scope: &mut Scope){}
+    fn handle_signal(&mut self, _cx: &mut Cx, _scope: &mut Scope){}
+    fn handle_audio_devices(&mut self, _cx: &mut Cx, _e:&AudioDevicesEvent, _scope: &mut Scope){}
+    fn handle_midi_ports(&mut self, _cx: &mut Cx, _e:&MidiPortsEvent, _scope: &mut Scope){}
+    fn handle_video_inputs(&mut self, _cx: &mut Cx, _e:&VideoInputsEvent, _scope: &mut Scope){}
+    fn handle_network_responses(&mut self, _cx: &mut Cx, _e:&NetworkResponsesEvent, _scope: &mut Scope){}
+    fn widget_match_event(&mut self, cx:&mut Cx, event:&Event, scope: &mut Scope){
         match event{
             Event::NextFrame(e)=>self.handle_next_frame(cx, e, scope),
             Event::Actions(e)=>self.handle_actions(cx,e, scope),
