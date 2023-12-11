@@ -52,7 +52,7 @@ pub trait Widget: LiveApply {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw;
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
+    fn draw(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
         let walk = self.walk(cx);
         self.draw_walk(cx, scope, walk)
     }
@@ -65,7 +65,7 @@ pub trait Widget: LiveApply {
     }
 
     fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) {
-        while self.draw_widget(cx, scope).is_step() {};
+        while self.draw(cx, scope).is_step() {};
     }
     
     fn text(&self) -> String {
@@ -546,9 +546,9 @@ impl WidgetRef {
         self.draw_walk(cx, &mut WidgetScope::default(), walk)
     }
     
-    pub fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
+    pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-        if let Some(nd) = inner.widget.draw_widget(cx, scope).step() {
+        if let Some(nd) = inner.widget.draw(cx, scope).step() {
                 if nd.is_empty() {
                     return WidgetDraw::make_step_here(self.clone())
                 }
@@ -558,8 +558,8 @@ impl WidgetRef {
         WidgetDraw::done()
     }
     
-    pub fn draw_widget_no_scope(&mut self, cx: &mut Cx2d) -> WidgetDraw{
-        self.draw_widget(cx, &mut WidgetScope::default())
+    pub fn draw_no_scope(&mut self, cx: &mut Cx2d) -> WidgetDraw{
+        self.draw(cx, &mut WidgetScope::default())
     }        
     
     pub fn walk(&self, cx:&mut Cx) -> Walk {

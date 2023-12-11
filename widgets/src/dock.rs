@@ -1042,7 +1042,7 @@ impl Widget for Dock {
                                 (*kind, WidgetRef::new_from_ptr(cx, Some(*ptr)))
                             });
                             scope.with_id(id, |scope|{
-                                entry.draw_widget(cx, scope)
+                                entry.draw(cx, scope)
                             })?;
                         }
                     }

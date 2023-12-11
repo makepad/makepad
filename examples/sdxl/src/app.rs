@@ -596,7 +596,7 @@ impl MatchEvent for App {
         
         let image_list = self.ui.portal_list(id!(image_list));
         
-        while let Some(next) = self.ui.draw_widget_no_scope(cx).step() {
+        while let Some(next) = self.ui.draw_no_scope(cx).step() {
             if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                 // alright now we draw the items
                 image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
