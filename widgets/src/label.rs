@@ -10,7 +10,7 @@ live_design!{
     LabelBase = {{Label}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct Label {
     #[live] draw_text: DrawText,
     #[walk] walk: Walk,

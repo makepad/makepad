@@ -75,7 +75,7 @@ live_design! {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct PerformanceView {
     #[deref]
     view: View,
@@ -136,7 +136,7 @@ impl PerformanceView {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct PerformanceLiveGraph {
     #[deref]
     view: View,

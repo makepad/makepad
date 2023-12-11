@@ -57,7 +57,7 @@ pub fn derive_widget_register_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    return parser.unexpected() 
 }
 
 /*

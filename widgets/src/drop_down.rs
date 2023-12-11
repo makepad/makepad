@@ -14,7 +14,7 @@ live_design!{
     DropDownBase = {{DropDown}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct DropDown {
     #[animator] animator: Animator,
     

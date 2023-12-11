@@ -180,7 +180,7 @@ pub enum Winding{
     CounterClockWise
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct VectorArc{
     #[walk] walk: Walk,
     #[live] draw_arc: DrawArc,
@@ -200,7 +200,7 @@ pub struct VectorArc{
    
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct VectorCornerArc
 {
     #[walk] walk: Walk,
