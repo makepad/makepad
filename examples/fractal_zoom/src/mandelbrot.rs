@@ -393,14 +393,14 @@ impl FractalSpace {
 }
 
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
 pub struct Mandelbrot {
     // DSL accessible
     #[live] draw_tile: DrawTile,
     #[live] max_iter: usize,
     
     // thew view container that contains our mandelbrot UI
-    #[rust] view_area: Area,
+    #[redraw] #[rust] view_area: Area,
     
     #[walk] walk: Walk,
     // prepending #[rust] makes derive(Live) ignore these fields
@@ -416,8 +416,7 @@ pub struct Mandelbrot {
     #[rust(true)] is_zoom_in: bool,
     
     // default fractal space for looking at a mandelbrot
-    #[rust(FractalSpace::new(dvec2(-0.5, 0.0), 0.5))]
-    #[live] space: FractalSpace,
+    #[rust(FractalSpace::new(dvec2(-0.5, 0.0), 0.5))] space: FractalSpace,
     
     #[rust]had_first_draw: bool,
     
@@ -531,12 +530,6 @@ impl Widget for Mandelbrot {
             }
             _ => ()
         }
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view_area.redraw(cx)
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {

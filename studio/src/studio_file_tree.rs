@@ -15,20 +15,12 @@ live_design!{
     }
 } 
  
-#[derive(Live, LiveHook, LiveRegisterWidget)] 
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRedraw)] 
 pub struct StudioFileTree{
-    #[live] pub file_tree: FileTree
-} 
- 
+    #[walk_redraw] #[live] pub file_tree: FileTree
+}
+
 impl Widget for StudioFileTree {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.file_tree.redraw(cx);
-    }
-    
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.file_tree.walk(cx)
-    }
-    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while self.file_tree.draw_walk(cx, scope, walk).is_step() {
             self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);

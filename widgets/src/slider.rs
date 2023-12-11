@@ -30,9 +30,9 @@ pub struct DrawSlider {
     #[live] slider_type: SliderType
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct Slider {
-    #[live] draw_slider: DrawSlider,
+    #[redraw] #[live] draw_slider: DrawSlider,
     
     #[walk] walk: Walk,
     
@@ -120,10 +120,7 @@ impl Slider {
 
 
 impl Widget for Slider {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_slider.redraw(cx);
-    }
-    
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -195,8 +192,6 @@ impl Widget for Slider {
             _ => ()
         }
     }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk_slider(cx, walk);

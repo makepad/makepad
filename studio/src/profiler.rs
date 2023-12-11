@@ -17,38 +17,50 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     
+    ProfilerEventChart = {{ProfilerEventChart}}{
+        height: Fill,
+        width: Fill
+        bg: {
+            fn pixel(self)->vec4{
+                return #f00
+            }
+        }
+    }
+    
     Profiler = {{Profiler}}{
         height: Fill,
         width: Fill
+        <ProfilerEventChart>{
+        }
     }
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
-struct Profiler{
-    #[deref] view:View
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+struct ProfilerEventChart{
+    #[walk] walk:Walk,
+    #[redraw] #[live] bg: DrawQuad,
+    #[live] item: DrawQuad,
 }
- 
-impl Profiler{
-    fn draw_profiler(&mut self, _cx: &mut Cx2d, _list:&mut PortalList, _build_manager:&mut BuildManager){
+
+impl Widget for ProfilerEventChart {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk:Walk)->DrawStep{
+        self.bg.begin(cx, walk, Layout::default());
+        self.bg.end(cx);
+        DrawStep::done()
     }
+        
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    }
+}
+
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+struct Profiler{
+    #[deref] view:View,
 }
 
 impl Widget for Profiler {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
-    }
-    
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.view.walk(cx)
-    }
-    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
-        while let Some(item) = self.view.draw_walk(cx, scope, walk).step(){
-            if let Some(mut list) = item.as_portal_list().borrow_mut(){
-                self.draw_profiler(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
-            }
-        }
-        DrawStep::done()
+        self.view.draw_walk_all(cx, scope, walk)
     }
     
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
