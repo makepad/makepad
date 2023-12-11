@@ -50,9 +50,9 @@ pub trait Widget: LiveApply {
     fn widget_to_data(&self, _cx: &mut Cx, _actions: &Actions, _nodes: &mut LiveNodeVec, _path: &[LiveId]) -> bool {false}
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw;
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep;
     
-    fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> WidgetDraw{
+    fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep{
         let walk = self.walk(cx);
         self.draw_walk(cx, scope, walk)
     }
@@ -210,16 +210,16 @@ impl <'a> WidgetScopeData<'a>{
     }
 }
 
-pub trait WidgetDrawApi {
-    fn done() -> WidgetDraw {Result::Ok(())}
-    fn make_step_here(arg: WidgetRef) -> WidgetDraw {Result::Err(arg)}
-    fn make_step() -> WidgetDraw {Result::Err(WidgetRef::empty())}
+pub trait DrawStepApi {
+    fn done() -> DrawStep {Result::Ok(())}
+    fn make_step_here(arg: WidgetRef) -> DrawStep {Result::Err(arg)}
+    fn make_step() -> DrawStep {Result::Err(WidgetRef::empty())}
     fn is_done(&self) -> bool;
     fn is_step(&self) -> bool;
     fn step(self) -> Option<WidgetRef>;
 }
 
-impl WidgetDrawApi for WidgetDraw {
+impl DrawStepApi for DrawStep {
     fn is_done(&self) -> bool {
         match *self {
             Result::Ok(_) => true,
@@ -241,7 +241,7 @@ impl WidgetDrawApi for WidgetDraw {
     }
 }
 
-pub type WidgetDraw = Result<(), WidgetRef>;
+pub type DrawStep = Result<(), WidgetRef>;
 
 generate_any_trait_api!(Widget);
 
@@ -524,28 +524,28 @@ impl WidgetRef {
         WidgetSet::default()
     }
     
-    pub fn draw_walk(&self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
+    pub fn draw_walk(&self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
            if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).step() {
                 if nd.is_empty() {
-                    return WidgetDraw::make_step_here(self.clone())
+                    return DrawStep::make_step_here(self.clone())
                 }
-                return WidgetDraw::make_step_here(nd);
+                return DrawStep::make_step_here(nd);
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> WidgetDraw{
+    pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
         if let Some(nd) = inner.widget.draw(cx, scope).step() {
                 if nd.is_empty() {
-                    return WidgetDraw::make_step_here(self.clone())
+                    return DrawStep::make_step_here(self.clone())
                 }
-                return WidgetDraw::make_step_here(nd);
+                return DrawStep::make_step_here(nd);
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     pub fn walk(&self, cx:&mut Cx) -> Walk {

@@ -142,7 +142,7 @@ impl Widget for SlidesView {
         }
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         // alright lets draw the child slide
         // we always maximally show 2 slides
         if self.draw_state.begin(cx, DrawState::DrawFirst) {
@@ -195,7 +195,7 @@ impl Widget for SlidesView {
         }
         cx.end_turtle();
         cx.end_turtle_with_area(&mut self.area);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

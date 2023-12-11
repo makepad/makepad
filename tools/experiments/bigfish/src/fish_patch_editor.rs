@@ -92,7 +92,7 @@ impl Widget for FishPatchEditor {
         self.scroll_bars.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
         //let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
@@ -196,7 +196,7 @@ impl Widget for FishPatchEditor {
 
         self.scroll_bars.end(cx);
 
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

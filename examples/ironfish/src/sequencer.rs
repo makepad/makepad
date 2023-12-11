@@ -246,7 +246,7 @@ impl Widget for Sequencer {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::default());
                 
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
@@ -273,7 +273,7 @@ impl Widget for Sequencer {
                 
         cx.end_turtle_with_area(&mut self.area);
         self.buttons.retain_visible();
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn widget_to_data(&self, cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
