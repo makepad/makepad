@@ -31,7 +31,7 @@ live_design! {
             },
             header = <BlockHeaderButton>
             {
-                text:"Synth Block",
+
                 draw_text:
                 {
                     color: #0
