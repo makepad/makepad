@@ -39,7 +39,7 @@ impl DrawRoundCorner {
     }
 }
 
-#[derive(Live, Widget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[walk] walk: Walk,
@@ -54,8 +54,7 @@ pub struct Dock {
     #[live] splitter: Option<LivePtr>,
     
     #[rust] needs_save: bool,
-    
-    #[redraw] #[rust] area: Area,
+    #[rust] area: Area,
     
     #[rust] tab_bars: ComponentMap<LiveId, TabBarWrap>,
     #[rust] splitters: ComponentMap<LiveId, Splitter>,
@@ -66,6 +65,32 @@ pub struct Dock {
     #[rust] drop_state: Option<DropPosition>,
     #[rust] dock_item_iter_stack: Vec<(LiveId, usize)>,
 }
+
+impl WidgetNode for Dock{
+    fn walk(&mut self, _cx:&mut Cx) -> Walk{
+        self.walk
+    }
+    
+    fn redraw(&mut self, cx: &mut Cx){
+        self.area.redraw(cx)
+    }
+    
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        if let Some((_, widget)) = self.items.get_mut(&path[0]) {
+            if path.len()>1 {
+                widget.find_widgets(&path[1..], cached, results);
+            }
+            else {
+                results.push(widget.clone());
+            }
+        }
+        else {
+            for (_, widget) in self.items.values_mut() {
+                widget.find_widgets(path, cached, results);
+            }
+        }
+    }
+}        
 
 pub struct DockVisibleItemIterator<'a> {
     stack: &'a mut Vec<(LiveId, usize)>,
@@ -928,22 +953,6 @@ impl Widget for Dock {
                 cx.widget_action(uid, &scope.path, DockAction::Drop(f.clone()))
             }
             _ => {}
-        }
-    }
-    
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some((_, widget)) = self.items.get_mut(&path[0]) {
-            if path.len()>1 {
-                widget.find_widgets(&path[1..], cached, results);
-            }
-            else {
-                results.push(widget.clone());
-            }
-        }
-        else {
-            for (_, widget) in self.items.values_mut() {
-                widget.find_widgets(path, cached, results);
-            }
         }
     }
     

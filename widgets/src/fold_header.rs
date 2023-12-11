@@ -14,8 +14,8 @@ pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
     #[rust] area: Area,
-    #[redraw] #[live] header: WidgetRef,
-    #[redraw] #[live] body: WidgetRef,
+    #[find] #[redraw] #[live] header: WidgetRef,
+    #[find] #[redraw] #[live] body: WidgetRef,
     #[animator] animator: Animator,
 
     #[live] opened: f64,
@@ -41,24 +41,18 @@ impl Widget for FoldHeader {
         self.header.handle_event(cx,  event, scope);
         
         if let Event::Actions(actions) = event{
-            if let Some(action) = actions.find_widget_action(self.header.widget(id!(fold_button)).widget_uid()){
-                match action.cast() {
-                    FoldButtonAction::Opening => {
-                        self.animator_play(cx, id!(open.on))
-                    }
-                    FoldButtonAction::Closing => {
-                        self.animator_play(cx, id!(open.off))
-                    }
-                    _ => ()
+            match actions.find_widget_action(self.header.widget(id!(fold_button)).widget_uid()).cast() {
+                FoldButtonAction::Opening => {
+                    self.animator_play(cx, id!(open.on))
                 }
+                FoldButtonAction::Closing => {
+                    self.animator_play(cx, id!(open.off))
+                }
+                _ => ()
             }
         }
     }
 
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.header.find_widgets(path, cached, results);
-        self.body.find_widgets(path, cached, results);
-    }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {

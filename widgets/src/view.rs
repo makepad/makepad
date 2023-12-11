@@ -385,7 +385,7 @@ impl ViewSet {
     }
 }
 
-impl WidgetRedraw for View{
+impl WidgetNode for View{
     fn walk(&mut self, _cx:&mut Cx)->Walk{
         self.walk
     }    
@@ -394,6 +394,53 @@ impl WidgetRedraw for View{
         self.area.redraw(cx);
         for child in self.children.values_mut() {
             child.redraw(cx);
+        }
+    }
+    
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        match cached {
+            WidgetCache::Yes | WidgetCache::Clear => {
+                if let WidgetCache::Clear = cached {
+                    self.find_cache.clear();
+                }
+                let mut hash = 0u64;
+                for i in 0..path.len() {
+                    hash ^= path[i].0
+                }
+                if let Some(widget_set) = self.find_cache.get(&hash) {
+                    results.extend_from_set(widget_set);
+                    return
+                }
+                let mut local_results = WidgetSet::empty();
+                if let Some(child) = self.children.get_mut(&path[0]) {
+                    if path.len()>1 {
+                        child.find_widgets(&path[1..], WidgetCache::No, &mut local_results);
+                    }
+                    else {
+                        local_results.push(child.clone());
+                    }
+                }
+                for child in self.children.values_mut() {
+                    child.find_widgets(path, WidgetCache::No, &mut local_results);
+                }
+                if !local_results.is_empty() {
+                    results.extend_from_set(&local_results);
+                }
+                self.find_cache.insert(hash, local_results);
+            }
+            WidgetCache::No => {
+                if let Some(child) = self.children.get_mut(&path[0]) {
+                    if path.len()>1 {
+                        child.find_widgets(&path[1..], WidgetCache::No, results);
+                    }
+                    else {
+                        results.push(child.clone());
+                    }
+                }
+                for child in self.children.values_mut() {
+                    child.find_widgets(path, WidgetCache::No, results);
+                }
+            }
         }
     }
 }
@@ -669,52 +716,6 @@ impl Widget for View {
         DrawStep::done()
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        match cached {
-            WidgetCache::Yes | WidgetCache::Clear => {
-                if let WidgetCache::Clear = cached {
-                    self.find_cache.clear();
-                }
-                let mut hash = 0u64;
-                for i in 0..path.len() {
-                    hash ^= path[i].0
-                }
-                if let Some(widget_set) = self.find_cache.get(&hash) {
-                    results.extend_from_set(widget_set);
-                    return
-                }
-                let mut local_results = WidgetSet::empty();
-                if let Some(child) = self.children.get_mut(&path[0]) {
-                    if path.len()>1 {
-                        child.find_widgets(&path[1..], WidgetCache::No, &mut local_results);
-                    }
-                    else {
-                        local_results.push(child.clone());
-                    }
-                }
-                for child in self.children.values_mut() {
-                    child.find_widgets(path, WidgetCache::No, &mut local_results);
-                }
-                if !local_results.is_empty() {
-                    results.extend_from_set(&local_results);
-                }
-                self.find_cache.insert(hash, local_results);
-            }
-            WidgetCache::No => {
-                if let Some(child) = self.children.get_mut(&path[0]) {
-                    if path.len()>1 {
-                        child.find_widgets(&path[1..], WidgetCache::No, results);
-                    }
-                    else {
-                        results.push(child.clone());
-                    }
-                }
-                for child in self.children.values_mut() {
-                    child.find_widgets(path, WidgetCache::No, results);
-                }
-            }
-        }
-    }
 }
 
 #[derive(Clone)]

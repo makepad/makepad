@@ -139,9 +139,5 @@ impl Widget for KeyboardView {
         self.end(cx);
         DrawStep::done()
     }
-
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.view.find_widgets(path, cached, results);
-    }
 }
 
