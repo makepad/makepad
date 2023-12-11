@@ -9,9 +9,9 @@ live_design!{
     PageFlipBase = {{PageFlip}} {}
 }
 
-#[derive(Live, Widget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct PageFlip {
-    #[redraw] #[rust] area: Area,
+    #[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[live(false)] lazy_init: bool,
@@ -89,8 +89,15 @@ impl PageFlip {
     }
 }
 
-
-impl Widget for PageFlip {
+impl WidgetNode for PageFlip{
+    fn walk(&mut self, _cx:&mut Cx) -> Walk{
+        self.walk
+    }
+        
+    fn redraw(&mut self, cx: &mut Cx){
+        self.area.redraw(cx)
+    }
+        
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(page) = self.pages.get_mut(&path[0]) {
             if path.len() == 1{
@@ -104,6 +111,9 @@ impl Widget for PageFlip {
             page.find_widgets(path, cached, results);
         }
     }
+}        
+
+impl Widget for PageFlip {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
