@@ -9,7 +9,7 @@ live_design!{
     PageFlipBase = {{PageFlip}} {}
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct PageFlip {
     #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,

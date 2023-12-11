@@ -45,7 +45,7 @@ impl ListDrawState {
         }
     }
 }
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct PortalList {
     #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,

@@ -12,7 +12,7 @@ pub enum FishConnectionWidgetAction {
     Released,
 }
 
-#[derive(Live, LiveHook,  LiveRegisterWidget, WidgetRedraw)]
+#[derive(Live, LiveHook,  Widget)]
 pub struct FishConnectionWidget {
     #[live]
     start_pos: DVec2,

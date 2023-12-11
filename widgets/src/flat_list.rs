@@ -29,7 +29,7 @@ pub enum FlatListAction {
     None
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct FlatList {
     //#[rust] area: Area,
     #[walk] walk: Walk,
