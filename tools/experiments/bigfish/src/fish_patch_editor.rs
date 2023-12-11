@@ -1,6 +1,6 @@
 use crate::{
-    fish_block_template::FishBlockCategory, fish_doc::FishDoc, fish_ports::ConnectionType,
-    makepad_draw::*, makepad_widgets::*, block_header_button::BlockHeaderButtonAction,
+    block_header_button::BlockHeaderButtonAction, fish_block_template::FishBlockCategory,
+    fish_doc::FishDoc, fish_ports::ConnectionType, makepad_draw::*, makepad_widgets::*,
 };
 
 live_design! {
@@ -49,7 +49,8 @@ pub struct FishPatchEditor {
     #[live]
     draw_ls: DrawLine,
 
-    #[redraw] #[live]
+    #[redraw]
+    #[live]
     scroll_bars: ScrollBars,
     #[live]
     draw_bg: DrawColor,
@@ -63,37 +64,29 @@ pub struct FishPatchEditor {
 }
 
 impl Widget for FishPatchEditor {
-    fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        scope: &mut Scope,
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
 
         self.scroll_bars.handle_event(cx, event);
+        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
 
         for (item_id, item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
-            scope.with_id(*item_id, |scope| {
-                cx.group_widget_actions(uid, item_uid, |cx|{
-                    item.handle_event(cx, event, scope);
-                })
-            })
-        }
-        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
-      
-        for action in cx.scope_actions(|cx| splitter.handle_event(cx, event, scope)) {
-            match action.as_widget_action().cast() {
-                BlockHeaderButtonAction::Move{id,x,y} =>
-                {
-                    patch.move_block(id,x,y);
+
+            for action in cx.scope_actions(|cx| item.handle_event(cx, event, scope)) {
+                match action.as_widget_action().cast() {
+                    BlockHeaderButtonAction::Move { id, x, y } => {
+                        patch.move_block(id, x, y);
+                    }
+                    _ => {}
                 }
-                _ =>{}
             }
-      
+        }
     }
+
+    //  }
+    //}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
