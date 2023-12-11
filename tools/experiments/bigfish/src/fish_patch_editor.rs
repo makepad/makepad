@@ -61,6 +61,11 @@ pub struct FishPatchEditor {
     templates: ComponentMap<LiveId, LivePtr>,
     #[rust]
     items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
+
+    #[rust]
+    dragstartx: i32,
+    #[rust]
+    dragstarty: i32,
 }
 
 impl Widget for FishPatchEditor {
@@ -76,8 +81,23 @@ impl Widget for FishPatchEditor {
             for action in cx.scope_actions(|cx| item.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     BlockHeaderButtonAction::Move { id, x, y } => {
+                        self.scroll_bars.redraw(cx);
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
-                        patch.move_block(id, x, y);
+                        patch.move_block(
+                            id,
+                            self.dragstartx as f64 + x,
+                            self.dragstarty as f64 + y,
+                        );
+                    }
+                    BlockHeaderButtonAction::RecordDragStart { id } => {
+                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                        let block = patch.get_block(id);
+                        if block.is_some() {
+                            let b = block.unwrap();
+
+                            self.dragstartx = b.x;
+                            self.dragstarty = b.y;
+                        }
                     }
                     _ => {}
                 }

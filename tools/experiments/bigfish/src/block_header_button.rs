@@ -1,6 +1,5 @@
 use crate::makepad_widgets::*;
 
-
 live_design! {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
@@ -21,7 +20,7 @@ live_design! {
                     }
                 }
 
-                
+
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -75,7 +74,7 @@ live_design! {
             }
         }
 
-        
+
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -99,12 +98,12 @@ live_design! {
             instance bodytop: #53
             instance bodybottom: #5c
             fn pixel(self) -> vec4 {
-                
+
                 //let body = mix(mix(self.bodytop, self.bodybottom, self.hover), #33, self.pressed);
-                
+
                 return vec4(0.,0.,0.,0.);
             }
-        }        
+        }
     }
 }
 
@@ -114,47 +113,75 @@ pub enum BlockHeaderButtonAction {
     Clicked,
     Pressed,
     Released,
-    Move{id:u64, x: f64, y:f64}
+    Move { id: u64, x: f64, y: f64 },
+    RecordDragStart { id: u64 },
 }
 
 #[derive(Live, LiveHook, Widget)]
 pub struct BlockHeaderButton {
-    #[animator] animator: Animator,
+    #[animator]
+    animator: Animator,
 
-    #[redraw] #[live] draw_bg: DrawQuad,
-    #[live] draw_text: DrawText,
-    #[live] draw_icon: DrawIcon,
-    #[live] icon_walk: Walk,
-    #[live] label_walk: Walk,
-    #[walk] walk: Walk,
-    
-    #[layout] layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_icon: DrawIcon,
+    #[live]
+    icon_walk: Walk,
+    #[live]
+    label_walk: Walk,
+    #[walk]
+    walk: Walk,
 
-    #[live(true)] grab_key_focus: bool,
+    #[layout]
+    layout: Layout,
 
-    #[live] pub text: RcStringMut,
+    #[live(true)]
+    grab_key_focus: bool,
 
-    #[rust] pub blockid: u64,
-    #[rust] pub dragging: bool,
-} 
+    #[live]
+    pub text: RcStringMut,
 
+    #[live]
+    pub blockid: u64,
+    #[rust]
+    pub dragging: bool,
+}
 
-impl Widget for BlockHeaderButton{
-   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+impl Widget for BlockHeaderButton {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-       self.animator_handle_event(cx, event);
-       match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerMove(fe) =>
-            {
-                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Move{id: self.blockid,x:  fe.abs.x-fe.abs_start.x,y: fe.abs.y- fe.abs_start.y});
-            },
+        self.animator_handle_event(cx, event);
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerMove(fe) => {
+                if self.dragging {
+                    cx.widget_action(
+                        uid,
+                        &scope.path,
+                        BlockHeaderButtonAction::Move {
+                            id: self.blockid,
+                            x: fe.abs.x - fe.abs_start.x,
+                            y: fe.abs.y - fe.abs_start.y,
+                        },
+                    );
+                }
+            }
             Hit::FingerDown(_fe) => {
-                if self.grab_key_focus{
+                if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
+                self.dragging = true;
+                cx.widget_action(
+                    uid,
+                    &scope.path,
+                    BlockHeaderButtonAction::RecordDragStart { id: self.blockid },
+                );
                 cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
-            },
+            }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
@@ -162,64 +189,69 @@ impl Widget for BlockHeaderButton{
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerUp(fe) => if fe.is_over {
-                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Clicked);
-                if fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
+            Hit::FingerUp(fe) => {
+                if self.dragging {
+                    self.dragging = false;
                 }
-                else{
+                if fe.is_over {
+                    cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Clicked);
+                    if fe.device.has_hovers() {
+                        self.animator_play(cx, id!(hover.on));
+                    } else {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                } else {
+                    cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Released);
                     self.animator_play(cx, id!(hover.off));
                 }
             }
-            else {
-                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Released);
-                self.animator_play(cx, id!(hover.off));
-            }
-            _ => ()
+            _ => (),
         }
     }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text.draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        self.draw_text
+            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
         DrawStep::done()
     }
-    
-    fn text(&self)->String{
+
+    fn text(&self) -> String {
         self.text.as_ref().to_string()
     }
-    
-    fn set_text(&mut self, v:&str){
+
+    fn set_text(&mut self, v: &str) {
         self.text.as_mut_empty().push_str(v);
     }
 }
 
 impl BlockHeaderButtonRef {
-    
-    pub fn clicked(&self, actions:&Actions) -> bool {
-        if let BlockHeaderButtonAction::Clicked = actions.find_widget_action(self.widget_uid()).cast() {
-            return true
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let BlockHeaderButtonAction::Clicked =
+            actions.find_widget_action(self.widget_uid()).cast()
+        {
+            return true;
         }
         false
     }
 
-    pub fn pressed(&self, actions:&Actions) -> bool {
-        if let BlockHeaderButtonAction::Pressed = actions.find_widget_action(self.widget_uid()).cast() {
-            return true
+    pub fn pressed(&self, actions: &Actions) -> bool {
+        if let BlockHeaderButtonAction::Pressed =
+            actions.find_widget_action(self.widget_uid()).cast()
+        {
+            return true;
         }
         false
     }
-
 }
 
-impl BlockHeaderButtonSet{
-    pub fn clicked(&self, actions: &Actions)->bool{
+impl BlockHeaderButtonSet {
+    pub fn clicked(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.clicked(actions))
     }
-    pub fn pressed(&self, actions: &Actions)->bool{
+    pub fn pressed(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.pressed(actions))
     }
 }
-
