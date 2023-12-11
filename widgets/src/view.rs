@@ -498,12 +498,12 @@ impl Widget for View {
         self.walk
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // the beginning state
         if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
             if !self.visible {
                 self.draw_state.end();
-                return WidgetDraw::done()
+                return DrawStep::done()
             }
                         
             self.defer_walks.clear();
@@ -520,7 +520,7 @@ impl Widget for View {
                             self.area = self.draw_bg.area();
                             cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0 / self.dpi_factor.unwrap_or(1.0));
                         }
-                        return WidgetDraw::done()
+                        return DrawStep::done()
                     }
                     // lets start a pass
                     if self.texture_cache.is_none() {
@@ -545,7 +545,7 @@ impl Widget for View {
                     let walk = self.walk_from_previous_size(walk);
                     if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
                         cx.walk_turtle_with_area(&mut self.area, walk);
-                        return WidgetDraw::done()
+                        return DrawStep::done()
                     }
                 }
                 _ => ()
@@ -657,7 +657,7 @@ impl Widget for View {
                 self.draw_state.end();
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn redraw(&mut self, cx: &mut Cx) {

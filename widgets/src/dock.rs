@@ -952,7 +952,7 @@ impl Widget for Dock {
     
     fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
             let id = live_id!(root);
             vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]
@@ -1067,7 +1067,7 @@ impl Widget for Dock {
         self.end(cx);
         self.draw_state.end();
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

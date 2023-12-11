@@ -136,8 +136,8 @@ impl Widget for WindowMenu {
         return Walk::fixed(0.0,0.0);
     }
     
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> WidgetDraw {
-        WidgetDraw::done()
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
     }
 }
 

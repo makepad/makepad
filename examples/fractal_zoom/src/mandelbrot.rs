@@ -539,7 +539,7 @@ impl Widget for Mandelbrot {
         self.view_area.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::flow_right());
         // lets check our clip
                 
@@ -570,7 +570,7 @@ impl Widget for Mandelbrot {
         }
                 
         cx.end_turtle_with_area(&mut self.view_area);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

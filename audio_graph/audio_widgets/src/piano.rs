@@ -376,7 +376,7 @@ impl Widget for Piano{
         self.area.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         
         cx.begin_turtle(walk, Layout::default());
         
@@ -441,7 +441,7 @@ impl Widget for Piano{
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

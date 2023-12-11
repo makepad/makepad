@@ -305,11 +305,11 @@ impl Widget for Window {
         self.view.find_widgets(path, cached, results);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();
-                return WidgetDraw::done();
+                return DrawStep::done();
             }
         }
         
@@ -319,6 +319,6 @@ impl Widget for Window {
             self.end(cx);
         }
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

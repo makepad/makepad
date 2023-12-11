@@ -67,7 +67,7 @@ impl Widget for FoldHeader {
         self.body.find_widgets(path, cached, results);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
@@ -89,7 +89,7 @@ impl Widget for FoldHeader {
             cx.end_turtle_with_area(&mut self.area);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

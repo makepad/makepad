@@ -52,7 +52,7 @@ impl Widget for SlidePanel {
         self.frame.find_widgets(path, cached, results);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> DrawStep {
         // ok lets set abs pos
         let rect = cx.peek_walk_turtle(walk);
         match self.side{

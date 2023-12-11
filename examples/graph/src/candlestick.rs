@@ -59,9 +59,9 @@ impl Widget for CandleStick {
         self.draw_cs.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_cs.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

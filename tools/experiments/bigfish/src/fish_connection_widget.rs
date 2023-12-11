@@ -85,9 +85,9 @@ impl Widget for FishConnectionWidget {
         self.draw_line.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let _ = self.draw_walk_fishconnection(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 
     fn text(&self) -> String {
