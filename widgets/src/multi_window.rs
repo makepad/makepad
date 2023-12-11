@@ -58,7 +58,7 @@ impl Widget for MultiWindow {
         }
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for window in self.windows.values_mut() {
             window.handle_event(cx, event, scope);
         }
@@ -66,7 +66,7 @@ impl Widget for MultiWindow {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> WidgetDraw {
         self.draw_state.begin(cx, DrawState::Window(0));
         if cx.os_type().is_single_window(){
             if let Some(DrawState::Window(_)) = self.draw_state.get(){

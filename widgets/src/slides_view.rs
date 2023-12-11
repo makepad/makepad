@@ -77,7 +77,7 @@ pub enum SlidesViewAction {
 }
 
 impl Widget for SlidesView {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // lets handle mousedown, setfocus
         match event {
             Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
@@ -142,7 +142,7 @@ impl Widget for SlidesView {
         }
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
         // alright lets draw the child slide
         // we always maximally show 2 slides
         if self.draw_state.begin(cx, DrawState::DrawFirst) {

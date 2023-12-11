@@ -36,7 +36,7 @@ pub struct Button {
 }
 
 impl Widget for Button{
-   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
        self.animator_handle_event(cx, event);
        match event.hits(cx, self.draw_bg.area()) {
@@ -79,7 +79,7 @@ impl Widget for Button{
         self.draw_bg.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_text.draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_icon.draw_walk(cx, self.icon_walk);

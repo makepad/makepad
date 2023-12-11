@@ -101,6 +101,6 @@ impl MatchEvent for App{
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.ui.handle_event_no_scope(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

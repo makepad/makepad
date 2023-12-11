@@ -50,7 +50,7 @@ pub struct CandleStick {
 }
 
 impl Widget for CandleStick {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -59,7 +59,7 @@ impl Widget for CandleStick {
         self.draw_cs.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
         self.draw_cs.draw_walk(cx, walk);
         WidgetDraw::done()
     }

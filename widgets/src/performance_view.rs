@@ -105,7 +105,7 @@ impl Widget for PerformanceView {
         self.view.walk(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope,  walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope,  walk: Walk) -> WidgetDraw {
         let _ = self.view.draw_walk(cx, scope, walk);
         WidgetDraw::done()
     }
@@ -178,7 +178,7 @@ impl Widget for PerformanceLiveGraph {
         self.view.find_widgets(path, cached, results);
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
         let _ = self.view.draw_walk(cx, scope, walk);
         let _ = self.draw_walk(cx, walk);
         WidgetDraw::done()

@@ -444,7 +444,7 @@ pub enum MandelbrotAction {
 
 impl Widget for Mandelbrot {
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let uid = self.widget_uid();
         if let Some(ne) = self.next_frame.is_event(event) {
             // If we don't have a current layer, initiate the first tile render on the center of the screen
@@ -539,7 +539,7 @@ impl Widget for Mandelbrot {
         self.view_area.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw {
         cx.begin_turtle(walk, Layout::flow_right());
         // lets check our clip
                 

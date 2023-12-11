@@ -70,7 +70,7 @@ pub struct DisplayAudio {
 
 
 impl Widget for DisplayAudio {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -79,7 +79,7 @@ impl Widget for DisplayAudio {
         self.draw_wave.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw { 
         self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
         self.draw_wave.vu_left = self.vu[0].0.powf(1.0/3.0)*1.2;
         self.draw_wave.vu_right = self.vu[0].1.powf(1.0/3.0)*1.2;

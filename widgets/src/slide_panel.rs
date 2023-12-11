@@ -24,7 +24,7 @@ pub enum SlidePanelAction {
 }
 
 impl Widget for SlidePanel {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         //let uid = self.widget_uid();
         self.frame.handle_event(cx, event, scope);
         // lets handle mousedown, setfocus
@@ -52,7 +52,7 @@ impl Widget for SlidePanel {
         self.frame.find_widgets(path, cached, results);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, mut walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> WidgetDraw {
         // ok lets set abs pos
         let rect = cx.peek_walk_turtle(walk);
         match self.side{
