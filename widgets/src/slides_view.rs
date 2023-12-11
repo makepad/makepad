@@ -9,7 +9,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct SlidesView {
     #[layout] layout: Layout,
     #[redraw] #[rust] area: Area,

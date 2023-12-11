@@ -12,7 +12,7 @@ live_design!{
     MyWidget = {{MyWidget}} {}
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct MyWidget {
     #[redraw] #[live] draw: DrawQuad,
     #[walk] walk: Walk,

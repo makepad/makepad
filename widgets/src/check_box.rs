@@ -31,7 +31,7 @@ pub enum CheckType {
     None = shader_enum(4),
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, LiveHook, Widget)]
 pub struct CheckBox {
     
     #[walk] walk: Walk,

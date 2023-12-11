@@ -39,7 +39,7 @@ impl DrawRoundCorner {
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[walk] walk: Walk,

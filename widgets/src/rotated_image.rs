@@ -5,7 +5,7 @@ live_design! {
     RotatedImageBase = {{RotatedImage}} {}
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct RotatedImage {
     #[walk] walk: Walk,
     #[layout] layout: Layout,

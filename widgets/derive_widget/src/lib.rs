@@ -13,6 +13,16 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
     derive_widget_impl(input)
 }*/
 
+#[proc_macro_derive(Widget, attributes(
+    walk,
+    deref,
+    redraw,
+    walk_redraw
+))]
+pub fn derive_widget(input: TokenStream) -> TokenStream {
+    derive_widget_impl(input)
+}
+
 #[proc_macro_derive(WidgetRedraw, attributes(
     walk,
     deref,

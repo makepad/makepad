@@ -28,7 +28,7 @@ live_design! {
     VideoBase = {{Video}} {}
 }
 
-#[derive(Live, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct Video {
     // Drawing
     #[redraw] #[live]
@@ -204,16 +204,6 @@ enum AudioState {
     #[default]
     Playing,
     Muted,
-}
-
-impl LiveRegister for Video{
-    #[allow(unused)]
-    fn live_register(cx: &mut Cx) {
-        #[cfg(target_os = "android")]
-        {
-            register_widget!(cx, Video);
-        }
-    }
 }
 
 impl LiveHook for Video {

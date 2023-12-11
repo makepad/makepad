@@ -18,7 +18,7 @@ live_design!{
     }
 } 
  
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)] 
+#[derive(Live, LiveHook, Widget)] 
 pub struct StudioEditor{
     #[walk_redraw] #[live] pub editor: CodeEditor
 } 
