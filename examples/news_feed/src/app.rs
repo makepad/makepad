@@ -343,12 +343,12 @@ live_design!{
 app_main!(App);
 
 #[derive(Live, LiveHook, Widget)]
-struct NewsFeed{
+struct NewsFeed{ 
     #[deref] view:View
 }
 
 impl Widget for NewsFeed{
-    fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+    fn draw_walk(&mut self, cx:&mut Cx2d, _scope:&mut Scope, _walk:Walk)->DrawStep{
         while let Some(item) =  self.view.draw(cx, &mut Scope::empty()).step(){
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 1000);
