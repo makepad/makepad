@@ -58,11 +58,11 @@ live_design!{
 }
 
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct RunView {
     #[walk] walk: Walk,
     #[animator] animator: Animator,
-    #[live] draw_app: DrawQuad,
+    #[redraw] #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
     #[rust] last_size: DVec2,
     #[rust] tick: NextFrame,
@@ -292,14 +292,7 @@ impl RunView {
 }
 
 impl Widget for RunView {
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_app.redraw(cx)
-    }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let run_view_id = scope.path.get(0);
         let manager = &mut scope.data.get_mut::<AppData>().build_manager;

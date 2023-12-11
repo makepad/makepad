@@ -385,6 +385,19 @@ impl ViewSet {
     }
 }
 
+impl WidgetRedraw for View{
+    fn walk(&mut self, _cx:&mut Cx)->Walk{
+        self.walk
+    }    
+        
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+        for child in self.children.values_mut() {
+            child.redraw(cx);
+        }
+    }
+}
+
 impl Widget for View {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
@@ -493,11 +506,7 @@ impl Widget for View {
     fn is_visible(&self) -> bool {
         self.visible
     }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // the beginning state
         if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
@@ -658,13 +667,6 @@ impl Widget for View {
             }
         }
         DrawStep::done()
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-        for child in self.children.values_mut() {
-            child.redraw(cx);
-        }
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {

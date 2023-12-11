@@ -23,8 +23,12 @@ pub struct WidgetUid(pub u64);
 pub trait WidgetDesign {
 }
 
-pub trait Widget: LiveApply {
+pub trait WidgetRedraw: LiveApply{
+    fn walk(&mut self, _cx:&mut Cx) -> Walk;
+    fn redraw(&mut self, _cx: &mut Cx);
+}
 
+pub trait Widget: WidgetRedraw {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 
@@ -56,9 +60,11 @@ pub trait Widget: LiveApply {
         let walk = self.walk(cx);
         self.draw_walk(cx, scope, walk)
     }
-        
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
-    fn redraw(&mut self, _cx: &mut Cx);
+    
+    fn draw_walk_all(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk:Walk) -> DrawStep{
+        while self.draw_walk(cx, scope, walk).is_step(){}
+        DrawStep::done()
+    }
     
     fn is_visible(&self) -> bool {
         true
@@ -167,9 +173,10 @@ impl Debug for WidgetPath {
 
 
 #[derive(Default)]
-pub struct Scope<'a>{
+pub struct Scope<'a,'b>{
     pub path: WidgetPath,
-    pub data: WidgetScopeData<'a>
+    pub data: WidgetScopeData<'a>,
+    pub meta: WidgetScopeData<'b>
 }
 
 #[derive(Default)]
@@ -177,18 +184,28 @@ pub struct WidgetScopeData<'a>{
     pub data: Option<&'a mut dyn Any>
 }
 
-impl<'a> Scope<'a>{
+impl<'a,'b> Scope<'a,'b>{
     pub fn with_data<T: Any>(v:&'a mut T)->Self{
         Self{
             path:WidgetPath::default(),
-            data:WidgetScopeData{data:Some(v)}
+            data:WidgetScopeData{data:Some(v)},
+            meta:WidgetScopeData{data:None}
+        }
+    }
+    
+    pub fn with_data_meta<T: Any>(v:&'a mut T, w:&'b mut T)->Self{
+        Self{
+            path:WidgetPath::default(),
+            data:WidgetScopeData{data:Some(v)},
+            meta:WidgetScopeData{data:Some(w)}
         }
     }
     
     pub fn empty()->Self{
         Self{
             path:WidgetPath::default(),
-            data:WidgetScopeData{data:None}
+            data:WidgetScopeData{data:None},
+            meta:WidgetScopeData{data:None}
         }
     }
     

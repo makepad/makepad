@@ -143,7 +143,7 @@ pub enum RunListAction{
     None
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, Widget)]
 struct RunList{
     #[deref] view:View
 }
@@ -247,14 +247,7 @@ impl WidgetMatchEvent for RunList{
 }
 
 impl Widget for RunList {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
-    }
-        
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.view.walk(cx)
-    }
-        
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = item.as_flat_list().borrow_mut(){

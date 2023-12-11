@@ -21,7 +21,6 @@ pub mod splitter;
 pub mod vectorline;
 pub mod fold_header;
 pub mod fold_button;
-pub mod hook_widget;
 pub mod multi_window;
 pub mod designer;
 pub mod dock;
@@ -104,6 +103,7 @@ pub use crate::{
         WidgetActionOptionApi,
         WidgetRef,
         Widget,
+        WidgetRedraw,
         WidgetRegistry,
         WidgetFactory,
         DrawStateWrap,
@@ -143,7 +143,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::drop_down::live_design(cx);
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
-    crate::hook_widget::live_design(cx);
     crate::portal_list::live_design(cx);
     crate::flat_list::live_design(cx);
     crate::slide_panel::live_design(cx);

@@ -92,9 +92,9 @@ pub struct SeqButton {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, Widget)]
 pub struct Sequencer {
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[live] button: Option<LivePtr>,
     
@@ -231,10 +231,7 @@ impl Sequencer {
 
 
 impl Widget for Sequencer {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
-    
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         for button in self.buttons.values_mut() {
@@ -243,9 +240,7 @@ impl Widget for Sequencer {
             }
         }
     }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::default());
                 
