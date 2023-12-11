@@ -56,6 +56,7 @@ live_design! {
             }
             
             <FishSlider>{text:"Slider!"}
+            
           
         }
     }
