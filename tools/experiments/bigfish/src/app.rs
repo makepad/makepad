@@ -229,6 +229,6 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) { 
         self.match_event(cx, event); 
-        self.ui.handle_event(cx, event, &mut WidgetScope::new(&mut self.document));
+        self.ui.handle_event(cx, event, &mut Scope::new(&mut self.document));
     }
 }

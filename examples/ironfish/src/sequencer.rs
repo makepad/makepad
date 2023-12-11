@@ -235,7 +235,7 @@ impl Widget for Sequencer {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         for button in self.buttons.values_mut() {
             if button.handle_event_changed(cx, event, self.area){
@@ -246,7 +246,7 @@ impl Widget for Sequencer {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
         cx.begin_turtle(walk, Layout::default());
                 
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);

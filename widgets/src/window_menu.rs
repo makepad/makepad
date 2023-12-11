@@ -121,7 +121,7 @@ impl Widget for WindowMenu {
     fn redraw(&mut self, _cx: &mut Cx) {
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut Scope) {
         match event{
             Event::MacosMenuCommand(item)=>{
                 if *item == live_id!(quit){
@@ -136,7 +136,7 @@ impl Widget for WindowMenu {
         return Walk::fixed(0.0,0.0);
     }
     
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> WidgetDraw {
         WidgetDraw::done()
     }
 }

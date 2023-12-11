@@ -88,7 +88,7 @@ pub use crate::{
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
     widget::{
-        WidgetScope,
+        Scope,
         WidgetSet,
         WidgetSetIterator,
         WidgetUid,
