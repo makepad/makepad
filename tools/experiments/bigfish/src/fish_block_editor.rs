@@ -23,7 +23,7 @@ live_design! {
             flow: Down
             width: Fill
             height: Fit
-            padding: 4
+            padding: 0
             draw_bg:
             {
                 fn pixel(self) -> vec4
@@ -54,7 +54,7 @@ live_design! {
                     return mix(vec4(1,1,0.9,1), vec4(1,1,0.8,1),self.pos.y);
                 }
             }
-            <Label>{text:"Synth Block", draw_text:{color: #0, text_style: <H2_TEXT_REGULAR>{}}}
+            
             <FishSlider>{text:"Slider!"}
           
         }
