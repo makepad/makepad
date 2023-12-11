@@ -196,6 +196,7 @@ impl LiveRegister for App {
         crate::makepad_audio_widgets::live_design(cx);
         //crate::makepad_widgets::live_design(cx);
         crate::fish_patch_editor::live_design(cx);
+        crate::block_header_button::live_design(cx);
         crate::fish_block_editor::live_design(cx);
         crate::fish_theme::live_design(cx);
         crate::homescreen::live_design(cx);
