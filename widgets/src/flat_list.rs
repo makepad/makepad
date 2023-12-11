@@ -29,7 +29,7 @@ pub enum FlatListAction {
     None
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FlatList {
     //#[rust] area: Area,
     #[walk] walk: Walk,
@@ -299,9 +299,6 @@ impl Widget for FlatList {
     }
 }
 
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct FlatListRef(WidgetRef);
-
 impl FlatListRef {
    
     pub fn item(&self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
@@ -338,9 +335,6 @@ impl FlatListRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct FlatListSet(WidgetSet);
 
 impl FlatListSet {
     pub fn items_with_actions(&self, actions: &Actions) -> Vec<(LiveId, WidgetRef)> {

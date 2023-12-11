@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
+use makepad_micro_proc_macro::{TokenBuilder, TokenParser};
 
 pub fn derive_default_none_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
@@ -122,15 +122,11 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        if let Some(ref_name) = parser.eat_any_ident() {
-            let clean_name = if let Some(sn) = ref_name.strip_suffix("Ref"){
-                sn
-            }
-            else{
-                return error("derive WidgetRef can only be done on a struct with ending name Ref")
-            };
-            let snake_name = camel_case_to_snake_case(clean_name);
-            
+        if let Some(clean_name) = parser.eat_any_ident() {
+            let ref_name = format!("{}Ref", clean_name);
+            let snake_name = camel_case_to_snake_case(&clean_name);
+            tb.add("#[derive(Clone, Debug)]");
+            tb.add("pub struct ").ident(&ref_name).add("(WidgetRef);");
             tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
             tb.add("    type Target = WidgetRef;");
             tb.add("    fn deref(&self)->&Self::Target{");
@@ -152,11 +148,11 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("    }");
 
-            tb.add("   pub fn borrow(&self) -> Option<std::cell::Ref<'_, ").ident(clean_name).add(" >> {");
+            tb.add("   pub fn borrow(&self) -> Option<std::cell::Ref<'_, ").ident(&clean_name).add(" >> {");
             tb.add("       self.0.borrow()");
             tb.add("   }");
             
-            tb.add("   pub fn borrow_mut(&self) -> Option<std::cell::RefMut<'_, ").ident(clean_name).add(" >> {");
+            tb.add("   pub fn borrow_mut(&self) -> Option<std::cell::RefMut<'_, ").ident(&clean_name).add(" >> {");
             tb.add("       self.0.borrow_mut()");
             tb.add("   }");
             tb.add("}");
@@ -224,15 +220,12 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        if let Some(set_name) = parser.eat_any_ident() {
-            let clean_name = if let Some(sn) = set_name.strip_suffix("Set"){
-                sn
-            }
-            else{
-                return error("derive WidgetRef can only be done on a struct with ending name Ref")
-            };
-            let snake_name = camel_case_to_snake_case(clean_name);
+        if let Some(clean_name) = parser.eat_any_ident() {
+            let set_name = format!("{}Set", clean_name);
+            let snake_name = camel_case_to_snake_case(&clean_name);
             
+            tb.add("#[derive(Clone, Debug)]");
+            tb.add("pub struct ").ident(&set_name).add("(WidgetSet);");
             tb.add("impl std::ops::Deref for ").ident(&set_name).add("{");
             tb.add("    type Target = WidgetSet;");
             tb.add("    fn deref(&self)->&Self::Target{");

@@ -12,7 +12,7 @@ live_design!{
     MultiWindowBase = {{MultiWindow}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct MultiWindow {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] windows: ComponentMap<LiveId, Window>,
@@ -93,6 +93,3 @@ impl Widget for MultiWindow {
         WidgetDraw::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct MultiWindowRef(WidgetRef);

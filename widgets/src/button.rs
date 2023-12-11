@@ -17,7 +17,7 @@ pub enum ButtonAction {
     Released
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Button {
     #[animator] animator: Animator,
 
@@ -96,9 +96,6 @@ impl Widget for Button{
     }
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct ButtonRef(WidgetRef); 
-
 impl ButtonRef {
     
     pub fn clicked(&self, actions:&Actions) -> bool {
@@ -121,8 +118,6 @@ impl ButtonRef {
 
 }
 
-#[derive(Clone, Debug, WidgetSet)]
-pub struct ButtonSet(WidgetSet);
 impl ButtonSet{
     pub fn clicked(&self, actions: &Actions)->bool{
         for button in self.iter(){

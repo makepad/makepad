@@ -37,7 +37,7 @@ pub struct DrawLabel {
 }
 
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct TextInput {
     #[animator] animator: Animator,
     
@@ -631,9 +631,6 @@ impl TextInput {
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default())
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct TextInputRef(WidgetRef);
 
 impl TextInputRef {
     pub fn changed(&self, actions: &Actions) -> Option<String> {
