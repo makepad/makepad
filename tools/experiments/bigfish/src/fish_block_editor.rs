@@ -1,7 +1,5 @@
 use crate::makepad_widgets::*;
 
-
-
 live_design! {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
@@ -30,8 +28,8 @@ live_design! {
                 {
                     return mix(vec4(1,1,0.6,1), vec4(1,1,0.5,1),self.pos.y);
                 }
-            },            
-            <BlockHeaderButton>
+            },
+            header = <BlockHeaderButton>
             {
                 text:"Synth Block",
                 draw_text:
@@ -54,10 +52,10 @@ live_design! {
                     return mix(vec4(1,1,0.9,1), vec4(1,1,0.8,1),self.pos.y);
                 }
             }
-            
+
             <FishSlider>{text:"Slider!"}
-            
-          
+
+
         }
     }
 
@@ -102,8 +100,3 @@ live_design! {
         body = {draw_bg: { fn pixel(self) -> vec4 { return THEME_COLOR_FILTER_FADE} }  }
     }
 }
-
-
-
-
-
