@@ -5,7 +5,7 @@ use {
             build_manager::*,
             build_protocol::*,
         },
-        app::{AppAction, StudioData},
+        app::{AppAction, AppData},
         makepad_widgets::*,
         makepad_code_editor::text::{Position},
         makepad_widgets::portal_list::PortalList,
@@ -221,15 +221,13 @@ pub struct JumpTo{
     pub start:Position
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 struct LogList{
     #[deref] view:View
 }
 
 impl LogList{
     fn draw_log(&mut self, cx: &mut Cx2d, list:&mut PortalList, build_manager:&mut BuildManager){
-        let mut scope =  WidgetScope::default();
-                                
         list.set_item_range(cx, 0, build_manager.log.len() as u64);
                                 
         while let Some(item_id) = list.next_visible_item(cx) {
@@ -260,7 +258,7 @@ impl LogList{
                             body = {text: (&msg.line)}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_all(cx, &mut scope);
+                        item.draw_all(cx, &mut Scope::empty());
                     }
                     LogItem::Location(msg) => {
                         let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
@@ -271,7 +269,7 @@ impl LogList{
                             location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_all(cx, &mut scope);
+                        item.draw_all(cx, &mut Scope::empty());
                     }
                     _ => {}
                 }
@@ -279,7 +277,7 @@ impl LogList{
             }
             let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
             item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-            item.draw_all(cx, &mut scope);
+            item.draw_all(cx, &mut Scope::empty());
         }
     }
 }
@@ -293,20 +291,19 @@ impl Widget for LogList {
         self.view.walk(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
-        while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
-            if let Some(mut list) = next.as_portal_list().borrow_mut(){
-                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<StudioData>().build_manager)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step(){
+            if let Some(mut list) = step.as_portal_list().borrow_mut(){
+                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
-        
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        let data = scope.data.get::<StudioData>();
+        let data = scope.data.get::<AppData>();
         if let Event::Actions(actions) = event{    
             for (item_id, item) in log_list.items_with_actions(&actions) {
                 if item.link_label(id!(location)).pressed(&actions) {

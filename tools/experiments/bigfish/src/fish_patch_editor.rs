@@ -40,7 +40,7 @@ live_design! {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FishPatchEditor {
     #[animator]
     animator: Animator,
@@ -67,7 +67,7 @@ impl Widget for FishPatchEditor {
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        scope: &mut WidgetScope,
+        scope: &mut Scope,
     ) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -92,7 +92,7 @@ impl Widget for FishPatchEditor {
         self.scroll_bars.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
         //let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
@@ -126,7 +126,7 @@ impl Widget for FishPatchEditor {
             );
             //println!("{} {:?} ({:?},{:?})", item_id, i.id, i.x, i.y);
 
-            item.draw_all(cx, &mut WidgetScope::default());
+            item.draw_all(cx, &mut Scope::empty());
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
                 let templateid = match inp.datatype {
@@ -144,7 +144,7 @@ impl Widget for FishPatchEditor {
                         abs_pos: (dvec2(i.x as f64, i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
-                item.draw_all(cx, &mut WidgetScope::default());
+                item.draw_all(cx, &mut Scope::empty());
             }
 
             for outp in &i.output_ports {
@@ -163,7 +163,7 @@ impl Widget for FishPatchEditor {
                         abs_pos: (dvec2(i.x as f64 + 240., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
-                item.draw_all(cx, &mut WidgetScope::default());
+                item.draw_all(cx, &mut Scope::empty());
             }
         }
 
@@ -189,14 +189,14 @@ impl Widget for FishPatchEditor {
                    },
             );
 
-            item.draw_all(cx, &mut WidgetScope::default());
+            item.draw_all(cx, &mut Scope::empty());
 
             // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
 
         self.scroll_bars.end(cx);
 
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -253,6 +253,3 @@ impl FishPatchEditor {
         None
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct FishPatchEditorRef(WidgetRef);

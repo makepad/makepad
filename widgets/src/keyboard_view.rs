@@ -10,7 +10,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct KeyboardView {
     #[deref] view: View,
     #[rust] area: Area,
@@ -59,7 +59,7 @@ impl Widget for KeyboardView {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(e) = self.next_frame.is_event(event){
             match &self.anim_state{
                 AnimState::Opening{duration, start_time, ease, height}=>{
@@ -133,7 +133,7 @@ impl Widget for KeyboardView {
         self.outer_walk
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &(), |cx,_|{
             self.view.walk(cx)
         }){
@@ -143,7 +143,7 @@ impl Widget for KeyboardView {
             self.view.draw_walk(cx, scope, walk)?;
         }
         self.end(cx);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {

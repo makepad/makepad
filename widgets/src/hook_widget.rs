@@ -11,7 +11,7 @@ live_design!{
     HookWidgetBase = {{HookWidget}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct HookWidget {
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -24,7 +24,7 @@ enum DrawState {
 }
 
 impl Widget for HookWidget{
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope) {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 
     fn walk(&mut self, _cx:&mut Cx)->Walk{
@@ -33,10 +33,10 @@ impl Widget for HookWidget{
     
     fn redraw(&mut self, _cx:&mut Cx){}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::Hook) {
-            return WidgetDraw::hook_above();
+            return DrawStep::make_step();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

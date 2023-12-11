@@ -92,7 +92,7 @@ pub struct SeqButton {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Sequencer {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -235,7 +235,7 @@ impl Widget for Sequencer {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         for button in self.buttons.values_mut() {
             if button.handle_event_changed(cx, event, self.area){
@@ -246,7 +246,7 @@ impl Widget for Sequencer {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::default());
                 
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
@@ -273,7 +273,7 @@ impl Widget for Sequencer {
                 
         cx.end_turtle_with_area(&mut self.area);
         self.buttons.retain_visible();
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn widget_to_data(&self, cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
@@ -301,9 +301,6 @@ impl Widget for Sequencer {
         }
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SequencerRef(WidgetRef);
 
 impl SequencerRef {
     

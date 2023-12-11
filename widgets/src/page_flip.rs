@@ -9,7 +9,7 @@ live_design!{
     PageFlipBase = {{PageFlip}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct PageFlip {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -109,7 +109,7 @@ impl Widget for PageFlip {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         if let Some(page) = self.pages.get_mut(&self.active_page) {
             let item_uid = page.widget_uid();
@@ -123,7 +123,7 @@ impl Widget for PageFlip {
         self.walk
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if let Some(page) = self.page(cx, self.active_page) {
             if self.draw_state.begin_with(cx, &(), | cx, _ | {
                 page.walk(cx)
@@ -139,12 +139,9 @@ impl Widget for PageFlip {
             self.begin(cx, walk);
             self.end(cx);
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct PageFlipRef(WidgetRef);
 
 impl PageFlipRef {
     pub fn set_active_page(&self, page: LiveId) {
@@ -159,9 +156,6 @@ impl PageFlipRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct PageFlipSet(WidgetSet);
 
 impl PageFlipSet {
 }

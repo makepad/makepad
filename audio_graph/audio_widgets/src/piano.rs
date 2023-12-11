@@ -131,7 +131,7 @@ pub struct PianoKey {
     #[animator] animator: Animator,
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Piano {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -255,7 +255,7 @@ impl Piano {
 }
 
 impl Widget for Piano{
-   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
        
        let uid = self.widget_uid();
        let mut key_actions = Vec::new();
@@ -376,7 +376,7 @@ impl Widget for Piano{
         self.area.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         
         cx.begin_turtle(walk, Layout::default());
         
@@ -441,15 +441,12 @@ impl Widget for Piano{
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PianoKeyId(pub LiveId);
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct PianoRef(WidgetRef);
 
 impl PianoRef {
     pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {
@@ -477,9 +474,6 @@ impl PianoRef {
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct PianoSet(WidgetSet);
 
 impl PianoSet {
     pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {

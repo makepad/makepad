@@ -18,7 +18,7 @@ pub fn derive_widget_ref(input: TokenStream) -> TokenStream {
     derive_widget_ref_impl(input)
 }
 
-#[proc_macro_derive(WidgetRegister)]
+#[proc_macro_derive(LiveRegisterWidget)]
 pub fn derive_widget_register(input: TokenStream) -> TokenStream {
     derive_widget_register_impl(input)
 }

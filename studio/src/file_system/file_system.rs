@@ -11,7 +11,7 @@ use {
             FileRequest,
             FileError,
             FileResponse,
-            FileClientAction,
+            FileClientMessage,
             FileNodeData,
             FileTreeData,
         },
@@ -105,78 +105,80 @@ impl FileSystem {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef) {
         
-        for action in self.file_client.handle_event(cx, event) {
-            match action {
-                FileClientAction::Response(response) => match response {
-                    FileResponse::LoadFileTree(response) => {
-                        self.load_file_tree(response.unwrap());
-                        cx.action(FileSystemAction::TreeLoaded)
-                        // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
-                    }
-                    FileResponse::OpenFile(result) => {
-                        match result {
-                            Ok((_unix_path, data, id)) => {
-                                let file_id = FileNodeId(LiveId(id));
-                                let dock = ui.dock(id!(dock));
-                                for (tab_id, file_id) in &self.tab_id_to_file_node_id {
-                                    if id == file_id.0.0 {
-                                        dock.redraw_tab(cx, *tab_id);
+        if let Event::Signal = event{
+            while let Ok(message) = self.file_client.inner.as_mut().unwrap().message_receiver.try_recv() {
+                match message {
+                    FileClientMessage::Response(response) => match response {
+                        FileResponse::LoadFileTree(response) => {
+                            self.load_file_tree(response.unwrap());
+                            cx.action(FileSystemAction::TreeLoaded)
+                            // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
+                        }
+                        FileResponse::OpenFile(result) => {
+                            match result {
+                                Ok((_unix_path, data, id)) => {
+                                    let file_id = FileNodeId(LiveId(id));
+                                    let dock = ui.dock(id!(dock));
+                                    for (tab_id, file_id) in &self.tab_id_to_file_node_id {
+                                        if id == file_id.0.0 {
+                                            dock.redraw_tab(cx, *tab_id);
+                                        }
                                     }
+                                    if let Some(OpenDoc::Decorations(dec)) = self.open_documents.get(&file_id) {
+                                        let dec = dec.clone();
+                                        self.open_documents.insert(file_id, OpenDoc::Document(Document::new(data.into(), dec)));
+                                    }else {panic!()}
+                                    ui.redraw(cx);
                                 }
-                                if let Some(OpenDoc::Decorations(dec)) = self.open_documents.get(&file_id) {
-                                    let dec = dec.clone();
-                                    self.open_documents.insert(file_id, OpenDoc::Document(Document::new(data.into(), dec)));
-                                }else {panic!()}
-                                ui.redraw(cx);
-                            }
-                            Err(FileError::CannotOpen(_unix_path)) => {
-                            }
-                            Err(FileError::Unknown(err)) => {
-                                log!("File error unknown {}", err);
-                                // ignore
+                                Err(FileError::CannotOpen(_unix_path)) => {
+                                }
+                                Err(FileError::Unknown(err)) => {
+                                    log!("File error unknown {}", err);
+                                    // ignore
+                                }
                             }
                         }
-                    }
-                    FileResponse::SaveFile(result) => match result {
-                        Ok((path, old, new, _id)) => {
-                            // alright file has been saved
-                            // now we need to check if a live_design!{} changed or something outside it
-                            if old != new {
-                                let mut old_neg = Vec::new();
-                                let mut new_neg = Vec::new();
-                                match LiveRegistry::tokenize_from_str_live_design(&old, Default::default(), Default::default(), Some(&mut old_neg)) {
-                                    Err(e) => {
-                                        log!("Cannot tokenize old file {}", e)
-                                    }
-                                    Ok(old_tokens) => match LiveRegistry::tokenize_from_str_live_design(&new, Default::default(), Default::default(), Some(&mut new_neg)) {
+                        FileResponse::SaveFile(result) => match result {
+                            Ok((path, old, new, _id)) => {
+                                // alright file has been saved
+                                // now we need to check if a live_design!{} changed or something outside it
+                                if old != new {
+                                    let mut old_neg = Vec::new();
+                                    let mut new_neg = Vec::new();
+                                    match LiveRegistry::tokenize_from_str_live_design(&old, Default::default(), Default::default(), Some(&mut old_neg)) {
                                         Err(e) => {
-                                            log!("Cannot tokenize new file {}", e);
+                                            log!("Cannot tokenize old file {}", e)
                                         }
-                                        Ok(new_tokens) => {
-                                            // we need the space 'outside' of these tokens
-                                            if old_neg != new_neg {
-                                                cx.action(FileSystemAction::RecompileNeeded)
+                                        Ok(old_tokens) => match LiveRegistry::tokenize_from_str_live_design(&new, Default::default(), Default::default(), Some(&mut new_neg)) {
+                                            Err(e) => {
+                                                log!("Cannot tokenize new file {}", e);
                                             }
-                                            if old_tokens != new_tokens {
-                                                // design code changed, hotreload it
-                                                cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
-                                                    file_name: path,
-                                                    content: new
-                                                }));
+                                            Ok(new_tokens) => {
+                                                // we need the space 'outside' of these tokens
+                                                if old_neg != new_neg {
+                                                    cx.action(FileSystemAction::RecompileNeeded)
+                                                }
+                                                if old_tokens != new_tokens {
+                                                    // design code changed, hotreload it
+                                                    cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
+                                                        file_name: path,
+                                                        content: new
+                                                    }));
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            Err(_) => {}
+                            // ok we saved a file, we should check however what changed
+                            // to see if we need a recompile
+                            
                         }
-                        Err(_) => {}
-                        // ok we saved a file, we should check however what changed
-                        // to see if we need a recompile
-                        
+                    },
+                    FileClientMessage::Notification(_notification) => {
+                        //self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
                     }
-                },
-                FileClientAction::Notification(_notification) => {
-                    //self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
                 }
             }
         }

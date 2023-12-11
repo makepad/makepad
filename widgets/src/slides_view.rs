@@ -9,7 +9,7 @@ live_design!{
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct SlidesView {
     #[layout] layout: Layout,
     #[rust] area: Area,
@@ -77,7 +77,7 @@ pub enum SlidesViewAction {
 }
 
 impl Widget for SlidesView {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // lets handle mousedown, setfocus
         match event {
             Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
@@ -142,7 +142,7 @@ impl Widget for SlidesView {
         }
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         // alright lets draw the child slide
         // we always maximally show 2 slides
         if self.draw_state.begin(cx, DrawState::DrawFirst) {
@@ -195,7 +195,7 @@ impl Widget for SlidesView {
         }
         cx.end_turtle();
         cx.end_turtle_with_area(&mut self.area);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -227,10 +227,6 @@ impl SlidesView {
     }
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SlidesViewRef(WidgetRef);
-
 impl SlidesViewRef {
     pub fn next_slide(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -243,9 +239,6 @@ impl SlidesViewRef {
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct SlidesViewSet(WidgetSet);
 
 impl SlidesViewSet {
     pub fn next_slide(&self, cx: &mut Cx) {
