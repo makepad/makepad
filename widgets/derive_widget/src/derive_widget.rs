@@ -78,7 +78,7 @@ pub fn derive_widget_redraw_impl(input: TokenStream) ->  TokenStream {
                 tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&deref_field).add(".redraw(cx)}");
             }
             else{
-                return error("Need either a field marked redraw or deref to find walk method")
+                return error("Need either a field marked redraw or deref to find redraw method")
             }
         }
         tb.add("}");
