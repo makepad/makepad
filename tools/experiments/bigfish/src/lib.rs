@@ -18,4 +18,5 @@ mod fish_processor;
 mod fish_block_template;
 mod fish_theme;
 mod fish_connection_widget;
+mod block_header_button;
 pub mod app;

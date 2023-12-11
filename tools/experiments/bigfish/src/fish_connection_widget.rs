@@ -8,17 +8,11 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        draw_radio: {hover: 0.0}
-                        draw_text: {hover: 0.0}
-                        draw_icon: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_radio: {hover: 1.0}
-                        draw_text: {hover: 1.0}
-                        draw_icon: {hover: 1.0}
                     }
                 }
             }
@@ -27,17 +21,11 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_radio: {focus: 0.0}
-                        draw_text: {focus: 0.0}
-                        draw_icon: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_radio: {focus: 1.0}
-                        draw_text: {focus: 1.0}
-                        draw_icon: {focus: 1.0}
                     }
                 }
             }
@@ -46,20 +34,12 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_radio: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
-                        draw_text: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
                     }
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_radio: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
-                        draw_text: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
                     }
                 }
             }
