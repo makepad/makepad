@@ -17,11 +17,11 @@ pub enum ButtonAction {
     Released
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct Button {
     #[animator] animator: Animator,
 
-    #[live] draw_bg: DrawQuad,
+    #[redraw] #[live] draw_bg: DrawQuad,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     #[live] icon_walk: Walk,
@@ -69,14 +69,6 @@ impl Widget for Button{
             }
             _ => ()
         }
-    }
-
-    fn walk(&mut self, _cx:&mut Cx)->Walk{
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx:&mut Cx){
-        self.draw_bg.redraw(cx)
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {

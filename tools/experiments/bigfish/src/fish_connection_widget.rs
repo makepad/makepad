@@ -12,7 +12,7 @@ pub enum FishConnectionWidgetAction {
     Released,
 }
 
-#[derive(Live, LiveHook,  LiveRegisterWidget)]
+#[derive(Live, LiveHook,  LiveRegisterWidget, WidgetRedraw)]
 pub struct FishConnectionWidget {
     #[live]
     start_pos: DVec2,
@@ -20,7 +20,7 @@ pub struct FishConnectionWidget {
     end_pos: DVec2,
     #[animator]
     animator: Animator,
-    #[live]
+    #[redraw] #[live]
     draw_line: DrawLine,
     #[walk]
     walk: Walk,
@@ -75,14 +75,6 @@ impl Widget for FishConnectionWidget {
             }
             _ => (),
         }
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_line.redraw(cx)
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {

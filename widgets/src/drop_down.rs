@@ -14,11 +14,11 @@ live_design!{
     DropDownBase = {{DropDown}} {}
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct DropDown {
     #[animator] animator: Animator,
     
-    #[live] draw_bg: DrawQuad,
+    #[redraw] #[live] draw_bg: DrawQuad,
     #[live] draw_text: DrawLabelText,
     
     #[walk] walk: Walk,
@@ -172,10 +172,6 @@ impl Widget for DropDown {
         }
     }
     
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope)  {
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
@@ -268,9 +264,7 @@ impl Widget for DropDown {
             _ => ()
         };
     }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
+        
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
         DrawStep::done()

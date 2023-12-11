@@ -40,7 +40,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct FishPatchEditor {
     #[animator]
     animator: Animator,
@@ -49,7 +49,7 @@ pub struct FishPatchEditor {
     #[live]
     draw_ls: DrawLine,
 
-    #[live]
+    #[redraw] #[live]
     scroll_bars: ScrollBars,
     #[live]
     draw_bg: DrawColor,
@@ -82,14 +82,6 @@ impl Widget for FishPatchEditor {
                 })
             })
         }
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_bars.redraw(cx)
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {

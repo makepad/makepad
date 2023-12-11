@@ -29,7 +29,7 @@ pub enum FlatListAction {
     None
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct FlatList {
     //#[rust] area: Area,
     #[walk] walk: Walk,
@@ -46,7 +46,7 @@ pub struct FlatList {
     #[live(true)] drag_scrolling: bool,
     
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
-    #[live] scroll_bars: ScrollBars,
+    #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<()>,
     
@@ -136,10 +136,6 @@ impl FlatList {
 
 
 impl Widget for FlatList {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_bars.redraw(cx);
-    }
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
 
         let uid = self.widget_uid();
@@ -285,8 +281,6 @@ impl Widget for FlatList {
             }
         }*/
     }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {

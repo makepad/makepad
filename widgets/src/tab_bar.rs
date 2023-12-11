@@ -12,10 +12,10 @@ live_design!{
     TabBarBase = {{TabBar}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
 pub struct TabBar {
     
-    #[live] scroll_bars: ScrollBars,
+    #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] draw_drag: DrawColor,
 
     #[live] draw_fill: DrawColor,
@@ -49,13 +49,6 @@ impl LiveHook for TabBar {
 }
 
 impl Widget for TabBar{
-    fn walk(&mut self, _cx:&mut Cx)->Walk{
-        self.walk
-    }
-        
-    fn redraw(&mut self, cx:&mut Cx){
-        self.scroll_bars.redraw(cx)
-    }
     
     fn handle_event(
         &mut self,

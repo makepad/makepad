@@ -11,7 +11,7 @@ live_design!{
     LinkLabelBase = {{LinkLabel}} {}
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct LinkLabel {
     #[deref] button: Button
 }
@@ -24,14 +24,6 @@ impl Widget for LinkLabel {
         scope: &mut Scope,
     ) {
         self.button.handle_event(cx, event, scope)
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.button.redraw(cx)
-    }
-    
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.button.walk(cx)
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {

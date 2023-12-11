@@ -37,11 +37,11 @@ pub struct DrawLabel {
 }
 
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct TextInput {
     #[animator] animator: Animator,
     
-    #[live] draw_bg: DrawColor,
+    #[redraw] #[live] draw_bg: DrawColor,
     #[live] draw_select: DrawQuad,
     #[live] draw_cursor: DrawQuad,
     #[live] draw_text: DrawLabel,
@@ -76,10 +76,6 @@ pub struct TextInput {
 }
 
 impl Widget for TextInput {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -338,8 +334,6 @@ impl Widget for TextInput {
             _ => ()
         }
     }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk_text_input(cx, walk);
