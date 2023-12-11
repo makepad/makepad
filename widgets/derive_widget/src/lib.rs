@@ -31,8 +31,8 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
     find,
     wrap
 ))]
-pub fn derive_widget_wrap(input: TokenStream) -> TokenStream {
-    derive_widget_wrap_impl(input)
+pub fn derive_widget_node(input: TokenStream) -> TokenStream {
+    derive_widget_node_impl(input)
 }
 
 #[proc_macro_derive(WidgetRef)]
