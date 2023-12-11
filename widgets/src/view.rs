@@ -44,7 +44,7 @@ impl ViewOptimize {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct View { // draw info per UI element
     #[live] pub draw_bg: DrawColor,
     

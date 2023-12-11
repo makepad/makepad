@@ -9,7 +9,7 @@ live_design!{
     SlidePanelBase = {{SlidePanel}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct SlidePanel {
     #[deref] frame: View,
     #[animator] animator: Animator,

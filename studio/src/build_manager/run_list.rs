@@ -143,7 +143,7 @@ pub enum RunListAction{
     None
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 struct RunList{
     #[deref] view:View
 }
