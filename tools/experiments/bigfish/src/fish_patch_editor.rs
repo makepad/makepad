@@ -1,6 +1,6 @@
 use crate::{
     fish_block_template::FishBlockCategory, fish_doc::FishDoc, fish_ports::ConnectionType,
-    makepad_draw::*, makepad_widgets::*,
+    makepad_draw::*, makepad_widgets::*, block_header_button::BlockHeaderButtonAction,
 };
 
 live_design! {
@@ -82,6 +82,17 @@ impl Widget for FishPatchEditor {
                 })
             })
         }
+        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+      
+        for action in cx.scope_actions(|cx| splitter.handle_event(cx, event, scope)) {
+            match action.as_widget_action().cast() {
+                BlockHeaderButtonAction::Move{id,x,y} =>
+                {
+                    patch.move_block(id,x,y);
+                }
+                _ =>{}
+            }
+      
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
