@@ -72,6 +72,10 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             *index += 1;
             LiveEval::Float64(*v)
         }
+        LiveValue::Uint64(v) => {
+            *index += 1;
+            LiveEval::Int64(*v as i64)
+        }
         LiveValue::Int64(v) => {
             *index += 1;
             LiveEval::Int64(*v)
@@ -114,6 +118,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             fn value_to_live_value(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<LiveEval, LiveError> {
                 Ok(match &nodes[index].value {
                     LiveValue::Float64(val) => LiveEval::Float64(*val),
+                    LiveValue::Uint64(val) => LiveEval::Int64(*val as i64),
                     LiveValue::Int64(val) => LiveEval::Int64(*val),
                     LiveValue::Bool(val) => LiveEval::Bool(*val),
                     LiveValue::Vec2(val) => LiveEval::Vec2(*val),
@@ -495,7 +500,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                         LiveEval::Int64(vb) => LiveEval::Vec2(va / vb as f32),
                         LiveEval::Float64(vb) => LiveEval::Vec2(va / vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
-                    }
+                    } 
                     LiveEval::Vec3(va) => match b {
                         LiveEval::Vec3(vb) => LiveEval::Vec3(va / vb),
                         LiveEval::Int64(vb) => LiveEval::Vec3(va / vb as f32),

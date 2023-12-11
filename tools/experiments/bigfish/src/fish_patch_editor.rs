@@ -117,7 +117,7 @@ impl Widget for FishPatchEditor {
             item.apply_over(
                 cx,
                 live! {
-                    header: {blockid: i.id},
+                    header: {blockid: (i.id)},
                     abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos) ,
                 },
             );
