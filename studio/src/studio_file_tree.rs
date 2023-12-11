@@ -29,7 +29,7 @@ impl Widget for StudioFileTree {
         self.file_tree.walk(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->WidgetDraw{
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while self.file_tree.draw_walk(cx, scope, walk).is_step() {
             self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
              scope.data.get_mut::<AppData>().file_system.draw_file_node(
@@ -38,7 +38,7 @@ impl Widget for StudioFileTree {
                 &mut self.file_tree
             );
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){

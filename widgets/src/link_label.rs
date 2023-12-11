@@ -34,7 +34,7 @@ impl Widget for LinkLabel {
         self.button.walk(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.button.draw_walk(cx, scope, walk)
     }
     

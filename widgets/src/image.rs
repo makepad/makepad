@@ -50,14 +50,14 @@ impl Widget for Image {
         self.walk
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk)
     }
 }
 
 impl Image {
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
         // alright we get a walk. depending on our aspect ratio
         // we change either nothing, or width or height
         let rect = cx.peek_walk_turtle(walk);
@@ -105,7 +105,7 @@ impl Image {
         
         self.draw_bg.draw_walk(cx, walk);
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

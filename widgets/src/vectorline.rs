@@ -74,7 +74,7 @@ impl Widget for VectorLine {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
@@ -130,6 +130,6 @@ impl Widget for VectorLine {
         self.draw_ls
             .draw_line_abs(cx, line_start, line_end, self.color, self.line_width);
 
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

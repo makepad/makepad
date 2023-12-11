@@ -225,7 +225,7 @@ impl Widget for VectorCornerArc {
         self.area.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
                     
@@ -267,7 +267,7 @@ impl Widget for VectorCornerArc {
         self.draw_arc.width = (self.line_width/2.) as f32;
         self.draw_arc.draw_abs(cx,fullrect);
                     
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -283,7 +283,7 @@ impl Widget for VectorArc {
         self.area.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
         
@@ -370,7 +370,7 @@ impl Widget for VectorArc {
         self.draw_arc.width = (self.line_width/2.) as f32;
         self.draw_arc.draw_abs(cx,fullrect);
                     
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

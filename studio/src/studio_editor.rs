@@ -32,14 +32,14 @@ impl Widget for StudioEditor {
         self.editor.walk(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->WidgetDraw{
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         // alright we have a scope, and an id, so now we can properly draw the editor.
         let session_id = scope.path.get(0);
         let app_scope = scope.data.get_mut::<AppData>();
         if let Some(session) = app_scope.file_system.get_session_mut(session_id){
             self.editor.draw_walk_editor(cx, session, walk);
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){

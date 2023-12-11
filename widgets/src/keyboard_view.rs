@@ -133,7 +133,7 @@ impl Widget for KeyboardView {
         self.outer_walk
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &(), |cx,_|{
             self.view.walk(cx)
         }){
@@ -143,7 +143,7 @@ impl Widget for KeyboardView {
             self.view.draw_walk(cx, scope, walk)?;
         }
         self.end(cx);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
