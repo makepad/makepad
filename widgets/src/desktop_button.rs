@@ -14,11 +14,11 @@ live_design!{
     DesktopButtonBase = {{DesktopButton}} {}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
 pub struct DesktopButton {
     #[animator] animator: Animator,
     #[walk] walk: Walk,
-    #[live] draw_bg: DrawDesktopButton,
+    #[redraw] #[live] draw_bg: DrawDesktopButton,
 }
 
 impl Widget for DesktopButton{
@@ -53,12 +53,6 @@ impl Widget for DesktopButton{
             }
             _ => ()
         };
-    }
-
-    fn walk(&mut self, _cx:&mut Cx)->Walk{self.walk}
-    
-    fn redraw(&mut self, cx:&mut Cx){
-        self.draw_bg.redraw(cx)
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {

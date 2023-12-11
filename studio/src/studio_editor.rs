@@ -18,20 +18,12 @@ live_design!{
     }
 } 
  
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)] 
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)] 
 pub struct StudioEditor{
-    #[live] pub editor: CodeEditor
+    #[walk_redraw] #[live] pub editor: CodeEditor
 } 
 
 impl Widget for StudioEditor {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.editor.redraw(cx);
-    }
-    
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.editor.walk(cx)
-    }
-    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         // alright we have a scope, and an id, so now we can properly draw the editor.
         let session_id = scope.path.get(0);

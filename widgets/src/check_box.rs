@@ -31,7 +31,7 @@ pub enum CheckType {
     None = shader_enum(4),
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct CheckBox {
     
     #[walk] walk: Walk,
@@ -42,7 +42,7 @@ pub struct CheckBox {
     #[live] label_walk: Walk,
     #[live] label_align: Align,
     
-    #[live] draw_check: DrawCheckBox,
+    #[redraw] #[live] draw_check: DrawCheckBox,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     
@@ -94,10 +94,6 @@ impl Widget for CheckBox {
         }
     }
     
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_check.redraw(cx);
-    }
-    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -129,8 +125,6 @@ impl Widget for CheckBox {
             _ => ()
         }
     }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);

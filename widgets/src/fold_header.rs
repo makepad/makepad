@@ -9,13 +9,13 @@ live_design!{
     FoldHeaderBase = {{FoldHeader}} {}
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRedraw)]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
     #[rust] area: Area,
-    #[live] header: WidgetRef,
-    #[live] body: WidgetRef,
+    #[redraw] #[live] header: WidgetRef,
+    #[redraw] #[live] body: WidgetRef,
     #[animator] animator: Animator,
 
     #[live] opened: f64,
@@ -54,13 +54,6 @@ impl Widget for FoldHeader {
             }
         }
     }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.header.redraw(cx);
-        self.body.redraw(cx);
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
 
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.header.find_widgets(path, cached, results);
