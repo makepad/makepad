@@ -79,14 +79,14 @@ impl Widget for DisplayAudio {
         self.draw_wave.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> WidgetDraw { 
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep { 
         self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
         self.draw_wave.vu_left = self.vu[0].0.powf(1.0/3.0)*1.2;
         self.draw_wave.vu_right = self.vu[0].1.powf(1.0/3.0)*1.2;
         self.vu[0].0 *= 0.95;
         self.vu[0].1 *= 0.95;
         self.draw_wave.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

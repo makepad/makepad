@@ -183,7 +183,7 @@ impl Widget for Designer {
         self.ui.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
         let outline = self.ui.file_tree(id!(outline));
         while let Some(next) = self.ui.draw(cx, scope).step() {
             if let Some(mut outline) = outline.has_widget(&next).borrow_mut() {
@@ -193,6 +193,6 @@ impl Widget for Designer {
                 self.draw_design(cx);
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

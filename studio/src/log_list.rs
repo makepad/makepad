@@ -291,13 +291,13 @@ impl Widget for LogList {
         self.view.walk(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->WidgetDraw{
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = step.as_portal_list().borrow_mut(){
                 self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){

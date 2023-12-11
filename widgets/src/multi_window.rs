@@ -66,7 +66,7 @@ impl Widget for MultiWindow {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         self.draw_state.begin(cx, DrawState::Window(0));
         if cx.os_type().is_single_window(){
             if let Some(DrawState::Window(_)) = self.draw_state.get(){
@@ -76,7 +76,7 @@ impl Widget for MultiWindow {
                     self.draw_state.end();
                 }
             }
-            return WidgetDraw::done()
+            return DrawStep::done()
         }
         
         while let Some(DrawState::Window(step)) = self.draw_state.get() {
@@ -90,6 +90,6 @@ impl Widget for MultiWindow {
                 self.draw_state.end();
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
