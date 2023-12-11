@@ -45,7 +45,7 @@ impl ListDrawState {
         }
     }
 }
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct PortalList {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -483,7 +483,7 @@ impl Widget for PortalList {
         self.area.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
         let mut scroll_to = None;
@@ -710,22 +710,19 @@ impl Widget for PortalList {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         // ok so if we are
         if let Some(_) = self.draw_state.get() {
             self.end(cx);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct PortalListRef(WidgetRef);
 
 impl PortalListRef {
     pub fn set_first_id_and_scroll(&self, id: u64, s: f64) {
@@ -790,9 +787,6 @@ impl PortalListRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct PortalListSet(WidgetSet);
 
 impl PortalListSet {
     pub fn set_first_id(&self, id: u64) {

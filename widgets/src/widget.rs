@@ -25,7 +25,7 @@ pub trait WidgetDesign {
 
 pub trait Widget: LiveApply {
 
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope) {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 
     fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {}
@@ -50,9 +50,9 @@ pub trait Widget: LiveApply {
     fn widget_to_data(&self, _cx: &mut Cx, _actions: &Actions, _nodes: &mut LiveNodeVec, _path: &[LiveId]) -> bool {false}
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw;
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep;
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
+    fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep{
         let walk = self.walk(cx);
         self.draw_walk(cx, scope, walk)
     }
@@ -64,8 +64,8 @@ pub trait Widget: LiveApply {
         true
     }
 
-    fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) {
-        while self.draw_widget(cx, scope).is_hook() {};
+    fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
+        while self.draw(cx, scope).is_step() {};
     }
     
     fn text(&self) -> String {
@@ -107,17 +107,67 @@ pub enum CreateAt {
     End
 }
 
-pub trait WidgetDrawApi {
-    fn done() -> WidgetDraw {Result::Ok(())}
-    fn hook(arg: WidgetRef) -> WidgetDraw {Result::Err(arg)}
-    fn hook_above() -> WidgetDraw {Result::Err(WidgetRef::empty())}
-    fn is_done(&self) -> bool;
-    fn is_hook(&self) -> bool;
-    fn hook_widget(self) -> Option<WidgetRef>;
+#[derive(Default, Clone)]
+pub struct WidgetPath{
+    static_path:[LiveId;16], 
+    static_len:usize, 
+    dyn_path:Vec<LiveId>,
 }
 
+impl WidgetPath{
+    pub fn get(&self, id:usize)->LiveId{
+        if id >= self.dyn_path.len(){
+            if id >= self.static_len{
+                return LiveId(0)
+            }
+            else{
+                let idx = self.static_len - id - 1;
+                self.static_path[idx]
+            }
+        }
+        else{
+            let idx = self.dyn_path.len() - id - 1;
+            *self.dyn_path.get(idx).unwrap_or(&LiveId(0))
+        }
+    }
+    pub fn push(&mut self, id:LiveId){
+        if self.static_len < self.static_path.len(){
+            self.static_path[self.static_len] = id;
+            self.static_len += 1;
+        }
+        else{
+            self.dyn_path.push(id);
+        }
+    }
+    pub fn pop(&mut self){
+        if self.dyn_path.len()>0{
+            self.dyn_path.pop();
+        }
+        else if self.static_len>0{
+            self.static_len -= 1;
+        }
+    }
+}
+
+impl Debug for WidgetPath {
+    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
+        for i in 0..self.static_len{
+            if i!=0{
+                let _ = write!(f, ".");
+            }
+            let _ = write!(f, "{}", self.static_path[i]);
+        }
+        for i in 0..self.dyn_path.len(){
+            let _ = write!(f, ".");
+            let _ = write!(f, "{}", self.dyn_path[i]);
+        }
+        Ok(())
+    }
+}
+
+
 #[derive(Default)]
-pub struct WidgetScope<'a>{
+pub struct Scope<'a>{
     pub path: WidgetPath,
     pub data: WidgetScopeData<'a>
 }
@@ -127,18 +177,25 @@ pub struct WidgetScopeData<'a>{
     pub data: Option<&'a mut dyn Any>
 }
 
-impl<'a> WidgetScope<'a>{
-    pub fn new<T: Any>(v:&'a mut T)->Self{
+impl<'a> Scope<'a>{
+    pub fn with_data<T: Any>(v:&'a mut T)->Self{
         Self{
             path:WidgetPath::default(),
             data:WidgetScopeData{data:Some(v)}
         }
     }
     
-    pub fn with_id<F, R>(&mut self, id:LiveId, f: F) -> R where F: FnOnce(&mut WidgetScope) -> R{
-        self.path.0.push(id);
+    pub fn empty()->Self{
+        Self{
+            path:WidgetPath::default(),
+            data:WidgetScopeData{data:None}
+        }
+    }
+    
+    pub fn with_id<F, R>(&mut self, id:LiveId, f: F) -> R where F: FnOnce(&mut Scope) -> R{
+        self.path.push(id);
         let r = f(self);
-        self.path.0.pop();
+        self.path.pop();
         r
     }
 }
@@ -153,30 +210,38 @@ impl <'a> WidgetScopeData<'a>{
     }
 }
 
-impl WidgetDrawApi for WidgetDraw {
+pub trait DrawStepApi {
+    fn done() -> DrawStep {Result::Ok(())}
+    fn make_step_here(arg: WidgetRef) -> DrawStep {Result::Err(arg)}
+    fn make_step() -> DrawStep {Result::Err(WidgetRef::empty())}
+    fn is_done(&self) -> bool;
+    fn is_step(&self) -> bool;
+    fn step(self) -> Option<WidgetRef>;
+}
+
+impl DrawStepApi for DrawStep {
     fn is_done(&self) -> bool {
         match *self {
             Result::Ok(_) => true,
             Result::Err(_) => false
         }
     }
-    fn is_hook(&self) -> bool {
+    fn is_step(&self) -> bool {
         match *self {
             Result::Ok(_) => false,
             Result::Err(_) => true
         }
     }
     
-    fn hook_widget(self) -> Option<WidgetRef> {
+    fn step(self) -> Option<WidgetRef> {
         match self {
             Result::Ok(_) => None,
             Result::Err(nd) => Some(nd)
         }
     }
-    
 }
 
-pub type WidgetDraw = Result<(), WidgetRef>;
+pub type DrawStep = Result<(), WidgetRef>;
 
 generate_any_trait_api!(Widget);
 
@@ -403,11 +468,7 @@ impl WidgetRef {
         }))))
     }
     
-    pub fn handle_event_no_scope(&self, cx: &mut Cx, event: &Event){
-        self.handle_event(cx, event, &mut WidgetScope::default())
-    }
-    
-    pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope){
+    pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope:&mut Scope){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             // if we're in a draw event, do taht here
             if let Event::Draw(e) = event{
@@ -463,37 +524,29 @@ impl WidgetRef {
         WidgetSet::default()
     }
     
-    pub fn draw_walk(&self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    pub fn draw_walk(&self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-           if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).hook_widget() {
+           if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).step() {
                 if nd.is_empty() {
-                    return WidgetDraw::hook(self.clone())
+                    return DrawStep::make_step_here(self.clone())
                 }
-                return WidgetDraw::hook(nd);
+                return DrawStep::make_step_here(nd);
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
-    pub fn draw_walk_no_scope(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, &mut WidgetScope::default(), walk)
-    }
-    
-    pub fn draw_widget(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope) -> WidgetDraw{
+    pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-        if let Some(nd) = inner.widget.draw_widget(cx, scope).hook_widget() {
+        if let Some(nd) = inner.widget.draw(cx, scope).step() {
                 if nd.is_empty() {
-                    return WidgetDraw::hook(self.clone())
+                    return DrawStep::make_step_here(self.clone())
                 }
-                return WidgetDraw::hook(nd);
+                return DrawStep::make_step_here(nd);
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
-    
-    pub fn draw_widget_no_scope(&mut self, cx: &mut Cx2d) -> WidgetDraw{
-        self.draw_widget(cx, &mut WidgetScope::default())
-    }        
     
     pub fn walk(&self, cx:&mut Cx) -> Walk {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
@@ -516,15 +569,9 @@ impl WidgetRef {
         true
     }
     
-    pub fn draw_all(&self, cx: &mut Cx2d, scope:&mut WidgetScope) {
+    pub fn draw_all(&self, cx: &mut Cx2d, scope:&mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.draw_all(cx, scope)
-        }
-    }
-    
-    pub fn draw_all_no_scope(&self, cx: &mut Cx2d) {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.draw_all(cx, &mut WidgetScope::default())
         }
     }
     
@@ -688,31 +735,6 @@ pub struct WidgetAction {
     pub widget_uid: WidgetUid,
     pub path: WidgetPath,
     pub group: Option<WidgetActionGroup>
-}
-
-#[derive(Default, Clone)]
-pub struct WidgetPath(pub Vec<LiveId>);
-
-impl WidgetPath{
-    pub fn get(&self, id:usize)->LiveId{
-        if id >= self.0.len(){
-            return LiveId(0)
-        }
-        let idx = self.0.len() - id - 1;
-        *self.0.get(idx).unwrap_or(&LiveId(0))
-    }
-}
-
-impl Debug for WidgetPath {
-    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
-        for i in 0..self.0.len(){
-            if i!=0{
-                let _ = write!(f, ".");
-            }
-            let _ = write!(f, "{}", self.0[i]);
-        }
-        Ok(())
-    }
 }
 
 

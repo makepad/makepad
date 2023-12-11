@@ -8,7 +8,7 @@ live_design!{
     FoldButtonBase = {{FoldButton}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FoldButton {
     #[animator] animator: Animator,
     
@@ -54,7 +54,7 @@ impl Widget for FoldButton {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).is_animating() {
             if self.animator.is_track_animating(cx, id!(open)) {
@@ -100,15 +100,12 @@ impl Widget for FoldButton {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk_fold_button(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
-
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct FoldButtonRef(WidgetRef); 
 
 impl FoldButtonRef {
     

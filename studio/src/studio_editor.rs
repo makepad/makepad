@@ -1,7 +1,7 @@
 
 use {
     crate::{
-        app::{StudioData},
+        app::{AppData},
         makepad_widgets::*,
         makepad_code_editor::CodeEditor,
     },
@@ -18,7 +18,7 @@ live_design!{
     }
 } 
  
-#[derive(Live, LiveHook, WidgetRegister)] 
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)] 
 pub struct StudioEditor{
     #[live] pub editor: CodeEditor
 } 
@@ -32,25 +32,25 @@ impl Widget for StudioEditor {
         self.editor.walk(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         // alright we have a scope, and an id, so now we can properly draw the editor.
         let session_id = scope.path.get(0);
-        let app_scope = scope.data.get_mut::<StudioData>();
+        let app_scope = scope.data.get_mut::<AppData>();
         if let Some(session) = app_scope.file_system.get_session_mut(session_id){
             self.editor.draw_walk_editor(cx, session, walk);
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let session_id = scope.path.get(0);
-        let data = scope.data.get_mut::<StudioData>();
-        
+        let data = scope.data.get_mut::<AppData>();
+        let uid = self.widget_uid();
         if let Some(session) = data.file_system.get_session_mut(session_id){
-            self.editor.handle_event(cx, event, session);
+            for action in self.editor.handle_event(cx, event, session){
+                cx.widget_action(uid, &scope.path, action);
+            }
             data.file_system.handle_sessions();
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct StudioEditorRef(WidgetRef);

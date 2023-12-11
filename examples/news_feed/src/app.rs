@@ -352,11 +352,9 @@ impl LiveRegister for App {
 
 impl MatchEvent for App {
     fn handle_draw_2d(&mut self, cx:&mut Cx2d){
-        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
-        while let Some(next) = self.ui.draw_widget_no_scope(cx).hook_widget() {
-            if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
+        while let Some(item) =  self.ui.draw(cx, &mut Scope::empty()).step(){
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 1000);
-                                    
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let template = match item_id {
                         0 => live_id!(TopSpace),
@@ -373,7 +371,7 @@ impl MatchEvent for App {
                     item.label(id!(content.text)).set_text(&text);
                     item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
                     item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
-                    item.draw_all_no_scope(cx);
+                    item.draw_all(cx, &mut Scope::empty());
                 }
             }
         }
@@ -394,6 +392,6 @@ impl AppMain for App {
         if self.match_event_with_draw_2d(cx, event).is_ok(){
             return
         }
-        self.ui.handle_event_no_scope(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

@@ -60,7 +60,7 @@ enum OutlineNode {
     }
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct Designer {
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,
@@ -134,9 +134,8 @@ impl Designer {
                 });
                 container.widget(id!(label)).set_text(&format!("{}=<{}>", name, class));
                 // lets draw this thing in a neat little container box with a title bar
-                let mut scope = WidgetScope::default();
-                while let Some(_) = container.draw_widget(cx, &mut scope).hook_widget() {
-                    widget.draw_all(cx, &mut scope);
+                while let Some(_) = container.draw(cx, &mut Scope::empty()).step() {
+                    widget.draw_all(cx, &mut Scope::empty());
                 }
             }
         }
@@ -172,7 +171,7 @@ impl Designer {
 }
 
 impl Widget for Designer {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         self.ui.handle_event(cx, event, scope);
         for (component, container) in self.components.values_mut() {
             component.handle_event(cx, event, scope);
@@ -184,9 +183,9 @@ impl Widget for Designer {
         self.ui.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
         let outline = self.ui.file_tree(id!(outline));
-        while let Some(next) = self.ui.draw_widget(cx, scope).hook_widget() {
+        while let Some(next) = self.ui.draw(cx, scope).step() {
             if let Some(mut outline) = outline.has_widget(&next).borrow_mut() {
                 self.draw_outline(cx, &mut *outline);
             }
@@ -194,6 +193,6 @@ impl Widget for Designer {
                 self.draw_design(cx);
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

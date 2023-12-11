@@ -14,7 +14,7 @@ live_design!{
     DropDownBase = {{DropDown}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct DropDown {
     #[animator] animator: Animator,
     
@@ -176,7 +176,7 @@ impl Widget for DropDown {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope)  {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope)  {
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
                 
@@ -271,14 +271,11 @@ impl Widget for DropDown {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct DropDownRef(WidgetRef);
 
 impl DropDownRef {
     pub fn set_labels(&self, labels: Vec<String>) {

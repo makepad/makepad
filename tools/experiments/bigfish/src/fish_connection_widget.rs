@@ -78,7 +78,7 @@ pub enum FishConnectionWidgetAction {
     Released,
 }
 
-#[derive(Live,LiveHook,  WidgetRegister)]
+#[derive(Live, LiveHook,  LiveRegisterWidget)]
 pub struct FishConnectionWidget {
     #[live]
     start_pos: DVec2,
@@ -107,7 +107,7 @@ impl Widget for FishConnectionWidget {
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        scope: &mut WidgetScope,
+        scope: &mut Scope,
     )  {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -151,9 +151,9 @@ impl Widget for FishConnectionWidget {
         self.draw_line.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let _ = self.draw_walk_fishconnection(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 
     fn text(&self) -> String {
@@ -204,8 +204,6 @@ impl FishConnectionWidget {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct FishConnectionWidgetRef(WidgetRef);
 /*
 impl FishConnectionWidgetRef {
     pub fn clicked(&self, actions: &WidgetActions) -> bool {

@@ -29,7 +29,7 @@ pub enum FlatListAction {
     None
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct FlatList {
     //#[rust] area: Area,
     #[walk] walk: Walk,
@@ -140,7 +140,7 @@ impl Widget for FlatList {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
 
         let uid = self.widget_uid();
         self.scroll_bars.handle_event(cx, event);
@@ -288,19 +288,16 @@ impl Widget for FlatList {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         self.end(cx);
         self.draw_state.end();
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct FlatListRef(WidgetRef);
 
 impl FlatListRef {
    
@@ -338,9 +335,6 @@ impl FlatListRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct FlatListSet(WidgetSet);
 
 impl FlatListSet {
     pub fn items_with_actions(&self, actions: &Actions) -> Vec<(LiveId, WidgetRef)> {
