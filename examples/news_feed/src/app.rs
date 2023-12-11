@@ -353,7 +353,7 @@ impl LiveRegister for App {
 impl MatchEvent for App {
     fn handle_draw_2d(&mut self, cx:&mut Cx2d){
         let news_feeds = self.ui.portal_list_set(ids!(news_feed));
-        while let Some(next) = self.ui.draw_widget_no_scope(cx).hook_widget() {
+        while let Some(next) = self.ui.draw_widget_no_scope(cx).step() {
             if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
                 list.set_item_range(cx, 0, 1000);
                                     

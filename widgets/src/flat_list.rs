@@ -291,7 +291,7 @@ impl Widget for FlatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return WidgetDraw::make_step()
         }
         self.end(cx);
         self.draw_state.end();

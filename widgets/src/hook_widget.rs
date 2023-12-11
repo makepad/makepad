@@ -35,7 +35,7 @@ impl Widget for HookWidget{
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::Hook) {
-            return WidgetDraw::hook_above();
+            return WidgetDraw::make_step();
         }
         WidgetDraw::done()
     }
