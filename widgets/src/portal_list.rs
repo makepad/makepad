@@ -45,7 +45,7 @@ impl ListDrawState {
         }
     }
 }
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct PortalList {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -724,9 +724,6 @@ impl Widget for PortalList {
     }
 }
 
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct PortalListRef(WidgetRef);
-
 impl PortalListRef {
     pub fn set_first_id_and_scroll(&self, id: u64, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -790,9 +787,6 @@ impl PortalListRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct PortalListSet(WidgetSet);
 
 impl PortalListSet {
     pub fn set_first_id(&self, id: u64) {

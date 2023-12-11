@@ -75,7 +75,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct PerformanceView {
     #[deref]
     view: View,
@@ -136,7 +136,7 @@ impl PerformanceView {
     }
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct PerformanceLiveGraph {
     #[deref]
     view: View,
@@ -260,9 +260,6 @@ impl PerformanceLiveGraph {
         self.draw_graph.end(cx);
     }
 }
-
-#[derive(Debug, Clone, PartialEq, WidgetRef)]
-pub struct PerformanceLiveGraphRef(WidgetRef);
 
 impl PerformanceLiveGraphRef {
     pub fn add_y_entry(&mut self, cx: &mut Cx, y_entry: i64) {

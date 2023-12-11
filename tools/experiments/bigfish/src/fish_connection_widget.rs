@@ -12,7 +12,7 @@ pub enum FishConnectionWidgetAction {
     Released,
 }
 
-#[derive(Live,LiveHook,  LiveRegisterWidget)]
+#[derive(Live, LiveHook,  LiveRegisterWidget)]
 pub struct FishConnectionWidget {
     #[live]
     start_pos: DVec2,
@@ -138,8 +138,6 @@ impl FishConnectionWidget {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct FishConnectionWidgetRef(WidgetRef);
 /*
 impl FishConnectionWidgetRef {
     pub fn clicked(&self, actions: &WidgetActions) -> bool {
