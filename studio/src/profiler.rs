@@ -43,8 +43,10 @@ impl Widget for Profiler {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->WidgetDraw{
-        while let Some(mut list) = self.view.draw_walk(cx, scope, walk).single().as_portal_list().borrow_mut(){
-            self.draw_profiler(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step(){
+            if let Some(mut list) = item.as_portal_list().borrow_mut(){
+                self.draw_profiler(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+            }
         }
         WidgetDraw::done()
     }

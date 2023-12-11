@@ -228,8 +228,6 @@ struct LogList{
 
 impl LogList{
     fn draw_log(&mut self, cx: &mut Cx2d, list:&mut PortalList, build_manager:&mut BuildManager){
-        let mut scope =  Scope::default();
-                                
         list.set_item_range(cx, 0, build_manager.log.len() as u64);
                                 
         while let Some(item_id) = list.next_visible_item(cx) {
@@ -260,7 +258,7 @@ impl LogList{
                             body = {text: (&msg.line)}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_all(cx, &mut scope);
+                        item.draw_all(cx, &mut Scope::empty());
                     }
                     LogItem::Location(msg) => {
                         let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
@@ -271,7 +269,7 @@ impl LogList{
                             location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_all(cx, &mut scope);
+                        item.draw_all(cx, &mut Scope::empty());
                     }
                     _ => {}
                 }
@@ -279,7 +277,7 @@ impl LogList{
             }
             let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
             item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-            item.draw_all(cx, &mut scope);
+            item.draw_all(cx, &mut Scope::empty());
         }
     }
 }
@@ -294,14 +292,15 @@ impl Widget for LogList {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->WidgetDraw{
-        while let Some(mut list) = self.view.draw_walk(cx, scope, walk).single().as_portal_list().borrow_mut(){
-            self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step(){
+            if let Some(mut list) = step.as_portal_list().borrow_mut(){
+                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+            }
         }
         WidgetDraw::done()
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>();
