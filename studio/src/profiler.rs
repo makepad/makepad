@@ -35,7 +35,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, LiveHook, Widget)]
 struct ProfilerEventChart{
     #[walk] walk:Walk,
     #[redraw] #[live] bg: DrawQuad,
@@ -53,7 +53,7 @@ impl Widget for ProfilerEventChart {
     }
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, LiveHook, Widget)]
 struct Profiler{
     #[deref] view:View,
 }

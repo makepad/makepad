@@ -17,7 +17,7 @@ pub enum ButtonAction {
     Released
 }
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, LiveHook, Widget)]
 pub struct Button {
     #[animator] animator: Animator,
 

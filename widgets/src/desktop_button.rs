@@ -14,7 +14,7 @@ live_design!{
     DesktopButtonBase = {{DesktopButton}} {}
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct DesktopButton {
     #[animator] animator: Animator,
     #[walk] walk: Walk,

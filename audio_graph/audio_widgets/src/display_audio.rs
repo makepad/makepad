@@ -58,7 +58,7 @@ struct DrawWave {
     #[live] vu_right: f32
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, Widget)]
 pub struct DisplayAudio {
     #[walk] walk: Walk,
     #[redraw] #[live] draw_wave: DrawWave,

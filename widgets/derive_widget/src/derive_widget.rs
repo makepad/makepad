@@ -2,6 +2,15 @@ use proc_macro::{TokenStream};
 
 use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
+pub fn derive_widget_impl(input: TokenStream) ->  TokenStream {
+    let mut out = TokenStream::new();
+    out.extend(derive_widget_redraw_impl(input.clone()));
+    out.extend(derive_widget_register_impl(input.clone()));
+    out.extend(derive_widget_ref_impl(input.clone()));
+    out.extend(derive_widget_set_impl(input.clone()));
+    out
+}
+
 pub fn derive_widget_redraw_impl(input: TokenStream) ->  TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);

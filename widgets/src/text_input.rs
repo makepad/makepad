@@ -37,7 +37,7 @@ pub struct DrawLabel {
 }
 
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
+#[derive(Live, LiveHook, Widget)]
 pub struct TextInput {
     #[animator] animator: Animator,
     

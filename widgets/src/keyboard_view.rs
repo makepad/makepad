@@ -10,7 +10,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRedraw)]
+#[derive(Live, LiveHook, Widget)]
 pub struct KeyboardView {
     #[deref] view: View,
     #[redraw] #[rust] area: Area,
