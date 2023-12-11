@@ -108,20 +108,10 @@ impl ButtonRef {
 
 impl ButtonSet{
     pub fn clicked(&self, actions: &Actions)->bool{
-        for button in self.iter(){
-            if button.clicked(actions){
-                return true
-            }
-        }
-        false
+        self.iter().any(|v| v.clicked(actions))
     }
     pub fn pressed(&self, actions: &Actions)->bool{
-        for button in self.iter(){
-            if button.pressed(actions){
-                return true
-            }
-        }
-        false
+        self.iter().any(|v| v.pressed(actions))
     }
 }
 
