@@ -6,7 +6,7 @@ live_design! {
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
 
-    BlockHeaderButtonBase = {{BlockHeaderButton}} {
+    BlockHeaderButton = {{BlockHeaderButton}} {
 
 
         animator: {
@@ -21,6 +21,7 @@ live_design! {
                     }
                 }
 
+                
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -44,6 +45,68 @@ live_design! {
             }
         }
 
+        width: Fill,
+        height: Fit,
+        margin: {left:0.0, right: 0.0, top:0.0, bottom: 0.0}
+        align: {x: 0.5, y: 0.5}
+        padding: {left: 0.0, top: 5.0, right: 0.0, bottom: 5.0}
+
+        label_walk: {
+            width: Fit,
+            height: Fit
+        }
+
+        draw_text: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            text_style: <THEME_FONT_LABEL>{
+                font_size: 11.0
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+        }
+
+        draw_icon: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+        }
+
+        draw_bg: {
+            instance hover: 0.0Q
+            instance pressed: 0.0
+            uniform border_radius: 3.0
+            instance bodytop: #53
+            instance bodybottom: #5c
+            fn pixel(self) -> vec4 {
+                
+                //let body = mix(mix(self.bodytop, self.bodybottom, self.hover), #33, self.pressed);
+                
+                return vec4(0.,0.,0.,0.);
+            }
+        }
+
+        
+
     }
 }
 
@@ -52,7 +115,8 @@ pub enum BlockHeaderButtonAction {
     None,
     Clicked,
     Pressed,
-    Released
+    Released,
+    Move{id:u64, x: f64, y:f64}
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -71,13 +135,21 @@ pub struct BlockHeaderButton {
     #[live(true)] grab_key_focus: bool,
 
     #[live] pub text: RcStringMut,
+
+    #[rust] pub blockid: u64,
+    #[rust] pub dragging: bool,
 }
+
 
 impl Widget for BlockHeaderButton{
    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
        self.animator_handle_event(cx, event);
        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerMove(fe) =>
+            {
+                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Move{id: self.blockid,x:  fe.abs.x-fe.abs_start.x,y: fe.abs.y- fe.abs_start.y});
+            },
             Hit::FingerDown(_fe) => {
                 if self.grab_key_focus{
                     cx.set_key_focus(self.draw_bg.area());
