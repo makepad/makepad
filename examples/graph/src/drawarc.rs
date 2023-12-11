@@ -180,7 +180,7 @@ pub enum Winding{
     CounterClockWise
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct VectorArc{
     #[walk] walk: Walk,
     #[live] draw_arc: DrawArc,
@@ -200,7 +200,7 @@ pub struct VectorArc{
    
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct VectorCornerArc
 {
     #[walk] walk: Walk,
@@ -214,7 +214,7 @@ pub struct VectorCornerArc
 }
 
 impl Widget for VectorCornerArc {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -225,7 +225,7 @@ impl Widget for VectorCornerArc {
         self.area.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
                     
@@ -249,7 +249,7 @@ impl Widget for VectorCornerArc {
                            
         let mut usecomputedcenter = true;
                     
-        let cmid = get_rect_corner_u32(rect, (self.corner as u32 + 2)%4);;
+        let cmid = get_rect_corner_u32(rect, (self.corner as u32 + 2)%4);
         let copp = get_rect_corner_u32(rect, (self.corner as u32 )%4);
                     
         let mut center = cmid + (cmid-copp);
@@ -267,12 +267,12 @@ impl Widget for VectorCornerArc {
         self.draw_arc.width = (self.line_width/2.) as f32;
         self.draw_arc.draw_abs(cx,fullrect);
                     
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
 impl Widget for VectorArc {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
@@ -283,7 +283,7 @@ impl Widget for VectorArc {
         self.area.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
         
@@ -370,7 +370,7 @@ impl Widget for VectorArc {
         self.draw_arc.width = (self.line_width/2.) as f32;
         self.draw_arc.draw_abs(cx,fullrect);
                     
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

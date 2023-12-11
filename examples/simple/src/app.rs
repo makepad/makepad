@@ -58,12 +58,6 @@ impl LiveRegister for App {
     }
 }
 
-impl App{
-    async fn _do_network_request(_cx:CxRef, _ui:WidgetRef, _url:&str)->String{
-        "".to_string()
-    }
-}
-
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
@@ -78,6 +72,6 @@ impl MatchEvent for App{
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
-        self.ui.handle_event_no_scope(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

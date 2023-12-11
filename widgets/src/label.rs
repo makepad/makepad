@@ -10,7 +10,7 @@ live_design!{
     LabelBase = {{Label}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Label {
     #[live] draw_text: DrawText,
     #[walk] walk: Walk,
@@ -29,9 +29,9 @@ impl Widget for Label {
         self.walk
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk:Walk)->WidgetDraw{
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
         self.draw_text.draw_walk(cx, walk.with_add_padding(self.padding), self.align, self.text.as_ref());
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn text(&self)->String{
@@ -41,12 +41,4 @@ impl Widget for Label {
     fn set_text(&mut self, v:&str){
         self.text.as_mut_empty().push_str(v);
     }
-}
-
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct LabelRef(WidgetRef); 
-
-impl LabelRef{
-  
 }

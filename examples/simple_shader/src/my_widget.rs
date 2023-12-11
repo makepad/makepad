@@ -12,7 +12,7 @@ live_design!{
     MyWidget = {{MyWidget}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct MyWidget {
     #[live] draw: DrawQuad,
     #[walk] walk: Walk,
@@ -38,7 +38,7 @@ impl Widget for MyWidget{
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        _scope: &mut WidgetScope
+        _scope: &mut Scope
     ){
         if let Some(ne) = self.next_frame.is_event(event) {
             // update time to use for animation
@@ -57,9 +57,9 @@ impl Widget for MyWidget{
         self.draw.redraw(cx)
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw.begin(cx, walk, self.layout);
         self.draw.end(cx);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

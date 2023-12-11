@@ -12,7 +12,7 @@ live_design!{
     TabBarBase = {{TabBar}} {}
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget)]
 pub struct TabBar {
     
     #[live] scroll_bars: ScrollBars,
@@ -61,7 +61,7 @@ impl Widget for TabBar{
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        scope: &mut WidgetScope
+        scope: &mut Scope
     ){
         let uid = self.widget_uid();
         if self.scroll_bars.handle_event(cx, event).len()>0{
@@ -122,14 +122,14 @@ impl Widget for TabBar{
         }*/
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         if let Some(()) = self.draw_state.get() {
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

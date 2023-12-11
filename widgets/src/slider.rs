@@ -30,7 +30,7 @@ pub struct DrawSlider {
     #[live] slider_type: SliderType
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Slider {
     #[live] draw_slider: DrawSlider,
     
@@ -124,7 +124,7 @@ impl Widget for Slider {
         self.draw_slider.redraw(cx);
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         
@@ -198,9 +198,9 @@ impl Widget for Slider {
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk_slider(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn widget_to_data(&self, _cx: &mut Cx, actions:&Actions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
@@ -235,9 +235,6 @@ impl Widget for Slider {
     }
         
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SliderRef(WidgetRef);
 
 impl SliderRef{
     pub fn slided(&self, actions:&Actions)->Option<f64>{

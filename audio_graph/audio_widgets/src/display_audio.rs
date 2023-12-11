@@ -58,7 +58,7 @@ struct DrawWave {
     #[live] vu_right: f32
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct DisplayAudio {
     #[walk] walk: Walk,
     #[live] draw_wave: DrawWave,
@@ -70,7 +70,7 @@ pub struct DisplayAudio {
 
 
 impl Widget for DisplayAudio {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut WidgetScope){
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
     
     fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
@@ -79,14 +79,14 @@ impl Widget for DisplayAudio {
         self.draw_wave.redraw(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep { 
         self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
         self.draw_wave.vu_left = self.vu[0].0.powf(1.0/3.0)*1.2;
         self.draw_wave.vu_right = self.vu[0].1.powf(1.0/3.0)*1.2;
         self.vu[0].0 *= 0.95;
         self.vu[0].1 *= 0.95;
         self.draw_wave.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -153,10 +153,6 @@ impl DisplayAudio {
     }
 }
 
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct DisplayAudioRef(WidgetRef);
-
 impl DisplayAudioRef {
     pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer, gain:f32) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -167,10 +163,6 @@ impl DisplayAudioRef {
     pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
     }
 }
-
-// ImGUI convenience API for Piano
-#[derive(Clone, WidgetSet)]
-pub struct DisplayAudioSet(WidgetSet);
 
 impl DisplayAudioSet {
     pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer, gain:f32) {

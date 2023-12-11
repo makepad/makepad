@@ -32,7 +32,7 @@ pub enum WindowMenuItem {
     Line
 }
 
-#[derive(Live, WidgetRegister)]
+#[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct WindowMenu{
     #[walk] walk: Walk,
     #[layout] layout: Layout,
@@ -121,7 +121,7 @@ impl Widget for WindowMenu {
     fn redraw(&mut self, _cx: &mut Cx) {
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut Scope) {
         match event{
             Event::MacosMenuCommand(item)=>{
                 if *item == live_id!(quit){
@@ -136,14 +136,10 @@ impl Widget for WindowMenu {
         return Walk::fixed(0.0,0.0);
     }
     
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut WidgetScope, _walk: Walk) -> WidgetDraw {
-        WidgetDraw::done()
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
     }
 }
-
-
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct WindowMenuRef(WidgetRef);
 
 impl WindowMenuRef {
     pub fn command(&self) -> Option<LiveId> {

@@ -6,9 +6,10 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_studio::studio_editor::StudioEditor;
     import makepad_studio::studio_file_tree::StudioFileTree;
-    import makepad_studio::build_manager::run_view::RunView;
-    import makepad_studio::build_manager::log_list::LogList;
-    import makepad_studio::build_manager::run_list::RunList;
+    import makepad_studio::run_view::RunView;
+    import makepad_studio::log_list::LogList;
+    import makepad_studio::run_list::RunList;
+    import makepad_studio::profiler::Profiler;
     
     ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
 
@@ -117,8 +118,8 @@ live_design!{
             }
                 
             log_tabs = Tabs {
-                tabs: [log_list],
-                selected: 0
+                tabs: [log_list, profiler],
+                selected: 1
             }
                 
             run_tabs = Tabs {
@@ -166,6 +167,12 @@ live_design!{
                 name: "Log",
                 closable: false,
                 kind: LogList
+            }
+            
+            profiler = Tab {
+                name: "Profiler",
+                closable: false,
+                kind: Profiler
             }
                 
             StudioEditor = <StudioEditor> {}
@@ -252,6 +259,7 @@ live_design!{
             RunView = <RunView> {}
             StudioFileTree = <StudioFileTree> {}
             LogList = <LogList> {}
+            Profiler = <Profiler> {}
         }}
     }
 }

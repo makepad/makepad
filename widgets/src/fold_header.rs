@@ -9,7 +9,7 @@ live_design!{
     FoldHeaderBase = {{FoldHeader}} {}
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget)]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
@@ -31,7 +31,7 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             if self.animator.is_track_animating(cx, id!(open)) {
                 self.area.redraw(cx);
@@ -67,7 +67,7 @@ impl Widget for FoldHeader {
         self.body.find_widgets(path, cached, results);
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
@@ -89,7 +89,7 @@ impl Widget for FoldHeader {
             cx.end_turtle_with_area(&mut self.area);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 

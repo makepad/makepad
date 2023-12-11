@@ -1,7 +1,7 @@
 
 use {
     crate::{
-        app::{StudioData},
+        app::{AppData},
         makepad_widgets::*,
         makepad_widgets::file_tree::FileTree,
     },
@@ -15,7 +15,7 @@ live_design!{
     }
 } 
  
-#[derive(Live, LiveHook, WidgetRegister)] 
+#[derive(Live, LiveHook, LiveRegisterWidget)] 
 pub struct StudioFileTree{
     #[live] pub file_tree: FileTree
 } 
@@ -29,19 +29,19 @@ impl Widget for StudioFileTree {
         self.file_tree.walk(cx)
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
-        while let Some(_) = self.file_tree.draw_walk(cx, scope, walk).hook_widget() {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+        while self.file_tree.draw_walk(cx, scope, walk).is_step() {
             self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
-             scope.data.get_mut::<StudioData>().file_system.draw_file_node(
+             scope.data.get_mut::<AppData>().file_system.draw_file_node(
                 cx,
                 live_id!(root).into(),
                 &mut self.file_tree
             );
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         self.file_tree.handle_event(cx, event, scope);
     }
 }

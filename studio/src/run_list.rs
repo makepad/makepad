@@ -5,7 +5,7 @@ use {
             build_protocol::*,
             build_client::BuildClient
         },
-        app::{StudioData},
+        app::{AppData},
         makepad_widgets::*,
     },
     std::env,
@@ -143,14 +143,13 @@ pub enum RunListAction{
     None
 }
 
-#[derive(Live, LiveHook, WidgetRegister)]
+#[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
 struct RunList{
     #[deref] view:View
 }
 
 impl RunList{
     fn draw_run_list(&mut self, cx: &mut Cx2d, list:&mut FlatList, build_manager:&mut BuildManager){
-        let mut scope =  WidgetScope::default();
         let mut counter = 0u32;
         for binary in &build_manager.binaries {
             let is_even = counter & 1 == 0;
@@ -162,7 +161,7 @@ impl RunList{
                 draw_bg: {is_even: (if is_even {1.0} else {0.0})}
             });
             item.check_box(id!(check)).set_selected(cx, build_manager.active.any_binary_active(&binary.name));
-            item.draw_all(cx, &mut scope);
+            item.draw_all(cx, &mut Scope::empty());
             counter += 1;
                             
             if binary.open>0.001 {
@@ -178,7 +177,7 @@ impl RunList{
                         check = {text: (BuildTarget::from_id(i).name())}
                     });
                     item.check_box(id!(check)).set_selected(cx, build_manager.active.item_id_active(item_id));
-                    item.draw_all(cx, &mut scope);
+                    item.draw_all(cx, &mut Scope::empty());
                     counter += 1;
                 }
             }
@@ -192,7 +191,7 @@ impl RunList{
                 height: (height)
                 draw_bg: {is_even: (if is_even {1.0} else {0.0})}
             });
-            item.draw_all(cx, &mut scope);
+            item.draw_all(cx, &mut Scope::empty());
             counter += 1;
         }
             
@@ -200,8 +199,8 @@ impl RunList{
 }
 
 impl WidgetMatchEvent for RunList{
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut WidgetScope){
-        let build_manager = &mut scope.data.get_mut::<StudioData>().build_manager;
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope){
+        let build_manager = &mut scope.data.get_mut::<AppData>().build_manager;
         let run_list = self.view.flat_list(id!(list));
         for (item_id, item) in run_list.items_with_actions(&actions) {
             for binary in &mut build_manager.binaries {
@@ -256,16 +255,16 @@ impl Widget for RunList {
         self.view.walk(cx)
     }
         
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
-        while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
-            if let Some(mut list) = next.as_flat_list().borrow_mut(){
-                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<StudioData>().build_manager)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step(){
+            if let Some(mut list) = item.as_flat_list().borrow_mut(){
+                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut WidgetScope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         self.widget_match_event(cx, event, scope);
         self.view.handle_event(cx, event, scope);
     }
