@@ -343,7 +343,7 @@ impl AppMain for App {
             let saved = state.serialize_ron();
             let mut f = File::create("makepad_state.ron").expect("Unable to create file");
             f.write_all(saved.as_bytes()).expect("Unable to write data");
-        }
+        } 
     }
 }
 
