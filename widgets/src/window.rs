@@ -13,7 +13,7 @@ live_design!{
     WindowBase = {{Window}} {demo:false}
 }
 
-#[derive(Live, LiveRegisterWidget)]
+#[derive(Live, LiveRegisterWidget, WidgetRedraw)]
 pub struct Window {
     //#[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
@@ -293,12 +293,6 @@ impl Widget for Window {
                 })
             }
         }
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx)
     }
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {

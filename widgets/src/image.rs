@@ -9,10 +9,10 @@ live_design!{
     ImageBase = {{Image}} {}
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct Image {
     #[walk] walk: Walk,
-    #[live] draw_bg: DrawQuad,
+    #[redraw] #[live] draw_bg: DrawQuad,
     #[live] min_width: i64,
     #[live] min_height: i64,
     #[live(1.0)] width_scale: f64,
@@ -42,14 +42,6 @@ impl LiveHook for Image{
 }
 
 impl Widget for Image {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx)
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
-        self.walk
-    }
-    
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk)
     }

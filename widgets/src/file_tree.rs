@@ -81,9 +81,9 @@ pub struct FileTreeNode {
     #[live] selected: f32,
 }
 
-#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct FileTree {
-    #[live] scroll_bars: ScrollBars,
+    #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
     #[live] folder_node: Option<LivePtr>,
     #[walk] walk: Walk,
@@ -391,10 +391,7 @@ impl FileTree {
 pub struct FileNodeId(pub LiveId);
 
 impl Widget for FileTree {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_bars.redraw(cx);
-    }
-    
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
@@ -456,8 +453,6 @@ impl Widget for FileTree {
             _ => ()
         }
     }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope,walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {

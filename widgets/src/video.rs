@@ -28,10 +28,10 @@ live_design! {
     VideoBase = {{Video}} {}
 }
 
-#[derive(Live, WidgetRef, WidgetSet)]
+#[derive(Live, WidgetRef, WidgetSet, WidgetRedraw)]
 pub struct Video {
     // Drawing
-    #[live]
+    #[redraw] #[live]
     draw_bg: DrawColor,
     #[walk]
     walk: Walk,
@@ -245,14 +245,7 @@ pub enum VideoAction {
 }
 
 impl Widget for Video {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
