@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_micro_serde::*,
         makepad_platform::*,
-        makepad_file_protocol::{FileRequest, FileClientAction},
+        makepad_file_protocol::{FileRequest, FileClientMessage},
         makepad_file_server::{FileServerConnection, FileServer},
     },
     std::{
@@ -20,13 +20,13 @@ use {
 pub struct FileClient {
 //    bind: Option<String>,
     //path: String,
-    inner: Option<FileClientInner>
+    pub inner: Option<FileClientInner>
 }
 
 pub struct FileClientInner {
     pub request_sender: Sender<FileRequest>,
-    pub action_signal: Signal,
-    pub action_receiver: Receiver<FileClientAction>,
+    pub message_signal: Signal,
+    pub message_receiver: Receiver<FileClientMessage>,
 }
 
 impl FileClient {
@@ -45,35 +45,25 @@ impl FileClient {
         move | request | request_sender.send(request).unwrap()
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileClientAction> {
-        let mut a = Vec::new();
-        self.handle_event_with(cx, event, &mut | _, v | a.push(v));
-        a
-    }
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FileClientAction)) {
+    pub fn poll_messages(&mut self)->Vec<FileClientMessage> {
+        let mut messages = Vec::new();
         let inner = self.inner.as_ref().unwrap();
-        match event {
-            Event::Signal=>{
-                loop {
-                    match inner.action_receiver.try_recv() {
-                        Ok(action) => dispatch_action(cx, action),
-                        Err(TryRecvError::Empty) => break,
-                        _ => panic!(),
-                    }
-                }
+        loop {
+            match inner.message_receiver.try_recv() {
+                Ok(message) => messages.push(message),
+                Err(TryRecvError::Empty) => break,
+                _ => panic!(),
             }
-            _ => {}
         }
+        messages
     }
-    
 }
 
 impl FileClientInner {
     pub fn new_with_local_server(path:&Path) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let action_signal = Signal::new();
-        let (action_sender, action_receiver) = mpsc::channel();
+        let message_signal = Signal::new();
+        let (message_sender, message_receiver) = mpsc::channel();
         
         /*let mut root = "./".to_string();
         for arg in std::env::args(){
@@ -90,38 +80,38 @@ impl FileClientInner {
         spawn_local_request_handler(
             request_receiver,
             server.connect(Box::new({
-                let action_sender = action_sender.clone();
-                let action_signal = action_signal.clone();
+                let message_sender = message_sender.clone();
+                let message_signal = message_signal.clone();
                 move | notification | {
-                    action_sender.send(FileClientAction::Notification(notification)).unwrap();
-                    action_signal.set();
+                    message_sender.send(FileClientMessage::Notification(notification)).unwrap();
+                    message_signal.set();
                 }
             })),
-            action_signal.clone(),
-            action_sender,
+            message_signal.clone(),
+            message_sender,
         );
         //spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
         
         Self {
             request_sender,
-            action_signal,
-            action_receiver
+            message_signal,
+            message_receiver
         }
     }
     
     pub fn new_connect_remote(to_server: &str) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let action_signal = Signal::new();
-        let (action_sender, action_receiver) = mpsc::channel();
+        let message_signal = Signal::new();
+        let (message_sender, message_receiver) = mpsc::channel();
         
         let stream = TcpStream::connect(to_server).unwrap();
         spawn_request_sender(request_receiver, stream.try_clone().unwrap());
-        spawn_response_or_notification_receiver(stream, action_signal.clone(), action_sender,);
+        spawn_response_or_notification_receiver(stream, message_signal.clone(), message_sender,);
         
         Self {
             request_sender,
-            action_signal,
-            action_receiver
+            message_signal,
+            message_receiver
         }
     }
     
@@ -153,7 +143,7 @@ fn _spawn_connection_listener(listener: TcpListener, mut server: FileServer) {
 fn _spawn_remote_request_handler(
     connection: FileServerConnection,
     mut stream: TcpStream,
-    action_sender: Sender<FileClientAction>,
+    message_sender: Sender<FileClientMessage>,
 ) {
     thread::spawn(move || loop {
         let mut len_bytes = [0; 4];
@@ -164,23 +154,23 @@ fn _spawn_remote_request_handler(
         
         let request = DeBin::deserialize_bin(request_bytes.as_slice()).unwrap();
         let response = connection.handle_request(request);
-        action_sender.send(FileClientAction::Response(response)).unwrap();
+        message_sender.send(FileClientMessage::Response(response)).unwrap();
     });
 }
 
 fn _spawn_response_or_notification_sender(
-    action_receiver: Receiver<FileClientAction>,
+    message_receiver: Receiver<FileClientMessage>,
     mut stream: TcpStream,
 ) {
     thread::spawn(move || loop {
-        let action = action_receiver.recv().unwrap();
-        let mut action_bytes = Vec::new();
+        let message = message_receiver.recv().unwrap();
+        let mut message_bytes = Vec::new();
         
-        action.ser_bin(&mut action_bytes);
+        message.ser_bin(&mut message_bytes);
         
-        let len_bytes = action_bytes.len().to_be_bytes();
+        let len_bytes = message_bytes.len().to_be_bytes();
         stream.write_all(&len_bytes).unwrap();
-        stream.write_all(&action_bytes).unwrap();
+        stream.write_all(&message_bytes).unwrap();
     });
 }
 
@@ -197,8 +187,8 @@ fn spawn_request_sender(request_receiver: Receiver<FileRequest>, mut stream: Tcp
 
 fn spawn_response_or_notification_receiver(
     mut stream: TcpStream,
-    action_signal: Signal,
-    action_sender: Sender<FileClientAction>,
+    message_signal: Signal,
+    message_sender: Sender<FileClientMessage>,
 ) {
     thread::spawn(move || loop {
         let mut len_bytes = [0; 4];
@@ -208,8 +198,8 @@ fn spawn_response_or_notification_receiver(
         let mut action_bytes = vec![0; len as usize];
         stream.read_exact(&mut action_bytes).unwrap();
         let action = DeBin::deserialize_bin(action_bytes.as_slice()).unwrap();
-        action_sender.send(action).unwrap();
-        action_signal.set()
+        message_sender.send(action).unwrap();
+        message_signal.set()
     });
 }
 
@@ -217,12 +207,12 @@ fn spawn_local_request_handler(
     request_receiver: Receiver<FileRequest>,
     connection: FileServerConnection,
     action_signal: Signal,
-    action_sender: Sender<FileClientAction>,
+    action_sender: Sender<FileClientMessage>,
 ) {
     thread::spawn(move || loop {
         let request = request_receiver.recv().unwrap();
         let response = connection.handle_request(request);
-        action_sender.send(FileClientAction::Response(response)).unwrap();
+        action_sender.send(FileClientMessage::Response(response)).unwrap();
         action_signal.set()
     });
 }
