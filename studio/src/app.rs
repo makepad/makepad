@@ -5,10 +5,10 @@ use crate::{
     makepad_widgets::file_tree::*,
     file_system::file_system::*,
     studio_editor::*,
+    run_view::*,
+    log_list::*,
+    run_list::*,
     build_manager::{
-        run_view::*,
-        log_list::*,
-        run_list::*,
         build_manager::{
             BuildManager,
             BuildManagerAction
@@ -30,16 +30,17 @@ live_design!{
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[rust] data: StudioData,
+    #[rust] data: AppData,
 }
 
 impl LiveRegister for App{
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::makepad_code_editor::live_design(cx);
-        crate::build_manager::run_list::live_design(cx);
-        crate::build_manager::log_list::live_design(cx);
-        crate::build_manager::run_view::live_design(cx);
+        crate::run_list::live_design(cx);
+        crate::log_list::live_design(cx);
+        crate::profiler::live_design(cx);
+        crate::run_view::live_design(cx);
         crate::studio_editor::live_design(cx);
         crate::studio_file_tree::live_design(cx);
         crate::app_ui::live_design(cx);
@@ -63,7 +64,7 @@ impl App {
 }
 
 #[derive(Default)]
-pub struct StudioData{
+pub struct AppData{
     pub build_manager: BuildManager,
     pub file_system: FileSystem,
 }

@@ -7,7 +7,7 @@ use {
         makepad_micro_serde::*,
         makepad_platform::{*, cx_stdin::aux_chan},
         build_manager::{
-            build_protocol::{BuildCmd, BuildCmdWrap, LogItemWrap, LogItem},
+            build_protocol::{BuildCmd, BuildCmdWrap, BuildClientMessageWrap, LogItem},
             build_server::{BuildConnection, BuildServer},
         }
     },
@@ -24,10 +24,10 @@ use {
 
 pub struct BuildClient{
     pub cmd_sender: Sender<BuildCmdWrap>,
-    pub log_signal: Signal,
-    pub log_receiver: Receiver<LogItemWrap>,
+    pub msg_signal: Signal,
+    pub msg_receiver: Receiver<BuildClientMessageWrap>,
 }
-
+ 
 impl BuildClient {
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -41,31 +41,6 @@ impl BuildClient {
     #[cfg(target_arch = "wasm32")]
     pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){}
      
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<LogItemWrap> {
-        let mut a = Vec::new();
-        self.handle_event_with(cx, event, &mut | _, v | a.push(v));
-        a
-    }
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_msg: &mut dyn FnMut(&mut Cx, LogItemWrap)) {
-        match event {
-            Event::Signal=>{
-                loop {
-                    match self.log_receiver.try_recv() {
-                        Ok(msg) => {
-                            
-
-                            dispatch_msg(cx, msg);
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        _ => panic!(),
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    
     #[cfg(target_arch = "wasm32")]
     pub fn new_with_local_server(_ubdir:&str) -> Self {
         let (cmd_sender, _cmd_receiver) = mpsc::channel();
@@ -81,8 +56,8 @@ impl BuildClient {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_local_server(path:&Path) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
-        let log_signal = Signal::new();
-        let (log_sender, log_receiver) = mpsc::channel();
+        let msg_signal = Signal::new();
+        let (msg_sender, msg_receiver) = mpsc::channel();
         /*
         let mut root = "./".to_string();
         for arg in std::env::args(){
@@ -98,11 +73,11 @@ impl BuildClient {
         spawn_local_cmd_handler(
             cmd_receiver,
             server.connect(Box::new({
-                let log_sender = log_sender.clone();
-                let log_signal = log_signal.clone();
-                move | log_item:LogItemWrap | {
-                    log_sender.send(log_item).unwrap();
-                    log_signal.set()
+                let msg_sender = msg_sender.clone();
+                let msg_signal = msg_signal.clone();
+                move | msg_item:BuildClientMessageWrap | {
+                    msg_sender.send(msg_item).unwrap();
+                    msg_signal.set()
                 }
             })),
         );
@@ -110,8 +85,8 @@ impl BuildClient {
         
         Self {
             cmd_sender,
-            log_signal,
-            log_receiver,
+            msg_signal,
+            msg_receiver,
         }
     }
     

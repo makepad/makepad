@@ -5,7 +5,7 @@ use {
             build_protocol::*,
             build_client::BuildClient
         },
-        app::{StudioData},
+        app::{AppData},
         makepad_widgets::*,
     },
     std::env,
@@ -201,7 +201,7 @@ impl RunList{
 
 impl WidgetMatchEvent for RunList{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut WidgetScope){
-        let build_manager = &mut scope.data.get_mut::<StudioData>().build_manager;
+        let build_manager = &mut scope.data.get_mut::<AppData>().build_manager;
         let run_list = self.view.flat_list(id!(list));
         for (item_id, item) in run_list.items_with_actions(&actions) {
             for binary in &mut build_manager.binaries {
@@ -259,7 +259,7 @@ impl Widget for RunList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut WidgetScope, walk:Walk)->WidgetDraw{
         while let Some(next) = self.view.draw_walk(cx, scope, walk).hook_widget(){
             if let Some(mut list) = next.as_flat_list().borrow_mut(){
-                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<StudioData>().build_manager)
+                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
             }
         }
         WidgetDraw::done()
