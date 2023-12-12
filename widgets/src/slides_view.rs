@@ -111,19 +111,7 @@ impl Widget for SlidesView {
             }
             _ => ()
         }
-        match event.hits(cx, self.area) {
-            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
-                self.next_slide(cx);
-            }
-            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
-                self.prev_slide(cx);
-            }
-            Hit::FingerDown(_fe) => {
-                cx.set_key_focus(self.area);
-            },
-            _ => ()
-        }
-        
+
         //let uid = self.widget_uid();
         // lets grab the two slides we are seeing
         let current = self.current_slide.floor() as usize;
@@ -144,6 +132,19 @@ impl Widget for SlidesView {
                 }
             }
         }
+        match event.hits(cx, self.area) {
+            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
+                self.next_slide(cx);
+            }
+            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
+                self.prev_slide(cx);
+            }
+            Hit::FingerDown(_fe) => {
+                cx.set_key_focus(self.area);
+            },
+            _ => ()
+        }
+                        
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
