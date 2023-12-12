@@ -93,7 +93,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
                 tb.add("    }");
             }
             else if let Some(deref_field) = &deref_field{
-                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&deref_field).add(".find_widgets(path, cached, results)}");                
+                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&deref_field).add(".find_widgets(path, cached, results)}");
             }
             else{
                 tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
