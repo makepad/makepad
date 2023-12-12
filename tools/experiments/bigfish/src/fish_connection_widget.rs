@@ -58,7 +58,7 @@ pub enum FishConnectionWidgetAction {
     Released,
 }
 
-#[derive(Live, LiveHook,  Widget)]
+#[derive(Live, LiveHook, Widget)]
 pub struct FishConnectionWidget {
     #[live]
     start_pos: DVec2,
@@ -66,7 +66,8 @@ pub struct FishConnectionWidget {
     end_pos: DVec2,
     #[animator]
     animator: Animator,
-    #[redraw] #[live]
+    #[redraw]
+    #[live]
     draw_line: DrawLine,
     #[walk]
     walk: Walk,
@@ -83,12 +84,7 @@ pub struct FishConnectionWidget {
 }
 
 impl Widget for FishConnectionWidget {
-    fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        scope: &mut Scope,
-    )  {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_line.area()) {
@@ -143,6 +139,47 @@ impl FishConnectionWidget {
         self.draw_line.end(cx);
 
         if self.end_pos.x < self.start_pos.x {
+            let midpoint = (self.end_pos + self.start_pos) * 0.5;
+            let deltatomid = midpoint - self.start_pos;
+
+            self.draw_line.draw_line_abs(
+                cx,
+                self.start_pos,
+                self.start_pos + dvec2(40., 0.),
+                self.color,
+                self.line_width,
+            );
+            self.draw_line.draw_line_abs(
+                cx,
+                self.start_pos + dvec2(40., 0.),
+                self.start_pos + dvec2(40., deltatomid.y),
+                self.color,
+                self.line_width,
+            );
+
+            self.draw_line.draw_line_abs(
+                cx,
+                self.start_pos + dvec2(40., deltatomid.y),
+                self.end_pos + dvec2(-40., -deltatomid.y),
+                self.color,
+                self.line_width,
+            );
+
+            self.draw_line.draw_line_abs(
+                cx,
+                self.end_pos + dvec2(-40., -deltatomid.y),
+                self.end_pos + dvec2(-40., 0.),
+                self.color,
+                self.line_width,
+            );
+
+            self.draw_line.draw_line_abs(
+                cx,
+                self.end_pos + dvec2(-40., 0.),
+                self.end_pos,
+                self.color,
+                self.line_width,
+            );
         } else {
             let midpoint = (self.end_pos + self.start_pos) * 0.5;
             let deltatomid = midpoint - self.start_pos;
