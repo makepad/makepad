@@ -21,7 +21,7 @@ live_design!{
 #[derive(Live, LiveHook, Widget)] 
 pub struct StudioEditor{
     #[wrap] #[live] pub editor: CodeEditor
-} 
+}
 
 impl Widget for StudioEditor {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
