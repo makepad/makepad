@@ -48,8 +48,14 @@ impl DebugView {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.draw_list.begin(cx, Walk::default()).is_redrawing() {
-            return
+        if cx.debug.has_data() {
+            self.draw_list.redraw(cx);
+            self.draw_list.begin_always(cx);
+        }
+        else{
+            if !self.draw_list.begin(cx, Walk::default()).is_redrawing() {
+                return
+            }
         }
         let debug = cx.debug.clone();
         let rects = debug.take_rects();
@@ -73,6 +79,15 @@ impl DebugView {
             let rect = Rect {pos: point - 0.5 * point_size, size: point_size};
             self.rect.draw_abs(cx, rect);
             self.label.draw_abs(cx, point, &label);
+        }
+        
+        let debug = cx.debug.clone();
+        let areas = debug.take_areas();
+        for (area, tl, br, color) in areas {
+            self.rect.color = color;
+            let rect = area.get_rect(cx);
+            let rect = Rect{pos: rect.pos - tl, size: rect.size + tl + br};
+            self.rect.draw_abs(cx, rect);
         }
         
         self.draw_list.end(cx);

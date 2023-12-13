@@ -25,6 +25,11 @@ live_design!{
                 return #f00
             }
         }
+        item:{
+            fn pixel(self)->vec4{
+                return #f00
+            }
+        }
     }
     
     Profiler = {{Profiler}}{
@@ -45,6 +50,8 @@ struct ProfilerEventChart{
 impl Widget for ProfilerEventChart {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk:Walk)->DrawStep{
         self.bg.begin(cx, walk, Layout::default());
+        // alright lets draw some event blocks
+        
         self.bg.end(cx);
         DrawStep::done()
     }
