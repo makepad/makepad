@@ -92,6 +92,7 @@ pub struct Vec2 {
 
 
 impl Vec2 {
+
     pub fn new() -> Vec2 {
         Vec2::default()
     }
@@ -329,6 +330,11 @@ impl fmt::Display for Vec4 {
 }
 
 impl Vec4 {
+    pub const R: Vec4 = Vec4 {x: 1.0, y: 0.0, z: 0.0, w: 1.0};
+    pub const G: Vec4 = Vec4 {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
+    pub const B: Vec4 = Vec4 {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
+
+    
     pub fn all(v: f32) -> Self {
         Self {x: v, y: v, z: v, w: v}
     }

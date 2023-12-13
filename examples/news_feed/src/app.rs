@@ -133,6 +133,7 @@ live_design!{
         flow: Right,
         padding: 10.0,
         spacing: 10.0
+        
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
         
         <View> {
@@ -199,7 +200,6 @@ live_design!{
             flow: Right,
             padding: 10.0,
             spacing: 10.0
-            
             profile = <View> {
                 width: Fit,
                 height: Fit,
