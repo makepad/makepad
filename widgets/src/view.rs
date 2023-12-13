@@ -9,7 +9,7 @@ use {
 };
 
 live_design!{
-    ViewBase = {{View}} {}
+    ViewBase = {{View}} {debug:None}
 }
 
 // maybe we should put an enum on the bools like
@@ -22,6 +22,64 @@ pub enum ViewOptimize {
     Texture
 }
 
+#[derive(Live)]
+#[live_ignore]
+pub enum ViewDebug {
+    #[pick] None,
+    R,
+    G,
+    B,
+    M,
+    Margin,
+    P,
+    Padding,
+    A,
+    All,
+    #[live(Vec4::default())] Color(Vec4)
+}
+
+impl LiveHook for ViewDebug {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+        match &nodes[index].value {
+            LiveValue::Vec4(v) => {
+                *self = Self::Color(*v);
+                Some(index + 1)
+            }
+            LiveValue::Color(v) => {
+                *self = Self::Color(Vec4::from_u32(*v));
+                Some(index + 1)
+            }
+            LiveValue::Bool(v) => {
+                if *v{
+                    *self = Self::R;
+                }
+                else{
+                    *self = Self::None;
+                }
+                Some(index + 1)
+            }
+            LiveValue::Float64(v) => {
+                if *v != 0.0{
+                    *self = Self::R;
+                }
+                else{
+                    *self = Self::None;
+                }
+                Some(index + 1)
+            }
+            LiveValue::Int64(v) => {
+                if *v != 0{
+                    *self = Self::R;
+                }
+                else{
+                    *self = Self::None;
+                }
+                Some(index + 1)
+            }
+            _ => None
+        }
+    }
+}
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
@@ -58,6 +116,7 @@ pub struct View { // draw info per UI element
     #[live] dpi_factor: Option<f64>,
     
     #[live] optimize: ViewOptimize,
+    #[live] debug: ViewDebug,    
     #[live] event_order: EventOrder,
     
     #[live(true)] visible: bool,
@@ -711,6 +770,42 @@ impl Widget for View {
                     }
                 }
                 self.draw_state.end();
+            }
+        }
+        match &self.debug{
+            ViewDebug::None=>{},
+            ViewDebug::Color(c)=>{
+                cx.debug.area(self.area, *c);
+            }
+            ViewDebug::R=>{
+                cx.debug.area(self.area, Vec4::R);
+            }
+            ViewDebug::G=>{
+                cx.debug.area(self.area, Vec4::G);
+            }
+            ViewDebug::B=>{
+                cx.debug.area(self.area, Vec4::B);
+            }
+            ViewDebug::M | ViewDebug::Margin=>{
+                let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
+                let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::B);
+                cx.debug.area(self.area, Vec4::R);
+            }
+             ViewDebug::P | ViewDebug::Padding=>{
+                let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
+                let br = dvec2(-self.layout.padding.right,- self.layout.padding.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::G);
+                cx.debug.area(self.area, Vec4::R);
+            }
+            ViewDebug::All | ViewDebug::A=>{
+                let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
+                let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::B);
+                let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
+                let br = dvec2(-self.layout.padding.right,- self.layout.padding.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::G);
+                cx.debug.area(self.area, Vec4::R);
             }
         }
         DrawStep::done()

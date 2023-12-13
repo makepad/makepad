@@ -173,37 +173,62 @@ impl Debug for WidgetPath {
 #[derive(Default)]
 pub struct Scope<'a,'b>{
     pub path: WidgetPath,
-    pub data: WidgetScopeData<'a>,
-    pub meta: WidgetScopeData<'b>
+    pub data: WidgetScopeMut<'a>,
+    pub props: WidgetScopeRef<'b>,
 }
 
 #[derive(Default)]
-pub struct WidgetScopeData<'a>{
-    pub data: Option<&'a mut dyn Any>
+pub struct WidgetScopeRef<'a>(Option<&'a dyn Any>);
+
+#[derive(Default)]
+pub struct WidgetScopeMut<'a>(Option<&'a mut dyn Any>);
+
+impl <'a> WidgetScopeRef<'a>{
+    pub fn get<T: Any>(&mut self) -> &T {
+        self.0.as_ref().unwrap().downcast_ref::<T>().unwrap()
+    }
+}
+
+impl <'a> WidgetScopeMut<'a>{
+    pub fn get<T: Any>(&mut self) -> &T {
+        self.0.as_ref().unwrap().downcast_ref::<T>().unwrap()
+    }
+                
+    pub fn get_mut<T: Any>(&mut self) -> &mut T {
+        self.0.as_mut().unwrap().downcast_mut::<T>().unwrap()
+    }
 }
 
 impl<'a,'b> Scope<'a,'b>{
     pub fn with_data<T: Any>(v:&'a mut T)->Self{
         Self{
             path:WidgetPath::default(),
-            data:WidgetScopeData{data:Some(v)},
-            meta:WidgetScopeData{data:None}
+            data:WidgetScopeMut(Some(v)),
+            props:WidgetScopeRef(None)
         }
     }
     
-    pub fn with_data_meta<T: Any>(v:&'a mut T, w:&'b mut T)->Self{
+    pub fn with_data_props<T: Any>(v:&'a mut T, w:&'b T)->Self{
         Self{
             path:WidgetPath::default(),
-            data:WidgetScopeData{data:Some(v)},
-            meta:WidgetScopeData{data:Some(w)}
+            data:WidgetScopeMut(Some(v)),
+            props:WidgetScopeRef(Some(w)),
         }
     }
     
+    pub fn with_props<T: Any>( w:&'b mut T)->Self{
+        Self{
+            path:WidgetPath::default(),
+            data:WidgetScopeMut(None),
+            props:WidgetScopeRef(Some(w)),
+        }
+    }
+
     pub fn empty()->Self{
         Self{
             path:WidgetPath::default(),
-            data:WidgetScopeData{data:None},
-            meta:WidgetScopeData{data:None}
+            data:WidgetScopeMut(None),
+            props:WidgetScopeRef(None),
         }
     }
     
@@ -215,15 +240,6 @@ impl<'a,'b> Scope<'a,'b>{
     }
 }
 
-impl <'a> WidgetScopeData<'a>{
-    pub fn get<T: Any>(&mut self) -> &T {
-        self.data.as_ref().unwrap().downcast_ref::<T>().unwrap()
-    }
-        
-    pub fn get_mut<T: Any>(&mut self) -> &mut T {
-        self.data.as_mut().unwrap().downcast_mut::<T>().unwrap()
-    }
-}
 
 pub trait DrawStepApi {
     fn done() -> DrawStep {Result::Ok(())}
