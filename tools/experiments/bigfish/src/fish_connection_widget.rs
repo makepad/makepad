@@ -77,8 +77,15 @@ pub struct FishConnectionWidget {
     grab_key_focus: bool,
     #[live]
     pub text: RcStringMut,
+
     #[live]
     pub color: Vec4,
+
+    #[live(0)]
+    pub from_h: i32,
+    #[live(0)]
+    pub to_h: i32,
+
     #[live(5.0)]
     pub line_width: f64,
 }
@@ -87,6 +94,9 @@ impl Widget for FishConnectionWidget {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+
+        return;
+
         match event.hits(cx, self.draw_line.area()) {
             Hit::FingerDown(_fe) => {
                 if self.grab_key_focus {
@@ -139,8 +149,9 @@ impl FishConnectionWidget {
         self.draw_line.end(cx);
 
         if self.end_pos.x < self.start_pos.x {
-            let midpoint = (self.end_pos + self.start_pos) * 0.5;
+            let midpoint = (self.end_pos + self.start_pos + dvec2(0.0, self.from_h as f64)) * 0.5;
             let deltatomid = midpoint - self.start_pos;
+            let delta = self.end_pos - self.start_pos;
 
             let overshoot = 40.;
 
@@ -154,14 +165,14 @@ impl FishConnectionWidget {
             self.draw_line.draw_line_abs(
                 cx,
                 self.start_pos + dvec2(overshoot, 0.),
-                self.start_pos + dvec2(overshoot, deltatomid.y),
+                self.start_pos + dvec2(overshoot, delta.y - deltatomid.y),
                 self.color,
                 self.line_width,
             );
 
             self.draw_line.draw_line_abs(
                 cx,
-                self.start_pos + dvec2(overshoot, deltatomid.y),
+                self.start_pos + dvec2(overshoot, delta.y - deltatomid.y),
                 self.end_pos + dvec2(-overshoot, -deltatomid.y),
                 self.color,
                 self.line_width,

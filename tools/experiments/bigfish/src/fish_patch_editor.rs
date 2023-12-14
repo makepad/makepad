@@ -163,7 +163,7 @@ impl Widget for FishPatchEditor {
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
-        for i in &mut patch.blocks.iter() {
+        for mut i in &mut patch.blocks.iter_mut() {
             let item_id = LiveId::from_num(1, i.id as u64);
             let templateid = match i.category {
                 FishBlockCategory::Effect => live_id!(BlockTemplateEffect),
@@ -183,6 +183,7 @@ impl Widget for FishPatchEditor {
             );
 
             item.draw_all(cx, &mut Scope::empty());
+            i.h = 20;
 
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
@@ -329,7 +330,9 @@ impl FishPatchEditor {
                 live! {
                     start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 10. + 20.  * _portfrom.id as f64) - scroll_pos),
                     end_pos: (dvec2(blockto.x as f64, blockto.y as f64+ 10. + 20. * _portto.id as f64) - scroll_pos ),
-                    color: #ff0,
+                    from_h: (blockfrom.h),
+                    to_h: (blockto.h),
+                    color: #ddd,
                       abs_pos: (dvec2(0.,0.)),
                    },
             );
