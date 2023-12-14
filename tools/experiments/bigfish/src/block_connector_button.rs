@@ -175,8 +175,8 @@ impl Widget for BlockConnectorButton {
                         &scope.path,
                         BlockConnectorButtonAction::Move {
                             id: self.blockid,
-                            x: fe.abs.x - fe.abs_start.x,
-                            y: fe.abs.y - fe.abs_start.y,
+                            x: fe.abs.x,
+                            y: fe.abs.y,
                         },
                     );
                 }
