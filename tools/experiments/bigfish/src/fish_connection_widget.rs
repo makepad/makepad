@@ -88,6 +88,15 @@ pub struct FishConnectionWidget {
 
     #[live(5.0)]
     pub line_width: f64,
+
+    #[live(-1)]
+    pub from_top: i32,
+    #[live(-1)]
+    pub from_bottom: i32,
+    #[live(-1)]
+    pub to_top: i32,
+    #[live(-1)]
+    pub to_bottom: i32,
 }
 
 impl Widget for FishConnectionWidget {
@@ -149,7 +158,16 @@ impl FishConnectionWidget {
         self.draw_line.end(cx);
 
         if self.end_pos.x < self.start_pos.x {
-            let midpoint = (self.end_pos + self.start_pos + dvec2(0.0, self.from_h as f64)) * 0.5;
+            let mut midpoint = (self.end_pos + self.start_pos) * 0.5;
+
+            if self.from_bottom > -1 {
+                if self.from_bottom > self.to_top {
+                    midpoint.y = (self.from_top + self.to_bottom) as f64 / 2.0;
+                } else {
+                    midpoint.y = (self.to_top + self.from_bottom) as f64 / 2.0;
+                }
+            }
+
             let deltatomid = midpoint - self.start_pos;
             let delta = self.end_pos - self.start_pos;
 
@@ -165,22 +183,22 @@ impl FishConnectionWidget {
             self.draw_line.draw_line_abs(
                 cx,
                 self.start_pos + dvec2(overshoot, 0.),
-                self.start_pos + dvec2(overshoot, delta.y - deltatomid.y),
+                dvec2(self.start_pos.x + overshoot, midpoint.y),
                 self.color,
                 self.line_width,
             );
 
             self.draw_line.draw_line_abs(
                 cx,
-                self.start_pos + dvec2(overshoot, delta.y - deltatomid.y),
-                self.end_pos + dvec2(-overshoot, -deltatomid.y),
+                dvec2(self.start_pos.x + overshoot, midpoint.y),
+                dvec2(self.end_pos.x - overshoot, midpoint.y),
                 self.color,
                 self.line_width,
             );
 
             self.draw_line.draw_line_abs(
                 cx,
-                self.end_pos + dvec2(-overshoot, -deltatomid.y),
+                dvec2(self.end_pos.x - overshoot, midpoint.y),
                 self.end_pos + dvec2(-overshoot, 0.),
                 self.color,
                 self.line_width,
