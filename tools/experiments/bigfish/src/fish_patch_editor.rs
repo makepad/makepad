@@ -301,7 +301,7 @@ impl FishPatchEditor {
         item.apply_over(
             cx,
             live! {
-                start_pos: (dvec2(self.connectingx as f64 + 200.0, self.connectingy as f64 ) - scroll_pos),
+                start_pos: (dvec2(self.connectingx as f64 , self.connectingy as f64 ) - scroll_pos),
                 end_pos: (dvec2(self.connectingcurrentx as f64, self.connectingcurrenty as f64) - scroll_pos ),
                 color: #ff0,
                   abs_pos: (dvec2(0.,0.)),
