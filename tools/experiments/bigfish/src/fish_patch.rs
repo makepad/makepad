@@ -37,8 +37,8 @@ impl FishPatch {
         }
         let b = g.unwrap();
         //let g = self.get_block(id).unwrap();
-        b.x = x as i32;
-        b.y = y as i32;
+        b.x = ((x / 10.) as i32).max(0) * 10;
+        b.y = ((y / 10.) as i32).max(0) * 10;
     }
 
     pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) {
