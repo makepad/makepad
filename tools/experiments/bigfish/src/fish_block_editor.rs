@@ -9,7 +9,7 @@ live_design! {
 
     FishBlockEditor = <View>
     {
-        margin: 30
+        margin: 0
         width: 200
         height: Fit
         flow: Down

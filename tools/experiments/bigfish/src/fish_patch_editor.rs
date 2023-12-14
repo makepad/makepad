@@ -34,7 +34,7 @@ live_design! {
 
                 let Pos = floor(self.pos*self.rect_size *0.10);
                 let PatternMask = mod(Pos.x + mod(Pos.y, 2.0), 2.0);
-                return mix( vec4(0,0.15*self.pos.y,0.1,1), vec4(.05, 0.03, .23*self.pos.y, 1.0), PatternMask);
+                return mix( vec4(1,1,1,1), vec4(0.95,0.95,0.95 +self.pos.y*0.05, 1.0), PatternMask);
             }
         }
     }
@@ -70,7 +70,7 @@ pub struct FishPatchEditor {
 
 impl Widget for FishPatchEditor {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let uid = self.widget_uid();
+        //let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
 
         self.scroll_bars.handle_event(cx, event);
@@ -121,7 +121,6 @@ impl Widget for FishPatchEditor {
 
         for i in &mut patch.blocks.iter() {
             let item_id = LiveId::from_num(1, i.id as u64);
-
             let templateid = match i.category {
                 FishBlockCategory::Effect => live_id!(BlockTemplateEffect),
                 FishBlockCategory::Generator => live_id!(BlockTemplateGenerator),
@@ -133,17 +132,14 @@ impl Widget for FishPatchEditor {
             };
 
             let item = self.item(cx, item_id, templateid).unwrap();
-
             item.apply_over(
                 cx,
-                live! {
-                    title= {header= {text:"Synth Block", blockid: (i.id)}},
-                    abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos) ,
-                },
+                live! {title= {header= {text:"Synth Block", blockid: (i.id)}},
+                abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos)},
             );
-            //println!("{} {:?} ({:?},{:?})", item_id, i.id, i.x, i.y);
 
             item.draw_all(cx, &mut Scope::empty());
+
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
                 let templateid = match inp.datatype {
@@ -158,7 +154,7 @@ impl Widget for FishPatchEditor {
                     cx,
                     live! {
 
-                        abs_pos: (dvec2(i.x as f64, i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
+                        abs_pos: (dvec2(i.x as f64-20., i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
                 item.draw_all(cx, &mut Scope::empty());
@@ -177,7 +173,7 @@ impl Widget for FishPatchEditor {
                 item.apply_over(
                     cx,
                     live! {
-                        abs_pos: (dvec2(i.x as f64 + 240., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
+                        abs_pos: (dvec2(i.x as f64 + 200., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
                 item.draw_all(cx, &mut Scope::empty());
@@ -199,7 +195,7 @@ impl Widget for FishPatchEditor {
             item.apply_over(
                 cx,
                 live! {
-                    start_pos: (dvec2(blockfrom.x as f64 + 250.0, blockfrom.y as f64 + 30.  * _portfrom.id as f64) - scroll_pos),
+                    start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 30.  * _portfrom.id as f64) - scroll_pos),
                     end_pos: (dvec2(blockto.x as f64, blockto.y as f64) - scroll_pos + 30. * _portto.id as f64),
                     color: #ff0,
                       abs_pos: (dvec2(0.,0.)),
