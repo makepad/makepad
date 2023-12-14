@@ -344,6 +344,9 @@ impl CxDrawList {
                         return Some(i)
                     }
                 }
+                else if draw_item.kind.sub_list().is_some(){
+                    
+                }
             }
         }
         None
