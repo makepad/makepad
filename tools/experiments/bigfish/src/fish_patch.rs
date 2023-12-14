@@ -90,12 +90,12 @@ impl FishPatch {
         );
         i = i + 1;
 
-        patch.create_block(lib, String::from("Utility"), i % 3 * 300, i / 3 * 300 + 100); //i=i+1;
+        patch.create_block(lib, String::from("Utility"), 0, i / 3 * 300 + 100); //i=i+1;
 
         for i in 0..7 {
             patch.presets.push(FishPreset::create_test_preset(i));
         }
-        for i in 0..1 {
+        for i in 0..5 {
             let fromidx = i as usize % patch.blocks.len();
             let toidx = (i as usize + 1) % patch.blocks.len();
             let fromblock = &patch.blocks[fromidx];

@@ -20,7 +20,6 @@ live_design! {
                     }
                 }
 
-
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -64,8 +63,8 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        #0,
+                        #4,
                         self.hover
                     ),
                     #9,
@@ -73,7 +72,6 @@ live_design! {
                 )
             }
         }
-
 
         draw_icon: {
             instance hover: 0.0

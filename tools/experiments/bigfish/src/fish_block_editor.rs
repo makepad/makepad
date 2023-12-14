@@ -45,7 +45,7 @@ live_design! {
             width: Fill
             height: Fit
             flow: Down
-            padding: 4
+            padding: {left: 30, right: 30, top: 4, bottom: 4}
 
             draw_bg: {
                 fn pixel(self) -> vec4 {
