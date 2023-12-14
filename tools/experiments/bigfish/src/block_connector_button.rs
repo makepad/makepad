@@ -212,6 +212,7 @@ impl Widget for BlockConnectorButton {
                 }
                 if fe.is_over {
                     cx.widget_action(uid, &scope.path, BlockConnectorButtonAction::Clicked);
+                    cx.widget_action(uid, &scope.path, BlockConnectorButtonAction::Released);
                     if fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));
                     } else {
