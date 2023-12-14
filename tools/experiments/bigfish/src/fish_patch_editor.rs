@@ -72,7 +72,7 @@ pub struct FishPatchEditor {
     dragstarty: i32,
 
     #[rust]
-    connectingID: u64,
+    connectingid: u64,
     #[rust]
     connectingx: i32,
     #[rust]
@@ -128,19 +128,23 @@ impl Widget for FishPatchEditor {
                         y,
                         frominput,
                     } => {
-                        self.connectingID = id;
-                        self.connectingx = x as i32;
-                        self.connectingy = y as i32;
-                        self.connectingcurrentx = x as i32;
-                        self.connectingcurrenty = y as i32;
+                        let scroll = self.scroll_bars.get_scroll_pos();
+
+                        self.connectingid = id;
+                        self.connectingx = x as i32 + scroll.x as i32;
+                        self.connectingy = y as i32 + scroll.y as i32;
+                        self.connectingcurrentx = x as i32 + scroll.x as i32;
+                        self.connectingcurrenty = y as i32 + scroll.y as i32;
                         self.connectinginput = frominput;
                         self.connecting = true;
                         self.scroll_bars.redraw(cx);
                     }
                     BlockConnectorButtonAction::Move { id, x, y } => {
+                        let scroll = self.scroll_bars.get_scroll_pos();
+
                         self.scroll_bars.redraw(cx);
-                        self.connectingcurrentx = x as i32;
-                        self.connectingcurrenty = y as i32;
+                        self.connectingcurrentx = x as i32 + scroll.x as i32;
+                        self.connectingcurrenty = y as i32 + scroll.y as i32;
                     }
                     BlockConnectorButtonAction::Released => {
                         self.scroll_bars.redraw(cx);
@@ -175,7 +179,8 @@ impl Widget for FishPatchEditor {
                 FishBlockCategory::Utility => live_id!(BlockTemplateUtility),
             };
 
-            let item = self.item(cx, item_id, templateid).unwrap();
+            let item = self.item(cx, item_id, templateid).unwrap().as_view();
+
             item.apply_over(
                 cx,
                 live! {title= {header= {text:"Synth Block", blockid: (i.id)}},
@@ -183,7 +188,8 @@ impl Widget for FishPatchEditor {
             );
 
             item.draw_all(cx, &mut Scope::empty());
-            i.h = 20;
+            let itemarea = item.area().get_rect(cx);
+            i.h = itemarea.size.y as i32;
 
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
@@ -298,8 +304,18 @@ impl FishPatchEditor {
         let templateid = live_id!(ConnectorTemplate);
         let preitem = self.item(cx, item_id, templateid);
         let item = preitem.unwrap();
-
-        item.apply_over(
+        if self.connectinginput {
+            item.apply_over(
+                cx,
+                live! {
+                    end_pos: (dvec2(self.connectingx as f64 , self.connectingy as f64 ) - scroll_pos),
+                    start_pos: (dvec2(self.connectingcurrentx as f64, self.connectingcurrenty as f64) - scroll_pos ),
+                    color: #ff0,
+                      abs_pos: (dvec2(0.,0.)),
+                   },
+            );
+        } else {
+            item.apply_over(
             cx,
             live! {
                 start_pos: (dvec2(self.connectingx as f64 , self.connectingy as f64 ) - scroll_pos),
@@ -308,7 +324,7 @@ impl FishPatchEditor {
                   abs_pos: (dvec2(0.,0.)),
                },
         );
-
+        }
         item.draw_all(cx, &mut Scope::empty());
     }
 
@@ -325,14 +341,14 @@ impl FishPatchEditor {
             let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
             let _portto = blockto.get_input_instance(i.to_port).unwrap();
 
-            item.apply_over(
-                cx,
-                live! {
+            item.apply_over( cx, live! {
                     start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 10. + 20.  * _portfrom.id as f64) - scroll_pos),
                     end_pos: (dvec2(blockto.x as f64, blockto.y as f64+ 10. + 20. * _portto.id as f64) - scroll_pos ),
-                    from_h: (blockfrom.h),
-                    to_h: (blockto.h),
-                    color: #ddd,
+                    from_top: (blockfrom.y- scroll_pos.y as i32),
+                    from_bottom: (blockfrom.y + blockfrom.h - scroll_pos.y as i32),
+                    to_top: (blockto.y - scroll_pos.y as i32),
+                    to_bottom: (blockto.y + blockto.h - scroll_pos.y as i32) ,
+                    color: #x888,
                       abs_pos: (dvec2(0.,0.)),
                    },
             );
