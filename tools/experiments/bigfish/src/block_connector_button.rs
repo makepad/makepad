@@ -5,8 +5,11 @@ live_design! {
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
 
-    BlockHeaderButton = {{BlockHeaderButton}} {
+    BlockConnectorButton = {{BlockConnectorButton}} {
 
+        width: 19,
+        height: 19,
+        margin: 1,
 
         animator: {
             hover = {
@@ -19,6 +22,7 @@ live_design! {
                         draw_text: {pressed: 0.0, hover: 0.0}
                     }
                 }
+
 
                 on = {
                     from: {
@@ -43,8 +47,6 @@ live_design! {
             }
         }
 
-        width: Fill,
-        height: Fit,
         margin: {left:0.0, right: 0.0, top:0.0, bottom: 0.0}
         align: {x: 0.5, y: 0.5}
         padding: {left: 0.0, top: 5.0, right: 0.0, bottom: 5.0}
@@ -63,8 +65,8 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #0,
-                        #4,
+                        #9,
+                        #c,
                         self.hover
                     ),
                     #9,
@@ -72,6 +74,7 @@ live_design! {
                 )
             }
         }
+
 
         draw_icon: {
             instance hover: 0.0
@@ -97,26 +100,35 @@ live_design! {
             instance bodybottom: #5c
             fn pixel(self) -> vec4 {
 
-                //let body = mix(mix(self.bodytop, self.bodybottom, self.hover), #33, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), #33, self.pressed);
 
-                return vec4(0.,0.,0.,0.);
+                return body;
             }
         }
     }
 }
 
 #[derive(Clone, Debug, DefaultNone)]
-pub enum BlockHeaderButtonAction {
+pub enum BlockConnectorButtonAction {
     None,
     Clicked,
     Pressed,
     Released,
-    Move { id: u64, x: f64, y: f64 },
-    RecordDragStart { id: u64 },
+    Move {
+        id: u64,
+        x: f64,
+        y: f64,
+    },
+    ConnectStart {
+        id: u64,
+        x: f64,
+        y: f64,
+        frominput: bool,
+    },
 }
 
 #[derive(Live, LiveHook, Widget)]
-pub struct BlockHeaderButton {
+pub struct BlockConnectorButton {
     #[animator]
     animator: Animator,
 
@@ -131,6 +143,8 @@ pub struct BlockHeaderButton {
     icon_walk: Walk,
     #[live]
     label_walk: Walk,
+    #[live]
+    input: bool,
     #[walk]
     walk: Walk,
 
@@ -149,7 +163,7 @@ pub struct BlockHeaderButton {
     pub dragging: bool,
 }
 
-impl Widget for BlockHeaderButton {
+impl Widget for BlockConnectorButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
@@ -159,7 +173,7 @@ impl Widget for BlockHeaderButton {
                     cx.widget_action(
                         uid,
                         &scope.path,
-                        BlockHeaderButtonAction::Move {
+                        BlockConnectorButtonAction::Move {
                             id: self.blockid,
                             x: fe.abs.x - fe.abs_start.x,
                             y: fe.abs.y - fe.abs_start.y,
@@ -167,7 +181,7 @@ impl Widget for BlockHeaderButton {
                     );
                 }
             }
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
@@ -175,9 +189,14 @@ impl Widget for BlockHeaderButton {
                 cx.widget_action(
                     uid,
                     &scope.path,
-                    BlockHeaderButtonAction::RecordDragStart { id: self.blockid },
+                    BlockConnectorButtonAction::ConnectStart {
+                        id: (self.blockid),
+                        x: (fe.abs.x),
+                        y: (fe.abs.y),
+                        frominput: (self.input),
+                    },
                 );
-                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Pressed);
+                cx.widget_action(uid, &scope.path, BlockConnectorButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             }
             Hit::FingerHoverIn(_) => {
@@ -192,14 +211,14 @@ impl Widget for BlockHeaderButton {
                     self.dragging = false;
                 }
                 if fe.is_over {
-                    cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Clicked);
+                    cx.widget_action(uid, &scope.path, BlockConnectorButtonAction::Clicked);
                     if fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));
                     } else {
                         self.animator_play(cx, id!(hover.off));
                     }
                 } else {
-                    cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Released);
+                    cx.widget_action(uid, &scope.path, BlockConnectorButtonAction::Released);
                     self.animator_play(cx, id!(hover.off));
                 }
             }
@@ -225,9 +244,9 @@ impl Widget for BlockHeaderButton {
     }
 }
 
-impl BlockHeaderButtonRef {
+impl BlockConnectorButtonRef {
     pub fn clicked(&self, actions: &Actions) -> bool {
-        if let BlockHeaderButtonAction::Clicked =
+        if let BlockConnectorButtonAction::Clicked =
             actions.find_widget_action(self.widget_uid()).cast()
         {
             return true;
@@ -236,7 +255,7 @@ impl BlockHeaderButtonRef {
     }
 
     pub fn pressed(&self, actions: &Actions) -> bool {
-        if let BlockHeaderButtonAction::Pressed =
+        if let BlockConnectorButtonAction::Pressed =
             actions.find_widget_action(self.widget_uid()).cast()
         {
             return true;
@@ -245,7 +264,7 @@ impl BlockHeaderButtonRef {
     }
 }
 
-impl BlockHeaderButtonSet {
+impl BlockConnectorButtonSet {
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.clicked(actions))
     }

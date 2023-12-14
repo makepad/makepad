@@ -1,6 +1,8 @@
 use crate::{
+    block_connector_button::BlockConnectorButtonAction,
     block_header_button::BlockHeaderButtonAction, fish_block_template::FishBlockCategory,
-    fish_doc::FishDoc, fish_ports::ConnectionType, makepad_draw::*, makepad_widgets::*,
+    fish_doc::FishDoc, fish_patch::*, fish_ports::ConnectionType, makepad_draw::*,
+    makepad_widgets::*,
 };
 
 live_design! {
@@ -9,6 +11,7 @@ live_design! {
     import crate::fish_block_editor::*;
     import crate::fish_theme::*;
     import crate::fish_connection_widget::*;
+    import crate::block_connector_button::*;
 
     FishPatchEditor = {{FishPatchEditor}} {
         width: Fill,
@@ -24,17 +27,18 @@ live_design! {
 
         ConnectorTemplate = <FishConnectionWidget>{color:  #d0d0a0ff};
 
-        AudioButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop: (CABLE_AUDIO_COLOR);}};
-        ControlButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop:  (CABLE_CONTROL_COLOR);}};
-        GateButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop: (CABLE_GATE_COLOR);}};
-        MIDIButtonTemplate = <Button>{flow: Overlay, draw_bg: { bodytop:(CABLE_MIDI_COLOR);}};
+        AudioButtonTemplate = <BlockConnectorButton>{flow: Overlay, draw_bg: { bodytop: (CABLE_AUDIO_COLOR);}};
+        ControlButtonTemplate = <BlockConnectorButton>{flow: Overlay, draw_bg: { bodytop:  (CABLE_CONTROL_COLOR);}};
+        GateButtonTemplate = <BlockConnectorButton>{flow: Overlay, draw_bg: { bodytop: (CABLE_GATE_COLOR);}};
+        MIDIButtonTemplate = <BlockConnectorButton>{flow: Overlay, draw_bg: { bodytop:(CABLE_MIDI_COLOR);}};
 
         draw_bg: {
             fn pixel(self) -> vec4 {
 
                 let Pos = floor(self.pos*self.rect_size *0.10);
                 let PatternMask = mod(Pos.x + mod(Pos.y, 2.0), 2.0);
-                return mix( vec4(1,1,1,1), vec4(0.95,0.95,0.95 +self.pos.y*0.05, 1.0), PatternMask);
+                let s  = 0.74 - self.pos.y * 0.03;
+                return mix( vec4(0.7,0.7,0.7,1), vec4(s,s,s, 1.0), PatternMask);
             }
         }
     }
@@ -66,6 +70,17 @@ pub struct FishPatchEditor {
     dragstartx: i32,
     #[rust]
     dragstarty: i32,
+
+    #[rust]
+    connectingID: u64,
+    #[rust]
+    connectingx: i32,
+    #[rust]
+    connectingy: i32,
+    #[rust]
+    connectinginput: bool,
+    #[rust]
+    connecting: bool,
 }
 
 impl Widget for FishPatchEditor {
@@ -75,8 +90,8 @@ impl Widget for FishPatchEditor {
 
         self.scroll_bars.handle_event(cx, event);
 
-        for (item_id, item) in self.items.values_mut() {
-            let item_uid = item.widget_uid();
+        for (_item_id, item) in self.items.values_mut() {
+            let _item_uid = item.widget_uid();
 
             for action in cx.scope_actions(|cx| item.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
@@ -101,12 +116,25 @@ impl Widget for FishPatchEditor {
                     }
                     _ => {}
                 }
+
+                match action.as_widget_action().cast() {
+                    BlockConnectorButtonAction::ConnectStart {
+                        id,
+                        x,
+                        y,
+                        frominput,
+                    } => {
+                        self.connectingID = id;
+                        self.connectingx = x as i32;
+                        self.connectingy = y as i32;
+                        self.connectinginput = frominput;
+                        self.connecting = true;
+                    }
+                    _ => {}
+                }
             }
         }
     }
-
-    //  }
-    //}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
@@ -153,8 +181,9 @@ impl Widget for FishPatchEditor {
                 item.apply_over(
                     cx,
                     live! {
+                        input: true,
 
-                        abs_pos: (dvec2(i.x as f64-20., i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
+                        abs_pos: (dvec2(i.x as f64, i.y as f64 + inp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
                 item.draw_all(cx, &mut Scope::empty());
@@ -173,39 +202,15 @@ impl Widget for FishPatchEditor {
                 item.apply_over(
                     cx,
                     live! {
-                        abs_pos: (dvec2(i.x as f64 + 200., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
+                        input: false,
+                        abs_pos: (dvec2(i.x as f64 + 200. - 20. + 1., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
                 item.draw_all(cx, &mut Scope::empty());
             }
         }
 
-        for i in patch.connections.iter() {
-            let item_id = LiveId::from_num(2, i.id as u64);
-
-            let templateid = live_id!(ConnectorTemplate);
-            let preitem = self.item(cx, item_id, templateid);
-            let item = preitem.unwrap();
-
-            let blockfrom = patch.get_block(i.from_block).unwrap();
-            let blockto = patch.get_block(i.to_block).unwrap();
-            let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
-            let _portto = blockto.get_input_instance(i.to_port).unwrap();
-
-            item.apply_over(
-                cx,
-                live! {
-                    start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 30.  * _portfrom.id as f64) - scroll_pos),
-                    end_pos: (dvec2(blockto.x as f64, blockto.y as f64) - scroll_pos + 30. * _portto.id as f64),
-                    color: #ff0,
-                      abs_pos: (dvec2(0.,0.)),
-                   },
-            );
-
-            item.draw_all(cx, &mut Scope::empty());
-
-            // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
-        }
+        self.draw_connections(cx, patch, scroll_pos);
 
         self.scroll_bars.end(cx);
 
@@ -264,5 +269,36 @@ impl FishPatchEditor {
             return Some(entry.clone());
         }
         None
+    }
+}
+
+impl FishPatchEditor {
+    pub fn draw_connections(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
+        for i in patch.connections.iter() {
+            let item_id = LiveId::from_num(2, i.id as u64);
+
+            let templateid = live_id!(ConnectorTemplate);
+            let preitem = self.item(cx, item_id, templateid);
+            let item = preitem.unwrap();
+
+            let blockfrom = patch.get_block(i.from_block).unwrap();
+            let blockto = patch.get_block(i.to_block).unwrap();
+            let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
+            let _portto = blockto.get_input_instance(i.to_port).unwrap();
+
+            item.apply_over(
+                cx,
+                live! {
+                    start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 10. + 20.  * _portfrom.id as f64) - scroll_pos),
+                    end_pos: (dvec2(blockto.x as f64, blockto.y as f64+ 10. + 20. * _portto.id as f64) - scroll_pos ),
+                    color: #ff0,
+                      abs_pos: (dvec2(0.,0.)),
+                   },
+            );
+
+            item.draw_all(cx, &mut Scope::empty());
+
+            // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
+        }
     }
 }
