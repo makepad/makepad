@@ -142,6 +142,8 @@ impl FishConnectionWidget {
             let midpoint = (self.end_pos + self.start_pos) * 0.5;
             let deltatomid = midpoint - self.start_pos;
 
+            let overshoot = 40.;
+
             self.draw_line.draw_line_abs(
                 cx,
                 self.start_pos,
@@ -151,31 +153,31 @@ impl FishConnectionWidget {
             );
             self.draw_line.draw_line_abs(
                 cx,
-                self.start_pos + dvec2(40., 0.),
-                self.start_pos + dvec2(40., deltatomid.y),
+                self.start_pos + dvec2(overshoot, 0.),
+                self.start_pos + dvec2(overshoot, deltatomid.y),
                 self.color,
                 self.line_width,
             );
 
             self.draw_line.draw_line_abs(
                 cx,
-                self.start_pos + dvec2(40., deltatomid.y),
-                self.end_pos + dvec2(-40., -deltatomid.y),
+                self.start_pos + dvec2(overshoot, deltatomid.y),
+                self.end_pos + dvec2(-overshoot, -deltatomid.y),
                 self.color,
                 self.line_width,
             );
 
             self.draw_line.draw_line_abs(
                 cx,
-                self.end_pos + dvec2(-40., -deltatomid.y),
-                self.end_pos + dvec2(-40., 0.),
+                self.end_pos + dvec2(-overshoot, -deltatomid.y),
+                self.end_pos + dvec2(-overshoot, 0.),
                 self.color,
                 self.line_width,
             );
 
             self.draw_line.draw_line_abs(
                 cx,
-                self.end_pos + dvec2(-40., 0.),
+                self.end_pos + dvec2(-overshoot, 0.),
                 self.end_pos,
                 self.color,
                 self.line_width,
