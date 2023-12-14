@@ -882,7 +882,7 @@ impl Widget for Dock {
         let uid = self.widget_uid();
         let dock_items = &mut self.dock_items;
         for (panel_id, splitter) in self.splitters.iter_mut() {
-            for action in cx.scope_actions(|cx| splitter.handle_event(cx, event, scope)) {
+            for action in cx.capture_actions(|cx| splitter.handle_event(cx, event, scope)) {
                 // alright so here we need to redraw the left/right area.. how?
                 
                 match action.as_widget_action().cast() {
@@ -900,7 +900,7 @@ impl Widget for Dock {
         }
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
             let contents_view = &mut tab_bar.contents_draw_list;
-            for action in cx.scope_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope)) {
+            for action in cx.capture_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     TabBarAction::ShouldTabStartDrag(item) => cx.widget_action(uid, &scope.path, DockAction::ShouldTabStartDrag(item)),
                     TabBarAction::TabWasPressed(tab_id) => {
