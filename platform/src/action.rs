@@ -66,7 +66,7 @@ impl Cx{
         r
     }
 
-    pub fn scope_actions<F>(&mut self, f: F) -> ActionsBuf where
+    pub fn capture_actions<F>(&mut self, f: F) -> ActionsBuf where
     F: FnOnce(&mut Cx),
     {
         let mut actions = Vec::new();
