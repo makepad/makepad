@@ -9,9 +9,7 @@ pub trait MatchEvent{
     fn handle_app_got_focus(&mut self, _cx: &mut Cx){}
     fn handle_app_lost_focus(&mut self, _cx: &mut Cx){}
     fn handle_next_frame(&mut self, _cx: &mut Cx, _e:&NextFrameEvent){}
-    fn handle_action(&mut self, _cx: &mut Cx, _e:&Action){
-                
-    }
+    fn handle_action(&mut self, _cx: &mut Cx, _e:&Action){}
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         for action in actions{
             self.handle_action(cx, action);
