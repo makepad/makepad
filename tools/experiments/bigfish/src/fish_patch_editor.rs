@@ -78,6 +78,10 @@ pub struct FishPatchEditor {
     #[rust]
     connectingy: i32,
     #[rust]
+    connectingcurrentx: i32,
+    #[rust]
+    connectingcurrenty: i32,
+    #[rust]
     connectinginput: bool,
     #[rust]
     connecting: bool,
@@ -127,8 +131,20 @@ impl Widget for FishPatchEditor {
                         self.connectingID = id;
                         self.connectingx = x as i32;
                         self.connectingy = y as i32;
+                        self.connectingcurrentx = x as i32;
+                        self.connectingcurrenty = y as i32;
                         self.connectinginput = frominput;
                         self.connecting = true;
+                        self.scroll_bars.redraw(cx);
+                    }
+                    BlockConnectorButtonAction::Move { id, x, y } => {
+                        self.scroll_bars.redraw(cx);
+                        self.connectingcurrentx = x as i32;
+                        self.connectingcurrenty = y as i32;
+                    }
+                    BlockConnectorButtonAction::Released => {
+                        self.scroll_bars.redraw(cx);
+                        self.connecting = false;
                     }
                     _ => {}
                 }
@@ -211,7 +227,9 @@ impl Widget for FishPatchEditor {
         }
 
         self.draw_connections(cx, patch, scroll_pos);
-
+        if self.connecting {
+            self.draw_active_connection(cx, patch, scroll_pos);
+        }
         self.scroll_bars.end(cx);
 
         DrawStep::done()
@@ -273,6 +291,26 @@ impl FishPatchEditor {
 }
 
 impl FishPatchEditor {
+    pub fn draw_active_connection(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
+        let item_id = LiveId::from_str("ActiveConnectionWidget");
+
+        let templateid = live_id!(ConnectorTemplate);
+        let preitem = self.item(cx, item_id, templateid);
+        let item = preitem.unwrap();
+
+        item.apply_over(
+            cx,
+            live! {
+                start_pos: (dvec2(self.connectingx as f64 + 200.0, self.connectingy as f64 ) - scroll_pos),
+                end_pos: (dvec2(self.connectingcurrentx as f64, self.connectingcurrenty as f64) - scroll_pos ),
+                color: #ff0,
+                  abs_pos: (dvec2(0.,0.)),
+               },
+        );
+
+        item.draw_all(cx, &mut Scope::empty());
+    }
+
     pub fn draw_connections(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
         for i in patch.connections.iter() {
             let item_id = LiveId::from_num(2, i.id as u64);
