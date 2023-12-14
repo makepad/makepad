@@ -345,7 +345,7 @@ impl CxDrawList {
                     }
                 }
                 else if draw_item.kind.sub_list().is_some(){
-                    
+                    break;
                 }
             }
         }
