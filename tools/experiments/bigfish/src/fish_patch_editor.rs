@@ -78,7 +78,7 @@ impl Widget for FishPatchEditor {
         for (item_id, item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
 
-            for action in cx.scope_actions(|cx| item.handle_event(cx, event, scope)) {
+            for action in cx.capture_actions(|cx| item.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     BlockHeaderButtonAction::Move { id, x, y } => {
                         self.scroll_bars.redraw(cx);
