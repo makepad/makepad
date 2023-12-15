@@ -85,6 +85,9 @@ pub struct FishPatchEditor {
     connectinginput: bool,
     #[rust]
     connecting: bool,
+
+    #[rust]
+    selection: Vec<u64>,
 }
 
 impl Widget for FishPatchEditor {
@@ -99,6 +102,10 @@ impl Widget for FishPatchEditor {
 
             for action in cx.capture_actions(|cx| item.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
+                    BlockHeaderButtonAction::Select { id } => {
+                        self.selection.clear();
+                        self.selection.push(id);
+                    }
                     BlockHeaderButtonAction::Move { id, x, y } => {
                         self.scroll_bars.redraw(cx);
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
