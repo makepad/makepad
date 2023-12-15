@@ -111,6 +111,7 @@ pub enum BlockHeaderButtonAction {
     Clicked,
     Pressed,
     Released,
+    Select { id: u64 },
     Move { id: u64, x: f64, y: f64 },
     RecordDragStart { id: u64 },
 }
