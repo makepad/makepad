@@ -97,7 +97,8 @@ impl FishPatch {
         for i in 0..7 {
             patch.presets.push(FishPreset::create_test_preset(i));
         }
-        for i in 0..1 {
+
+        for i in 0..8 {
             let fromidx = i as usize % patch.blocks.len();
             let toidx = (i as usize + 1) % patch.blocks.len();
             let fromblock = &patch.blocks[fromidx];
