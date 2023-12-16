@@ -34,12 +34,15 @@ struct AudioUnitEffect {
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
+impl LiveRegister for AudioUnitEffect{
+    fn live_register(cx: &mut Cx){
+        register_audio_component!(cx, AudioUnitEffect)
+    }
+}
+
 impl LiveHook for AudioUnitEffect {
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         self.load_audio_unit();
-    }
-    fn before_live_design(cx: &mut Cx){
-        register_audio_component!(cx, AudioUnitEffect)
     }
 }
 

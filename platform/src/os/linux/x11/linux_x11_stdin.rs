@@ -109,7 +109,7 @@ impl Cx {
         let mut swapchain = None;
         let mut present_index = 0;
 
-        self.call_event_handler(&Event::Construct);
+        self.call_event_handler(&Event::Startup);
 
         while let Ok(msg) = json_msg_rx.recv(){
             match msg {

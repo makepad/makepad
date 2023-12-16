@@ -11,7 +11,7 @@ live_design!{
     RadioButtonBase = {{RadioButton}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawRadioButton {
     #[deref] draw_super: DrawQuad,
@@ -30,9 +30,9 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct RadioButton {
-    #[live] draw_radio: DrawRadioButton,
+    #[redraw] #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
     #[live] draw_text: DrawText,
     
@@ -51,13 +51,7 @@ pub struct RadioButton {
     #[live] bind: String,
 }
 
-impl LiveHook for RadioButton{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,RadioButton)
-    }
-}
-
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum RadioButtonAction {
     Clicked,
     None
@@ -65,10 +59,20 @@ pub enum RadioButtonAction {
 
 
 impl RadioButton {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.draw_radio.begin(cx, walk, self.layout);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_radio.end(cx);
+    }
+}
+
+impl Widget for RadioButton {
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, RadioButtonAction)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-        
+                
         match event.hits(cx, self.draw_radio.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
@@ -81,50 +85,24 @@ impl RadioButton {
             Hit::FingerDown(_fe) => {
                 if self.animator_in_state(cx, id!(selected.off)) {
                     self.animator_play(cx, id!(selected.on));
-                    dispatch_action(cx, RadioButtonAction::Clicked);
+                    cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);
                 }
             },
             Hit::FingerUp(_fe) => {
-                
+                                
             }
             Hit::FingerMove(_fe) => {
-                
+                                
             }
             _ => ()
         }
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_radio.begin(cx, walk, self.layout);
-        self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
-        self.draw_radio.end(cx);
-    }
-}
-
-impl Widget for RadioButton {
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_radio.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct RadioButtonRef(WidgetRef);
 
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
@@ -134,29 +112,28 @@ impl RadioButtonRef{
     }
 }
 
-#[derive(Clone, WidgetSet)]
-pub struct RadioButtonSet(WidgetSet);
-
 impl RadioButtonSet{
     
-    pub fn selected(&self, cx: &mut Cx, actions: &WidgetActions)->Option<usize>{
+    pub fn selected(&self, cx: &mut Cx, actions: &Actions)->Option<usize>{
         for action in actions{
-            match action.action() {
-                RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| v.widget_uid() == action.widget_uid){
-                    for (i, item) in self.0.iter().enumerate(){
-                        if i != index{
-                            RadioButtonRef(item).unselect(cx);
+            if let Some(action) = action.as_widget_action(){
+                match action.cast(){
+                    RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| action.widget_uid == v.widget_uid()){
+                        for (i, item) in self.0.iter().enumerate(){
+                            if i != index{
+                                RadioButtonRef(item).unselect(cx);
+                            }
                         }
+                        return Some(index);
                     }
-                    return Some(index);
+                    _ => ()
                 }
-                _ => ()
             }
         }
         None
     }
     
-    pub fn selected_to_visible(&self, cx: &mut Cx, ui:&WidgetRef, actions: &WidgetActions, paths:&[&[LiveId]] ) {
+    pub fn selected_to_visible(&self, cx: &mut Cx, ui:&WidgetRef, actions: &Actions, paths:&[&[LiveId]] ) {
         // find a widget action that is in our radiogroup
         if let Some(index) = self.selected(cx, actions){
             // ok now we set visible

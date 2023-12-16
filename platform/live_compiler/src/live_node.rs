@@ -35,6 +35,7 @@ pub enum LiveValue {
     Dependency(Rc<String>),
     Bool(bool),
     Int64(i64),
+    Uint64(u64),
     Float32(f32),
     Float64(f64),
     Color(u32),
@@ -536,6 +537,7 @@ impl LiveValue {
             Self::Dependency {..} |
             Self::Bool(_) |
             Self::Int64(_) |
+            Self::Uint64(_) |
             Self::Float64(_) |
             Self::Float32(_) |
             Self::Color(_) |
@@ -573,6 +575,7 @@ impl LiveValue {
             Self::Float64(v) => Some(*v),
             Self::Float32(v) => Some(*v as f64),
             Self::Int64(v) => Some(*v as f64),
+            Self::Uint64(v) => Some(*v as f64),
             _ => None
         }
     }
@@ -582,6 +585,7 @@ impl LiveValue {
             Self::Float64(v) => Some(*v as i64),
             Self::Float32(v) => Some(*v as i64),
             Self::Int64(v) => Some(*v),
+            Self::Uint64(v) => Some(*v as i64),
             _ => None
         }
     }    
@@ -660,32 +664,33 @@ impl LiveValue {
             Self::Dependency {..} => 4,
             Self::Bool(_) => 5,
             Self::Int64(_) => 6,
-            Self::Float64(_) => 7,
-            Self::Float32(_) => 8,
-            Self::Color(_) => 9,
-            Self::Vec2(_) => 10,
-            Self::Vec3(_) => 11,
-            Self::Vec4(_) => 12,
-            Self::Id(_) => 13,
-            Self::IdPath{..}=>14,
-            Self::ExprBinOp(_) => 15,
-            Self::ExprUnOp(_) => 16,
-            Self::ExprMember(_) => 17,
-            Self::ExprCall {..} => 18,
+            Self::Uint64(_) => 7,
+            Self::Float64(_) => 8,
+            Self::Float32(_) => 9,
+            Self::Color(_) => 10,
+            Self::Vec2(_) => 11,
+            Self::Vec3(_) => 12,
+            Self::Vec4(_) => 13,
+            Self::Id(_) => 14,
+            Self::IdPath{..}=>15,
+            Self::ExprBinOp(_) => 16,
+            Self::ExprUnOp(_) => 17,
+            Self::ExprMember(_) => 18,
+            Self::ExprCall {..} => 19,
             
-            Self::BareEnum {..} => 19,
-            Self::Array => 20,
-            Self::Expr {..} => 21,
-            Self::TupleEnum {..} => 22,
-            Self::NamedEnum {..} => 23,
-            Self::Object => 24,
-            Self::Clone {..} => 25,
-            Self::Class {..} => 26,
-            Self::Root{..}=>27,
-            Self::Close => 28,
+            Self::BareEnum {..} => 20,
+            Self::Array => 21,
+            Self::Expr {..} => 22,
+            Self::TupleEnum {..} => 23,
+            Self::NamedEnum {..} => 24,
+            Self::Object => 25,
+            Self::Clone {..} => 26,
+            Self::Class {..} => 27,
+            Self::Root{..}=>28,
+            Self::Close => 29,
             
-            Self::DSL {..} => 29,
-            Self::Import {..} => 30,
+            Self::DSL {..} => 30,
+            Self::Import {..} => 31,
             //Self::Registry {..} => 30,
         }
     }

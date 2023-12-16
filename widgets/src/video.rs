@@ -28,10 +28,10 @@ live_design! {
     VideoBase = {{Video}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct Video {
     // Drawing
-    #[live]
+    #[redraw] #[live]
     draw_bg: DrawColor,
     #[walk]
     walk: Walk,
@@ -75,9 +75,6 @@ pub struct Video {
     #[rust]
     id: LiveId,
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct VideoRef(WidgetRef);
 
 impl VideoRef {
     pub fn prepare_playback(&mut self, cx: &mut Cx) {
@@ -187,11 +184,6 @@ impl VideoRef {
     }
 }
 
-#[derive(Clone, Default, WidgetSet)]
-pub struct VideoSet(WidgetSet);
-
-impl VideoSet {}
-
 #[derive(Default, PartialEq, Debug)]
 enum PlaybackState {
     #[default]
@@ -216,14 +208,6 @@ enum AudioState {
 
 impl LiveHook for Video {
     #[allow(unused)]
-    fn before_live_design(cx: &mut Cx) {
-        #[cfg(target_os = "android")]
-        {
-            register_widget!(cx, Video);
-        }
-    }
-
-    #[allow(unused)]
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.id = LiveId::unique();
 
@@ -240,7 +224,7 @@ impl LiveHook for Video {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum VideoAction {
     None,
     PlaybackPrepared,
@@ -251,84 +235,53 @@ pub enum VideoAction {
 }
 
 impl Widget for Video {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope){
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut |cx, action| {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
-    }
-}
-
-impl Video {
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, VideoAction),
-    ) {
-        if let Event::VideoPlaybackPrepared(event) = event {
-            if event.video_id == self.id {
+        match event{
+            Event::VideoPlaybackPrepared(event)=> if event.video_id == self.id {
                 self.handle_playback_prepared(cx, event);
-                dispatch_action(cx, VideoAction::PlaybackPrepared);
+                cx.widget_action(uid, &scope.path, VideoAction::PlaybackPrepared);
             }
-        }
-
-        if let Event::VideoTextureUpdated(event) = event {
-            if event.video_id == self.id {
+            Event::VideoTextureUpdated(event)=>if event.video_id == self.id {
                 self.redraw(cx);
                 if self.playback_state == PlaybackState::Prepared {
                     self.playback_state = PlaybackState::Playing;
-                    dispatch_action(cx, VideoAction::PlaybackBegan);
+                    cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
                 }
-                dispatch_action(cx, VideoAction::TextureUpdated);
+                cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
             }
-        }
-
-        if let Event::VideoPlaybackCompleted(event) = event {
-            if event.video_id == self.id {
+            Event::VideoPlaybackCompleted(event) =>  if event.video_id == self.id {
                 if !self.is_looping {
                     self.playback_state = PlaybackState::Completed;
-                    dispatch_action(cx, VideoAction::PlaybackCompleted);
+                    cx.widget_action(uid, &scope.path, VideoAction::PlaybackCompleted);
                 }
             }
-        }
-
-        if let Event::VideoPlaybackResourcesReleased(event) = event {
-            if event.video_id == self.id {
+            Event::VideoPlaybackResourcesReleased(event) => if event.video_id == self.id {
                 self.playback_state = PlaybackState::Unprepared;
-                dispatch_action(cx, VideoAction::PlayerReset);
+                cx.widget_action(uid, &scope.path, VideoAction::PlayerReset);
             }
-        }
-
-        if let Event::TextureHandleReady(event) = event {
-            if event.texture_id == self.texture.clone().unwrap().texture_id() {
-                self.texture_handle = Some(event.handle);
-                self.maybe_prepare_playback(cx);
+            Event::TextureHandleReady(event) => {
+                if event.texture_id == self.texture.clone().unwrap().texture_id() {
+                    self.texture_handle = Some(event.handle);
+                    self.maybe_prepare_playback(cx);
+                }
             }
+            _=>()
         }
-
+        
         self.handle_gestures(cx, event);
         self.handle_activity_events(cx, event);
         self.handle_errors(event);
     }
+}
+
+impl Video {
 
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {

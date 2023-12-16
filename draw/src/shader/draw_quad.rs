@@ -53,7 +53,7 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 #[repr(C)]
 pub struct DrawQuad {
     #[rust] pub many_instances: Option<ManyInstances>,

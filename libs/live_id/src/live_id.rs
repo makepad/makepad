@@ -269,7 +269,7 @@ impl fmt::Display for LiveId {
                     write!(f, "{}", id)
                 }
                 else {
-                    write!(f, "IdNotFound {:016x}", self.0)
+                    write!(f, "{:016x}", self.0)
                 }
             })
         }

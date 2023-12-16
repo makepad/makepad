@@ -136,9 +136,9 @@ pub enum BuildCmd {
 }
 
 #[derive(Clone)]
-pub struct LogItemWrap {
+pub struct BuildClientMessageWrap {
     pub cmd_id: LiveId,
-    pub item: LogItem
+    pub message: BuildClientMessage
 }
 
 #[derive(Clone, Debug)]
@@ -161,5 +161,10 @@ pub enum LogItem {
     Bare(LogItemBare),
     Location(LogItemLocation),
     StdinToHost(String),
+}
+
+#[derive(Clone)]
+pub enum BuildClientMessage{
+    LogItem(LogItem),
     AuxChanHostEndpointCreated(crate::makepad_platform::cx_stdin::aux_chan::HostEndpoint),
 }
