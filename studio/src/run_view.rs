@@ -155,7 +155,7 @@ impl RunView {
                             self.animator_play(cx, id!(started.on));
                         }
                         self.redraw_countdown = 20;
-                       
+                        
                         Some(())
                     };
 

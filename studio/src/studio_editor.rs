@@ -14,7 +14,8 @@ live_design!{
     import makepad_code_editor::code_editor::CodeEditor;
     
     StudioEditor = {{StudioEditor}}{
-        editor: <CodeEditor>{}
+        editor: <CodeEditor>{
+        }
     }
 } 
  
