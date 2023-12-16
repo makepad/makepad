@@ -11,7 +11,7 @@ live_design!{
     CheckBoxBase = {{CheckBox}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawCheckBox {
     #[deref] draw_super: DrawQuad,
@@ -21,7 +21,7 @@ pub struct DrawCheckBox {
     #[live] selected: f32
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[live_ignore]
 #[repr(u32)]
 pub enum CheckType {
@@ -31,7 +31,7 @@ pub enum CheckType {
     None = shader_enum(4),
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct CheckBox {
     
     #[walk] walk: Walk,
@@ -42,7 +42,7 @@ pub struct CheckBox {
     #[live] label_walk: Walk,
     #[live] label_align: Align,
     
-    #[live] draw_check: DrawCheckBox,
+    #[redraw] #[live] draw_check: DrawCheckBox,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     
@@ -51,19 +51,13 @@ pub struct CheckBox {
     #[live] bind: String,
 }
 
-impl LiveHook for CheckBox {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, CheckBox)
-    }
-}
-
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum CheckBoxAction {
     Change(bool),
     None
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawLabelText {
     #[deref] draw_super: DrawText,
     #[live] hover: f32,
@@ -71,37 +65,6 @@ struct DrawLabelText {
 }
 
 impl CheckBox {
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
-        self.animator_handle_event(cx, event);
-        
-        match event.hits(cx, self.draw_check.area()) {
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            },
-            Hit::FingerDown(_fe) => {
-                if self.animator_in_state(cx, id!(selected.on)) {
-                    self.animator_play(cx, id!(selected.off));
-                    dispatch_action(cx, CheckBoxAction::Change(false));
-                }
-                else {
-                    self.animator_play(cx, id!(selected.on));
-                    dispatch_action(cx, CheckBoxAction::Change(true));
-                }
-            },
-            Hit::FingerUp(_fe) => {
-                
-            }
-            Hit::FingerMove(_fe) => {
-                
-            }
-            _ => ()
-        }
-    }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_check.begin(cx, walk, self.layout);
@@ -113,8 +76,8 @@ impl CheckBox {
 
 impl Widget for CheckBox {
     
-    fn widget_to_data(&self, _cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
-        match actions.single_action(self.widget_uid()) {
+    fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
+        match actions.find_widget_action_cast(self.widget_uid()) {
             CheckBoxAction::Change(v) => {
                 nodes.write_field_value(path, LiveValue::Bool(v));
                 true
@@ -131,22 +94,41 @@ impl Widget for CheckBox {
         }
     }
     
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_check.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        self.animator_handle_event(cx, event);
+                
+        match event.hits(cx, self.draw_check.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            },
+            Hit::FingerDown(_fe) => {
+                if self.animator_in_state(cx, id!(selected.on)) {
+                    self.animator_play(cx, id!(selected.off));
+                    cx.widget_action(uid, &scope.path, CheckBoxAction::Change(false));
+                }
+                else {
+                    self.animator_play(cx, id!(selected.on));
+                    cx.widget_action(uid, &scope.path, CheckBoxAction::Change(true));
+                }
+            },
+            Hit::FingerUp(_fe) => {
+                                
+            }
+            Hit::FingerMove(_fe) => {
+                                
+            }
+            _ => ()
+        }
     }
     
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
     
     fn text(&self) -> String {
@@ -158,15 +140,10 @@ impl Widget for CheckBox {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct CheckBoxRef(WidgetRef);
-
 impl CheckBoxRef {
-    pub fn changed(&self, actions: &WidgetActions) -> Option<bool> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let CheckBoxAction::Change(b) = item.action() {
-                return Some(b)
-            }
+    pub fn changed(&self, actions: &Actions) -> Option<bool> {
+        if let CheckBoxAction::Change(b) = actions.find_widget_action_cast(self.widget_uid()) {
+            return Some(b)
         }
         None
     }

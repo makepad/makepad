@@ -59,7 +59,7 @@ impl Cx {
             }
         }));
         get_win32_app_global().start_timer(0, 0.008, true);
-        cx.borrow_mut().call_event_handler(&Event::Construct);
+        cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
         get_win32_app_global().start_signal_poll();
         Win32App::event_loop();
@@ -143,7 +143,7 @@ impl Cx {
                 if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                     d3d11_windows.remove(index);
                     if d3d11_windows.len() == 0 {
-                        self.call_event_handler(&Event::Destruct);
+                        self.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit
                     }
                 }
@@ -362,7 +362,7 @@ impl Cx {
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest {request_id: _, request: _} => {
-                    //todo!()
+                    todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),

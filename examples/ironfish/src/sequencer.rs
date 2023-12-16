@@ -74,14 +74,14 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawButton {
     #[deref] draw_super: DrawQuad,
     #[live] active: f32,
     #[live] hover: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct SeqButton {
     #[live] draw_button: DrawButton,
     #[animator] animator: Animator,
@@ -92,9 +92,9 @@ pub struct SeqButton {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct Sequencer {
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[live] button: Option<LivePtr>,
     
@@ -107,11 +107,7 @@ pub struct Sequencer {
 }
 
 impl LiveHook for Sequencer {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, Sequencer)
-    }
-    
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for button in self.buttons.values_mut() {
             if let Some(index) = nodes.child_by_name(index, live_id!(button).as_field()) {
                 button.apply(cx, from, index, nodes);
@@ -121,7 +117,7 @@ impl LiveHook for Sequencer {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum SequencerAction {
     Change,
     None
@@ -141,13 +137,12 @@ impl SeqButton {
         self.animator_in_state(cx, id!(active.on))
     }
     
-    pub fn handle_event_with(
+    pub fn handle_event_changed(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         sweep_area: Area,
-        dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
-    ) {
+    )->bool {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_button.area().redraw(cx);
         }
@@ -164,16 +159,15 @@ impl SeqButton {
                 self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
+                self.animator_play(cx, id!(hover.on));
                 if self.animator_in_state(cx, id!(active.on)) {
                     self.animator_play(cx, id!(active.off));
-                    dispatch_action(cx, SequencerAction::Change);
+                    return true
                 }
                 else {
                     self.animator_play(cx, id!(active.on));
-                    dispatch_action(cx, SequencerAction::Change);
-                    
+                    return true
                 }
-                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerUp(se) => {
                 if !se.is_sweep && se.is_over && se.device.has_hovers() {
@@ -185,61 +179,15 @@ impl SeqButton {
             }
             _ => {}
         }
+        false
     }
 }
 
 
 impl Sequencer {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, Layout::default());
-        
-        let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
-        
-        let rect = cx.turtle().rect();
-        let sz = rect.size / dvec2(self.grid_x as f64, self.grid_y as f64);
-        let button = self.button;
-        for y in 0..self.grid_y {
-            for x in 0..self.grid_x {
-                let i = x + y * self.grid_x;
-                let pos = start_pos + dvec2(x as f64 * sz.x, y as f64 * sz.y);
-                let btn_id = LiveId(i as u64).into();
-                let btn = self.buttons.get_or_insert(cx, btn_id, | cx | {
-                    SeqButton::new_from_ptr(cx, button)
-                });
-                btn.x = x;
-                btn.y = y;
-                btn.draw_abs(cx, Rect {pos: pos, size: sz});
-            }
-        }
-        let used = dvec2(self.grid_x as f64 * self.button_size.x, self.grid_y as f64 * self.button_size.y);
-        
-        cx.turtle_mut().set_used(used.x, used.y);
-        
-        cx.end_turtle_with_area(&mut self.area);
-        self.buttons.retain_visible();
-    }
     
     pub fn _set_key_focus(&self, cx: &mut Cx) {
         cx.set_key_focus(self.area);
-    }
-    
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
-    ) {
-        for button in self.buttons.values_mut() {
-            button.handle_event_with(cx, event, self.area, dispatch_action);
-        }
-        
-        match event.hits(cx, self.area) {
-            Hit::KeyFocus(_) => {
-            }
-            Hit::KeyFocusLost(_) => {
-            }
-            _ => ()
-        }
     }
     
     pub fn get_steps(&self, cx: &Cx) -> Vec<u32> {
@@ -283,27 +231,49 @@ impl Sequencer {
 
 
 impl Widget for Sequencer {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        for button in self.buttons.values_mut() {
+            if button.handle_event_changed(cx, event, self.area){
+                cx.widget_action(uid, &scope.path, SequencerAction::Change);
+            }
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, Layout::default());
+                
+        let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
+                
+        let rect = cx.turtle().rect();
+        let sz = rect.size / dvec2(self.grid_x as f64, self.grid_y as f64);
+        let button = self.button;
+        for y in 0..self.grid_y {
+            for x in 0..self.grid_x {
+                let i = x + y * self.grid_x;
+                let pos = start_pos + dvec2(x as f64 * sz.x, y as f64 * sz.y);
+                let btn_id = LiveId(i as u64).into();
+                let btn = self.buttons.get_or_insert(cx, btn_id, | cx | {
+                    SeqButton::new_from_ptr(cx, button)
+                });
+                btn.x = x;
+                btn.y = y;
+                btn.draw_abs(cx, Rect {pos: pos, size: sz});
+            }
+        }
+        let used = dvec2(self.grid_x as f64 * self.button_size.x, self.grid_y as f64 * self.button_size.y);
+                
+        cx.turtle_mut().set_used(used.x, used.y);
+                
+        cx.end_turtle_with_area(&mut self.area);
+        self.buttons.retain_visible();
+        DrawStep::done()
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-    
-    fn widget_to_data(&self, cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
+    fn widget_to_data(&self, cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         let uid = self.widget_uid();
-        if actions.find_single_action(uid).is_some() {
+        if actions.find_widget_action(uid).is_some() {
             self.write_state_to_data(cx, nodes, path);
             true
         }
@@ -327,21 +297,18 @@ impl Widget for Sequencer {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SequencerRef(WidgetRef);
-
 impl SequencerRef {
     
-    pub fn clear_grid(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+    pub fn clear_grid(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {*step = 0};
             inner.set_steps(cx, &steps);
-            actions.push(WidgetActionItem::new(SequencerAction::Change.into(), inner.widget_uid()));
+            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
         }
     }
     
-    pub fn grid_down(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+    pub fn grid_down(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {
@@ -350,11 +317,11 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            actions.push(WidgetActionItem::new(SequencerAction::Change.into(), inner.widget_uid()));
+            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
         }
     }
     
-    pub fn grid_up(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+    pub fn grid_up(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {
@@ -363,7 +330,7 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            actions.push(WidgetActionItem::new(SequencerAction::Change.into(), inner.widget_uid()));
+            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
         }
     }
 }

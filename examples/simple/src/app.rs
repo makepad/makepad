@@ -2,8 +2,7 @@ use makepad_widgets::*;
 
 live_design!{
     import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    
+    import makepad_widgets::theme_desktop_dark::*; 
     App = {{App}} {
 
         ui: <Window>{
@@ -47,36 +46,32 @@ live_design!{
 
 app_main!(App);
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
-}
+ }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App {
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
     }
 }
 
-impl App{
-    async fn _do_network_request(_cx:CxRef, _ui:WidgetRef, _url:&str)->String{
-        "".to_string()
-    }
-}
-
-impl AppMain for App{
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
-        }
-        let actions = self.ui.handle_widget_event(cx, event);
-  
+impl MatchEvent for App{
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
             log!("BUTTON CLICKED {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
         }
+    }
+}
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
