@@ -7,10 +7,10 @@ pub struct OsWebSocket{
 
 impl OsWebSocket{
     pub fn send_message(&mut self, _message:WebSocketMessage)->Result<(),()>{
-        todo!();
+        todo!("Websockets not implemented yet on windows, we'll get there");
     }
                         
     pub fn open(_request: HttpRequest, _rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
-        todo!();
+        todo!("Websockets not implemented yet on windows, we'll get there");
     }
 }
