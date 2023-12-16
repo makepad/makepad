@@ -362,7 +362,7 @@ impl Cx {
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest {request_id: _, request: _} => {
-                    //todo!()
+                    todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
