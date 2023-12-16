@@ -9,6 +9,8 @@ pub struct FishBlock {
     pub library_id: u64,
     pub x: i32,
     pub y: i32,
+    pub h: i32,
+
     pub category: FishBlockCategory,
     pub block_type: String,
     pub parameters: Vec<FishParamStorage>,
