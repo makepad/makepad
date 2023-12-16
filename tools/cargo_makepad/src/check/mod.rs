@@ -52,6 +52,8 @@ const TOOLCHAINS:[(&'static str,BuildTy, Platform);16]=[
 pub fn check_crate(build_crate:&str, args: &[String])->Result<(),String>{
     
     let crate_dir = get_crate_dir(build_crate).expect("Cant find crate dir");
+    
+    println!("GOT CARGO DIR {:?}", crate_dir);
     // lets parse the toml
     let cargo_str = std::fs::read_to_string(&crate_dir.join("Cargo.toml")).expect("Cant find cargo.toml");
     let toml = makepad_toml_parser::parse_toml(&cargo_str).expect("Cant parse Cargo.toml");
