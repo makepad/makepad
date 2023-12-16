@@ -195,14 +195,16 @@ impl Cx {
                         if cxtexture.format.is_vec(){
                             cxtexture.update_vec_texture();
                         } else if cxtexture.format.is_video() {
-                            cxtexture.update_video_texture();
-                            let e = Event::TextureHandleReady(
-                                TextureHandleReadyEvent {
-                                    texture_id,
-                                    handle: cxtexture.os.gl_texture.unwrap()
-                                }
-                            );
-                            to_dispatch.push(e);
+                            let is_initial_setup = cxtexture.setup_video_texture();
+                            if is_initial_setup {
+                                let e = Event::TextureHandleReady(
+                                    TextureHandleReadyEvent {
+                                        texture_id,
+                                        handle: cxtexture.os.gl_texture.unwrap()
+                                    }
+                                );
+                                to_dispatch.push(e);
+                            }
                         }
                     }
                     for i in 0..sh.mapping.textures.len() {
@@ -984,7 +986,7 @@ impl CxTexture {
         }
     }
 
-    pub fn update_video_texture(&mut self) {
+    pub fn setup_video_texture(&mut self) -> bool {
         while unsafe { gl_sys::GetError() } != 0 {}
 
         if self.alloc_video(){
@@ -1010,7 +1012,9 @@ impl CxTexture {
 
                 assert_eq!(gl_sys::GetError(), 0, "UPDATE VIDEO TEXTURE ERROR {}", self.os.gl_texture.unwrap());
             }
+            return true;
         }
+        false
     }
     
     pub fn update_render_target(&mut self, width: usize, height: usize) {

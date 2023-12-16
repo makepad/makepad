@@ -51,6 +51,12 @@ pub fn derive_live_apply(input: TokenStream) -> TokenStream {
     derive_live_hook_impl(input)
 }
 
+#[proc_macro_derive(LiveRegister)]
+pub fn derive_live_register(input: TokenStream) -> TokenStream {
+    derive_live_register_impl(input)
+}
+
+
 #[proc_macro_derive(LiveRead)]
 pub fn derive_live_read(input: TokenStream) -> TokenStream {
     derive_live_read_impl(input)
@@ -71,15 +77,9 @@ pub fn live_object(input: TokenStream) -> TokenStream {
     live_object_impl(input)
 }
 
-
 #[proc_macro]
-pub fn generate_ref_cast_api(input: TokenStream) -> TokenStream {
-    generate_ref_cast_api_impl(input)
-}
-
-#[proc_macro]
-pub fn generate_clone_cast_api(input: TokenStream) -> TokenStream {
-    generate_clone_cast_api_impl(input)
+pub fn generate_any_trait_api(input: TokenStream) -> TokenStream {
+    generate_any_trait_api_impl(input)
 }
 
 #[proc_macro]

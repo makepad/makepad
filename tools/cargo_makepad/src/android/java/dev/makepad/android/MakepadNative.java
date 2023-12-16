@@ -38,5 +38,6 @@ public class MakepadNative {
     // video playback
     public static native void onVideoPlaybackPrepared(long videoId, int videoWidth, int videoHeight, long duration, VideoPlayer surfaceTexture);
     public static native void onVideoPlaybackCompleted(long videoId);
+    public static native void onVideoPlayerReleased(long videoId);
     public static native void onVideoDecodingError(long videoId, String error);
 }

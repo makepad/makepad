@@ -17,6 +17,7 @@ use {
             network::*,
             video_playback::*,
         },
+        action::ActionsBuf,
         animator::Ease,
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
@@ -26,10 +27,10 @@ use {
 };
 
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Event {
-    Construct,
-    Destruct,
+    Startup,
+    Shutdown,
     
     Pause,
     Resume,
@@ -72,14 +73,16 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
     
+    Actions(ActionsBuf),
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
-    NetworkResponses(Vec<NetworkResponseEvent>),
+    NetworkResponses(NetworkResponsesEvent),
 
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoTextureUpdated(VideoTextureUpdatedEvent),
     VideoPlaybackCompleted(VideoPlaybackCompletedEvent),
+    VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
  
@@ -88,10 +91,14 @@ pub enum Event {
 }
 
 impl Event{
+    pub fn name(&self)->&'static str{
+        Self::name_from_u32(self.to_u32())
+    }
+    
     pub fn name_from_u32(v:u32)->&'static str{
         match v{
-            1=>"Construct",
-            2=>"Destruct",
+            1=>"Startup",
+            2=>"Shutdown",
                 
             3=>"Pause",
             4=>"Resume",
@@ -137,23 +144,26 @@ impl Event{
             37=>"MidiPorts",
             38=>"VideoInputs",
             39=>"NetworkResponses",
-            
+
             40=>"VideoPlaybackPrepared",
             41=>"VideoTextureUpdated",
             42=>"VideoPlaybackCompleted",
             43=>"VideoDecodingError",
-             
+            44=>"VideoPlaybackResourcesReleased",
+            45=>"TextureHandleReady",
+            46=>"MouseLeave",
+            47=>"Actions",
+                                                 
             #[cfg(target_arch = "wasm32")]
-            44=>"ToWasmMsg",
-            45=>"MouseLeave",
+            48=>"ToWasmMsg",
             _=>panic!()
         }
     }
     
     pub fn to_u32(&self)->u32{
         match self{
-            Self::Construct=>1,
-            Self::Destruct=>2,
+            Self::Startup=>1,
+            Self::Shutdown=>2,
                             
             Self::Pause=>3,
             Self::Resume=>4,
@@ -204,11 +214,13 @@ impl Event{
             Self::VideoTextureUpdated(_)=>41,
             Self::VideoPlaybackCompleted(_)=>42,
             Self::VideoDecodingError(_)=>43,
-            Self::TextureHandleReady(_)=>44,
-            Self::MouseLeave(_)=>45,
+            Self::VideoPlaybackResourcesReleased(_)=>44,
+            Self::TextureHandleReady(_)=>45,
+            Self::MouseLeave(_)=>46,
+            Self::Actions(_)=>47,
                                      
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>46,
+            Self::ToWasmMsg(_)=>48,
         }
     }
 }

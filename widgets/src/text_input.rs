@@ -29,7 +29,7 @@ pub enum UndoGroup {
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawLabel {
     #[deref] draw_super: DrawText,
@@ -37,11 +37,11 @@ pub struct DrawLabel {
 }
 
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct TextInput {
     #[animator] animator: Animator,
     
-    #[live] draw_bg: DrawColor,
+    #[redraw] #[live] draw_bg: DrawColor,
     #[live] draw_select: DrawQuad,
     #[live] draw_cursor: DrawQuad,
     #[live] draw_text: DrawLabel,
@@ -75,37 +75,269 @@ pub struct TextInput {
     #[rust] cursor_head: usize
 }
 
-impl LiveHook for TextInput {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, TextInput)
-    }
-}
-
 impl Widget for TextInput {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-    /*fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
-        
-        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
-            self.set_internal(*v as f32);
-        }
-    }*/
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        self.animator_handle_event(cx, event);
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                cx.hide_text_ime();
+                cx.widget_action(uid, &scope.path, TextInputAction::Return(self.text.clone()));
+                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
+            }
+            Hit::KeyFocus(_) => {
+                self.undo_id += 1;
+                self.animator_play(cx, id!(focus.on));
+                // select all
+                if self.on_focus_select_all {
+                    self.select_all();
+                }
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
+            }
+            Hit::TextInput(te) => {
+                let mut input = String::new();
+                self.filter_input(&te.input, Some(&mut input));
+                if input.len() == 0 {
+                    return
+                }
+                let last_undo = self.last_undo.take();
+                if te.replace_last {
+                    self.undo_id += 1;
+                    self.create_undo(UndoGroup::TextInput(self.undo_id));
+                    if let Some(item) = last_undo {
+                        self.consume_undo_item(item);
+                    }
+                }
+                else {
+                    if input == " " {
+                        self.undo_id += 1;
+                    }
+                    // if this one follows a space, it still needs to eat it
+                    self.create_undo(UndoGroup::TextInput(self.undo_id));
+                }
+                if self.change(cx, &input){self.push_change_action(uid, scope, cx)}
+            }
+            Hit::TextCopy(ce) => {
+                self.undo_id += 1;
+                *ce.response.borrow_mut() = Some(self.selected_text());
+            }
+            Hit::TextCut(tc) => {
+                self.undo_id += 1;
+                if self.cursor_head != self.cursor_tail {
+                    *tc.response.borrow_mut() = Some(self.selected_text());
+                    self.create_undo(UndoGroup::Cut(self.undo_id));
+                    if self.change(cx, ""){self.push_change_action(uid, scope, cx)}
+                }
+            }
+            Hit::KeyDown(ke) => match ke.key_code {
+                                
+                KeyCode::Tab => {
+                    // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
+                }
+                KeyCode::ReturnKey => {
+                    cx.hide_text_ime();
+                    cx.widget_action(uid, &scope.path, TextInputAction::Return(self.text.clone()));
+                },
+                KeyCode::Escape => {
+                    cx.widget_action(uid, &scope.path, TextInputAction::Escape);
+                },
+                KeyCode::KeyZ if ke.modifiers.logo || ke.modifiers.shift => {
+                    if self.read_only {
+                        return
+                    }
+                    self.undo_id += 1;
+                    if ke.modifiers.shift {
+                        self.redo();
+                    }
+                    else {
+                        self.undo();
+                    }
+                    self.push_change_action(uid, scope, cx);
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::KeyA if ke.modifiers.logo || ke.modifiers.control => {
+                    self.undo_id += 1;
+                    self.cursor_tail = 0;
+                    self.cursor_head = self.text.chars().count();
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::ArrowLeft => if !ke.modifiers.logo {
+                                        
+                    self.undo_id += 1;
+                    if self.cursor_head>0 {
+                        self.cursor_head -= 1;
+                    }
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                },
+                KeyCode::ArrowRight => if !ke.modifiers.logo {
+                    self.undo_id += 1;
+                    if self.cursor_head < self.text.chars().count() {
+                        self.cursor_head += 1;
+                    }
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::ArrowDown => if !ke.modifiers.logo {
+                    self.undo_id += 1;
+                    // we need to figure out what is below our current cursor
+                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head) {
+                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y + self.draw_text.get_line_spacing() * 1.5)) {
+                            self.cursor_head = pos;
+                            if !ke.modifiers.shift {
+                                self.cursor_tail = self.cursor_head;
+                            }
+                            self.draw_bg.redraw(cx);
+                        }
+                    }
+                },
+                KeyCode::ArrowUp => if !ke.modifiers.logo {
+                    self.undo_id += 1;
+                    // we need to figure out what is below our current cursor
+                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head) {
+                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y - self.draw_text.get_line_spacing() * 0.5)) {
+                            self.cursor_head = pos;
+                            if !ke.modifiers.shift {
+                                self.cursor_tail = self.cursor_head;
+                            }
+                            self.draw_bg.redraw(cx);
+                        }
+                    }
+                },
+                KeyCode::Home => if !ke.modifiers.logo {
+                    self.undo_id += 1;
+                    self.cursor_head = 0;
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::End => if !ke.modifiers.logo {
+                    self.undo_id += 1;
+                    self.cursor_head = self.text.chars().count();
+                                        
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::Backspace => {
+                    self.create_undo(UndoGroup::Backspace(self.undo_id));
+                    if self.cursor_head == self.cursor_tail {
+                        if self.cursor_tail > 0 {
+                            self.cursor_tail -= 1;
+                        }
+                    }
+                    if self.change(cx, ""){self.push_change_action(uid, scope, cx)}
+                }
+                KeyCode::Delete => {
+                    self.create_undo(UndoGroup::Delete(self.undo_id));
+                    if self.cursor_head == self.cursor_tail {
+                        if self.cursor_head < self.text.chars().count() {
+                            self.cursor_head += 1;
+                        }
+                    }
+                    if self.change(cx, ""){self.push_change_action(uid, scope, cx)}
+                }
+                _ => ()
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Text);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            },
+            Hit::FingerDown(fe) => {
+                cx.set_cursor(MouseCursor::Text);
+                self.set_key_focus(cx);
+                // ok so we need to calculate where we put the cursor down.
+                //elf.
+                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
+                    //log!("{} {}", pos, fe.abs);
+                    let pos = pos.min(self.text.chars().count());
+                    if fe.tap_count == 1 {
+                        if pos != self.cursor_head {
+                            self.cursor_head = pos;
+                            if !fe.modifiers.shift {
+                                self.cursor_tail = pos;
+                            }
+                        }
+                        self.draw_bg.redraw(cx);
+                    }
+                    if fe.tap_count == 2 {
+                        // lets select the word.
+                        self.select_word(pos);
+                        self.double_tap_start = Some((self.cursor_head, self.cursor_tail));
+                    }
+                    if fe.tap_count == 3 {
+                        self.select_all();
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+            },
+            Hit::FingerUp(fe) => {
+                self.double_tap_start = None;
+                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
+                    let pos = pos.min(self.text.chars().count());
+                    if !fe.modifiers.shift && fe.tap_count == 1 && fe.was_tap() {
+                        self.cursor_head = pos;
+                        self.cursor_tail = self.cursor_head;
+                        self.draw_bg.redraw(cx);
+                    }
+                }
+                if fe.was_long_press() {
+                    cx.show_clipboard_actions(self.selected_text());
+                }
+                if fe.is_over && fe.device.has_hovers() {
+                    self.animator_play(cx, id!(hover.on));
+                }
+                else {
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            Hit::FingerMove(fe) => {
+                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
+                    let pos = pos.min(self.text.chars().count());
+                    if fe.tap_count == 2 {
+                        let (head, tail) = self.double_tap_start.unwrap();
+                        // ok so. now we do a word select and merge the selection
+                        self.select_word(pos);
+                        if head > self.cursor_head {
+                            self.cursor_head = head
+                        }
+                        if tail < self.cursor_tail {
+                            self.cursor_tail = tail;
+                        }
+                        self.draw_bg.redraw(cx);
+                    }
+                    else if fe.tap_count == 1 {
+                        if let Some(pos_start) = self.draw_text.closest_offset(cx, fe.abs_start) {
+                            let pos_start = pos_start.min(self.text.chars().count());
+                                                        
+                            self.cursor_head = pos_start;
+                            self.cursor_tail = self.cursor_head;
+                        }
+                        if pos != self.cursor_head {
+                            self.cursor_head = pos;
+                        }
+                        self.draw_bg.redraw(cx);
+                    }
+                }
+            }
+            _ => ()
+        }
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
-        WidgetDraw::done()
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+        self.draw_walk_text_input(cx, walk);
+        DrawStep::done()
     }
     
     
@@ -118,7 +350,7 @@ impl Widget for TextInput {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetAction)]
+#[derive(Clone, Debug, PartialEq, DefaultNone)]
 pub enum TextInputAction {
     Change(String),
     Return(String),
@@ -269,14 +501,17 @@ impl TextInput {
         }
     }
     
-    pub fn change(&mut self, cx: &mut Cx, s: &str, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
+    pub fn push_change_action(&self, uid:WidgetUid, scope:&Scope, cx: &mut Cx){
+        cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+    }
+    
+    pub fn change(&mut self, cx: &mut Cx, s: &str)->bool{
         if self.read_only {
-            return
+            return false
         }
-        
         self.replace_text(s);
-        dispatch_action(cx, TextInputAction::Change(self.text.clone()));
         self.draw_bg.redraw(cx);
+        true
     }
     
     pub fn set_key_focus(&self, cx: &mut Cx) {
@@ -315,271 +550,7 @@ impl TextInput {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
-        let mut actions = Vec::new();
-        self.handle_event_with(cx, event, &mut | _, a | actions.push(a));
-        actions
-    }
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
-        self.animator_handle_event(cx, event);
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
-                cx.hide_text_ime();
-                dispatch_action(cx, TextInputAction::Return(self.text.clone()));
-                dispatch_action(cx, TextInputAction::KeyFocusLost);
-            }
-            Hit::KeyFocus(_) => {
-                self.undo_id += 1;
-                self.animator_play(cx, id!(focus.on));
-                // select all
-                if self.on_focus_select_all {
-                    self.select_all();
-                }
-                self.draw_bg.redraw(cx);
-                dispatch_action(cx, TextInputAction::KeyFocus);
-            }
-            Hit::TextInput(te) => {
-                let mut input = String::new();
-                self.filter_input(&te.input, Some(&mut input));
-                if input.len() == 0 {
-                    return
-                }
-                let last_undo = self.last_undo.take();
-                if te.replace_last {
-                    self.undo_id += 1;
-                    self.create_undo(UndoGroup::TextInput(self.undo_id));
-                    if let Some(item) = last_undo {
-                        self.consume_undo_item(item);
-                    }
-                }
-                else {
-                    if input == " " {
-                        self.undo_id += 1;
-                    }
-                    // if this one follows a space, it still needs to eat it
-                    self.create_undo(UndoGroup::TextInput(self.undo_id));
-                }
-                self.change(cx, &input, dispatch_action);
-            }
-            Hit::TextCopy(ce) => {
-                self.undo_id += 1;
-                *ce.response.borrow_mut() = Some(self.selected_text());
-            }
-            Hit::TextCut(tc) => {
-                self.undo_id += 1;
-                if self.cursor_head != self.cursor_tail {
-                    *tc.response.borrow_mut() = Some(self.selected_text());
-                    self.create_undo(UndoGroup::Cut(self.undo_id));
-                    self.change(cx, "", dispatch_action);
-                }
-            }
-            Hit::KeyDown(ke) => match ke.key_code {
-                
-                KeyCode::Tab => {
-                    // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
-                }
-                KeyCode::ReturnKey => {
-                    cx.hide_text_ime();
-                    dispatch_action(cx, TextInputAction::Return(self.text.clone()));
-                },
-                KeyCode::Escape => {
-                    dispatch_action(cx, TextInputAction::Escape);
-                },
-                KeyCode::KeyZ if ke.modifiers.logo || ke.modifiers.shift => {
-                    if self.read_only {
-                        return
-                    }
-                    self.undo_id += 1;
-                    if ke.modifiers.shift {
-                        self.redo();
-                    }
-                    else {
-                        self.undo();
-                    }
-                    dispatch_action(cx, TextInputAction::Change(self.text.clone()));
-                    self.draw_bg.redraw(cx);
-                }
-                KeyCode::KeyA if ke.modifiers.logo || ke.modifiers.control => {
-                    self.undo_id += 1;
-                    self.cursor_tail = 0;
-                    self.cursor_head = self.text.chars().count();
-                    self.draw_bg.redraw(cx);
-                }
-                KeyCode::ArrowLeft => if !ke.modifiers.logo {
-                    
-                    self.undo_id += 1;
-                    if self.cursor_head>0 {
-                        self.cursor_head -= 1;
-                    }
-                    if !ke.modifiers.shift {
-                        self.cursor_tail = self.cursor_head;
-                    }
-                    self.draw_bg.redraw(cx);
-                },
-                KeyCode::ArrowRight => if !ke.modifiers.logo {
-                    self.undo_id += 1;
-                    if self.cursor_head < self.text.chars().count() {
-                        self.cursor_head += 1;
-                    }
-                    if !ke.modifiers.shift {
-                        self.cursor_tail = self.cursor_head;
-                    }
-                    self.draw_bg.redraw(cx);
-                }
-                KeyCode::ArrowDown => if !ke.modifiers.logo {
-                    self.undo_id += 1;
-                    // we need to figure out what is below our current cursor
-                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head) {
-                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y + self.draw_text.get_line_spacing() * 1.5)) {
-                            self.cursor_head = pos;
-                            if !ke.modifiers.shift {
-                                self.cursor_tail = self.cursor_head;
-                            }
-                            self.draw_bg.redraw(cx);
-                        }
-                    }
-                },
-                KeyCode::ArrowUp => if !ke.modifiers.logo {
-                    self.undo_id += 1;
-                    // we need to figure out what is below our current cursor
-                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head) {
-                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y - self.draw_text.get_line_spacing() * 0.5)) {
-                            self.cursor_head = pos;
-                            if !ke.modifiers.shift {
-                                self.cursor_tail = self.cursor_head;
-                            }
-                            self.draw_bg.redraw(cx);
-                        }
-                    }
-                },
-                KeyCode::Home => if !ke.modifiers.logo {
-                    self.undo_id += 1;
-                    self.cursor_head = 0;
-                    if !ke.modifiers.shift {
-                        self.cursor_tail = self.cursor_head;
-                    }
-                    self.draw_bg.redraw(cx);
-                }
-                KeyCode::End => if !ke.modifiers.logo {
-                    self.undo_id += 1;
-                    self.cursor_head = self.text.chars().count();
-                    
-                    if !ke.modifiers.shift {
-                        self.cursor_tail = self.cursor_head;
-                    }
-                    self.draw_bg.redraw(cx);
-                }
-                KeyCode::Backspace => {
-                    self.create_undo(UndoGroup::Backspace(self.undo_id));
-                    if self.cursor_head == self.cursor_tail {
-                        if self.cursor_tail > 0 {
-                            self.cursor_tail -= 1;
-                        }
-                    }
-                    self.change(cx, "", dispatch_action);
-                }
-                KeyCode::Delete => {
-                    self.create_undo(UndoGroup::Delete(self.undo_id));
-                    if self.cursor_head == self.cursor_tail {
-                        if self.cursor_head < self.text.chars().count() {
-                            self.cursor_head += 1;
-                        }
-                    }
-                    self.change(cx, "", dispatch_action);
-                }
-                _ => ()
-            }
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Text);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            },
-            Hit::FingerDown(fe) => {
-                cx.set_cursor(MouseCursor::Text);
-                self.set_key_focus(cx);
-                // ok so we need to calculate where we put the cursor down.
-                //elf.
-                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
-                    //log!("{} {}", pos, fe.abs);
-                    let pos = pos.min(self.text.chars().count());
-                    if fe.tap_count == 1 {
-                        if pos != self.cursor_head {
-                            self.cursor_head = pos;
-                            if !fe.modifiers.shift {
-                                self.cursor_tail = pos;
-                            }
-                        }
-                        self.draw_bg.redraw(cx);
-                    }
-                    if fe.tap_count == 2 {
-                        // lets select the word.
-                        self.select_word(pos);
-                        self.double_tap_start = Some((self.cursor_head, self.cursor_tail));
-                    }
-                    if fe.tap_count == 3 {
-                        self.select_all();
-                    }
-                    self.draw_bg.redraw(cx);
-                }
-            },
-            Hit::FingerUp(fe) => {
-                self.double_tap_start = None;
-                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
-                    let pos = pos.min(self.text.chars().count());
-                    if !fe.modifiers.shift && fe.tap_count == 1 && fe.was_tap() {
-                        self.cursor_head = pos;
-                        self.cursor_tail = self.cursor_head;
-                        self.draw_bg.redraw(cx);
-                    }
-                }
-                if fe.was_long_press() {
-                    cx.show_clipboard_actions(self.selected_text());
-                }
-                if fe.is_over && fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
-                }
-                else {
-                    self.animator_play(cx, id!(hover.off));
-                }
-            }
-            Hit::FingerMove(fe) => {
-                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
-                    let pos = pos.min(self.text.chars().count());
-                    if fe.tap_count == 2 {
-                        let (head, tail) = self.double_tap_start.unwrap();
-                        // ok so. now we do a word select and merge the selection
-                        self.select_word(pos);
-                        if head > self.cursor_head {
-                            self.cursor_head = head
-                        }
-                        if tail < self.cursor_tail {
-                            self.cursor_tail = tail;
-                        }
-                        self.draw_bg.redraw(cx);
-                    }
-                    else if fe.tap_count == 1 {
-                        if let Some(pos_start) = self.draw_text.closest_offset(cx, fe.abs_start) {
-                            let pos_start = pos_start.min(self.text.chars().count());
-                            
-                            self.cursor_head = pos_start;
-                            self.cursor_tail = self.cursor_head;
-                        }
-                        if pos != self.cursor_head {
-                            self.cursor_head = pos;
-                        }
-                        self.draw_bg.redraw(cx);
-                    }
-                }
-            }
-            _ => ()
-        }
-    }
-    
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    pub fn draw_walk_text_input(&mut self, cx: &mut Cx2d, walk: Walk) {
         
         self.draw_bg.begin(cx, walk, self.layout);
         let turtle_rect = cx.turtle().rect();
@@ -655,15 +626,10 @@ impl TextInput {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct TextInputRef(WidgetRef);
-
 impl TextInputRef {
-    pub fn changed(&self, actions: &WidgetActions) -> Option<String> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let TextInputAction::Change(val) = item.action() {
-                return Some(val);
-            }
+    pub fn changed(&self, actions: &Actions) -> Option<String> {
+        if let TextInputAction::Change(val) = actions.find_widget_action_cast(self.widget_uid()) {
+            return Some(val);
         }
         None
     }

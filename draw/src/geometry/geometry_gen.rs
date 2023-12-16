@@ -52,7 +52,7 @@ impl GeometryFields for GeometryQuad2D {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 pub struct GeometryQuad2D {
     #[rust] pub geometry_ref: Option<GeometryRef>,
     #[live(0.0)] pub x1: f32,

@@ -1,6 +1,6 @@
 
 use {
-    std::simd::*,
+    std::simd::{*,num::*,cmp::*},
     crate::mandelbrot::*
 };
 

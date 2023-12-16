@@ -12,17 +12,13 @@ live_design!{
     MultiWindowBase = {{MultiWindow}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct MultiWindow {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] windows: ComponentMap<LiveId, Window>,
 }
 
 impl LiveHook for MultiWindow {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,MultiWindow)
-    }
-    
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match from {
@@ -49,52 +45,54 @@ enum DrawState {
     Window(usize),
 }
 
-impl Widget for MultiWindow {
+impl WidgetNode for MultiWindow{
     fn redraw(&mut self, cx: &mut Cx) {
         for window in self.windows.values_mut() {
             window.redraw(cx);
         }
     }
-    
+    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
+        
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
         for window in self.windows.values_mut() {
             window.find_widgets(path, cached, results);
         }
     }
+        
+}
+
+impl Widget for MultiWindow {
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for window in self.windows.values_mut() {
-            window.handle_widget_event_with(cx, event, dispatch_action);
+            window.handle_event(cx, event, scope);
         }
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
+     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         self.draw_state.begin(cx, DrawState::Window(0));
         if cx.os_type().is_single_window(){
             if let Some(DrawState::Window(_)) = self.draw_state.get(){
                 if let Some(window) = self.windows.get_mut(&live_id!(mobile)){
-                    window.draw_widget(cx)?; 
+                    let walk = window.walk(cx);
+                    window.draw_walk(cx, scope, walk)?; 
                     self.draw_state.end();
                 }
             }
-            return WidgetDraw::done()
+            return DrawStep::done()
         }
         
         while let Some(DrawState::Window(step)) = self.draw_state.get() {
             
             if let Some(window) = self.windows.values_mut().nth(step){
-                window.draw_widget(cx)?; 
+                let walk = window.walk(cx);
+                window.draw_walk(cx, scope, walk)?; 
                 self.draw_state.set(DrawState::Window(step+1));
             }
             else{
                 self.draw_state.end();
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct MultiWindowRef(WidgetRef);

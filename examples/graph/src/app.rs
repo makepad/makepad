@@ -5,9 +5,9 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    import crate::vectorline::VectorLine;
     import crate::drawarc::VectorArc;  
     import crate::drawarc::VectorCornerArc;
+    import makepad_widgets::vectorline::*;
     
     App = {{App}} {
         ui: <Window> {
@@ -314,39 +314,20 @@ flow: Down,
 
 app_main!(App);
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
 }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App {
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        crate::vectorline::live_design(cx);
         crate::drawarc::live_design(cx);
     }
-    
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-    }
-}
-
-impl App {   
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-       
-
-        if let Event::Draw(event) = event {
-            let cx = &mut Cx2d::new(cx, event);
-            while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
-                
-            }
-            return
-        }
-
-        let _actions = self.ui.handle_widget_event(cx, event);
-        
-       
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

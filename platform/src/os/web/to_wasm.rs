@@ -162,6 +162,7 @@ pub struct ToWasmRedrawAll {}
 
 #[derive(ToWasm, Clone, Debug)]
 pub struct WTouchPoint {
+    pub time: f64,
     pub state: u32, // 0 stable, 1 start, 2 end, 3 move
     pub x: f64,
     pub y: f64,
@@ -182,6 +183,7 @@ impl From<WTouchPoint> for TouchPoint {
                 2=>TouchState::Move,
                 _=>TouchState::Stop,
             },
+            time: v.time, 
             uid: v.uid as u64,
             force: v.force,
             radius: dvec2(v.radius_x, v.radius_y),

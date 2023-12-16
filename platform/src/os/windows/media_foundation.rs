@@ -110,7 +110,7 @@ pub struct MediaFoundationAccess {
 impl MediaFoundationAccess {
     pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
         unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
+            //CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             let change_listener: IMMNotificationClient = MediaFoundationChangeListener { change_signal: change_signal.clone() }.into();
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();

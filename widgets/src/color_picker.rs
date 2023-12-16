@@ -112,7 +112,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawColorWheel {
     #[deref] draw_super: DrawQuad,
@@ -121,7 +121,7 @@ pub struct DrawColorWheel {
     #[live] val: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct ColorPicker {
     #[live] draw_wheel: DrawColorWheel,
     
