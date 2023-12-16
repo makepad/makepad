@@ -37,8 +37,10 @@ impl FishPatch {
         }
         let b = g.unwrap();
         //let g = self.get_block(id).unwrap();
-        b.x = x as i32;
-        b.y = y as i32;
+        let mult = 1;
+        let div = 1. / (mult as f64);
+        b.x = ((x * div) as i32).max(0) * mult;
+        b.y = ((y * div) as i32).max(0) * mult;
     }
 
     pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) {
@@ -95,7 +97,8 @@ impl FishPatch {
         for i in 0..7 {
             patch.presets.push(FishPreset::create_test_preset(i));
         }
-        for i in 0..5 {
+
+        for i in 0..8 {
             let fromidx = i as usize % patch.blocks.len();
             let toidx = (i as usize + 1) % patch.blocks.len();
             let fromblock = &patch.blocks[fromidx];
