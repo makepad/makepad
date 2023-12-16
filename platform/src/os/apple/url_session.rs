@@ -20,7 +20,7 @@ use {
         },
         web_socket::WebSocketMessage,
         event::{
-            NetworkResponseEvent,
+            NetworkResponseItem,
             NetworkResponse,
             HttpRequest,
             HttpResponse
@@ -163,7 +163,7 @@ impl OsWebSocket{
 }
 
 
-pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseEvent>) {
+pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseItem>) {
     unsafe {
         let ns_request = make_ns_request(&request);
                 
@@ -171,7 +171,7 @@ pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_se
         let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {
             if error != ptr::null_mut() {
                 let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
-                let message = NetworkResponseEvent {
+                let message = NetworkResponseItem {
                     request_id,
                     response: NetworkResponse::HttpRequestError(error_str)
                 };
@@ -202,7 +202,7 @@ pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_se
                 key = msg_send![key_enumerator, nextObject];
             }
                         
-            let message = NetworkResponseEvent {
+            let message = NetworkResponseItem {
                 request_id,
                 response: NetworkResponse::HttpResponse(response)
             };

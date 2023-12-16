@@ -11,7 +11,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawSplitter {
     #[deref] draw_super: DrawQuad,
@@ -57,7 +57,7 @@ impl SplitterAlign {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct Splitter {
     #[live(SplitterAxis::Horizontal)] pub axis: SplitterAxis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
@@ -73,20 +73,14 @@ pub struct Splitter {
     #[live] min_horizontal: f64,
     #[live] max_horizontal: f64,
     
-    #[live] draw_splitter: DrawSplitter,
+    #[redraw] #[live] draw_splitter: DrawSplitter,
     #[live] split_bar_size: f64,
     
     // framecomponent mode
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[live] a: WidgetRef,
-    #[live] b: WidgetRef,
+    #[find] #[live] a: WidgetRef,
+    #[find] #[live] b: WidgetRef,
     #[walk] walk: Walk,
-}
-
-impl LiveHook for Splitter{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,Splitter)
-    }
 }
 
 #[derive(Clone)]
@@ -97,45 +91,87 @@ enum DrawState {
 }
 
 impl Widget for Splitter {
-   fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let mut redraw = false;
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-            redraw = true;
-        });
-        self.a.handle_widget_event_with(cx, event, dispatch_action);
-        self.b.handle_widget_event_with(cx, event, dispatch_action);
-        if redraw {
-            self.a.redraw(cx);
-            self.b.redraw(cx);
+        
+        self.animator_handle_event(cx, event);
+        match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
+            Hit::FingerHoverIn(_) => {
+                match self.axis {
+                    SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
+                    SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
+                }
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            },
+            Hit::FingerDown(_) => {
+                match self.axis {
+                    SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
+                    SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
+                }
+                self.animator_play(cx, id!(hover.pressed));
+                self.drag_start_align = Some(self.align);
+            }
+            Hit::FingerUp(f) => {
+                self.drag_start_align = None;
+                if f.is_over && f.device.has_hovers() {
+                    self.animator_play(cx, id!(hover.on));
+                }
+                else {
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            Hit::FingerMove(f) => {
+                if let Some(drag_start_align) = self.drag_start_align {
+                    let delta = match self.axis {
+                        SplitterAxis::Horizontal => f.abs.x - f.abs_start.x,
+                        SplitterAxis::Vertical => f.abs.y - f.abs_start.y,
+                    };
+                    let new_position =
+                    drag_start_align.to_position(self.axis, self.rect) + delta;
+                    self.align = match self.axis {
+                        SplitterAxis::Horizontal => {
+                            let center = self.rect.size.x / 2.0;
+                            if new_position < center - 30.0 {
+                                SplitterAlign::FromA(new_position.max(self.min_vertical))
+                            } else if new_position > center + 30.0 {
+                                SplitterAlign::FromB((self.rect.size.x - new_position).max(self.max_vertical))
+                            } else {
+                                SplitterAlign::Weighted(new_position / self.rect.size.x)
+                            }
+                        }
+                        SplitterAxis::Vertical => {
+                            let center = self.rect.size.y / 2.0;
+                            if new_position < center - 30.0 {
+                                SplitterAlign::FromA(new_position.max(self.min_horizontal))
+                            } else if new_position > center + 30.0 {
+                                SplitterAlign::FromB((self.rect.size.y - new_position).max(self.max_horizontal))
+                            } else {
+                                SplitterAlign::Weighted(new_position / self.rect.size.y)
+                            }
+                        }
+                    };
+                    self.draw_splitter.redraw(cx);
+                    cx.widget_action(uid, &scope.path, SplitterAction::Changed {axis: self.axis, align: self.align});
+                    
+                    self.a.redraw(cx);
+                    self.b.redraw(cx);
+                }
+            }
+            _ => {}
         }
+        self.a.handle_event(cx, event, scope);
+        self.b.handle_event(cx, event, scope);
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx:&mut Cx){
-        self.draw_splitter.redraw(cx)
-    }
-    
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet) {
-        self.a.find_widgets(path, cached, results);
-        self.b.find_widgets(path, cached, results);
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
         if let Some(DrawState::DrawA) = self.draw_state.get() {
-            self.a.draw_widget(cx) ?;
+            self.a.draw(cx, scope) ?;
             self.draw_state.set(DrawState::DrawSplit);
         }
         if let Some(DrawState::DrawSplit) = self.draw_state.get() {
@@ -143,11 +179,11 @@ impl Widget for Splitter {
             self.draw_state.set(DrawState::DrawB)
         }
         if let Some(DrawState::DrawB) = self.draw_state.get() {
-            self.b.draw_widget(cx) ?;
+            self.b.draw(cx, scope) ?;
             self.end(cx);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -217,98 +253,25 @@ impl Splitter {
         self.align = align;
     }
     
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
-    ) {
-        self.animator_handle_event(cx, event);
-        match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
-        Hit::FingerHoverIn(_) => {
-            match self.axis {
-                SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
-                SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
-            }
-            self.animator_play(cx, id!(hover.on));
+    fn margin(&self) -> Margin {
+        match self.axis {
+            SplitterAxis::Horizontal => Margin {
+                left: 3.0,
+                top: 0.0,
+                right: 3.0,
+                bottom: 0.0,
+            },
+            SplitterAxis::Vertical => Margin {
+                left: 0.0,
+                top: 3.0,
+                right: 0.0,
+                bottom: 3.0,
+            },
         }
-        Hit::FingerHoverOut(_) => {
-            self.animator_play(cx, id!(hover.off));
-        },
-        Hit::FingerDown(_) => {
-            match self.axis {
-                SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
-                SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
-            }
-            self.animator_play(cx, id!(hover.pressed));
-            self.drag_start_align = Some(self.align);
-        }
-        Hit::FingerUp(f) => {
-            self.drag_start_align = None;
-            if f.is_over && f.device.has_hovers() {
-                self.animator_play(cx, id!(hover.on));
-            }
-            else {
-                self.animator_play(cx, id!(hover.off));
-            }
-        }
-        Hit::FingerMove(f) => {
-            if let Some(drag_start_align) = self.drag_start_align {
-                let delta = match self.axis {
-                    SplitterAxis::Horizontal => f.abs.x - f.abs_start.x,
-                    SplitterAxis::Vertical => f.abs.y - f.abs_start.y,
-                };
-                let new_position =
-                drag_start_align.to_position(self.axis, self.rect) + delta;
-                self.align = match self.axis {
-                    SplitterAxis::Horizontal => {
-                        let center = self.rect.size.x / 2.0;
-                        if new_position < center - 30.0 {
-                            SplitterAlign::FromA(new_position.max(self.min_vertical))
-                        } else if new_position > center + 30.0 {
-                            SplitterAlign::FromB((self.rect.size.x - new_position).max(self.max_vertical))
-                        } else {
-                            SplitterAlign::Weighted(new_position / self.rect.size.x)
-                        }
-                    }
-                    SplitterAxis::Vertical => {
-                        let center = self.rect.size.y / 2.0;
-                        if new_position < center - 30.0 {
-                            SplitterAlign::FromA(new_position.max(self.min_horizontal))
-                        } else if new_position > center + 30.0 {
-                            SplitterAlign::FromB((self.rect.size.y - new_position).max(self.max_horizontal))
-                        } else {
-                            SplitterAlign::Weighted(new_position / self.rect.size.y)
-                        }
-                    }
-                };
-                self.draw_splitter.redraw(cx);
-                dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
-            }
-        }
-        _ => {}
     }
 }
 
-fn margin(&self) -> Margin {
-    match self.axis {
-        SplitterAxis::Horizontal => Margin {
-            left: 3.0,
-            top: 0.0,
-            right: 3.0,
-            bottom: 0.0,
-        },
-        SplitterAxis::Vertical => Margin {
-            left: 0.0,
-            top: 3.0,
-            right: 0.0,
-            bottom: 3.0,
-        },
-    }
-}
-}
-
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum SplitterAction {
     None,
     Changed {axis: SplitterAxis, align: SplitterAlign},

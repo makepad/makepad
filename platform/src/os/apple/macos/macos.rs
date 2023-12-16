@@ -138,6 +138,7 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx: Rc<RefCell<Cx >>) {
+        
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
@@ -172,7 +173,8 @@ impl Cx {
         // lets set our signal poll timer
         // final bit of initflow
         get_macos_app_global().start_timer(0, 0.008, true);
-        cx.borrow_mut().call_event_handler(&Event::Construct);
+        
+        cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
         MacosApp::event_loop();
     }
@@ -231,7 +233,7 @@ impl Cx {
     ) -> EventFlow {
         
         if let  EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx){
-            self.call_event_handler(&Event::Destruct);
+            self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit
         }
         
@@ -324,7 +326,7 @@ impl Cx {
                 if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
                     metal_windows.remove(index);
                     if metal_windows.len() == 0 {
-                        self.call_event_handler(&Event::Destruct);
+                        self.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit
                     }
                 }
@@ -525,10 +527,12 @@ impl Cx {
                 CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     todo!()
                 }*/
-                CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
-                CxOsOp::EndVideoPlayback(_) => todo!(),
+                CxOsOp::MuteVideoPlayback(_) => todo!(),
+                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
+                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
                 CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
             }
         }

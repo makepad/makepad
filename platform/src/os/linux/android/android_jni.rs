@@ -100,6 +100,9 @@ pub enum FromJavaMessage {
     VideoPlaybackCompleted {
         video_id: u64,
     },
+    VideoPlayerReleased {
+        video_id: u64,
+    },
     VideoDecodingError {
         video_id: u64,
         error: String,
@@ -252,6 +255,8 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
     let action_masked = unsafe {ndk_utils::call_int_method!(env, event, "getActionMasked", "()I")};
     let action_index = unsafe {ndk_utils::call_int_method!(env, event, "getActionIndex", "()I")};
     let touch_count = unsafe {ndk_utils::call_int_method!(env, event, "getPointerCount", "()I")};
+
+    let time = unsafe {ndk_utils::call_long_method!(env, event, "getEventTime", "()J")} as i64;
     
     let mut touches = Vec::with_capacity(touch_count as usize);
     for touch_index in 0..touch_count {
@@ -282,6 +287,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
+            time: time as f64 / 1000.0,
         });
     }
     send_from_java_message(FromJavaMessage::Touch(touches));
@@ -454,6 +460,18 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackC
         video_id: video_id as u64,
     });
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlayerReleased(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    video_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::VideoPlayerReleased {
+        video_id: video_id as u64,
+    });
+}
+
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoDecodingError(
@@ -662,7 +680,7 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }  
 }
 
-pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, source: VideoSource, external_texture_handle: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
+pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, source: VideoSource, external_texture_handle: u32, autoplay: bool, should_loop: bool) {
     let video_source = match source {
         VideoSource::InMemory(data) => {
             let source = &*data;
@@ -689,13 +707,12 @@ pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id
         env,
         ACTIVITY,
         "prepareVideoPlayback",
-        "(JLjava/lang/Object;IZZZ)V",
+        "(JLjava/lang/Object;IZZ)V",
         video_id.get_value() as jni_sys::jlong,
         video_source,
         external_texture_handle as jni_sys::jint,
         autoplay as jni_sys::jboolean as std::ffi::c_uint,
-        should_loop as jni_sys::jboolean as std::ffi::c_uint,
-        pause_on_first_frame as jni_sys::jboolean as std::ffi::c_uint
+        should_loop as jni_sys::jboolean as std::ffi::c_uint
     );
 }
 
@@ -711,6 +728,8 @@ pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_
     );
 
     let updated = (**env).CallBooleanMethod.unwrap()(env, video_decoder_ref, mid_update_tex_image);
+    (**env).DeleteLocalRef.unwrap()(env, class);
+
     updated != 0
 }
 
@@ -722,7 +741,7 @@ pub unsafe fn to_java_pause_video_playback(env: *mut jni_sys::JNIEnv, video_id: 
         "(J)V",
         video_id
     );
-}    
+}
 
 pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
@@ -732,13 +751,33 @@ pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id:
         "(J)V",
         video_id
     );
-}    
+}
 
-pub unsafe fn to_java_end_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+pub unsafe fn to_java_mute_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
         ACTIVITY,
-        "endVideoPlayback",
+        "muteVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}
+
+pub unsafe fn to_java_unmute_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "unmuteVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}
+
+pub unsafe fn to_java_cleanup_video_playback_resources(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "cleanupVideoPlaybackResources",
         "(J)V",
         video_id
     );

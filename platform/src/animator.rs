@@ -77,6 +77,7 @@ pub struct KeyFrame {
     #[live(LiveValue::None)]
     pub value: LiveValue,
 }
+impl LiveRegister for KeyFrame{}
 
 #[derive(Copy, Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Play {
@@ -589,13 +590,8 @@ impl AnimatorAction {
 }
 impl Animator {
     
-    pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
-        if let Some(state) = self.state.take() {
-            state
-        }
-        else {
-            Vec::new()
-        }
+    pub fn swap_out_state(&mut self) -> Option<Vec<LiveNode>> {
+        self.state.take()
     }
     
     pub fn swap_in_state(&mut self, state: Vec<LiveNode>) {
@@ -928,7 +924,7 @@ impl Animator {
             cx.set_cursor(cursor);
         }
         // if we dont have a state object, lets create a template
-        let mut state = self.swap_out_state();
+        let mut state = self.swap_out_state().unwrap_or(Vec::new());
         // ok lets fetch the track
         let track = state_pair[0];
         
@@ -1043,7 +1039,7 @@ impl Animator {
             cx.set_cursor(cursor);
         }
         
-        let mut state = self.swap_out_state();
+        let mut state = self.swap_out_state().unwrap_or(Vec::new());
         if state.len() == 0 { // call cut first
             //self.cut_to(cx, state_id, index, nodes);
             //return

@@ -19,6 +19,13 @@ impl DataBindingStore {
         }
     }
     
+    pub fn from_nodes(nodes:Vec<LiveNode>)-> Self {
+        Self {
+            nodes,
+            mutated_by: Vec::new(),
+        }
+    }
+    
     pub fn set_mutated_by(&mut self, uid: WidgetUid) {
         if !self.mutated_by.contains(&uid) {
             self.mutated_by.push(uid);
@@ -26,40 +33,37 @@ impl DataBindingStore {
     }
 }
 
-enum Direction {
+enum Direction<'a> {
     DataToWidgets,
-    WidgetsToData
+    WidgetsToData(&'a Actions)
 }
 
 pub struct DataBindingMap<'a> {
     pub store: &'a mut DataBindingStore,
     pub debug_missing: bool,
     pub cx: &'a mut Cx,
-    direction: Direction,
-    pub actions: &'a WidgetActions,
+    direction: Direction<'a>,
     pub ui: &'a WidgetRef,
 }
 
 impl DataBindingStore {
-    pub fn data_to_widgets<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a WidgetActions, ui: &'a WidgetRef) -> DataBindingMap {
+    pub fn data_to_widgets<'a>(&'a mut self, cx: &'a mut Cx,  ui: &'a WidgetRef) -> DataBindingMap {
         DataBindingMap {
             debug_missing: false,
             direction: Direction::DataToWidgets,
             store: self,
             cx,
             ui,
-            actions
         }
     }
     
-    pub fn widgets_to_data<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a WidgetActions, ui: &'a WidgetRef) -> DataBindingMap {
+    pub fn widgets_to_data<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a Actions, ui: &'a WidgetRef) -> DataBindingMap {
         DataBindingMap {
             debug_missing: false,
-            direction: Direction::WidgetsToData,
+            direction: Direction::WidgetsToData(actions),
             store: self,
             cx,
             ui,
-            actions
         }
     }
 }
@@ -75,12 +79,22 @@ impl<'a> DataBindingMap<'a> {
     }
     
     pub fn is_widgets_to_data(&self) -> bool {
-        if let Direction::WidgetsToData = self.direction {true}else {false}
+        if let Direction::WidgetsToData(_) = self.direction {true}else {false}
     }
     
     pub fn bind(&mut self, data_id: &[LiveId], widgets: &[&[LiveId]]) {
         // alright so. we have a direction.
-        if self.is_data_to_widgets() {
+        if let Direction::WidgetsToData(actions) = self.direction{
+            if actions.len() == 0 {
+                return
+            }
+            for widget in self.ui.widgets(widgets).iter() {
+                if widget.widget_to_data(self.cx, actions, &mut self.store.nodes, data_id) {
+                    self.store.set_mutated_by(widget.widget_uid());
+                }
+            }
+        }
+        else {
             let mut any_found = false;
             for widget in self.ui.widgets(widgets).iter() {
                 any_found = true;
@@ -91,16 +105,6 @@ impl<'a> DataBindingMap<'a> {
             }
             if !any_found && self.debug_missing {
                 log!("No widgets found for databinding {:?}", widgets);
-            }
-        }
-        else {
-            if self.actions.len() == 0 {
-                return
-            }
-            for widget in self.ui.widgets(widgets).iter() {
-                if widget.widget_to_data(self.cx, self.actions, &mut self.store.nodes, data_id) {
-                    self.store.set_mutated_by(widget.widget_uid());
-                }
             }
         }
     }

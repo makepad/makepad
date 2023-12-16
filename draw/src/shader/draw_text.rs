@@ -68,7 +68,7 @@ live_design!{
     }
 }
 
-#[derive(Clone, Live, LiveHook)]
+#[derive(Clone, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct TextStyle {
     #[live()] pub font: Font,
@@ -194,7 +194,7 @@ pub struct TextGeom {
     pub ellip_pt: Option<(usize, f64, usize)>
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 #[repr(C)]
 pub struct DrawText {
     #[rust] pub many_instances: Option<ManyInstances>,

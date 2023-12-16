@@ -28,7 +28,7 @@ use {
         thread::Signal,
         event::{
             VirtualKeyboardEvent,
-            NetworkResponseEvent,
+            NetworkResponseItem,
             NetworkResponse,
             HttpResponse,
             TouchPoint,
@@ -46,6 +46,7 @@ use {
             VideoTextureUpdatedEvent,
             VideoDecodingErrorEvent,
             VideoPlaybackCompletedEvent,
+            VideoPlaybackResourcesReleasedEvent,
             HttpRequest,
             HttpMethod,
         },
@@ -66,7 +67,7 @@ impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
         
-        self.call_event_handler(&Event::Construct);
+        self.call_event_handler(&Event::Startup);
         self.redraw_all();
         
         self.start_network_live_file_watcher();
@@ -123,7 +124,7 @@ impl Cx {
                         self.call_event_handler(&Event::ClearAtlasses);
                     }
                     FromJavaMessage::Touch(mut touches) => {
-                        let time = self.os.timers.time_now();
+                        let time = touches[0].time;
                         let window = &mut self.windows[CxWindowPool::id_zero()];
                         let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                         for touch in &mut touches {
@@ -239,7 +240,7 @@ impl Cx {
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
                         let e = Event::NetworkResponses(vec![
-                            NetworkResponseEvent {
+                            NetworkResponseItem {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpResponse(HttpResponse::new(
                                     LiveId(metadata_id),
@@ -253,7 +254,7 @@ impl Cx {
                     }
                     FromJavaMessage::HttpRequestError {request_id, error, ..} => {
                         let e = Event::NetworkResponses(vec![
-                            NetworkResponseEvent {
+                            NetworkResponseItem {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpRequestError(error)
                             }
@@ -310,7 +311,16 @@ impl Cx {
                             }
                         );
                         self.call_event_handler(&e);
-                    }
+                    },
+                    FromJavaMessage::VideoPlayerReleased {video_id} => {
+                        self.os.video_surfaces.remove(&LiveId(video_id));
+                        let e = Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent {
+                                video_id: LiveId(video_id)
+                            }
+                        );
+                        self.call_event_handler(&e);
+                    },
                     FromJavaMessage::VideoDecodingError {video_id, error} => {
                         let e = Event::VideoDecodingError(
                             VideoDecodingErrorEvent {
@@ -337,7 +347,7 @@ impl Cx {
                         self.call_event_handler(&Event::Resume);
                     }
                     FromJavaMessage::Destroy => {
-                        self.call_event_handler(&Event::Destruct);
+                        self.call_event_handler(&Event::Shutdown);
                         self.os.quit = true;
                     }
                     FromJavaMessage::Init(_) => {
@@ -687,10 +697,10 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
-                CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame) => {
+                CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame);
+                        android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop);
                     }
                 },
                 CxOsOp::PauseVideoPlayback(video_id) => {
@@ -705,10 +715,22 @@ impl Cx {
                         android_jni::to_java_resume_video_playback(env, video_id);
                     }
                 },
-                CxOsOp::EndVideoPlayback(video_id) => {
+                CxOsOp::MuteVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();
-                        android_jni::to_java_end_video_playback(env, video_id);
+                        android_jni::to_java_mute_video_playback(env, video_id);
+                    }
+                },
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_unmute_video_playback(env, video_id);
+                    }
+                },
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_cleanup_video_playback_resources(env, video_id);
                     }
                 },
                 _ => ()

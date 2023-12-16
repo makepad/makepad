@@ -7,8 +7,12 @@ use {
 
 pub use crate::live_cx::LiveBody;
 
+pub trait LiveRegister{
+    fn live_register(_cx:&mut Cx){}
+}
+
 pub trait LiveHook {
-    fn before_live_design(_cx:&mut Cx){}
+    //fn before_live_design(_cx:&mut Cx){}
         
     fn apply_value_unknown(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if !nodes[index].origin.node_has_prefix() {
