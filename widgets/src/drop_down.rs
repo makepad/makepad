@@ -14,11 +14,11 @@ live_design!{
     DropDownBase = {{DropDown}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct DropDown {
     #[animator] animator: Animator,
     
-    #[live] draw_bg: DrawQuad,
+    #[redraw] #[live] draw_bg: DrawQuad,
     #[live] draw_text: DrawLabelText,
     
     #[walk] walk: Walk,
@@ -45,7 +45,7 @@ struct PopupMenuGlobal {
     map: Rc<RefCell<ComponentMap<LivePtr, PopupMenu >> >
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawLabelText {
     #[deref] draw_super: DrawText,
     #[live] focus: f32,
@@ -54,10 +54,6 @@ struct DrawLabelText {
 }
 
 impl LiveHook for DropDown {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, DropDown)
-    }
-    
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.popup_menu.is_none() || !from.is_from_doc() {
             return
@@ -75,7 +71,7 @@ impl LiveHook for DropDown {
         
     }
 }
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum DropDownAction {
     Select(usize, LiveValue),
     None
@@ -99,98 +95,6 @@ impl DropDown {
         self.is_open = false;
         self.draw_bg.redraw(cx);
         cx.sweep_unlock(self.draw_bg.area());
-    }
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DropDownAction)) {
-        self.animator_handle_event(cx, event);
-        
-        if self.is_open && self.popup_menu.is_some() {
-            // ok so how will we solve this one
-            let global = cx.global::<PopupMenuGlobal>().clone();
-            let mut map = global.map.borrow_mut();
-            let menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
-            let mut close = false;
-            menu.handle_event_with(cx, event, self.draw_bg.area(), &mut | cx, action | {
-                match action {
-                    PopupMenuAction::WasSweeped(_node_id) => {
-                        //dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
-                    }
-                    PopupMenuAction::WasSelected(node_id) => {
-                        //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
-                        self.selected_item = node_id.0.0 as usize;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
-                        self.draw_bg.redraw(cx);
-                        close = true;
-                    }
-                    _ => ()
-                }
-            });
-            if close {
-                self.set_closed(cx);
-            }
-            
-            // check if we clicked outside of the popup menu
-            if let Event::MouseDown(e) = event {
-                if !menu.menu_contains_pos(cx, e.abs) {
-                    self.set_closed(cx);
-                    self.animator_play(cx, id!(hover.off));
-                }
-            }
-        }
-        
-        match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
-            Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
-                self.set_closed(cx);
-                self.animator_play(cx, id!(hover.off));
-                self.draw_bg.redraw(cx);
-            }
-            Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
-            }
-            Hit::KeyDown(ke) => match ke.key_code {
-                KeyCode::ArrowUp => {
-                    if self.selected_item > 0 {
-                        self.selected_item -= 1;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
-                        self.set_closed(cx);
-                        self.draw_bg.redraw(cx);
-                    }
-                }
-                KeyCode::ArrowDown => {
-                    if self.values.len() > 0 && self.selected_item < self.values.len() - 1 {
-                        self.selected_item += 1;
-                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
-                        self.set_closed(cx);
-                        self.draw_bg.redraw(cx);
-                    }
-                },
-                _ => ()
-            }
-            Hit::FingerDown(_fe) => {
-                cx.set_key_focus(self.draw_bg.area());
-                self.set_open(cx);
-                self.animator_play(cx, id!(hover.pressed));
-            },
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            }
-            Hit::FingerUp(fe) => {
-                if fe.is_over {
-                    if fe.device.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
-                    }
-                }
-                else {
-                    self.animator_play(cx, id!(hover.off));
-                }
-            }
-            _ => ()
-        };
     }
     
     pub fn draw_text(&mut self, cx: &mut Cx2d, label: &str) {
@@ -244,8 +148,8 @@ impl DropDown {
 
 impl Widget for DropDown {
     
-    fn widget_to_data(&self, _cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
-        match actions.single_action(self.widget_uid()) {
+    fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
+        match actions.find_widget_action_cast(self.widget_uid()) {
             DropDownAction::Select(_, value) => {
                 nodes.write_field_value(path, value.clone());
                 true
@@ -268,27 +172,104 @@ impl Widget for DropDown {
         }
     }
     
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope)  {
+        self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+                
+        if self.is_open && self.popup_menu.is_some() {
+            // ok so how will we solve this one
+            let global = cx.global::<PopupMenuGlobal>().clone();
+            let mut map = global.map.borrow_mut();
+            let menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
+            let mut close = false;
+            menu.handle_event_with(cx, event, self.draw_bg.area(), &mut | cx, action | {
+                match action {
+                    PopupMenuAction::WasSweeped(_node_id) => {
+                        //dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
+                    }
+                    PopupMenuAction::WasSelected(node_id) => {
+                        //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
+                        self.selected_item = node_id.0.0 as usize;
+                        cx.widget_action(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
+                        self.draw_bg.redraw(cx);
+                        close = true;
+                    }
+                    _ => ()
+                }
+            });
+            if close {
+                self.set_closed(cx);
+            }
+                        
+            // check if we clicked outside of the popup menu
+            if let Event::MouseDown(e) = event {
+                if !menu.menu_contains_pos(cx, e.abs) {
+                    self.set_closed(cx);
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+        }
+                
+        match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                self.set_closed(cx);
+                self.animator_play(cx, id!(hover.off));
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
+            }
+            Hit::KeyDown(ke) => match ke.key_code {
+                KeyCode::ArrowUp => {
+                    if self.selected_item > 0 {
+                        self.selected_item -= 1;
+                        cx.widget_action(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
+                        self.set_closed(cx);
+                        self.draw_bg.redraw(cx);
+                    }
+                }
+                KeyCode::ArrowDown => {
+                    if self.values.len() > 0 && self.selected_item < self.values.len() - 1 {
+                        self.selected_item += 1;
+                        cx.widget_action(uid, &scope.path, DropDownAction::Select(self.selected_item, self.values.get(self.selected_item).cloned().unwrap_or(LiveValue::None)));
+                        self.set_closed(cx);
+                        self.draw_bg.redraw(cx);
+                    }
+                },
+                _ => ()
+            }
+            Hit::FingerDown(_fe) => {
+                cx.set_key_focus(self.draw_bg.area());
+                self.set_open(cx);
+                self.animator_play(cx, id!(hover.pressed));
+            },
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => {
+                if fe.is_over {
+                    if fe.device.has_hovers() {
+                        self.animator_play(cx, id!(hover.on));
+                    }
+                }
+                else {
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            _ => ()
+        };
     }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct DropDownRef(WidgetRef);
 
 impl DropDownRef {
     pub fn set_labels(&self, labels: Vec<String>) {
@@ -304,9 +285,9 @@ impl DropDownRef {
         }
     }
     
-    pub fn selected(&self, actions: &WidgetActions) -> Option<usize> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DropDownAction::Select(id, _) = item.action() {
+    pub fn selected(&self, actions: &Actions) -> Option<usize> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let DropDownAction::Select(id, _) = item.cast() {
                 return Some(id)
             }
         }

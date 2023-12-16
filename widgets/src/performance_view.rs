@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 
-use makepad_derive_widget::WidgetRef;
-
+use makepad_derive_widget::*;
 use crate::{label::*, makepad_draw::*, view::*, widget::*};
 
 live_design! {
@@ -76,7 +75,7 @@ live_design! {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct PerformanceView {
     #[deref]
     view: View,
@@ -87,10 +86,6 @@ pub struct PerformanceView {
 }
 
 impl LiveHook for PerformanceView {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PerformanceView);
-    }
-
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
         self.next_refresh_at = 2.0;
@@ -98,21 +93,9 @@ impl LiveHook for PerformanceView {
 }
 
 impl Widget for PerformanceView {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
-    }
-
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.view.find_widgets(path, cached, results);
-    }
-
-    fn walk(&mut self, cx: &mut Cx) -> Walk {
-        self.view.walk(cx)
-    }
-
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.view.draw_walk_widget(cx, walk);
-        WidgetDraw::done()
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope,  walk: Walk) -> DrawStep {
+        let _ = self.view.draw_walk(cx, scope, walk);
+        DrawStep::done()
     }
 }
 
@@ -141,13 +124,13 @@ impl PerformanceView {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct PerformanceLiveGraph {
-    #[deref]
+    #[redraw] #[deref]
     view: View,
-    #[live]
+    #[redraw] #[live]
     draw_graph: DrawColor,
-    #[live]
+    #[redraw] #[live]
     draw_bar: DrawColor,
     #[rust]
     data: VecDeque<i64>,
@@ -162,10 +145,6 @@ pub struct PerformanceLiveGraph {
 }
 
 impl LiveHook for PerformanceLiveGraph {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PerformanceLiveGraph);
-    }
-
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         self.label(id!(graph_label))
             .set_text(&format!("{}", self.graph_label));
@@ -173,24 +152,10 @@ impl LiveHook for PerformanceLiveGraph {
 }
 
 impl Widget for PerformanceLiveGraph {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
-        self.draw_graph.redraw(cx);
-        self.draw_bar.redraw(cx);
-    }
-
-    fn walk(&mut self, cx: &mut Cx) -> Walk {
-        self.view.walk(cx)
-    }
-
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.view.find_widgets(path, cached, results);
-    }
-
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.view.draw_walk_widget(cx, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
+        let _ = self.view.draw_walk(cx, scope, walk);
         let _ = self.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -269,9 +234,6 @@ impl PerformanceLiveGraph {
         self.draw_graph.end(cx);
     }
 }
-
-#[derive(Debug, Clone, PartialEq, WidgetRef)]
-pub struct PerformanceLiveGraphRef(WidgetRef);
 
 impl PerformanceLiveGraphRef {
     pub fn add_y_entry(&mut self, cx: &mut Cx, y_entry: i64) {

@@ -1,9 +1,15 @@
 //pub mod app_inner;
 //pub mod app_state;
 pub mod app;
+pub mod app_ui;
 pub mod build_manager;
 pub mod file_system;
-
+pub mod studio_editor;
+pub mod studio_file_tree;
+pub mod log_list;
+pub mod run_list;
+pub mod run_view;
+pub mod profiler;
 //pub use makepad_code_editor;
 
 pub use makepad_widgets::makepad_draw;

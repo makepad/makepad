@@ -134,35 +134,20 @@ live_design!{
 
 app_main!(App);
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
 
 }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App {
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        //cx.start_stdin_service();
     }
-}
-
-impl App {
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        
-        if let Event::Draw(event) = event {
-            //let dt = profile_start();
-            let cx = &mut Cx2d::new(cx, event);
-            while let Some(_next) = self.ui.draw_widget(cx).hook_widget() {
-              
-            }
-            //profile_end!(dt);
-            return
-        }
-        
-        let _actions = self.ui.handle_widget_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

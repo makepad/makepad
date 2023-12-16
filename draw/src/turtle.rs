@@ -5,7 +5,7 @@ use {
     }
 };
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Layout {
     #[live] pub scroll: DVec2,
@@ -31,7 +31,7 @@ impl Default for Layout{
     }
 }
 
-#[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Default, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Walk {
     #[live] pub abs_pos: Option<DVec2>,
@@ -40,14 +40,14 @@ pub struct Walk {
     #[live] pub height: Size,
 }
 
-#[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Align {
     #[live] pub x: f64,
     #[live] pub y: f64
 }
 
-#[derive(Clone, Copy, Default, Debug, Live)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveRegister)]
 #[live_ignore]
 pub struct Padding {
     #[live] pub left: f64,
@@ -459,7 +459,10 @@ impl<'a> Cx2d<'a> {
             match turtle.layout.flow {
                 Flow::Right=>turtle.update_height_max(pos.y, size.y + walk.margin.size().y),
                 Flow::Down=>turtle.update_width_max(pos.x, size.x + walk.margin.size().x),
-                _=>()
+                Flow::Overlay => { // do not walk
+                    turtle.update_width_max(pos.x, size.x);
+                    turtle.update_height_max(pos.y,size.y);
+                }
             }
             Rect {pos: pos + walk.margin.left_top(), size}
         }

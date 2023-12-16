@@ -1,41 +1,41 @@
 use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
     import do_not_run_bigfish::fish_theme::*;
-   
+    import crate::block_header_button::*;
 
-    FishBlockEditor = <View> 
+    FishBlockEditor = <View>
     {
-        margin: 20
+        margin: 0
         width: 200
         height: Fit
         flow: Down
         optimize: DrawList
-      
+
         title = <View>
         {
             show_bg: true
             flow: Down
             width: Fill
             height: Fit
-            padding: 4
-            draw_bg: 
+            padding: 0
+            draw_bg:
             {
-                fn pixel(self) -> vec4 
+                fn pixel(self) -> vec4
                 {
                     return mix(vec4(1,1,0.6,1), vec4(1,1,0.5,1),self.pos.y);
                 }
             },
-            <Label>
+            header = <BlockHeaderButton>
             {
-                text:"Synth Block", 
+
                 draw_text:
                 {
-                        color: #0
-                        text_style: <H2_TEXT_BOLD> {}
+                    color: #0
+                    text_style: <H2_TEXT_BOLD> {}
                 }
             }
         }
@@ -45,21 +45,20 @@ live_design!{
             width: Fill
             height: Fit
             flow: Down
-            padding: 4
-           
+            padding: {left: 30, right: 30, top: 4, bottom: 4}
+
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return mix(vec4(1,1,0.9,1), vec4(1,1,0.8,1),self.pos.y);
                 }
             }
-            <Label>{text:"Synth Block", draw_text:{color: #0, text_style: <H2_TEXT_REGULAR>{}}}
+
             <FishSlider>{text:"Slider!"}
-            <FishSlider>{text:"Slider!"}
-            <FishSlider>{text:"Slider!"}
-            <FishSlider>{text:"Slider!"}
+
+
         }
-      
     }
+
     FishBlockEditorGenerator = <FishBlockEditor>
     {
         title = {draw_bg: { fn pixel(self) -> vec4   { return mix(THEME_COLOR_GENERATOR, THEME_COLOR_GENERATOR_DARK, self.pos.y) }} }
@@ -68,7 +67,6 @@ live_design!{
 
     FishBlockEditorEffect = <FishBlockEditor>
     {
-
         title = {draw_bg: { fn pixel(self) -> vec4   { return mix(THEME_COLOR_EFFECT, THEME_COLOR_EFFECT_DARK, self.pos.y) }} }
         body = {draw_bg: { fn pixel(self) -> vec4 { return THEME_COLOR_EFFECT_FADE} }  }
     }
