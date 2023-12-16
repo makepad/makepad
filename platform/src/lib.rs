@@ -11,6 +11,7 @@ mod cx_api;
 
 #[macro_use]
 pub mod log;
+pub mod action;
 
 pub mod live_traits;
 pub mod live_cx;
@@ -151,7 +152,7 @@ pub use {
             HttpResponse,
             HttpMethod,
             NetworkResponse,
-            NetworkResponseEvent,
+            NetworkResponsesEvent,
             Margin,
             KeyCode,
             Event,
@@ -197,6 +198,13 @@ pub use {
             DragHitEvent,
             DropHitEvent,
         },
+        action::{
+            Action,
+            Actions,
+            ActionsBuf, 
+            ActionCast,
+            ActionTrait
+        },
         cursor::MouseCursor,
         macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
@@ -222,6 +230,7 @@ pub use {
         live_traits::{
             LiveHookDeref,
             LiveBody,
+            LiveRegister,
             LiveNew,
             LiveApply,
             LiveHook,

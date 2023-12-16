@@ -671,7 +671,10 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     writeln!(f, "{}{} <Bool> {}", node.id, pt, v).unwrap();
                 }
                 LiveValue::Int64(v) => {
-                    writeln!(f, "{}{} <Int> {}", node.id, pt, v).unwrap();
+                    writeln!(f, "{}{} <Int64> {}", node.id, pt, v).unwrap();
+                }
+                LiveValue::Uint64(v) => {
+                    writeln!(f, "{}{} <Uint64> {}", node.id, pt, v).unwrap();
                 }
                 LiveValue::Float64(v) => {
                     writeln!(f, "{}{} <Float> {}", node.id, pt, v).unwrap();

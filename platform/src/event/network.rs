@@ -3,13 +3,14 @@ use crate::makepad_live_id::*;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::BTreeMap;
 use std::str;
-use crate::event::Event;
 
 #[derive(Clone, Debug)]
-pub struct NetworkResponseEvent {
+pub struct NetworkResponseItem{
     pub request_id: LiveId,
     pub response: NetworkResponse,
 }
+
+pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 
 #[derive(Clone, Debug)]
 pub enum NetworkResponse{
@@ -33,25 +34,9 @@ impl<I> Iterator for NetworkResponseIter<I> where I: Iterator {
     }
 }
 
-impl Event{
-    pub fn network_responses(&self) -> NetworkResponseIter<std::slice::Iter<'_, NetworkResponseEvent>>{
-        match self{
-            Event::NetworkResponses(responses)=>{
-                NetworkResponseIter{
-                    iter:Some(responses.iter())
-                }
-            }
-            _=>{
-                // return empty thing
-                NetworkResponseIter{iter:None}
-            }
-        } 
-    }
-}
-
 pub struct NetworkResponseChannel {
-    pub receiver: Receiver<NetworkResponseEvent>,
-    pub sender: Sender<NetworkResponseEvent>,
+    pub receiver: Receiver<NetworkResponseItem>,
+    pub sender: Sender<NetworkResponseItem>,
 }
 
 impl Default for NetworkResponseChannel {

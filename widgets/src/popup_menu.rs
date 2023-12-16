@@ -2,7 +2,6 @@ use {
     crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
-        widget::*,
     },
 };
 
@@ -12,7 +11,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct PopupMenuItem {
     
     #[live] draw_bg: DrawQuad,
@@ -30,7 +29,7 @@ pub struct PopupMenuItem {
     #[live] selected: f32,
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 pub struct PopupMenu {
     #[live] draw_list: DrawList2d,
     #[live] menu_item: Option<LivePtr>,
@@ -64,7 +63,7 @@ pub enum PopupMenuItemAction {
     None
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum PopupMenuAction {
     WasSweeped(PopupMenuItemId),
     WasSelected(PopupMenuItemId),

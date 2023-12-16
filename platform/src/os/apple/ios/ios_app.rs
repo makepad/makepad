@@ -246,6 +246,7 @@ impl IosApp {
                 state,
                 abs,
                 uid,
+                time: self.time_now(),
                 rotation_angle: 0.0,
                 force: 0.0,
                 radius: dvec2(0.0, 0.0),

@@ -2,7 +2,7 @@
 pub use makepad_platform;
 pub use makepad_platform::*;
 pub use makepad_vector;
-
+pub mod match_event;
 pub mod overlay;
 pub mod cx_2d;
 pub mod draw_list_2d;
@@ -15,6 +15,7 @@ pub mod icon_atlas;
 mod owned_font_face;
  
 pub use crate::{
+    match_event::MatchEvent, 
     font_atlas::Font,
     turtle::{
         Layout,

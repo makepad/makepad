@@ -7,7 +7,7 @@ live_design!{
     ScrollBarsBase = {{ScrollBars}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBars {
     #[live] show_scroll_x: bool,
     #[live] show_scroll_y: bool,
@@ -38,12 +38,14 @@ impl ScrollBars {
         self.scroll
     }
 
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event,  dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
-        self.handle_main_event(cx, event, dispatch_action);
-        self.handle_scroll_event(cx, event, dispatch_action);
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event)->Vec<ScrollBarsAction> {
+        let mut actions = Vec::new();
+        self.handle_main_event(cx, event, &mut actions);
+        self.handle_scroll_event(cx, event, &mut actions);
+        actions
     }
     
-    pub fn handle_main_event(&mut self, cx: &mut Cx, event: &Event,  dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
+    pub fn handle_main_event(&mut self, cx: &mut Cx, event: &Event,  actions: &mut Vec<ScrollBarsAction> ) {
         if let Event::Trigger(te) = event{
             if let Some(triggers) = te.triggers.get(&self.area){
                 if let Some(trigger) = triggers.iter().find(|t| t.id == live_id!(scroll_focus_nav)){
@@ -60,11 +62,11 @@ impl ScrollBars {
         
         if self.show_scroll_x {
             let mut ret_x = None;
-            self.scroll_bar_x.handle_event_with(cx, event, &mut | cx, action | {
+            self.scroll_bar_x.handle_event_with(cx, event, &mut | _cx, action | {
                 match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_x = Some(scroll_pos);
-                        dispatch_action(cx, ScrollBarsAction::ScrollX(scroll_pos))
+                        actions.push(ScrollBarsAction::ScrollX(scroll_pos))
                     }
                     _ => ()
                 }
@@ -73,11 +75,11 @@ impl ScrollBars {
         }
         if self.show_scroll_y {
             let mut ret_y = None;
-            self.scroll_bar_y.handle_event_with(cx, event, &mut | cx, action | {
+            self.scroll_bar_y.handle_event_with(cx, event, &mut | _cx, action | {
                 match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_y = Some(scroll_pos);
-                        dispatch_action(cx, ScrollBarsAction::ScrollY(scroll_pos))
+                        actions.push(ScrollBarsAction::ScrollY(scroll_pos))
                     }
                     _ => ()
                 }
@@ -86,15 +88,15 @@ impl ScrollBars {
         }
     }
     
-    pub fn handle_scroll_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
+    pub fn handle_scroll_event(&mut self, cx: &mut Cx, event: &Event, actions: &mut Vec<ScrollBarsAction> ) {
         
         if self.show_scroll_x {
             let mut ret_x = None;
-            self.scroll_bar_x.handle_scroll_event(cx, event, self.area, &mut | cx, action | {
+            self.scroll_bar_x.handle_scroll_event(cx, event, self.area, &mut | _cx, action | {
                 match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_x = Some(scroll_pos);
-                        dispatch_action(cx, ScrollBarsAction::ScrollX(scroll_pos))
+                        actions.push(ScrollBarsAction::ScrollX(scroll_pos))
                     }
                     _ => ()
                 }
@@ -103,11 +105,11 @@ impl ScrollBars {
         }
         if self.show_scroll_y {
             let mut ret_y = None;
-            self.scroll_bar_y.handle_scroll_event(cx, event, self.area, &mut | cx, action | {
+            self.scroll_bar_y.handle_scroll_event(cx, event, self.area, &mut | _cx, action | {
                 match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_y = Some(scroll_pos);
-                        dispatch_action(cx, ScrollBarsAction::ScrollY(scroll_pos))
+                        actions.push(ScrollBarsAction::ScrollY(scroll_pos))
                     }
                     _ => ()
                 }

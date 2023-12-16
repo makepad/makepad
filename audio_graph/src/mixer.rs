@@ -20,11 +20,13 @@ struct Mixer {
     #[rust] from_ui: FromUISender<FromUI>,
 }
 
-impl LiveHook for Mixer {
-    fn before_live_design(cx:&mut Cx){
+impl LiveRegister for Mixer{
+    fn live_register(cx: &mut Cx){
         register_audio_component!(cx, Mixer)
     }
-
+}
+            
+impl LiveHook for Mixer {
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         self.inputs.get_or_insert(cx, nodes[index].id, | cx | {AudioComponentRef::new(cx)})
             .apply(cx, from, index, nodes)

@@ -105,7 +105,7 @@ impl Default for LaddFilterCoefficients {
     }
 }*/
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct OscSettings {
     #[live] osc_type: U32A<OscType>,
     #[live(0)] transpose: i64a,
@@ -115,13 +115,13 @@ pub struct OscSettings {
     #[live(0.0)] harmoniclfo: f32a,
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct SupersawSettings {
     #[live(0.0)] spread: f32a,
     #[live(0.0)] diffuse: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct EnvelopeSettings {
     #[live(0.0)] predelay: f32a,
     #[live(0.05)] a: f32a,
@@ -131,7 +131,7 @@ pub struct EnvelopeSettings {
     #[live(0.2)] r: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct LFOSettings {
     #[live(0.2)] rate: f32a,
     #[live(0)] keysync: u32a,
@@ -143,7 +143,7 @@ pub struct LFOState{
     phase: f32
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct FilterSettings {
     #[live] filter_type: U32A<FilterType>,
     #[live(0.5)] cutoff: f32a,
@@ -154,21 +154,21 @@ pub struct FilterSettings {
     #[live(0.0)] envelope_curvature: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct TouchSettings {
     #[live(0.5)] offset: f32a,
     #[live(1.0)] scale: f32a,
     #[live(0.5)] curve: f32a,
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct BitCrushSettings {
     #[live(false)] enable: boola,
 
     #[live(0.4)] amount: f32a,
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct DelaySettings {
     #[live(0.15)] delaysend: f32a,
     #[live(0.8)] delayfeedback: f32a,
@@ -177,13 +177,13 @@ pub struct DelaySettings {
     
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct ArpSettings {
     #[live(true)] enabled: boola,
     #[live(0)] octaves: i32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct SequencerSettings {
     #[live] pub steps: [u32a; 16],
     
@@ -210,7 +210,7 @@ impl SequencerSettings {
     }
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 #[live_ignore]
 pub struct IronFishSettings {
     #[live] supersaw1: SupersawSettings,
@@ -841,7 +841,7 @@ enum EnvelopePhase {
     FastRelease
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct ChorusSettings {
     #[live(0.1)] mindelay: f32a,
     #[live(0.4)] moddepth: f32a,
@@ -852,7 +852,7 @@ pub struct ChorusSettings {
 }
 
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct ReverbSettings {
     #[live(0.05)] mix: f32a,
     #[live(0.04)] feedback: f32a
@@ -1902,10 +1902,13 @@ pub struct IronFish {
     //#[rust] from_ui: FromUISender<FromUI>,
 }
 
-impl LiveHook for IronFish{
-    fn before_live_design(cx:&mut Cx){
+impl LiveRegister for IronFish{
+    fn live_register(cx:&mut Cx){
         register_audio_component!(cx, IronFish)
-    }
+    }    
+}
+
+impl LiveHook for IronFish{
     fn skip_apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
         if let ApplyFrom::UpdateFromDoc{..} = apply_from{
             log!("NOT HERE");

@@ -185,8 +185,8 @@ impl<'a> PngEncoder<'a> {
 
 #[test]
 fn test_simple_write() {
-    use zune_core::bit_depth::BitDepth;
-    use zune_core::colorspace::ColorSpace;
+    use makepad_zune_core::bit_depth::BitDepth;
+    use makepad_zune_core::colorspace::ColorSpace;
 
     use crate::PngDecoder;
 
