@@ -28,7 +28,7 @@ live_design!{
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq6(index - self.color_cycle*-1.0),1);
+            return vec4(Pal::iq2(index - self.color_cycle*-1.0),1);
         }
     }
     
@@ -443,8 +443,7 @@ pub enum MandelbrotAction {
 
 impl Widget for Mandelbrot {
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        let uid = self.widget_uid();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
         if let Some(ne) = self.next_frame.is_event(event) {
             // If we don't have a current layer, initiate the first tile render on the center of the screen
             if self.had_first_draw && self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
@@ -532,7 +531,7 @@ impl Widget for Mandelbrot {
         }
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::flow_right());
         // lets check our clip
                 
