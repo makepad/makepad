@@ -75,10 +75,12 @@ pub enum CxOsOp {
 
     HttpRequest{request_id: LiveId, request:HttpRequest},
 
-    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool, bool),
+    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
-    EndVideoPlayback(LiveId),
+    MuteVideoPlayback(LiveId),
+    UnmuteVideoPlayback(LiveId),
+    CleanupVideoPlaybackResources(LiveId),
     UpdateVideoSurfaceTexture(LiveId),
 }
 
@@ -434,8 +436,8 @@ impl Cx {
         });
     }
 */
-    pub fn prepare_video_playback(&mut self, video_id: LiveId, source: VideoSource, external_texture_id: u32, autoplay: bool, should_loop: bool, pause_on_first_frame: bool) {
-        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop, pause_on_first_frame));
+    pub fn prepare_video_playback(&mut self, video_id: LiveId, source: VideoSource, external_texture_id: u32, autoplay: bool, should_loop: bool) {
+        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(video_id, source, external_texture_id, autoplay, should_loop));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
@@ -446,8 +448,16 @@ impl Cx {
         self.platform_ops.push(CxOsOp::ResumeVideoPlayback(video_id));
     }
 
-    pub fn end_video_playback(&mut self, video_id: LiveId) {
-        self.platform_ops.push(CxOsOp::EndVideoPlayback(video_id));
+    pub fn mute_video_playback(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::MuteVideoPlayback(video_id));
+    }
+
+    pub fn unmute_video_playback(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::UnmuteVideoPlayback(video_id));
+    }
+
+    pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::CleanupVideoPlaybackResources(video_id));
     }
 
     pub fn println_resources(&self){

@@ -868,7 +868,7 @@ pub struct XlibAtoms {
 impl XlibAtoms {
     fn new(display: *mut x11_sys::Display) -> Self {
         unsafe {Self {
-            clipboard: x11_sys::XInternAtom(display, "CLIPBOARD\n".as_ptr() as *const _, 0),
+            clipboard: x11_sys::XInternAtom(display, "CLIPBOARD\0".as_ptr() as *const _, 0),
             net_wm_moveresize: x11_sys::XInternAtom(display, "_NET_WM_MOVERESIZE\0".as_ptr() as *const _, 0),
             wm_delete_window: x11_sys::XInternAtom(display, "WM_DELETE_WINDOW\0".as_ptr() as *const _, 0),
             wm_protocols: x11_sys::XInternAtom(display, "WM_PROTOCOLS\0".as_ptr() as *const _, 0),

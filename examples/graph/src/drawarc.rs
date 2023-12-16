@@ -91,7 +91,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawArc {
     #[deref]
@@ -106,7 +106,7 @@ struct DrawArc {
     #[calc] color: Vec4,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawCornerArc {
     #[deref]
@@ -180,11 +180,11 @@ pub enum Winding{
     CounterClockWise
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct VectorArc{
     #[walk] walk: Walk,
     #[live] draw_arc: DrawArc,
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[live(true)] contained: bool,
     
     #[live(15.0)] line_width: f64,
@@ -200,13 +200,12 @@ pub struct VectorArc{
    
 }
 
-
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct VectorCornerArc
 {
     #[walk] walk: Walk,
     #[live] draw_arc: DrawCornerArc,
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[live(true)] contained: bool,
     
     #[live(15.0)] line_width: f64,
@@ -215,237 +214,147 @@ pub struct VectorCornerArc
 }
 
 impl Widget for VectorCornerArc {
-    fn handle_widget_event_with(
-        &mut self,
-        _cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
-        let uid = self.widget_uid();
-       
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
-    }
-
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-}
-
-
-#[derive(Clone, WidgetAction)]
-pub enum VectorCornerArcAction {
-    None,
-}
-
-impl LiveHook for VectorCornerArc {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, VectorCornerArc)
-    }
-
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
-}
-
-impl Widget for VectorArc {
-    fn handle_widget_event_with(
-        &mut self,
-        _cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
-        let uid = self.widget_uid();
-       
-    }
-
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
-    }
-
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-}
-
-#[derive(Clone, WidgetAction)]
-pub enum ArcAction {
-    None,
-}
-
-impl LiveHook for VectorArc {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, VectorArc)
-    }
-
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
-}
-
-impl VectorArc {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // lets draw a bunch of quads
-        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
-
-        let mut rect = fullrect;
-        let hw = self.line_width / 2.;
-        
-        if self.contained{
-            rect.size.x -= self.line_width;
-            rect.size.y -= self.line_width;
-            rect.pos.x += hw;
-            rect.pos.y += hw;
-            
-        } else {
-            fullrect.size.x+= self.line_width;
-            fullrect.size.y += self.line_width;
-            fullrect.pos.x -= hw;
-            fullrect.pos.y -= hw;
-        }
-      
-        let maxpixels = 300. as f64;
-        let mut arc_start = self.arc_start;
-        let mut arc_end = self.arc_end;
-        let mut usecomputedcenter = true;
-
-        match self.arc_start_corner
-        {
-            QuadCorner::TopLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y )}
-            QuadCorner::TopRight => {arc_start = dvec2(rect.pos.x + rect.size.x, rect.pos.y )}
-            QuadCorner::BottomRight => {arc_start = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
-            QuadCorner::BottomLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
-         
-            _ => {usecomputedcenter = false;}
-        }
-        
-        match self.arc_end_corner
-        {
-            QuadCorner::TopLeft => {arc_end = dvec2(rect.pos.x, rect.pos.y )}
-            QuadCorner::TopRight => {arc_end = dvec2(rect.pos.x + rect.size.x, rect.pos.y )}
-            QuadCorner::BottomRight => {arc_end = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
-            QuadCorner::BottomLeft => {arc_end = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
-         
-            _ => {usecomputedcenter = false;}
-        }
-
-        let shortedge = min(rect.size.x, rect.size.y);
-        let mut computedradius = shortedge;
-        let mut arc_center = self.arc_center;
-
-            if usecomputedcenter
-            {
-                    let endcornerid = self.arc_end_corner as u32;
-                    let startcornerid = self.arc_start_corner as u32;
-                    
-                     let cornerdelta = ((self.arc_end_corner as i32 - self.arc_start_corner as i32 + 4) as u32)%4;
-                     match cornerdelta
-                     {
-                        0 => {}
-                        1 => {computedradius*=0.5;arc_center = (get_rect_corner_u32(rect, startcornerid) +  get_rect_corner_u32(rect, (startcornerid+1)%4)) /2.}
-                        2 => {arc_center = 
-                                match self.arc_winding
-                                { 
-                                    Winding::ClockWise => get_rect_corner_u32(rect, (startcornerid+3)%4), 
-                                    Winding::CounterClockWise => get_rect_corner_u32(rect, (startcornerid+1)%4)  
-                                
-                                }
-                            }
-                        3 => {computedradius*=0.5;arc_center = (get_rect_corner_u32(rect, startcornerid) +  get_rect_corner_u32(rect, (startcornerid+3)%4)) /2.}
-                        _ => {}
-                     }
-
-            }
-        
-        if  Winding::CounterClockWise == self.arc_winding
-        {
-            std::mem::swap(&mut arc_start, &mut arc_end);
-          
-        }
-        self.draw_arc.radius = computedradius as f32;//(arc_start - arc_center).length() as f32;
-        self.draw_arc.arc_a0 = (arc_start - arc_center).angle_in_radians() as f32;
-        self.draw_arc.arc_a1 = (arc_end - arc_center).angle_in_radians() as f32;
-        self.draw_arc.center = (arc_center - fullrect.pos).into_vec2();        
-        
-        self.draw_arc.color = self.color;
-        self.draw_arc.width = (self.line_width/2.) as f32;
-        self.draw_arc.draw_abs(cx,fullrect);
-            
-        
-    }
-
-
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-
-}
-
-
-impl VectorCornerArc {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
-
+                    
         let mut rect = fullrect;
         let hw = self.line_width / 2.;
-        
+                            
         if self.contained{
             rect.size.x -= self.line_width;
             rect.size.y -= self.line_width;
             rect.pos.x += hw;
             rect.pos.y += hw;
-            
+                                        
         } else {
             fullrect.size.x+= self.line_width;
             fullrect.size.y += self.line_width;
             fullrect.pos.x -= hw;
             fullrect.pos.y -= hw;
         }
-      
+                          
         let maxpixels = 300. as f64;
-       
+                           
         let mut usecomputedcenter = true;
-
-        let cmid = get_rect_corner_u32(rect, (self.corner as u32 + 2)%4);;
+                    
+        let cmid = get_rect_corner_u32(rect, (self.corner as u32 + 2)%4);
         let copp = get_rect_corner_u32(rect, (self.corner as u32 )%4);
-
+                    
         let mut center = cmid + (cmid-copp);
-        
-
+                            
+                    
         let shortedge = min(rect.size.x, rect.size.y);
         let mut computedradius = shortedge;
-      
-
-           
+                          
+                    
+                               
         self.draw_arc.radius = computedradius as f32;//(arc_start - arc_center).length() as f32;
         self.draw_arc.center = (center - fullrect.pos).into_vec2();        
         self.draw_arc.xysize = rect.size.into_vec2() * 2.;
         self.draw_arc.color = self.color;
         self.draw_arc.width = (self.line_width/2.) as f32;
         self.draw_arc.draw_abs(cx,fullrect);
-            
+                    
+        DrawStep::done()
+    }
+}
+
+impl Widget for VectorArc {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // lets draw a bunch of quads
+        let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
         
+        let mut rect = fullrect;
+        let hw = self.line_width / 2.;
+                
+        if self.contained{
+            rect.size.x -= self.line_width;
+            rect.size.y -= self.line_width;
+            rect.pos.x += hw;
+            rect.pos.y += hw;
+                        
+        } else {
+            fullrect.size.x+= self.line_width;
+            fullrect.size.y += self.line_width;
+            fullrect.pos.x -= hw;
+            fullrect.pos.y -= hw;
+        }
+              
+        let maxpixels = 300. as f64;
+        let mut arc_start = self.arc_start;
+        let mut arc_end = self.arc_end;
+        let mut usecomputedcenter = true;
+        
+        match self.arc_start_corner
+        {
+            QuadCorner::TopLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y )}
+            QuadCorner::TopRight => {arc_start = dvec2(rect.pos.x + rect.size.x, rect.pos.y )}
+            QuadCorner::BottomRight => {arc_start = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
+            QuadCorner::BottomLeft => {arc_start = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
+                     
+            _ => {usecomputedcenter = false;}
+        }
+                
+        match self.arc_end_corner
+        {
+            QuadCorner::TopLeft => {arc_end = dvec2(rect.pos.x, rect.pos.y )}
+            QuadCorner::TopRight => {arc_end = dvec2(rect.pos.x + rect.size.x, rect.pos.y )}
+            QuadCorner::BottomRight => {arc_end = dvec2(rect.pos.x + rect.size.x, rect.pos.y +rect.size.y)}
+            QuadCorner::BottomLeft => {arc_end = dvec2(rect.pos.x, rect.pos.y +rect.size.y)}
+                     
+            _ => {usecomputedcenter = false;}
+        }
+        
+        let shortedge = min(rect.size.x, rect.size.y);
+        let mut computedradius = shortedge;
+        let mut arc_center = self.arc_center;
+        
+        if usecomputedcenter
+        {
+            let endcornerid = self.arc_end_corner as u32;
+            let startcornerid = self.arc_start_corner as u32;
+                                
+            let cornerdelta = ((self.arc_end_corner as i32 - self.arc_start_corner as i32 + 4) as u32)%4;
+            match cornerdelta
+            {
+                0 => {}
+                1 => {computedradius*=0.5;arc_center = (get_rect_corner_u32(rect, startcornerid) +  get_rect_corner_u32(rect, (startcornerid+1)%4)) /2.}
+                2 => {arc_center = 
+                    match self.arc_winding
+                    { 
+                        Winding::ClockWise => get_rect_corner_u32(rect, (startcornerid+3)%4), 
+                        Winding::CounterClockWise => get_rect_corner_u32(rect, (startcornerid+1)%4)  
+                                                        
+                    }
+                }
+                3 => {computedradius*=0.5;arc_center = (get_rect_corner_u32(rect, startcornerid) +  get_rect_corner_u32(rect, (startcornerid+3)%4)) /2.}
+                _ => {}
+            }
+            
+        }
+                
+        if  Winding::CounterClockWise == self.arc_winding
+        {
+            std::mem::swap(&mut arc_start, &mut arc_end);
+                      
+        }
+        self.draw_arc.radius = computedradius as f32;//(arc_start - arc_center).length() as f32;
+        self.draw_arc.arc_a0 = (arc_start - arc_center).angle_in_radians() as f32;
+        self.draw_arc.arc_a1 = (arc_end - arc_center).angle_in_radians() as f32;
+        self.draw_arc.center = (arc_center - fullrect.pos).into_vec2();        
+                
+        self.draw_arc.color = self.color;
+        self.draw_arc.width = (self.line_width/2.) as f32;
+        self.draw_arc.draw_abs(cx,fullrect);
+                    
+        DrawStep::done()
     }
-
-
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-
 }
 

@@ -1,4 +1,4 @@
-pub struct FishProcessor
+pub struct _FishProcessor
 {
     
 }

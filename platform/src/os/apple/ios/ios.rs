@@ -169,7 +169,7 @@ impl Cx {
             }
             IosEvent::Init=>{
                 get_ios_app_global().start_timer(0, 0.008, true);
-                self.call_event_handler(&Event::Construct);
+                self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }
             IosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
@@ -311,10 +311,12 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::PrepareVideoPlayback(_, _, _, _, _, _) => todo!(),
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
-                CxOsOp::EndVideoPlayback(_) => todo!(),
+                CxOsOp::MuteVideoPlayback(_) => todo!(),
+                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
+                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
                 CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
             }
         }

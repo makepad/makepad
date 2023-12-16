@@ -32,7 +32,7 @@ enum ListDrawState {
     End {viewport: Rect}
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum PortalListAction {
     Scroll,
     None
@@ -45,9 +45,9 @@ impl ListDrawState {
         }
     }
 }
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct PortalList {
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     
@@ -90,10 +90,6 @@ struct AlignItem {
 }
 
 impl LiveHook for PortalList {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PortalList)
-    }
-    
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {
             self.templates.clear();
@@ -483,11 +479,8 @@ impl PortalList {
 
 
 impl Widget for PortalList {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
         let mut scroll_to = None;
@@ -510,14 +503,14 @@ impl Widget for PortalList {
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
             self.first_id = scroll_to;
             self.first_scroll = 0.0;
-            dispatch_action(cx, WidgetActionItem::new(PortalListAction::Scroll.into(), uid));
+            cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
             self.area.redraw(cx);
         }
         
         for item in self.items.values_mut() {
             let item_uid = item.widget_uid();
-            item.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
+            cx.group_widget_actions(uid, item_uid, |cx|{
+                item.handle_event(cx, event, scope)
             });
         }
         
@@ -529,7 +522,7 @@ impl Widget for PortalList {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, true);
-                        dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
+                        cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
                         self.scroll_state = ScrollState::Stopped;
@@ -546,7 +539,7 @@ impl Widget for PortalList {
                         }
                         else {
                             *next_frame = cx.new_next_frame();
-                            dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
+                            cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         }
                         self.area.redraw(cx);
                     }
@@ -571,7 +564,7 @@ impl Widget for PortalList {
                     self.detect_tail_in_draw = true;
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
-                    dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
+                    cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 },
                 
@@ -712,24 +705,19 @@ impl Widget for PortalList {
         }
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         // ok so if we are
         if let Some(_) = self.draw_state.get() {
             self.end(cx);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct PortalListRef(WidgetRef);
 
 impl PortalListRef {
     pub fn set_first_id_and_scroll(&self, id: u64, s: f64) {
@@ -769,22 +757,24 @@ impl PortalListRef {
         }
     }
     
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(u64, WidgetRef)> {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
         set
     }
     
-    fn items_with_actions_vec(&self, actions: &WidgetActions, set: &mut Vec<(u64, WidgetRef)>) {
+    fn items_with_actions_vec(&self, actions: &Actions, set: &mut Vec<(u64, WidgetRef)>) {
         let uid = self.widget_uid();
         for action in actions {
-            if action.container_uid == uid {
-                
-                if let Some(inner) = self.borrow() {
-                    for ((item_id, _), item) in inner.items.iter() {
-                        
-                        if item.widget_uid() == action.item_uid {
-                            set.push((*item_id, item.clone()))
+            if let Some(action) = action.as_widget_action(){
+                if let Some(group) = &action.group{
+                    if group.group_uid == uid{
+                        if let Some(inner) = self.borrow() {
+                            for ((item_id, _), item) in inner.items.iter() {
+                                if group.item_uid == item.widget_uid(){
+                                    set.push((*item_id, item.clone()))
+                                }
+                            }
                         }
                     }
                 }
@@ -792,9 +782,6 @@ impl PortalListRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct PortalListSet(WidgetSet);
 
 impl PortalListSet {
     pub fn set_first_id(&self, id: u64) {
@@ -804,7 +791,7 @@ impl PortalListSet {
     }
     
     
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(u64, WidgetRef)> {
         let mut set = Vec::new();
         for list in self.iter() {
             list.items_with_actions_vec(actions, &mut set)

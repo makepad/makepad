@@ -9,7 +9,7 @@ use {
 };
 
 live_design!{
-    ViewBase = {{View}} {}
+    ViewBase = {{View}} {debug:None}
 }
 
 // maybe we should put an enum on the bools like
@@ -22,6 +22,64 @@ pub enum ViewOptimize {
     Texture
 }
 
+#[derive(Live)]
+#[live_ignore]
+pub enum ViewDebug {
+    #[pick] None,
+    R,
+    G,
+    B,
+    M,
+    Margin,
+    P,
+    Padding,
+    A,
+    All,
+    #[live(Vec4::default())] Color(Vec4)
+}
+
+impl LiveHook for ViewDebug {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+        match &nodes[index].value {
+            LiveValue::Vec4(v) => {
+                *self = Self::Color(*v);
+                Some(index + 1)
+            }
+            LiveValue::Color(v) => {
+                *self = Self::Color(Vec4::from_u32(*v));
+                Some(index + 1)
+            }
+            LiveValue::Bool(v) => {
+                if *v{
+                    *self = Self::R;
+                }
+                else{
+                    *self = Self::None;
+                }
+                Some(index + 1)
+            }
+            LiveValue::Float64(v) => {
+                if *v != 0.0{
+                    *self = Self::R;
+                }
+                else{
+                    *self = Self::None;
+                }
+                Some(index + 1)
+            }
+            LiveValue::Int64(v) => {
+                if *v != 0{
+                    *self = Self::R;
+                }
+                else{
+                    *self = Self::None;
+                }
+                Some(index + 1)
+            }
+            _ => None
+        }
+    }
+}
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
@@ -44,7 +102,7 @@ impl ViewOptimize {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct View { // draw info per UI element
     #[live] pub draw_bg: DrawColor,
     
@@ -58,6 +116,7 @@ pub struct View { // draw info per UI element
     #[live] dpi_factor: Option<f64>,
     
     #[live] optimize: ViewOptimize,
+    #[live] debug: ViewDebug,    
     #[live] event_order: EventOrder,
     
     #[live(true)] visible: bool,
@@ -92,10 +151,6 @@ struct ViewTextureCache {
 }
 
 impl LiveHook for View {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, View)
-    }
-    
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {
             //self.children.clear();
@@ -163,14 +218,8 @@ impl LiveHook for View {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct ViewRef(WidgetRef);
 
-
-#[derive(Clone, WidgetSet)]
-pub struct ViewSet(WidgetSet);
-
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum ViewAction {
     None,
     FingerDown(FingerDownEvent),
@@ -181,45 +230,45 @@ pub enum ViewAction {
 }
 
 impl ViewRef {
-    pub fn finger_down(&self, actions: &WidgetActions) -> Option<FingerDownEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ViewAction::FingerDown(fd) = item.action() {
+    pub fn finger_down(&self, actions: &Actions) -> Option<FingerDownEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::FingerDown(fd) = item.cast() {
                 return Some(fd)
             }
         }
         None
     }
     
-    pub fn finger_up(&self, actions: &WidgetActions) -> Option<FingerUpEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ViewAction::FingerUp(fd) = item.action() {
+    pub fn finger_up(&self, actions: &Actions) -> Option<FingerUpEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::FingerUp(fd) = item.cast() {
                 return Some(fd)
             }
         }
         None
     }
     
-    pub fn finger_move(&self, actions: &WidgetActions) -> Option<FingerMoveEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ViewAction::FingerMove(fd) = item.action() {
+    pub fn finger_move(&self, actions: &Actions) -> Option<FingerMoveEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::FingerMove(fd) = item.cast() {
                 return Some(fd)
             }
         }
         None
     }
     
-    pub fn key_down(&self, actions: &WidgetActions) -> Option<KeyEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ViewAction::KeyDown(fd) = item.action() {
+    pub fn key_down(&self, actions: &Actions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::KeyDown(fd) = item.cast() {
                 return Some(fd)
             }
         }
         None
     }
     
-    pub fn key_up(&self, actions: &WidgetActions) -> Option<KeyEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ViewAction::KeyUp(fd) = item.action() {
+    pub fn key_up(&self, actions: &Actions) -> Option<KeyEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::KeyUp(fd) = item.cast() {
                 return Some(fd)
             }
         }
@@ -348,7 +397,7 @@ impl ViewSet {
         }
     }
     
-    pub fn finger_down(&self, actions: &WidgetActions) -> Option<FingerDownEvent> {
+    pub fn finger_down(&self, actions: &Actions) -> Option<FingerDownEvent> {
         for item in self.iter() {
             if let Some(e) = item.finger_down(actions) {
                 return Some(e)
@@ -357,7 +406,7 @@ impl ViewSet {
         None
     }
     
-    pub fn finger_up(&self, actions: &WidgetActions) -> Option<FingerUpEvent> {
+    pub fn finger_up(&self, actions: &Actions) -> Option<FingerUpEvent> {
         for item in self.iter() {
             if let Some(e) = item.finger_up(actions) {
                 return Some(e)
@@ -367,7 +416,7 @@ impl ViewSet {
     }
     
     
-    pub fn finger_move(&self, actions: &WidgetActions) -> Option<FingerMoveEvent> {
+    pub fn finger_move(&self, actions: &Actions) -> Option<FingerMoveEvent> {
         for item in self.iter() {
             if let Some(e) = item.finger_move(actions) {
                 return Some(e)
@@ -376,7 +425,7 @@ impl ViewSet {
         None
     }
     
-    pub fn key_down(&self, actions: &WidgetActions) -> Option<KeyEvent> {
+    pub fn key_down(&self, actions: &Actions) -> Option<KeyEvent> {
         for item in self.iter() {
             if let Some(e) = item.key_down(actions) {
                 return Some(e)
@@ -385,7 +434,7 @@ impl ViewSet {
         None
     }
     
-    pub fn key_up(&self, actions: &WidgetActions) -> Option<KeyEvent> {
+    pub fn key_up(&self, actions: &Actions) -> Option<KeyEvent> {
         for item in self.iter() {
             if let Some(e) = item.key_up(actions) {
                 return Some(e)
@@ -395,125 +444,11 @@ impl ViewSet {
     }
 }
 
-impl Widget for View {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        if self.animator_handle_event(cx, event).must_redraw() {
-            self.redraw(cx);
-        }
-        
-        if self.block_signal_event {
-            if let Event::Signal = event {
-                return
-            }
-        }
-        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-            let mut redraw = false;
-            scroll_bars.handle_main_event(cx, event, &mut | _, _ | {
-                // lets invalidate all children
-                redraw = true;
-            });
-            if redraw {
-                cx.redraw_area_and_children(self.area);
-            }
-        }
-        
-        match &self.event_order {
-            EventOrder::Up => {
-                for id in self.draw_order.iter().rev() {
-                    if let Some(child) = self.children.get_mut(id) {
-                        if child.is_visible() || !event.requires_visibility() {
-                            child.handle_widget_event_with(cx, event, dispatch_action);
-                        }
-                    }
-                }
-            }
-            EventOrder::Down => {
-                for id in self.draw_order.iter() {
-                    if let Some(child) = self.children.get_mut(id) {
-                        if child.is_visible() || !event.requires_visibility() {
-                            child.handle_widget_event_with(cx, event, dispatch_action);
-                        }
-                    }
-                }
-            }
-            EventOrder::List(list) => {
-                for id in list {
-                    if let Some(child) = self.children.get_mut(id) {
-                        if child.is_visible() || !event.requires_visibility() {
-                            child.handle_widget_event_with(cx, event, dispatch_action);
-                        }
-                    }
-                }
-            }
-        }
-        
-        
-        if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
-            match event.hits(cx, self.area()) {
-                Hit::FingerDown(e) => {
-                    if self.grab_key_focus {
-                        cx.set_key_focus(self.area());
-                    }
-                    dispatch_action(cx, ViewAction::FingerDown(e).into_action(uid));
-                    if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(down.on));
-                    }
-                }
-                Hit::FingerMove(e) => {
-                    dispatch_action(cx, ViewAction::FingerMove(e).into_action(uid))
-                }
-                Hit::FingerUp(e) => {
-                    dispatch_action(cx, ViewAction::FingerUp(e).into_action(uid));
-                    if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(down.off));
-                    }
-                }
-                Hit::FingerHoverIn(_) => {
-                    if let Some(cursor) = &self.cursor {
-                        cx.set_cursor(*cursor);
-                    }
-                    if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(hover.on));
-                    }
-                }
-                Hit::FingerHoverOut(_) => {
-                    if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(hover.off));
-                    }
-                }
-                Hit::KeyDown(e) => {
-                    dispatch_action(cx, ViewAction::KeyDown(e).into_action(uid))
-                }
-                Hit::KeyUp(e) => {
-                    dispatch_action(cx, ViewAction::KeyUp(e).into_action(uid))
-                }
-                _ => ()
-            }
-        }
-        
-        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-            scroll_bars.handle_scroll_event(cx, event, &mut | _, _ | {});
-        }
-    }
-    
-    fn is_visible(&self) -> bool {
-        self.visible
-    }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+impl WidgetNode for View{
+    fn walk(&mut self, _cx:&mut Cx)->Walk{
         self.walk
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk)
-    }
-    
+    }    
+        
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
         for child in self.children.values_mut() {
@@ -569,6 +504,315 @@ impl Widget for View {
     }
 }
 
+impl Widget for View {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.redraw(cx);
+        }
+        
+        if self.block_signal_event {
+            if let Event::Signal = event {
+                return
+            }
+        }
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            let mut actions = Vec::new();
+            scroll_bars.handle_main_event(cx, event, &mut actions);
+            if actions.len()>0{
+                cx.redraw_area_and_children(self.area);
+            };
+        }
+        
+        match &self.event_order {
+            EventOrder::Up => {
+                for id in self.draw_order.iter().rev() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            scope.with_id(*id,|scope|{
+                                child.handle_event(cx, event, scope);
+                            });
+                        }
+                    }
+                }
+            }
+            EventOrder::Down => {
+                for id in self.draw_order.iter() {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            scope.with_id(*id,|scope|{
+                                child.handle_event(cx, event, scope);
+                            })
+                        }
+                    }
+                }
+            }
+            EventOrder::List(list) => {
+                for id in list {
+                    if let Some(child) = self.children.get_mut(id) {
+                        if child.is_visible() || !event.requires_visibility() {
+                            scope.with_id(*id,|scope|{
+                                child.handle_event(cx, event, scope);
+                            })
+                        }
+                    }
+                }
+            }
+        }
+        
+        
+        if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
+            match event.hits(cx, self.area()) {
+                Hit::FingerDown(e) => {
+                    if self.grab_key_focus {
+                        cx.set_key_focus(self.area());
+                    }
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerDown(e));
+                    if self.animator.live_ptr.is_some() {
+                        self.animator_play(cx, id!(down.on));
+                    }
+                }
+                Hit::FingerMove(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerMove(e))
+                }
+                Hit::FingerUp(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerUp(e));
+                    if self.animator.live_ptr.is_some() {
+                        self.animator_play(cx, id!(down.off));
+                    }
+                }
+                Hit::FingerHoverIn(_) => {
+                    if let Some(cursor) = &self.cursor {
+                        cx.set_cursor(*cursor);
+                    }
+                    if self.animator.live_ptr.is_some() {
+                        self.animator_play(cx, id!(hover.on));
+                    }
+                }
+                Hit::FingerHoverOut(_) => {
+                    if self.animator.live_ptr.is_some() {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                }
+                Hit::KeyDown(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::KeyDown(e))
+                }
+                Hit::KeyUp(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::KeyUp(e))
+                }
+                _ => ()
+            }
+        }
+        
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.handle_scroll_event(cx, event, &mut Vec::new());
+        }
+    }
+    
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // the beginning state
+        if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
+            if !self.visible {
+                self.draw_state.end();
+                return DrawStep::done()
+            }
+                        
+            self.defer_walks.clear();
+                        
+            match self.optimize {
+                ViewOptimize::Texture => {
+                    let walk = self.walk_from_previous_size(walk);
+                    if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
+                        if let Some(texture_cache) = &self.texture_cache {
+                            self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
+                            let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
+                            rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
+                            self.draw_bg.draw_abs(cx, rect);
+                            self.area = self.draw_bg.area();
+                            cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0 / self.dpi_factor.unwrap_or(1.0));
+                        }
+                        return DrawStep::done()
+                    }
+                    // lets start a pass
+                    if self.texture_cache.is_none() {
+                        self.texture_cache = Some(ViewTextureCache {
+                            pass: Pass::new(cx),
+                            _depth_texture: Texture::new(cx),
+                            color_texture: Texture::new(cx)
+                        });
+                        let texture_cache = self.texture_cache.as_mut().unwrap();
+                        //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
+                        texture_cache.color_texture.set_format(cx, TextureFormat::RenderBGRAu8{
+                            size:TextureSize::Auto
+                        });
+                        texture_cache.pass.add_color_texture(cx, &texture_cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+                    }
+                    let texture_cache = self.texture_cache.as_mut().unwrap();
+                    cx.make_child_pass(&texture_cache.pass);
+                    cx.begin_pass(&texture_cache.pass, self.dpi_factor);
+                    self.draw_list.as_mut().unwrap().begin_always(cx)
+                }
+                ViewOptimize::DrawList => {
+                    let walk = self.walk_from_previous_size(walk);
+                    if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
+                        cx.walk_turtle_with_area(&mut self.area, walk);
+                        return DrawStep::done()
+                    }
+                }
+                _ => ()
+            }
+                        
+                        
+            // ok so.. we have to keep calling draw till we return LiveId(0)
+            let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+                scroll_bars.begin_nav_area(cx);
+                scroll_bars.get_scroll_pos()
+            }
+            else {
+                self.layout.scroll
+            };
+                        
+            if self.show_bg {
+                /*if let Some(image_texture) = &self.image_texture {
+                    self.draw_bg.draw_vars.set_texture(0, image_texture);
+                }*/
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+            }
+            else {
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+            }
+        }
+                
+        while let Some(DrawState::Drawing(step, resume)) = self.draw_state.get() {
+            if step < self.draw_order.len() {
+                let id = self.draw_order[step];
+                if let Some(child) = self.children.get_mut(&id) {
+                    if child.is_visible() {
+                        let walk = child.walk(cx);
+                        if resume {
+                            scope.with_id(id, |scope|{
+                                child.draw_walk(cx, scope, walk)
+                            })?;
+                        }
+                        else if let Some(fw) = cx.defer_walk(walk) {
+                            self.defer_walks.push((id, fw));
+                        }
+                        else {
+                            self.draw_state.set(DrawState::Drawing(step, true));
+                            scope.with_id(id, |scope|{
+                                child.draw_walk(cx, scope, walk)
+                            })?;
+                        }
+                    }
+                }
+                self.draw_state.set(DrawState::Drawing(step + 1, false));
+            }
+            else {
+                self.draw_state.set(DrawState::DeferWalk(0));
+            }
+        }
+                
+        while let Some(DrawState::DeferWalk(step)) = self.draw_state.get() {
+            if step < self.defer_walks.len() {
+                let (id, dw) = &mut self.defer_walks[step];
+                if let Some(child) = self.children.get_mut(&id) {
+                    let walk = dw.resolve(cx);
+                    scope.with_id(*id, |scope|{
+                        child.draw_walk(cx, scope, walk) 
+                    })?;
+                }
+                self.draw_state.set(DrawState::DeferWalk(step + 1));
+            }
+            else {
+                if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+                    scroll_bars.draw_scroll_bars(cx);
+                };
+                                
+                if self.show_bg {
+                    if self.optimize.is_texture() {
+                        panic!("dont use show_bg and texture cazching at the same time");
+                    }
+                    self.draw_bg.end(cx);
+                    self.area = self.draw_bg.area();
+                }
+                else {
+                    cx.end_turtle_with_area(&mut self.area);
+                };
+                                
+                if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+                    scroll_bars.set_area(self.area);
+                    scroll_bars.end_nav_area(cx);
+                };
+                                
+                if self.optimize.needs_draw_list() {
+                    let rect = self.area.get_rect(cx);
+                    self.view_size = Some(rect.size);
+                    self.draw_list.as_mut().unwrap().end(cx);
+                                        
+                    if self.optimize.is_texture() {
+                        let texture_cache = self.texture_cache.as_mut().unwrap();
+                        cx.end_pass(&texture_cache.pass);
+                        /*if cache.pass.id_equals(4){
+                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[1.0]);
+                        }
+                        else{
+                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[0.0]);
+                        }*/
+                        self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
+                        self.draw_bg.draw_abs(cx, rect);
+                        let area = self.draw_bg.area();
+                        let texture_cache = self.texture_cache.as_mut().unwrap();
+                        cx.set_pass_scaled_area(&texture_cache.pass, area, 2.0 / self.dpi_factor.unwrap_or(1.0));
+                    }
+                }
+                self.draw_state.end();
+            }
+        }
+        match &self.debug{
+            ViewDebug::None=>{},
+            ViewDebug::Color(c)=>{
+                cx.debug.area(self.area, *c);
+            }
+            ViewDebug::R=>{
+                cx.debug.area(self.area, Vec4::R);
+            }
+            ViewDebug::G=>{
+                cx.debug.area(self.area, Vec4::G);
+            }
+            ViewDebug::B=>{
+                cx.debug.area(self.area, Vec4::B);
+            }
+            ViewDebug::M | ViewDebug::Margin=>{
+                let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
+                let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::B);
+                cx.debug.area(self.area, Vec4::R);
+            }
+             ViewDebug::P | ViewDebug::Padding=>{
+                let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
+                let br = dvec2(-self.layout.padding.right,- self.layout.padding.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::G);
+                cx.debug.area(self.area, Vec4::R);
+            }
+            ViewDebug::All | ViewDebug::A=>{
+                let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
+                let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::B);
+                let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
+                let br = dvec2(-self.layout.padding.right,- self.layout.padding.bottom);
+                cx.debug.area_offset(self.area, tl, br, Vec4::G);
+                cx.debug.area(self.area, Vec4::R);
+            }
+        }
+        DrawStep::done()
+    }
+    
+}
+
 #[derive(Clone)]
 enum DrawState {
     Drawing(usize, bool),
@@ -598,162 +842,6 @@ impl View {
             height: if walk.height.is_fill() {walk.height}else {Size::Fixed(view_size.y)},
             margin: walk.margin
         }
-    }
-    
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        // the beginning state
-        if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
-            if !self.visible {
-                self.draw_state.end();
-                return WidgetDraw::done()
-            }
-            
-            self.defer_walks.clear();
-            
-            match self.optimize {
-                ViewOptimize::Texture => {
-                    let walk = self.walk_from_previous_size(walk);
-                    if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
-                        if let Some(texture_cache) = &self.texture_cache {
-                            self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
-                            let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
-                            rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
-                            self.draw_bg.draw_abs(cx, rect);
-                            self.area = self.draw_bg.area();
-                            cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0 / self.dpi_factor.unwrap_or(1.0));
-                        }
-                        return WidgetDraw::done()
-                    }
-                    // lets start a pass
-                    if self.texture_cache.is_none() {
-                        self.texture_cache = Some(ViewTextureCache {
-                            pass: Pass::new(cx),
-                            _depth_texture: Texture::new(cx),
-                            color_texture: Texture::new(cx)
-                        });
-                        let texture_cache = self.texture_cache.as_mut().unwrap();
-                        //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
-                        texture_cache.color_texture.set_format(cx, TextureFormat::RenderBGRAu8{
-                            size:TextureSize::Auto
-                        });
-                        texture_cache.pass.add_color_texture(cx, &texture_cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
-                    }
-                    let texture_cache = self.texture_cache.as_mut().unwrap();
-                    cx.make_child_pass(&texture_cache.pass);
-                    cx.begin_pass(&texture_cache.pass, self.dpi_factor);
-                    self.draw_list.as_mut().unwrap().begin_always(cx)
-                }
-                ViewOptimize::DrawList => {
-                    let walk = self.walk_from_previous_size(walk);
-                    if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
-                        cx.walk_turtle_with_area(&mut self.area, walk);
-                        return WidgetDraw::done()
-                    }
-                }
-                _ => ()
-            }
-            
-            
-            // ok so.. we have to keep calling draw till we return LiveId(0)
-            let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-                scroll_bars.begin_nav_area(cx);
-                scroll_bars.get_scroll_pos()
-            }
-            else {
-                self.layout.scroll
-            };
-            
-            if self.show_bg {
-                /*if let Some(image_texture) = &self.image_texture {
-                    self.draw_bg.draw_vars.set_texture(0, image_texture);
-                }*/
-                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
-            }
-            else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
-            }
-        }
-        
-        while let Some(DrawState::Drawing(step, resume)) = self.draw_state.get() {
-            if step < self.draw_order.len() {
-                let id = self.draw_order[step];
-                if let Some(child) = self.children.get_mut(&id) {
-                    if child.is_visible() {
-                        let walk = child.walk(cx);
-                        if resume {
-                            child.draw_walk_widget(cx, walk) ?;
-                        }
-                        else if let Some(fw) = cx.defer_walk(walk) {
-                            self.defer_walks.push((id, fw));
-                        }
-                        else {
-                            self.draw_state.set(DrawState::Drawing(step, true));
-                            child.draw_walk_widget(cx, walk) ?;
-                        }
-                    }
-                }
-                self.draw_state.set(DrawState::Drawing(step + 1, false));
-            }
-            else {
-                self.draw_state.set(DrawState::DeferWalk(0));
-            }
-        }
-        
-        while let Some(DrawState::DeferWalk(step)) = self.draw_state.get() {
-            if step < self.defer_walks.len() {
-                let (id, dw) = &mut self.defer_walks[step];
-                if let Some(child) = self.children.get_mut(&id) {
-                    let walk = dw.resolve(cx);
-                    child.draw_walk_widget(cx, walk) ?;
-                }
-                self.draw_state.set(DrawState::DeferWalk(step + 1));
-            }
-            else {
-                if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-                    scroll_bars.draw_scroll_bars(cx);
-                };
-                
-                if self.show_bg {
-                    if self.optimize.is_texture() {
-                        panic!("dont use show_bg and texture cazching at the same time");
-                    }
-                    self.draw_bg.end(cx);
-                    self.area = self.draw_bg.area();
-                }
-                else {
-                    cx.end_turtle_with_area(&mut self.area);
-                };
-                
-                if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-                    scroll_bars.set_area(self.area);
-                    scroll_bars.end_nav_area(cx);
-                };
-                
-                if self.optimize.needs_draw_list() {
-                    let rect = self.area.get_rect(cx);
-                    self.view_size = Some(rect.size);
-                    self.draw_list.as_mut().unwrap().end(cx);
-                    
-                    if self.optimize.is_texture() {
-                        let texture_cache = self.texture_cache.as_mut().unwrap();
-                        cx.end_pass(&texture_cache.pass);
-                        /*if cache.pass.id_equals(4){
-                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[1.0]);
-                        }
-                        else{
-                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[0.0]);
-                        }*/
-                        self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
-                        self.draw_bg.draw_abs(cx, rect);
-                        let area = self.draw_bg.area();
-                        let texture_cache = self.texture_cache.as_mut().unwrap();
-                        cx.set_pass_scaled_area(&texture_cache.pass, area, 2.0 / self.dpi_factor.unwrap_or(1.0));
-                    }
-                }
-                self.draw_state.end();
-            }
-        }
-        WidgetDraw::done()
     }
     
     pub fn child_count(&self) -> usize {

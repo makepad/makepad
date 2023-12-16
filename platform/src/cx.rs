@@ -31,6 +31,7 @@ use {
             CxKeyboard,
             NextFrame,
         },
+        action::ActionsBuf,
         cx_api::CxOsOp,
         area::Area,
         gpu_info::GpuInfo,
@@ -86,6 +87,8 @@ pub struct Cx {
     pub (crate) platform_ops: Vec<CxOsOp>,
     
     pub (crate) new_next_frames: HashSet<NextFrame>,
+    
+    pub (crate) new_actions: ActionsBuf,
     
     pub (crate) dependencies: HashMap<String, CxDependency>,
     
@@ -225,6 +228,7 @@ impl Cx {
             draw_shaders: Default::default(),
             
             new_draw_event: Default::default(),
+            new_actions: Default::default(),
             
             start_time: Instant::now(),
             

@@ -4,7 +4,7 @@ live_design!{
     TabCloseButtonBase = {{TabCloseButton}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct TabCloseButton {
     #[live] draw_button: DrawQuad,
     #[animator] animator: Animator,

@@ -44,7 +44,7 @@ pub enum FileRequest {
 
 /// A type for representing either a response or a notification from the collab server.
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum FileClientAction {
+pub enum FileClientMessage {
     Response(FileResponse),
     Notification(FileNotification),
 }

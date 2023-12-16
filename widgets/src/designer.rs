@@ -1,4 +1,5 @@
 use crate::{
+    makepad_derive_widget::*,
     makepad_draw::*,
     file_tree::*,
     view::View,
@@ -23,7 +24,6 @@ live_design!{
                 draw_bg:{color:#5}
                 label = <Label> {text: "HI", draw_text:{color:#f}}
             }
-            inner = <HookWidget> {}
         }
         <Splitter> {
             align: FromStart(300),
@@ -36,7 +36,6 @@ live_design!{
                 draw_bg: {color: #4}
                 width: Fill, height: Fill
                 flow: Down
-                design = <HookWidget> {}
             },
         }
     }
@@ -59,7 +58,7 @@ enum OutlineNode {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct Designer {
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,
@@ -68,9 +67,6 @@ pub struct Designer {
 }
 
 impl LiveHook for Designer {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Designer)
-    }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         // lets take the doc we need (app_mobile for instance)
@@ -136,8 +132,8 @@ impl Designer {
                 });
                 container.widget(id!(label)).set_text(&format!("{}=<{}>", name, class));
                 // lets draw this thing in a neat little container box with a title bar
-                while let Some(_) = container.draw_widget(cx).hook_widget() {
-                    widget.draw_widget_all(cx);
+                while let Some(_) = container.draw(cx, &mut Scope::empty()).step() {
+                    widget.draw_all(cx, &mut Scope::empty());
                 }
             }
         }
@@ -173,21 +169,17 @@ impl Designer {
 }
 
 impl Widget for Designer {
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let _actions = self.ui.handle_widget_event(cx, event);
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        self.ui.handle_event(cx, event, scope);
         for (component, container) in self.components.values_mut() {
-            component.handle_widget_event(cx, event);
-            container.handle_widget_event(cx, event);
+            component.handle_event(cx, event, scope);
+            container.handle_event(cx, event, scope);
         }
     }
     
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.ui.redraw(cx)
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
         let outline = self.ui.file_tree(id!(outline));
-        while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+        while let Some(next) = self.ui.draw(cx, scope).step() {
             if let Some(mut outline) = outline.has_widget(&next).borrow_mut() {
                 self.draw_outline(cx, &mut *outline);
             }
@@ -195,6 +187,6 @@ impl Widget for Designer {
                 self.draw_design(cx);
             }
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }

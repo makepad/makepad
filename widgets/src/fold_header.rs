@@ -9,25 +9,19 @@ live_design!{
     FoldHeaderBase = {{FoldHeader}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
     #[rust] area: Area,
-    #[live] header: WidgetRef,
-    #[live] body: WidgetRef,
+    #[find] #[redraw] #[live] header: WidgetRef,
+    #[find] #[redraw] #[live] body: WidgetRef,
     #[animator] animator: Animator,
 
     #[live] opened: f64,
     #[layout] layout: Layout,
     #[walk] walk: Walk,
     #[live] body_walk: Walk,
-}
-
-impl LiveHook for FoldHeader{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,FoldHeader)
-    }
 }
 
 #[derive(Clone)]
@@ -37,54 +31,36 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             if self.animator.is_track_animating(cx, id!(open)) {
                 self.area.redraw(cx);
             }
         };
         
-        for item in self.header.handle_widget_event(cx, event) {
-            if item.widget_uid == self.header.widget(id!(fold_button)).widget_uid(){
-                match item.action.cast() {
-                    FoldButtonAction::Opening => {
-                        self.animator_play(cx, id!(open.on))
-                    }
-                    FoldButtonAction::Closing => {
-                        self.animator_play(cx, id!(open.off))
-                    }
-                    _ => ()
-                }
-            }
-            dispatch_action(cx, item)
-        }
+        self.header.handle_event(cx,  event, scope);
         
-        self.body.handle_widget_event_with(cx, event, dispatch_action);
+        if let Event::Actions(actions) = event{
+            match actions.find_widget_action(self.header.widget(id!(fold_button)).widget_uid()).cast() {
+                FoldButtonAction::Opening => {
+                    self.animator_play(cx, id!(open.on))
+                }
+                FoldButtonAction::Closing => {
+                    self.animator_play(cx, id!(open.off))
+                }
+                _ => ()
+            }
+        }
     }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.header.redraw(cx);
-        self.body.redraw(cx);
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
 
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.header.find_widgets(path, cached, results);
-        self.body.find_widgets(path, cached, results);
-    }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
         if let Some(DrawState::DrawHeader) = self.draw_state.get() {
-            self.header.draw_widget(cx) ?;
+            let walk = self.header.walk(cx);
+            self.header.draw_walk(cx, scope, walk) ?;
             cx.begin_turtle(
                 self.body_walk,
                 Layout::flow_down()
@@ -93,17 +69,18 @@ impl Widget for FoldHeader {
             self.draw_state.set(DrawState::DrawBody);
         }
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
-            self.body.draw_widget(cx) ?;
+            let walk = self.body.walk(cx);
+            self.body.draw_walk(cx, scope, walk) ?;
             self.rect_size = cx.turtle().used().y;
             cx.end_turtle();
             cx.end_turtle_with_area(&mut self.area);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum FoldHeaderAction {
     Opening,
     Closing,

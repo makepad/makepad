@@ -1,4 +1,5 @@
 use crate::{
+    app::{AppData},
     makepad_widgets::*,
     makepad_platform::os::cx_stdin::*,
     build_manager::build_manager::BuildManager,
@@ -57,12 +58,11 @@ live_design!{
 }
 
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct RunView {
     #[walk] walk: Walk,
-    #[rust] draw_state: DrawStateWrap<Walk>,
     #[animator] animator: Animator,
-    #[live] draw_app: DrawQuad,
+    #[redraw] #[live] draw_app: DrawQuad,
     #[live] frame_delta: f64,
     #[rust] last_size: DVec2,
     #[rust] tick: NextFrame,
@@ -73,12 +73,7 @@ pub struct RunView {
     #[rust] started: bool,
 }
 
-
 impl LiveHook for RunView {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, RunView)
-    }
-    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.tick = cx.new_next_frame(); //start_interval(self.frame_delta);
         self.time = 0.0;
@@ -123,67 +118,6 @@ impl RunView {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
-        self.animator_handle_event(cx, event);
-        // lets send mouse events
-        match event.hits(cx, self.draw_app.area()) {
-            Hit::FingerDown(_) => {
-                cx.set_key_focus(self.draw_app.area());
-            }
-            Hit::TextInput(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
-            }
-            Hit::KeyDown(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
-            }
-            Hit::KeyUp(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyUp(e));
-            }
-            _ => ()
-        }
-        let rect = self.draw_app.area().get_rect(cx);
-        match event {
-            Event::MouseDown(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseDown(StdinMouseDown {
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                    button: e.button,
-                }));
-            }
-            Event::MouseMove(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseMove(StdinMouseMove {
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                }));
-            }
-            Event::MouseUp(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseUp(StdinMouseUp {
-                    time: e.time,
-                    button: e.button,
-                    x: rel.x,
-                    y: rel.y,
-                }));
-            }
-            Event::Scroll(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::Scroll(StdinScroll {
-                    is_mouse: e.is_mouse,
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                    sx: e.scroll.x,
-                    sy: e.scroll.y
-                }));
-            }
-            _ => ()
-        }
-    }
-    
     pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost, run_view_id: LiveId, manager: &mut BuildManager) {
         match msg {
             
@@ -221,7 +155,7 @@ impl RunView {
                             self.animator_play(cx, id!(started.on));
                         }
                         self.redraw_countdown = 20;
-                       
+                        
                         Some(())
                     };
 
@@ -249,13 +183,11 @@ impl RunView {
         self.last_size = dvec2(0.0,0.0);
     }
     
-    
-    pub fn draw(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager) {
+    pub fn draw_run_view(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager, walk:Walk) {
         
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
         let dpi_factor = cx.current_dpi_factor();
-        let walk = if let Some(walk) = self.draw_state.get() {walk}else {panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
 
@@ -360,25 +292,80 @@ impl RunView {
 }
 
 impl Widget for RunView {
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_app.redraw(cx)
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        if self.draw_state.begin(cx, walk) {
-            return WidgetDraw::hook_above();
-        }
-        self.draw_state.end();
-        WidgetDraw::done()
-    }
-}
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct RunViewRef(WidgetRef);
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let run_view_id = scope.path.get(0);
+        let manager = &mut scope.data.get_mut::<AppData>().build_manager;
+        self.draw_run_view(cx, run_view_id, manager, walk);
+        DrawStep::done()
+    }
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        
+        let run_view_id = scope.path.get(0);
+        let manager = &scope.data.get::<AppData>().build_manager;
+        
+        self.animator_handle_event(cx, event);
+        // lets send mouse events
+        match event.hits(cx, self.draw_app.area()) {
+            Hit::FingerDown(_) => {
+                cx.set_key_focus(self.draw_app.area());
+            }
+            Hit::TextInput(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
+            }
+            Hit::KeyDown(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
+            }
+            Hit::KeyUp(e) => {
+                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyUp(e));
+            }
+            _ => ()
+        }
+        let rect = self.draw_app.area().get_rect(cx);
+        match event {
+            Event::MouseDown(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseDown(StdinMouseDown {
+                    time: e.time,
+                    x: rel.x,
+                    y: rel.y,
+                    button: e.button,
+                }));
+            }
+            Event::MouseMove(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseMove(StdinMouseMove {
+                    time: e.time,
+                    x: rel.x,
+                    y: rel.y,
+                }));
+            }
+            Event::MouseUp(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseUp(StdinMouseUp {
+                    time: e.time,
+                    button: e.button,
+                    x: rel.x,
+                    y: rel.y,
+                }));
+            }
+            Event::Scroll(e) => {
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(run_view_id, HostToStdin::Scroll(StdinScroll {
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                    x: rel.x,
+                    y: rel.y,
+                    sx: e.scroll.x,
+                    sy: e.scroll.y
+                }));
+            }
+            _ => ()
+        }
+    }
+    
+}
 
 impl RunViewRef {
     

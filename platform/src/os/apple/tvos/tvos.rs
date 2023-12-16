@@ -27,7 +27,6 @@ use {
         pass::{CxPassParent},
         thread::Signal,
         window::CxWindowPool,
-        web_socket::WebSocket,
         event::{
             Event,
             NetworkResponseChannel
@@ -167,7 +166,7 @@ impl Cx {
         match event {
            TvosEvent::Init=>{
                 get_tvos_app_global().start_timer(0, 0.008, true);
-                self.call_event_handler(&Event::Construct);
+                self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }
             TvosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
@@ -262,10 +261,13 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
-                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
-                CxOsOp::CleanupVideoDecoding(_) => todo!(),
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::PauseVideoPlayback(_) => todo!(),
+                CxOsOp::ResumeVideoPlayback(_) => todo!(),
+                CxOsOp::MuteVideoPlayback(_) => todo!(),
+                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
+                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
+                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
             }
         }
     }
