@@ -9,7 +9,7 @@ live_design!{
     TabBase = {{Tab}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct Tab {
     #[rust] is_selected: bool,
     #[rust] is_dragging: bool,

@@ -280,6 +280,9 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::Int64(v) => {
                     encode_i64(*v, &mut out);
                 }
+                LiveValue::Uint64(v) => {
+                    encode_u64(*v, &mut out);
+                }
                 LiveValue::Float32(v) => {
                     encode_f32(*v, &mut out);
                 },

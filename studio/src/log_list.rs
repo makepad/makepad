@@ -5,6 +5,7 @@ use {
             build_manager::*,
             build_protocol::*,
         },
+        app::{AppAction, AppData},
         makepad_widgets::*,
         makepad_code_editor::text::{Position},
         makepad_widgets::portal_list::PortalList,
@@ -177,43 +178,58 @@ live_design!{
         }
     }
     
-    LogList = <PortalList> {
-        grab_key_focus: true
-        auto_tail: true
-        allow_empty: true
-        drag_scrolling: false
+    LogList = {{LogList}}{
         height: Fill,
         width: Fill
-        flow: Down
-        Location = <LogItem> {
-            icon = <LogIcon> {},
-            binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
-            location = <LinkLabel> {margin: 0, text: ""}
-            body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
-        }
-        Bare = <LogItem> {
-            icon = <LogIcon> {},
-            binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
-            body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
-        }
-        Empty = <LogItem> {
-            cursor: Default
-            height: 24,
+        list = <PortalList> {
+            grab_key_focus: true
+            auto_tail: true
+            allow_empty: true
+            drag_scrolling: false
+            height: Fill,
             width: Fill
+            flow: Down
+            Location = <LogItem> {
+                icon = <LogIcon> {},
+                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
+                location = <LinkLabel> {margin: 0, text: ""}
+                body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
+            }
+            Bare = <LogItem> {
+                icon = <LogIcon> {},
+                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
+                body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
+            }
+            Empty = <LogItem> {
+                cursor: Default
+                height: 24,
+                width: Fill
+            }
         }
     }
 }
 
+#[derive(Clone, Debug, DefaultNone)]
 pub enum LogListAction {
-    JumpToError{file_name:String, start:Position},
+    JumpTo(JumpTo),
     None
 }
 
-impl BuildManager {
-    
-    pub fn draw_log(&self, cx: &mut Cx2d, list: &mut PortalList) {
-        
-        list.set_item_range(cx, 0, self.log.len() as u64);
+#[derive(Clone, Debug)]
+pub struct JumpTo{
+    pub file_name:String, 
+    pub start:Position
+}
+
+#[derive(Live, LiveHook, Widget)]
+struct LogList{
+    #[deref] view:View
+}
+
+impl LogList{
+    fn draw_log(&mut self, cx: &mut Cx2d, list:&mut PortalList, build_manager:&mut BuildManager){
+        list.set_item_range(cx, 0, build_manager.log.len() as u64);
+                                
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id & 1 == 0;
             fn map_level_to_icon(level: LogLevel) -> LiveId {
@@ -225,14 +241,14 @@ impl BuildManager {
                     LogLevel::Panic => live_id!(panic),
                 }
             }
-            if let Some((build_id, log_item)) = self.log.get(item_id as usize) {
-                let binary = if self.active.builds.len()>1 {
-                    if let Some(build) = self.active.builds.get(&build_id) {
+            if let Some((build_id, log_item)) = build_manager.log.get(item_id as usize) {
+                let binary = if build_manager.active.builds.len()>1 {
+                    if let Some(build) = build_manager.active.builds.get(&build_id) {
                         &build.log_index
                     }
                     else {""}
                 }else {""};
-                
+                                                                        
                 match log_item {
                     LogItem::Bare(msg) => {
                         let item = list.item(cx, item_id, live_id!(Bare)).unwrap().as_view();
@@ -242,7 +258,7 @@ impl BuildManager {
                             body = {text: (&msg.line)}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_widget_all(cx);
+                        item.draw_all(cx, &mut Scope::empty());
                     }
                     LogItem::Location(msg) => {
                         let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
@@ -253,7 +269,7 @@ impl BuildManager {
                             location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
-                        item.draw_widget_all(cx);
+                        item.draw_all(cx, &mut Scope::empty());
                     }
                     _ => {}
                 }
@@ -261,56 +277,44 @@ impl BuildManager {
             }
             let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
             item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
-            item.draw_widget_all(cx);
+            item.draw_all(cx, &mut Scope::empty());
         }
-        //profile_end!(dt);
+    }
+}
+
+impl Widget for LogList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step(){
+            if let Some(mut list) = step.as_portal_list().borrow_mut(){
+                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+            }
+        }
+        DrawStep::done()
     }
     
-    pub fn handle_log_list(&mut self, _cx: &mut Cx, log_list: &PortalListRef, actions: &WidgetActions) -> Vec<LogListAction> {
-        // ok lets see if someone clicked our jump to error
-        let mut ret = Vec::new();
-        for (item_id, item) in log_list.items_with_actions(&actions) {
-            if item.link_label(id!(location)).pressed(actions) {
-                if let Some((_build_id, log_item)) = self.log.get(item_id as usize) {
-                    // alright lets select a file tab or open the file
-                    // and lets jump to the location
-                    match log_item {
-                        LogItem::Location(msg) => {
-                            ret.push(LogListAction::JumpToError{
-                                file_name:msg.file_name.clone(), 
-                                start:Position{
-                                    line_index: msg.start.line_index,
-                                    byte_index: msg.start.byte_index,
-                                },
-                            })
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        let log_list = self.view.portal_list(id!(list));
+        self.view.handle_event(cx, event, scope);
+        let data = scope.data.get::<AppData>();
+        if let Event::Actions(actions) = event{    
+            for (item_id, item) in log_list.items_with_actions(&actions) {
+                if item.link_label(id!(location)).pressed(&actions) {
+                    if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {
+                        match log_item {
+                            LogItem::Location(msg) => {
+                                cx.action(AppAction::JumpTo(JumpTo{
+                                    file_name:msg.file_name.clone(), 
+                                    start:Position{
+                                        line_index: msg.start.line_index,
+                                        byte_index: msg.start.byte_index,
+                                    },
+                                }));
+                            }
+                            _ => ()
                         }
-                        _ => ()
                     }
                 }
             }
         }
-        ret    
     }
 }
-/*
-
-#[derive(Live)]
-struct LogList{
-    #[live] body:WidgetRef
-}
-
-impl Widget for LogList {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.body.redraw(cx);
-    }
-    
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.body.walk(cx)
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx, walk:Walk)->WidgetDraw{
-        self.body.draw_walk_widget(cx)
-    }
-}
-
-*/

@@ -18,9 +18,9 @@ pub mod slider;
 pub mod scroll_bar;
 pub mod scroll_bars;
 pub mod splitter;
+pub mod vectorline;
 pub mod fold_header;
 pub mod fold_button;
-pub mod hook_widget;
 pub mod multi_window;
 pub mod designer;
 pub mod dock;
@@ -51,6 +51,7 @@ pub mod nav_control;
 
 pub mod view;
 pub mod widget;
+pub mod widget_match_event;
 
 #[macro_use]
 pub mod data_binding;
@@ -84,21 +85,28 @@ pub use crate::{
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
     slides_view::{SlidesView},
+    widget_match_event::WidgetMatchEvent,
     widget::{
+        Scope,
         WidgetSet,
         WidgetSetIterator,
         WidgetUid,
-        WidgetDraw,
-        WidgetDrawApi,
+        WidgetPath,
+        DrawStep,
+        DrawStepApi,
         CreateAt,
-        WidgetActions,
+        WidgetCache,
+        WidgetActionCxExt,
         WidgetActionsApi,
-        WidgetActionItem,
+        WidgetActionTrait,
+        WidgetAction,
+        WidgetActionCast,
+        WidgetActionOptionApi,
         WidgetRef,
         Widget,
+        WidgetNode,
         WidgetRegistry,
         WidgetFactory,
-        WidgetAction,
         DrawStateWrap,
     }
 };
@@ -136,7 +144,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::drop_down::live_design(cx);
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
-    crate::hook_widget::live_design(cx);
     crate::portal_list::live_design(cx);
     crate::flat_list::live_design(cx);
     crate::slide_panel::live_design(cx);
@@ -148,4 +155,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::slides_view::live_design(cx);
     crate::tab_close_button::live_design(cx);
     crate::keyboard_view::live_design(cx);
+    crate::vectorline::live_design(cx);
 }

@@ -34,7 +34,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawLine {
     #[deref] pub draw_super: DrawQuad,

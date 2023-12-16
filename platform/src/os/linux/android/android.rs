@@ -28,7 +28,7 @@ use {
         thread::Signal,
         event::{
             VirtualKeyboardEvent,
-            NetworkResponseEvent,
+            NetworkResponseItem,
             NetworkResponse,
             HttpResponse,
             TouchPoint,
@@ -67,7 +67,7 @@ impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
         
-        self.call_event_handler(&Event::Construct);
+        self.call_event_handler(&Event::Startup);
         self.redraw_all();
         
         self.start_network_live_file_watcher();
@@ -240,7 +240,7 @@ impl Cx {
                     }
                     FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
                         let e = Event::NetworkResponses(vec![
-                            NetworkResponseEvent {
+                            NetworkResponseItem {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpResponse(HttpResponse::new(
                                     LiveId(metadata_id),
@@ -254,7 +254,7 @@ impl Cx {
                     }
                     FromJavaMessage::HttpRequestError {request_id, error, ..} => {
                         let e = Event::NetworkResponses(vec![
-                            NetworkResponseEvent {
+                            NetworkResponseItem {
                                 request_id: LiveId(request_id),
                                 response: NetworkResponse::HttpRequestError(error)
                             }
@@ -347,7 +347,7 @@ impl Cx {
                         self.call_event_handler(&Event::Resume);
                     }
                     FromJavaMessage::Destroy => {
-                        self.call_event_handler(&Event::Destruct);
+                        self.call_event_handler(&Event::Shutdown);
                         self.os.quit = true;
                     }
                     FromJavaMessage::Init(_) => {

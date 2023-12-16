@@ -1,5 +1,5 @@
 use crate::path::{LinePathCommand, PathCommand};
-use crate::geometry::{CubicSegment, QuadraticSegment};
+use crate::geometry::{Arc, CubicSegment, QuadraticSegment};
 use crate::internal_iter::InternalIterator;
 
 /// An extension trait for iterators over path commands.
@@ -49,6 +49,14 @@ where
                 PathCommand::LineTo(p) => {
                     current_point = Some(p);
                     f(LinePathCommand::LineTo(p))
+                }
+                PathCommand::ArcTo(e, r, xr, l, s) => {
+                    Arc::new(current_point.unwrap(), e, r, xr, l, s)
+                        .linearize(epsilon)
+                        .for_each(&mut |p| {
+                            current_point = Some(p);
+                            f(LinePathCommand::LineTo(p))
+                        })
                 }
                 PathCommand::QuadraticTo(p1, p) => {
                     QuadraticSegment::new(current_point.unwrap(), p1, p)

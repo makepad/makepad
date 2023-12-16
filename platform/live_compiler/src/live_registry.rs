@@ -726,7 +726,7 @@ impl LiveRegistry {
                 self.live_files[i].reexpand = true;
             }
         }
-        
+       
         for module_id in dep_order {
             let file_id = if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
                 file_id

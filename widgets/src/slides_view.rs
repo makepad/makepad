@@ -9,10 +9,10 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct SlidesView {
     #[layout] layout: Layout,
-    #[rust] area: Area,
+     #[rust] area: Area,
     #[walk] walk: Walk,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>,
@@ -23,6 +23,24 @@ pub struct SlidesView {
     #[rust] draw_state: DrawStateWrap<DrawState>,
 }
 
+impl WidgetNode for SlidesView{
+    fn walk(&mut self, _cx:&mut Cx) -> Walk{
+        self.walk
+    }
+            
+    fn redraw(&mut self, cx: &mut Cx){
+        self.area.redraw(cx)
+    }
+    
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        for child in self.children.values_mut() {
+            child.find_widgets(path, cached, results);
+        }
+    }
+}   
+
+    
+
 #[derive(Clone)]
 enum DrawState {
     DrawFirst,
@@ -30,10 +48,6 @@ enum DrawState {
 }
 
 impl LiveHook for SlidesView {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, SlidesView)
-    }
-    
     fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from {
             //self.children.clear();
@@ -68,58 +82,72 @@ impl LiveHook for SlidesView {
             }
         }
     }
+    
+    fn after_new_from_doc(&mut self, cx: &mut Cx){
+        self.next_frame(cx);
+    }
+    
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum SlidesViewAction {
     None,
 }
 
 impl Widget for SlidesView {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // lets handle mousedown, setfocus
+        match event {
+            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
+                self.current_slide = self.current_slide * self.anim_speed + self.goal_slide * (1.0 - self.anim_speed);
+                if (self.current_slide - self.goal_slide).abs()>0.00001 {
+                    self.next_frame(cx);
+                    self.area.redraw(cx);
+                }
+                else {
+                    self.current_slide = self.current_slide.round();
+                }
+                                
+            }
+            _ => ()
+        }
+
+        //let uid = self.widget_uid();
         // lets grab the two slides we are seeing
         let current = self.current_slide.floor() as usize;
-        if let Some(current) = self.draw_order.get(current) {
-            if let Some(current) = self.children.get(&current) {
-                current.handle_widget_event_with(cx, event, dispatch_action);
+        if let Some(current_id) = self.draw_order.get(current) {
+            if let Some(current) = self.children.get(&current_id) {
+                scope.with_id(*current_id, |scope|{
+                    current.handle_event(cx, event, scope);
+                })
             }
         }
         if self.current_slide.fract() >0.0 {
             let next = current + 1;
-            if let Some(next) = self.draw_order.get(next) {
-                if let Some(next) = self.children.get(&next) {
-                    next.handle_widget_event_with(cx, event, dispatch_action);
+            if let Some(next_id) = self.draw_order.get(next) {
+                if let Some(next) = self.children.get(&next_id) {
+                    scope.with_id(*next_id, |scope|{
+                        next.handle_event(cx, event, scope);
+                    })
                 }
             }
         }
-        
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
-    }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        
-        self.walk
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
-    }
-    
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        for child in self.children.values_mut() {
-            child.find_widgets(path, cached, results);
+        match event.hits(cx, self.area) {
+            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
+                self.next_slide(cx);
+            }
+            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
+                self.prev_slide(cx);
+            }
+            Hit::FingerDown(_fe) => {
+                cx.set_key_focus(self.area);
+            },
+            _ => ()
         }
+                        
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         // alright lets draw the child slide
         // we always maximally show 2 slides
         if self.draw_state.begin(cx, DrawState::DrawFirst) {
@@ -137,10 +165,12 @@ impl Widget for SlidesView {
         }
         if let Some(DrawState::DrawFirst) = self.draw_state.get() {
             let first = self.current_slide.floor() as usize;
-            if let Some(first) = self.draw_order.get(first) {
-                if let Some(slide) = self.children.get(&first) {
+            if let Some(first_id) = self.draw_order.get(first) {
+                if let Some(slide) = self.children.get(&first_id) {
                     let walk = slide.walk(cx);
-                    slide.draw_walk_widget(cx, walk) ?;
+                    scope.with_id(*first_id, |scope|{
+                        slide.draw_walk(cx, scope, walk)
+                    })?;
                 }
             }
             cx.end_turtle();
@@ -158,17 +188,19 @@ impl Widget for SlidesView {
         if let Some(DrawState::DrawSecond) = self.draw_state.get() {
             if self.current_slide.fract() > 0.0 {
                 let second = self.current_slide.floor() as usize + 1;
-                if let Some(second) = self.draw_order.get(second) {
-                    if let Some(slide) = self.children.get(&second) {
+                if let Some(second_id) = self.draw_order.get(second) {
+                    if let Some(slide) = self.children.get(&second_id) {
                         let walk = slide.walk(cx);
-                        slide.draw_walk_widget(cx, walk) ?;
+                        scope.with_id(*second_id, |scope|{
+                            slide.draw_walk(cx, scope, walk) 
+                        })?;
                     }
                 }
             }
         }
         cx.end_turtle();
         cx.end_turtle_with_area(&mut self.area);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
@@ -195,52 +227,10 @@ impl SlidesView {
         self.next_frame(cx);
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidesViewAction)) {
-        // lets handle mousedown, setfocus
-        match event {
-            Event::Construct => {
-                self.next_frame(cx);
-            }
-            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
-                self.current_slide = self.current_slide * self.anim_speed + self.goal_slide * (1.0 - self.anim_speed);
-                if (self.current_slide - self.goal_slide).abs()>0.00001 {
-                    self.next_frame(cx);
-                    self.area.redraw(cx);
-                }
-                else {
-                    self.current_slide = self.current_slide.round();
-                }
-                
-            }
-            _ => ()
-        }
-        match event.hits(cx, self.area) {
-            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
-                self.next_slide(cx);
-            }
-            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
-                self.prev_slide(cx);
-            }
-            Hit::FingerDown(_fe) => {
-                cx.set_key_focus(self.area);
-            },
-            _ => ()
-        }
-    }
-    
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
-    
-    pub fn draw_walk(&mut self, _cx: &mut Cx2d, _walk: Walk) {
-        //while self.frame.draw_walk_widget(cx, walk).is_hook() {
-        // }
-    }
 }
-
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SlidesViewRef(WidgetRef);
 
 impl SlidesViewRef {
     pub fn next_slide(&self, cx: &mut Cx) {
@@ -254,9 +244,6 @@ impl SlidesViewRef {
         }
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct SlidesViewSet(WidgetSet);
 
 impl SlidesViewSet {
     pub fn next_slide(&self, cx: &mut Cx) {

@@ -1,31 +1,31 @@
 use crate::makepad_platform::*;
 
-live_design!{
+live_design! {
     import makepad_draw::shader::std::*;
     import crate::base::*;
-    
+
     THEME_FONT_LABEL = {
         font_size: 9.4,
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
-    
+
     THEME_FONT_DATA = {
         font_size: 9.4,
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
-    
-    THEME_FONT_META = { 
+
+    THEME_FONT_META = {
         font_size: 9.4,
         top_drop: 1.2,
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
-    
+
     THEME_FONT_CODE = {
         font: {
             path: dep("crate://self/resources/LiberationMono-Regular.ttf")
@@ -35,18 +35,18 @@ live_design!{
         line_spacing: 2.0
         top_drop: 1.3
     }
-    
+
     const THEME_DATA_ITEM_HEIGHT = 23.0
     const THEME_DATA_ICON_WIDTH = 16.0
     const THEME_DATA_ICON_HEIGHT = 24.0
     // ABSOLUTE DEFS
-    
+
     const THEME_BRIGHTNESS = #x40
     const THEME_COLOR_HIGHLIGHT = #42
     const THEME_COLOR_HIGH = #C00
     const THEME_COLOR_MID = #FA0
     const THEME_COLOR_LOW = #8A0
-    
+
     // RELATIVE =DEFS
     //    42, =78, 117
     const THEME_COLOR_WHITE = #FFF
@@ -61,78 +61,78 @@ live_design!{
     const THEME_COLOR_DOWN_20 = #00000040
     const THEME_COLOR_DOWN_50 = #00000080
     const THEME_COLOR_BLACK = #000
-    
+
     // CORE BACKGROUND COLORS
-    
+
     const THEME_COLOR_BG_APP = (THEME_BRIGHTNESS)
-    
+
     const THEME_COLOR_BG_HEADER = (blend(
         THEME_COLOR_BG_APP,
         THEME_COLOR_DOWN_10
     ))
-    
+
     const THEME_COLOR_CLEAR = (THEME_COLOR_BG_APP)
-    
+
     const THEME_COLOR_BG_EDITOR = (blend(
         THEME_COLOR_BG_HEADER,
         THEME_COLOR_DOWN_10
     ))
-    
+
     const THEME_COLOR_BG_ODD = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_DOWN_7
     ))
-    
+
     const THEME_COLOR_BG_SELECTED = (THEME_COLOR_HIGHLIGHT)
-    
+
     const THEME_COLOR_BG_UNFOCUSSED = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_UP_10
     ))
-    
+
     const THEME_COLOR_EDITOR_SELECTED = (THEME_COLOR_BG_SELECTED)
     const THEME_COLOR_EDITOR_SELECTED_UNFOCUSSED = (THEME_COLOR_BG_SELECTED_UNFOCUSSED)
-    
+
     const THEME_COLOR_BG_CURSOR = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_UP_4
     ))
-    
+
     const THEME_COLOR_FG_CURSOR = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_UP_50
     ))
-    
+
     // TEXT / ICON COLORS
-    
+
     const THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_UP_50)
     const THEME_COLOR_TEXT_HOVER = (THEME_COLOR_UP_80)
     const THEME_COLOR_TEXT_META = (THEME_COLOR_UP_25)
     const THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_UP_80)
-    
+
     // SPLITTER AND SCROLLBAR
-    
+
     const THEME_COLOR_SCROLL_BAR_DEFAULT = (THEME_COLOR_UP_10)
-    
+
     const THEME_COLOR_CONTROL_HOVER = (blend(
         THEME_COLOR_BG_HEADER,
         THEME_COLOR_UP_50
     ))
-    
+
     const THEME_COLOR_CONTROL_PRESSED = (blend(
         THEME_COLOR_BG_HEADER,
         THEME_COLOR_UP_25
     ))
-    
+
     // ICON COLORS
-    
+
     const THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
     const THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
     const THEME_COLOR_WARNING = (THEME_COLOR_MID),
     const THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
     const THEME_COLOR_DRAG_QUAD = (THEME_COLOR_UP_50)
     const THEME_COLOR_PANIC = #f0f
-    
+
     const THEME_TAB_HEIGHT = 26.0,
     const THEME_SPLITTER_HORIZONTAL = 16.0,
     const THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
@@ -140,9 +140,9 @@ live_design!{
     const THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
     const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
     const THEME_SPLITTER_SIZE = 5.0
-    
-    
-    
+
+
+
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0
@@ -153,7 +153,7 @@ live_design!{
             instance bar_width: 6.0
             instance pressed: 0.0
             instance hover: 0.0
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 if self.is_vertical > 0.5 {
@@ -194,7 +194,7 @@ live_design!{
                         draw_bar: {pressed: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Default,
                     from: {
@@ -208,7 +208,7 @@ live_design!{
                         }
                     }
                 }
-                
+
                 pressed = {
                     cursor: Default,
                     from: {all: Snap}
@@ -222,15 +222,15 @@ live_design!{
             }
         }
     }
-    
+
     ScrollBars = <ScrollBarsBase> {
         show_scroll_x: true,
         show_scroll_y: true,
         scroll_bar_x: <ScrollBar> {}
         scroll_bar_y: <ScrollBar> {}
     }
-    
-    
+
+
     Label = <LabelBase> {
         width: Fit
         height: Fit
@@ -240,23 +240,23 @@ live_design!{
             wrap: Word
         }
     }
-    
+
     // Button
-    
-    
-    
+
+
+
     Button = <ButtonBase> {
         width: Fit,
         height: Fit,
         margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
         align: {x: 0.5, y: 0.5}
         padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
-        
+
         label_walk: {
             width: Fit,
             height: Fit
         }
-        
+
         draw_text: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -275,7 +275,7 @@ live_design!{
                 )
             }
         }
-        
+
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -291,17 +291,18 @@ live_design!{
                 )
             }
         }
-        
+
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
             uniform border_radius: 3.0
-            
+            instance bodytop: #53
+            instance bodybottom: #5c
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 1.0;
-                let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), #33, self.pressed);
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
                 let bot_gradient = mix(
@@ -309,7 +310,7 @@ live_design!{
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
-                
+
                 // the little drop shadow at the bottom
                 let shift_inward = self.border_radius + 4.0;
                 sdf.move_to(shift_inward, self.rect_size.y - self.border_radius);
@@ -318,7 +319,7 @@ live_design!{
                     mix(mix(#2f, #1f, self.hover), #0000, self.pressed),
                     self.border_radius
                 )
-                
+
                 sdf.box(
                     1.,
                     1.,
@@ -327,16 +328,16 @@ live_design!{
                     self.border_radius
                 )
                 sdf.fill_keep(body)
-                
+
                 sdf.stroke(
                     bot_gradient,
                     1.0
                 )
-                
+
                 return sdf.result
             }
         }
-        
+
         animator: {
             hover = {
                 default: off,
@@ -348,7 +349,7 @@ live_design!{
                         draw_text: {pressed: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -360,7 +361,7 @@ live_design!{
                         draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
-                
+
                 pressed = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -372,27 +373,27 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     // Checkbox
-    
-    
-    
+
+
+
      CheckBox = <CheckBoxBase> {
-        
+
         width: Fit,
         height: Fit
-        
+
         label_walk: {
             margin: {left: 20.0, top: 8, bottom: 8, right: 10}
             width: Fit,
             height: Fit,
         }
-        
+
         label_align: {
             y: 0.0
         }
-        
+
         draw_check: {
             uniform size: 7.0;
             fn pixel(self) -> vec4 {
@@ -466,7 +467,7 @@ live_design!{
                 )
             }
         }
-        
+
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0
@@ -483,7 +484,7 @@ live_design!{
                 )
             }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -544,8 +545,8 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     DesktopButton = <DesktopButtonBase> {
         draw_bg: {
             fn pixel(self) -> vec4 {
@@ -553,7 +554,7 @@ live_design!{
                 sdf.aa *= 3.0;
                 let sz = 4.5;
                 let c = self.rect_size * vec2(0.5, 0.5);
-                
+
                 // WindowsMin
                 match self.button_type {
                     DesktopButtonType::WindowsMin => {
@@ -602,7 +603,7 @@ live_design!{
                         sdf.circle(c.x, c.y + h - 0.75, 2.5);
                         sdf.subtract();
                         sdf.fill(#8);
-                        
+
                         return sdf.result;
                     }
                     DesktopButtonType::Fullscreen => {
@@ -616,7 +617,7 @@ live_design!{
                         sdf.rect(c.x - sz - 2., c.y - sz + 4., 2. * (sz + 2.), 2. * (sz - 4.));
                         sdf.subtract();
                         sdf.fill(#f); //, 0.5 + 0.5 * dpi_dilate);
-                        
+
                         return sdf.result;
                     }
                 }
@@ -632,7 +633,7 @@ live_design!{
                         draw_bg: {pressed: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -645,7 +646,7 @@ live_design!{
                         }
                     }
                 }
-                
+
                 pressed = {
                     from: {all: Snap}
                     apply: {
@@ -658,7 +659,7 @@ live_design!{
             }
         }
     }
-    
+
     NavControl = <NavControlBase> {
         draw_focus: {
             fn pixel(self) -> vec4 {
@@ -672,19 +673,21 @@ live_design!{
             color: #a
         }
     }
-    
+
     WindowMenu = <WindowMenuBase>{
+        height: 0,
+        width: 0
     }
-    
+
     Window = <WindowBase> {
         pass: {clear_color: (THEME_COLOR_CLEAR)}
         flow: Down
         nav_control: <NavControl> {}
         caption_bar = <SolidView> {
             visible: false,
-            
+
             flow: Right
-            
+
             draw_bg: {color: (THEME_COLOR_BG_APP)}
             height: 27
             caption_label = <View> {
@@ -714,6 +717,7 @@ live_design!{
                 xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
             }
         }
+        
         window_menu = <WindowMenu>{
             main = Main{items:[app]}
             app = Sub{name:"Makepad",items:[quit]}
@@ -729,22 +733,22 @@ live_design!{
             width: Fill,
             height: Fill
         }
-        
+
         cursor: Default
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
             instance border_width: 1.5
             instance color: #000
             instance border_color: #fff
-            
+
             fn get_color(self) -> vec4 {
                 return self.color
             }
-            
+
             fn get_border_color(self) -> vec4 {
                 return self.border_color
             }
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.move_to(1.0, 1.0);
@@ -762,24 +766,24 @@ live_design!{
             inner_size: vec2(1024, 768)
         }
     }
-    
-    
+
+
     // Dock
-    
-    
+
+
     Splitter = <SplitterBase> {
         draw_splitter: {
             uniform border_radius: 1.0
             uniform splitter_pad: 1.0
             uniform splitter_grabber: 110.0
-            
+
             instance pressed: 0.0
             instance hover: 0.0
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.clear(THEME_COLOR_BG_APP);
-                
+
                 if self.is_vertical > 0.5 {
                     sdf.box(
                         self.splitter_pad,
@@ -814,7 +818,7 @@ live_design!{
         max_horizontal: (THEME_SPLITTER_MAX_HORIZONTAL)
         min_vertical: (THEME_SPLITTER_MIN_VERTICAL)
         max_vertical: (THEME_SPLITTER_MAX_VERTICAL)
-        
+
         animator: {
             hover = {
                 default: off
@@ -824,7 +828,7 @@ live_design!{
                         draw_splitter: {pressed: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -837,7 +841,7 @@ live_design!{
                         }
                     }
                 }
-                
+
                 pressed = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
@@ -850,17 +854,17 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     TabCloseButton = <TabCloseButtonBase> {
         height: 10.0,
         width: 10.0,
         margin: {right: 5},
         draw_button: {
-            
+
             instance hover: float;
             instance selected: float;
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let mid = self.rect_size / 2.0;
@@ -878,7 +882,7 @@ live_design!{
                 ), 1.0);
             }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -888,7 +892,7 @@ live_design!{
                         draw_button: {hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Hand,
                     from: {all: Snap}
@@ -899,11 +903,11 @@ live_design!{
             }
         }
     }
-    
+
     Tab = <TabBase> {
         width: Fit,
         height: Fill, //Fixed((THEME_TAB_HEIGHT)),
-        
+
         align: {x: 0.0, y: 0.5}
         padding: {
             left: 10.0,
@@ -911,7 +915,7 @@ live_design!{
             right: 15.0,
             bottom: 0.0,
         },
-        
+
         close_button: <TabCloseButton> {}
         draw_name: {
             text_style: <THEME_FONT_LABEL> {}
@@ -929,11 +933,11 @@ live_design!{
                 )
             }
         }
-        
+
         draw_bg: {
             instance hover: float
             instance selected: float
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 return mix(
@@ -953,7 +957,7 @@ live_design!{
                 return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)*/
             }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -964,7 +968,7 @@ live_design!{
                         draw_name: {hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Hand,
                     from: {all: Forward {duration: 0.1}}
@@ -974,7 +978,7 @@ live_design!{
                     }
                 }
             }
-            
+
             selected = {
                 default: off
                 off = {
@@ -985,7 +989,7 @@ live_design!{
                         draw_name: {selected: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {all: Snap}
                     apply: {
@@ -997,7 +1001,7 @@ live_design!{
             }
         }
     }
-    
+
     TabBar = <TabBarBase> {
         tab: <Tab> {}
         draw_drag: {
@@ -1007,10 +1011,10 @@ live_design!{
         draw_fill: {
             color: (THEME_COLOR_BG_HEADER)
         }
-        
+
         width: Fill
         height: Fixed((THEME_TAB_HEIGHT))
-        
+
         scroll_bars: <ScrollBars> {
             show_scroll_x: true
             show_scroll_y: false
@@ -1021,20 +1025,20 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     const BORDER_SIZE: 6.0
     Dock = <DockBase> {
         round_corner: {
             draw_depth: 6.0
             border_radius: 10.0
             fn pixel(self) -> vec4 {
-                
+
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
                     mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
                 )
-                
+
                 let sdf = Sdf2d::viewport(pos * self.rect_size);
                 sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
                 sdf.box(
@@ -1044,13 +1048,13 @@ live_design!{
                     self.rect_size.y * 2.0,
                     4.0
                 );
-                
+
                 sdf.subtract()
                 return sdf.fill(THEME_COLOR_BG_APP);
             }
         }
         border_size: (BORDER_SIZE)
-        
+
         flow: Down
         padding: {left: (BORDER_SIZE), top: (0), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
         padding_fill: {color: (THEME_COLOR_BG_APP)}
@@ -1061,17 +1065,17 @@ live_design!{
         tab_bar: <TabBar> {}
         splitter: <Splitter> {}
     }
-    
-    
-    
-    
+
+
+
+
     PopupMenuItem = <PopupMenuItemBase> {
-        
+
         align: {y: 0.5}
         padding: {left: 15, top: 5, bottom: 5},
         width: Fill,
         height: Fit
-        
+
         draw_name: {
             text_style: <THEME_FONT_LABEL> {}
             instance selected: 0.0
@@ -1088,16 +1092,16 @@ live_design!{
                 )
             }
         }
-        
+
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
             instance color: #0
             instance color_selected: #4
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                
+
                 sdf.clear(mix(
                     self.color,
                     self.color_selected,
@@ -1105,7 +1109,7 @@ live_design!{
                     // THEME_COLOR_BG_SELECTED,
                     self.hover
                 ))
-                
+
                 //
                 // we have 3 points, and need to rotate around its center
                 let sz = 3.;
@@ -1115,11 +1119,11 @@ live_design!{
                 sdf.line_to(c.x, c.y + sz);
                 sdf.line_to(c.x + sz, c.y - sz);
                 sdf.stroke(mix(#fff0, #f, self.selected), 1.0);
-                
+
                 return sdf.result;
             }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -1139,7 +1143,7 @@ live_design!{
                     }
                 }
             }
-            
+
             select = {
                 default: off
                 off = {
@@ -1160,34 +1164,34 @@ live_design!{
         }
         indent_width: 10.0
     }
-    
+
     PopupMenu = <PopupMenuBase> {
         menu_item: <PopupMenuItem> {}
-        
+
         flow: Down,
         padding: 5
-        
-        
+
+
         width: 100,
         height: Fit
-        
+
         draw_bg: {
             instance color: #0
             instance border_width: 0.0,
             instance border_color: #0000,
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
             instance radius: 4.0
-            
+
             fn get_color(self) -> vec4 {
                 return self.color
             }
-            
+
             fn get_border_color(self) -> vec4 {
                 return self.border_color
             }
-            
+
             fn pixel(self) -> vec4 {
-                
+
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.blur = 20.0;
                 sdf.box(
@@ -1202,9 +1206,9 @@ live_design!{
             }
         }
     }
-    
-    
-    
+
+
+
     DropDown = <DropDownBase> {
         draw_text: {
             fn get_color(self) -> vec4 {
@@ -1223,13 +1227,13 @@ live_design!{
                 )
             }
         }
-        
+
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
             instance focus: 0.0,
             uniform border_radius: 0.5
-            
+
             fn get_bg(self, inout sdf: Sdf2d) {
                 sdf.box(
                     0.,
@@ -1240,35 +1244,35 @@ live_design!{
                 )
                 sdf.fill(mix(#2, #3, self.hover));
             }
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 self.get_bg(sdf);
                 // lets draw a little triangle in the corner
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
                 let sz = 2.5;
-                
+
                 sdf.move_to(c.x - sz, c.y - sz);
                 sdf.line_to(c.x + sz, c.y - sz);
                 sdf.line_to(c.x, c.y + sz * 0.75);
                 sdf.close_path();
-                
+
                 sdf.fill(mix(#8, #c, self.hover));
-                
+
                 return sdf.result
             }
         }
-        
+
         width: Fill,
         height: Fit,
         margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
         align: {x: 0., y: 0.}
         padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
-        
+
         popup_menu: <PopupMenu> {}
-        
+
         popup_shift: vec2(-6.0, 4.0)
-        
+
         selected_item: 0
         animator: {
             hover = {
@@ -1280,7 +1284,7 @@ live_design!{
                         draw_text: {pressed: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -1291,7 +1295,7 @@ live_design!{
                         draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
-                
+
                 pressed = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -1319,7 +1323,7 @@ live_design!{
             }
         }
     }
-    
+
     FileTreeNode = <FileTreeNodeBase> {
         draw_bg: {
             fn pixel(self) -> vec4 {
@@ -1338,7 +1342,7 @@ live_design!{
                 );
             }
         }
-        
+
         draw_icon: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1358,7 +1362,7 @@ live_design!{
                 ));
             }
         }
-        
+
         draw_name: {
             fn get_color(self) -> vec4 {
                 return mix(
@@ -1371,15 +1375,15 @@ live_design!{
                     self.hover
                 )
             }
-            
+
             text_style: <THEME_FONT_DATA> {
                 top_drop: 1.2,
             }
         }
-        
+
         align: {y: 0.5}
         padding: {left: 5.0, bottom: 0,},
-        
+
         icon_walk: {
             width: Fixed((THEME_DATA_ICON_WIDTH - 2)),
             height: Fixed((THEME_DATA_ICON_HEIGHT)),
@@ -1390,7 +1394,7 @@ live_design!{
                 bottom: 0
             },
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -1403,7 +1407,7 @@ live_design!{
                         draw_icon: {hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Hand
                     from: {all: Snap}
@@ -1415,20 +1419,20 @@ live_design!{
                     },
                 }
             }
-            
+
             focus = {
                 default: on
                 on = {
                     from: {all: Snap}
                     apply: {focussed: 1.0}
                 }
-                
+
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {focussed: 0.0}
                 }
             }
-            
+
             select = {
                 default: off
                 off = {
@@ -1449,19 +1453,19 @@ live_design!{
                         draw_icon: {selected: 1.0}
                     }
                 }
-                
+
             }
-            
+
             open = {
                 default: off
                 off = {
                     //from: {all: Exp {speed1: 0.80, speed2: 0.97}}
                     //duration: 0.2
                     redraw: true
-                    
+
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.80, d2: 0.97}
-                    
+
                     //ease: Ease::OutExp
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
@@ -1470,13 +1474,13 @@ live_design!{
                         draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
-                
+
                 on = {
                     //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
-                    
+
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.82, d2: 0.95}
-                    
+
                     //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
                     redraw: true
                     apply: {
@@ -1492,7 +1496,7 @@ live_design!{
         indent_width: 10.0
         min_drag_distance: 10.0
     }
-    
+
     FileTree = <FileTreeBase> {
         scroll_bars: <ScrollBars>{}
         node_height: (THEME_DATA_ITEM_HEIGHT),
@@ -1528,16 +1532,16 @@ live_design!{
         clip_y: true
         scroll_bars: {}
     }
-    
+
     FoldButton = <FoldButtonBase> {
         draw_bg: {
             instance open: 0.0
             instance hover: 0.0
-            
+
             uniform fade: 1.0
-            
+
             fn pixel(self) -> vec4 {
-                
+
                 let sz = 3.;
                 let c = vec2(5.0, 0.5 * self.rect_size.y);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1552,27 +1556,27 @@ live_design!{
                 return sdf.result * self.fade;
             }
         }
-        
+
         abs_size: vec2(32, 12)
         abs_offset: vec2(4., 0.)
         width: 12,
         height: 12,
-        
+
         animator: {
-            
+
             hover = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {draw_bg: {hover: 0.0}}
                 }
-                
+
                 on = {
                     from: {all: Snap}
                     apply: {draw_bg: {hover: 1.0}}
                 }
             }
-            
+
             open = {
                 default: yes
                 no = {
@@ -1594,7 +1598,7 @@ live_design!{
             }
         }
     }
-    
+
     FoldHeader = <FoldHeaderBase> {
         width: Fill,
         height: Fit
@@ -1602,9 +1606,9 @@ live_design!{
             width: Fill,
             height: Fit
         }
-        
+
         flow: Down,
-        
+
         animator: {
             open = {
                 default: on
@@ -1627,20 +1631,20 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     LinkLabel = <LinkLabelBase> {
         width: Fit,
         height: Fit,
         margin: 0
         padding: 0
         align: {x: 0., y: 0.}
-        
+
         label_walk: {
             width: Fit,
             height: Fit
         }
-        
+
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -1656,7 +1660,7 @@ live_design!{
                 )
             }
         }
-        
+
         animator: {
             hover = {
                 default: off,
@@ -1668,7 +1672,7 @@ live_design!{
                         draw_text: {pressed: 0.0, hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
@@ -1680,7 +1684,7 @@ live_design!{
                         draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
-                
+
                 pressed = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -1691,7 +1695,7 @@ live_design!{
                 }
             }
         }
-        
+
 
         draw_bg: {
             instance pressed: 0.0
@@ -1726,18 +1730,18 @@ live_design!{
                 )
             }
         }
-        
+
     }
-    
-    
+
+
     RadioButton = <RadioButtonBase> {
-        
+
         draw_radio: {
-            
+
             uniform size: 7.0;
             uniform color_active: #00000000
             uniform color_inactive: #x99EEFF
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 match self.radio_type {
@@ -1771,11 +1775,11 @@ live_design!{
             instance hover: 0.0
             instance focus: 0.0
             instance selected: 0.0
-            
+
             uniform color_unselected: #x00000088
             uniform color_unselected_hover: #x000000CC
             uniform color_selected: #xFFFFFF66
-            
+
             color: #9
             text_style: {
                 font: {
@@ -1795,7 +1799,7 @@ live_design!{
                 )
             }
         }
-        
+
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0
@@ -1812,20 +1816,20 @@ live_design!{
                 )
             }
         }
-        
+
         width: Fit,
         height: Fit
-        
+
         label_walk: {
             margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}
             width: Fit,
             height: Fit,
         }
-        
+
         label_align: {
             y: 0.0
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -1889,8 +1893,8 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     PortalList = <PortalListBase> {
         width: Fill
         height: Fill
@@ -1898,7 +1902,7 @@ live_design!{
         scroll_bar: <ScrollBar> {}
         flow: Down
     }
-    
+
     FlatList = <FlatListBase> {
         width: Fill
         height: Fill
@@ -1906,7 +1910,7 @@ live_design!{
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         flow: Down
     }
-    
+
     CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
     }
@@ -1919,9 +1923,9 @@ live_design!{
     ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
     ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
-    
-    
-    
+
+
+
     TextInput = <TextInputBase> {
         draw_text: {
             instance hover: 0.0
@@ -1961,8 +1965,8 @@ live_design!{
                 return sdf.result
             }
         }
-        
-        
+
+
         draw_select: {
             instance hover: 0.0
             instance focus: 0.0
@@ -1981,7 +1985,7 @@ live_design!{
                 return sdf.result
             }
         }
-        
+
         cursor_margin_bottom: 3.0,
         cursor_margin_top: 4.0,
         select_pad_edges: 3.0
@@ -1994,15 +1998,15 @@ live_design!{
             instance border_width: 0.0
             instance border_color: #3
             instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            
+
             fn get_color(self) -> vec4 {
                 return self.color
             }
-            
+
             fn get_border_color(self) -> vec4 {
                 return self.border_color
             }
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box(
@@ -2026,13 +2030,13 @@ live_design!{
         //margin: {top: 5, right: 5}
         width: Fit,
         height: Fit,
-        
+
         /*label_walk: {
             width: Fit,
             height: Fit,
             //margin: 0//{left: 5.0, right: 5.0, top: 0.0, bottom: 2.0},
         }*/
-        
+
         animator: {
             hover = {
                 default: off
@@ -2072,74 +2076,74 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     Slider = <SliderBase> {
         min: 0.0,
         max: 1.0,
         step: 0.0,
-        
+
         draw_slider: {
             instance hover: float
             instance focus: float
             instance drag: float
-            
+
             fn pixel(self) -> vec4 {
                 let slider_height = 3;
                 let nub_size = mix(3, 4, self.hover);
                 let nubbg_size = 18
-                
+
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                
+
                 let slider_bg_color = mix(#38, #30, self.focus);
                 let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
                 let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
                 let nubbg_color = mix(#eee0, #8, self.drag);
-                
+
                 match self.slider_type {
                     SliderType::Horizontal => {
                         sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
-                        
+
                         sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
                         sdf.fill(slider_color);
-                        
+
                         let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
                         sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
                         sdf.fill(nubbg_color);
-                        
+
                         // the nub
                         let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
                         sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
                         sdf.fill(nub_color);
                     }
                     SliderType::Vertical => {
-                        
+
                     }
                     SliderType::Rotary => {
-                        
+
                     }
                 }
                 return sdf.result
             }
         }
-        
+
         draw_text: {
             color: #9
         }
-        
+
         label_walk: {
             margin: {left: 4.0, top: 3.0}
             width: Fill,
             height: Fill
         }
-        
+
         label_align: {
             y: 0.0
         }
-        
+
         precision: 2,
-        
+
         text_input: <TextInput> {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
@@ -2152,12 +2156,12 @@ live_design!{
                 color: #5
                 radius: 2.0
             },
-            
+
             padding: 0,
             label_align: {y: 0.},
             margin: {top: 3, right: 3}
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -2206,8 +2210,8 @@ live_design!{
             }
         }
     }
-    
-    
+
+
     SlideBody = <Label> {
         margin:{top:20}
         draw_text: {
@@ -2220,7 +2224,7 @@ live_design!{
         }
         text: ""
     }
-    
+
     Slide = <RoundedView> {
         draw_bg: {color: #x1A, radius: 5.0}
         width: Fill,
@@ -2238,7 +2242,7 @@ live_design!{
             text: "SlideTitle"
         }
     }
-    
+
     SlideChapter = <Slide> {
         draw_bg: {color: #xFF5C39, radius: 5.0}
         width: Fill,
@@ -2256,15 +2260,15 @@ live_design!{
             text: "SlideTitle"
         }
     }
-    
+
     SlidesView = <SlidesViewBase> {
         anim_speed: 0.9
     }
-    
+
     DrawScrollShadow = <DrawScrollShadowBase> {
-        
+
         shadow_size: 4.0,
-        
+
         fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
             let is_viz = clamp(self.scroll * 0.1, 0., 1.);
             let pos = self.pos;

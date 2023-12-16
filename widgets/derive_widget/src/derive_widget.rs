@@ -2,7 +2,111 @@ use proc_macro::{TokenStream};
 
 use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
-pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
+pub fn derive_widget_impl(input: TokenStream) ->  TokenStream {
+    let mut out = TokenStream::new();
+    out.extend(derive_widget_node_impl(input.clone()));
+    out.extend(derive_widget_register_impl(input.clone()));
+    out.extend(derive_widget_ref_impl(input.clone()));
+    out.extend(derive_widget_set_impl(input.clone()));
+    out
+}
+
+pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
+    let mut tb = TokenBuilder::new();
+    let mut parser = TokenParser::new(input);
+    let _main_attribs = parser.eat_attributes();
+    parser.eat_ident("pub");
+    if parser.eat_ident("struct") {
+        let struct_name = parser.expect_any_ident().unwrap();
+        let generic = parser.eat_generic();
+        let types = parser.eat_all_types();
+        let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
+                
+        let mut fields = if let Some(_types) = types {
+            return error("Unexpected type form")
+        }
+        else if let Some(fields) = parser.eat_all_struct_fields() {
+            fields
+        }
+        else {
+            return error("Unexpected field form")
+        };
+                
+        // alright now. we have a field
+        let mut walk_field = None;
+        let mut deref_field = None;
+        let mut wrap_field = None;
+        let mut find_fields = Vec::new();
+        let mut redraw_fields = Vec::new();
+        for field in &mut fields {
+            if field.attrs.iter().find(|v| v.name == "walk").is_some(){
+                walk_field = Some(field.name.clone());
+            }
+            if field.attrs.iter().find(|v| v.name == "deref").is_some(){
+                deref_field = Some(field.name.clone());
+            }
+            if field.attrs.iter().find(|v| v.name == "redraw").is_some(){
+                redraw_fields.push(field.name.clone());
+            }
+            if field.attrs.iter().find(|v| v.name == "find").is_some(){
+                find_fields.push(field.name.clone());
+            }
+            if field.attrs.iter().find(|v| v.name == "wrap").is_some(){
+                wrap_field = Some(field.name.clone());
+            }
+        }
+        tb.add("impl").stream(generic.clone());
+        tb.add("WidgetNode for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
+        if let Some(wrap_field) = &wrap_field{
+            tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&wrap_field).add(".walk(cx)}");            
+            tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&wrap_field).add(".redraw(cx)}");
+            tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
+        }
+        else{
+            if let Some(walk_field) = &walk_field{
+                tb.add("    fn walk(&mut self, _cx:&mut Cx) -> Walk { self.").ident(&walk_field).add("}");
+            }
+            else if let Some(deref_field) = &deref_field{
+                tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&deref_field).add(".walk(cx)}");
+            }
+            else{
+                return error("Need either a field marked walk or deref to find walk method")
+            }
+            if redraw_fields.len()>0{
+                tb.add("    fn redraw(&mut self, cx:&mut Cx) {");
+                for redraw_field in redraw_fields{
+                    tb.add("    self.").ident(&redraw_field).add(".redraw(cx);");
+                }
+                tb.add("    }");
+            }
+            else if let Some(deref_field) = &deref_field{
+                tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&deref_field).add(".redraw(cx)}");
+            }
+            else{
+                return error("Need either a field marked redraw or deref or wrap to find redraw method")
+            }
+            if find_fields.len()>0{
+                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){");
+                for find_field in find_fields{
+                    tb.add("    self.").ident(&find_field).add(".find_widgets(path, cached, results);");
+                }
+                tb.add("    }");
+            }
+            else if let Some(deref_field) = &deref_field{
+                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&deref_field).add(".find_widgets(path, cached, results)}");
+            }
+            else{
+                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
+            }
+            
+        }
+        tb.add("}");
+        return tb.end();
+    }
+    parser.unexpected()
+}
+
+pub fn derive_default_none_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
@@ -11,19 +115,20 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
         if let Some(enum_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
+            /*
             tb.add("impl Into<Box<dyn WidgetAction>> for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
             tb.add("{");
             tb.add("    fn into(self)->Box<dyn WidgetAction>{");
             tb.add("        Box::new(self)");
             tb.add("    }");
-            tb.add("}");
-
+            tb.add("}");*/
+/*
             tb.add("impl ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
             tb.add("{");
             tb.add("    fn into_action(self, uid:WidgetUid)->WidgetActionItem{");
             tb.add("        WidgetActionItem::new(self.into(), uid)");
             tb.add("    }");
-            tb.add("}");
+            tb.add("}");*/
             tb.add("impl").stream(generic.clone());
             tb.add("Default for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
             tb.add("    fn default()->Self{Self::None}");
@@ -35,6 +140,30 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
 
     parser.unexpected()
 }
+
+pub fn derive_widget_register_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let mut parser = TokenParser::new(input);
+    let _main_attribs = parser.eat_attributes();
+    parser.eat_ident("pub");
+    if parser.eat_ident("struct") {
+        if let Some(struct_name) = parser.eat_any_ident() {
+            let generic = parser.eat_generic();
+            let _types = parser.eat_all_types();
+            let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
+            tb.add("impl").stream(generic.clone());
+            tb.add("LiveRegister for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            //tb.add("    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}");
+            tb.add("    fn live_register(cx: &mut Cx) {");
+            tb.add("        register_widget!(cx, ").ident(&struct_name).add(");");
+            tb.add("    }");
+            tb.add("}");
+            return tb.end();
+        }
+    }
+    return parser.unexpected() 
+}
+
 /*
 pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
@@ -97,15 +226,12 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        if let Some(ref_name) = parser.eat_any_ident() {
-            let clean_name = if let Some(sn) = ref_name.strip_suffix("Ref"){
-                sn
-            }
-            else{
-                return error("derive WidgetRef can only be done on a struct with ending name Ref")
-            };
-            let snake_name = camel_case_to_snake_case(clean_name);
-            
+        if let Some(clean_name) = parser.eat_any_ident() {
+            let ref_name = format!("{}Ref", clean_name);
+            let snake_name = camel_case_to_snake_case(&clean_name);
+                         
+            tb.add("#[derive(Clone, Debug)]");
+            tb.add("pub struct ").ident(&ref_name).add("(WidgetRef);");
             tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
             tb.add("    type Target = WidgetRef;");
             tb.add("    fn deref(&self)->&Self::Target{");
@@ -127,33 +253,14 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("    }");
 
-            tb.add("   pub fn borrow(&self) -> Option<std::cell::Ref<'_, ").ident(clean_name).add(" >> {");
+            tb.add("   pub fn borrow(&self) -> Option<std::cell::Ref<'_, ").ident(&clean_name).add(" >> {");
             tb.add("       self.0.borrow()");
             tb.add("   }");
             
-            tb.add("   pub fn borrow_mut(&self) -> Option<std::cell::RefMut<'_, ").ident(clean_name).add(" >> {");
+            tb.add("   pub fn borrow_mut(&self) -> Option<std::cell::RefMut<'_, ").ident(&clean_name).add(" >> {");
             tb.add("       self.0.borrow_mut()");
             tb.add("   }");
             tb.add("}");
-            /*
-            tb.add("impl LiveHook for ").ident(&ref_name).add("{}");
-            tb.add("impl LiveApply for ").ident(&ref_name).add("{");
-            tb.add("    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
-            tb.add("        if let Some(mut inner) = self.borrow_mut(){");
-            tb.add("            return inner.apply(cx, from, index, nodes)");
-            tb.add("        }");
-            tb.add("        nodes.skip_node(index)");
-            tb.add("    }");
-            tb.add("}");
-
-            tb.add("impl LiveNew for ").ident(&ref_name).add("{");
-            tb.add("    fn new(cx: &mut Cx) -> Self {");
-            tb.add("        Self (WidgetRef::new_with_inner(Box::new(").ident(clean_name).add("::new(cx))))");
-            tb.add("    }");
-            tb.add("    fn live_type_info(cx: &mut Cx) -> LiveTypeInfo {");
-            tb.add("        ").ident(clean_name).add("::live_type_info(cx)");
-            tb.add("    }");
-            tb.add("}");*/
 
             //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
@@ -199,15 +306,12 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        if let Some(set_name) = parser.eat_any_ident() {
-            let clean_name = if let Some(sn) = set_name.strip_suffix("Set"){
-                sn
-            }
-            else{
-                return error("derive WidgetRef can only be done on a struct with ending name Ref")
-            };
-            let snake_name = camel_case_to_snake_case(clean_name);
+        if let Some(clean_name) = parser.eat_any_ident() {
+            let set_name = format!("{}Set", clean_name);
+            let snake_name = camel_case_to_snake_case(&clean_name);
             
+            tb.add("#[derive(Clone, Debug)]");
+            tb.add("pub struct ").ident(&set_name).add("(WidgetSet);");
             tb.add("impl std::ops::Deref for ").ident(&set_name).add("{");
             tb.add("    type Target = WidgetSet;");
             tb.add("    fn deref(&self)->&Self::Target{");
@@ -219,16 +323,6 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("        &mut self.0");
             tb.add("    }");
             tb.add("}");
-            /*
-            tb.add("impl LiveHook for ").ident(&set_name).add("{}");
-            tb.add("impl LiveApply for ").ident(&set_name).add("{");
-            tb.add("    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
-            tb.add("        for mut item in self.iter(){");
-            tb.add("            item.apply(cx, from, index, nodes);");
-            tb.add("        }");
-            tb.add("        nodes.skip_node(index)");
-            tb.add("    }");
-            tb.add("}");*/
 
             let set_ext = format!("{}SetWidgetSetExt", clean_name);
             let ref_ext = format!("{}SetWidgetRefExt", clean_name);
