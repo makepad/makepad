@@ -103,10 +103,6 @@ live_design!{
         
         width: Fit
         height: Fit
-        // This is important to avoid clipping the image, specially when it is rotated.
-        // In any case, it can be override by the app developer.
-        clip_x: false,
-        clip_y: false
         
         draw_bg: {
             texture image: texture2d
