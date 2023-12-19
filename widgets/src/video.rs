@@ -213,8 +213,7 @@ impl LiveHook for Video {
 
         #[cfg(target_os = "android")]
         if self.texture.is_none() {
-            let new_texture = Texture::new(cx);
-            new_texture.set_format(cx, TextureFormat::VideoRGB);
+            let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
             self.texture = Some(new_texture);
         }
 
