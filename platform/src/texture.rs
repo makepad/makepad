@@ -449,26 +449,12 @@ impl Default for TextureFormat {
 
 impl Texture {
     pub fn new(cx: &mut Cx) -> Self {
-        cx.textures.alloc(TextureFormat::VecBGRAu8_32 {
-            width: 4,
-            height: 4,
-            data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        })
+        cx.null_texture()
     }
 
     pub fn new_with_format(cx: &mut Cx, format: TextureFormat) -> Self {
         let texture = cx.textures.alloc(format);
         texture
-    }
-    
-    pub fn set_format(&self, cx: &mut Cx, target_format: TextureFormat) {
-        let current_format = self.get_format(cx);
-        if current_format.is_compatible_with(&target_format) {
-            let cxtexture = &mut cx.textures[self.texture_id()];
-            cxtexture.format = target_format;
-        } else {
-            panic!("Attempted to set incompatible texture format: {:?} != {:?}", current_format, target_format);
-        }
     }
     
     pub fn get_format<'a>(&self, cx: &'a mut Cx) -> &'a mut TextureFormat {
