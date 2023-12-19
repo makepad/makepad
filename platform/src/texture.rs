@@ -23,14 +23,16 @@ pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
 
 impl CxTexturePool {
     pub fn alloc(&mut self, requested_format: TextureFormat) -> Texture {
+        let is_video = requested_format.is_video();
         let cx_texture = CxTexture {
-            format: requested_format.clone(),
+            format: requested_format,
             alloc: None,
             ..Default::default()
         };
 
         let new_id = self.0.alloc_with_reuse_filter(|item| {
-            requested_format.is_compatible_with(&item.item.format)
+            // check for compatibility, not using `is_compatible_with` to avoid passing the whole format and cloning vec contents
+            is_video == item.item.format.is_video()
         }, cx_texture);
 
         Texture(Rc::new(new_id))
@@ -288,12 +290,12 @@ impl TextureFormat{
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub fn is_video(&self) -> bool {
-        match self {
-            Self::VideoRGB => true,
-            _ => false
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        if let Self::VideoRGB = self {
+            return true;
         }
+        false
     }
 
     pub fn vec_width_height(&self)->Option<(usize,usize)>{
