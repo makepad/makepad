@@ -75,6 +75,7 @@ pub struct AppData{
 pub enum AppAction{
     JumpTo(JumpTo),
     RedrawLog,
+    RedrawProfiler,
     RedrawFile(FileNodeId),
     StartRecompile,
     ReloadFileTree,
@@ -105,6 +106,7 @@ impl MatchEvent for App{
         let file_tree = self.ui.view(id!(file_tree));
         let log_list = self.ui.view(id!(log_list));
         let run_list = self.ui.view(id!(run_list));
+        let profiler = self.ui.view(id!(profiler));
         match action.cast(){
             AppAction::JumpTo(jt)=>{
                 if let Some(file_id) = self.data.file_system.path_to_file_node_id(&jt.file_name) {
@@ -135,9 +137,13 @@ impl MatchEvent for App{
             AppAction::ClearLog=>{
                 self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
                 log_list.redraw(cx);
+                profiler.redraw(cx);
             }
             AppAction::ReloadFileTree=>{
                 self.data.file_system.reload_file_tree();
+            }
+            AppAction::RedrawProfiler=>{
+                profiler.redraw(cx);
             }
             AppAction::RedrawLog=>{
                 log_list.redraw(cx);

@@ -30,6 +30,7 @@ pub trait MatchEvent{
             Event::Shutdown=>self.handle_shutdown(cx),
             Event::Pause=>self.handle_pause(cx),
             Event::Resume=>self.handle_resume(cx),
+            Event::Signal=>self.handle_signal(cx),
             Event::AppGotFocus=>self.handle_app_got_focus(cx),
             Event::AppLostFocus=>self.handle_app_lost_focus(cx),
             Event::NextFrame(e)=>self.handle_next_frame(cx, e),

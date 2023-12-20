@@ -9,7 +9,7 @@ use {
             HostToStdin,
             StdinToHost,
         },
-        makepad_platform::studio::{AppToStudioVec,AppToStudio,ProfileSample},
+        makepad_platform::studio::{AppToStudioVec,AppToStudio,ProfileSampleEvent},
         makepad_platform::log::LogLevel,
         build_manager::{
             build_protocol::*,
@@ -72,12 +72,17 @@ impl ActiveBuilds {
 }
 
 #[derive(Default)]
+pub struct ProfileSampleStore{
+    pub events: Vec<ProfileSampleEvent>
+}
+
+#[derive(Default)]
 pub struct BuildManager {
     root_path: PathBuf,
     http_port: usize,
     pub clients: Vec<BuildClient>,
     pub log: Vec<(LiveId, LogItem)>,
-    pub profile: HashMap<LiveId, Vec<ProfileSample>>,
+    pub profile: HashMap<LiveId, ProfileSampleStore>,
     recompile_timeout: f64,
     recompile_timer: Timer,
     pub binaries: Vec<BuildBinary>,
@@ -183,6 +188,7 @@ impl BuildManager {
         file_system.clear_all_decorations();
         file_system.redraw_all_views(cx, dock);
         self.log.clear();
+        self.profile.clear();
     }
     
     pub fn start_recompile_timer(&mut self, cx: &mut Cx, ui: &WidgetRef) {
@@ -261,8 +267,11 @@ impl BuildManager {
                             })));
                             cx.action(AppAction::RedrawLog)
                         }
-                        AppToStudio::ProfileSample(_sample)=>{  
-                            //log!("{:?}", sample); 
+                        AppToStudio::ProfileEvent(sample)=>{  
+                            // ok lets push this profile sample into the profiles
+                            let values = self.profile.entry(build_id).or_default();
+                            values.events.push(sample);
+                            cx.action(AppAction::RedrawProfiler)
                         }
                     }
                 }
