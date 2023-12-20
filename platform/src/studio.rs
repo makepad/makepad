@@ -4,12 +4,10 @@ use crate::log::LogLevel;
 // communication enums for studio
 
 #[derive(SerBin, DeBin, Debug)]
-pub enum ProfileSample{
-    Event{
-        event_u32: u32,
-        start: f64,
-        end: f64,
-    }
+pub struct ProfileSampleEvent{
+    pub event_u32: u32,
+    pub start: f64,
+    pub end: f64,
 }
 
 #[derive(SerBin, DeBin, Debug)]
@@ -23,7 +21,7 @@ pub enum AppToStudio{
         message: String,
         level: LogLevel
     },
-    ProfileSample(ProfileSample)
+    ProfileEvent(ProfileSampleEvent)
 }
 
 #[derive(SerBin, DeBin)]
