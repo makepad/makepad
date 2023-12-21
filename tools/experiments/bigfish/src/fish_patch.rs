@@ -61,6 +61,20 @@ impl FindBlock for Vec<FishBlock> {
     }
 }
 
+pub trait FindConnection {
+    fn find_mut(&mut self, id: u64) -> Option<&mut FishConnection>;
+    fn find(&self, id: u64) -> Option<&FishConnection>;
+}
+
+impl FindConnection for Vec<FishConnection> {
+    fn find_mut(&mut self, id: u64) -> Option<&mut FishConnection> {
+        self.iter_mut().find(|x| x.id == id)
+    }
+    fn find(&self, id: u64) -> Option<&FishConnection> {
+        self.iter().find(|x| x.id == id)
+    }
+}
+
 impl FishPatch {
     pub fn connect(&mut self, blockfrom: u64, outputfrom: u64, blockto: u64, intputto: u64) {
         // todo: check if connection exists
@@ -126,8 +140,8 @@ impl FishPatch {
                 UndoableThing::Block => match item.1 {
                     IdAction::Create { id } => {
                         // undo of create = delete
-                        let B = self.get_block(id).expect("find block");
-                        let Bstring = B.serialize_ron();
+                        let b = self.get_block(id).expect("find block");
+                        let bstring = b.serialize_ron();
 
                         let index = self.blocks.iter().position(|x| x.id == id).unwrap();
                         self.blocks.remove(index);
@@ -135,7 +149,7 @@ impl FishPatch {
                         self.undo.redo_things.push((
                             UndoableThing::Block,
                             IdAction::Delete { id: id },
-                            Bstring,
+                            bstring,
                         ));
                     }
                     IdAction::Modify { id } => {
@@ -167,7 +181,52 @@ impl FishPatch {
                     }
                     _ => {}
                 },
-                UndoableThing::Connection => {}
+
+                UndoableThing::Connection => match item.1 {
+                    IdAction::Create { id } => {
+                        // undo of create = delete
+                        let c = self.get_connection(id).expect("find connection");
+                        let cstring = c.serialize_ron();
+
+                        let index = self.connections.iter().position(|x| x.id == id).unwrap();
+                        self.connections.remove(index);
+
+                        self.undo.redo_things.push((
+                            UndoableThing::Connection,
+                            IdAction::Delete { id: id },
+                            cstring,
+                        ));
+                    }
+                    IdAction::Modify { id } => {
+                        // deserialize old state in to existing block
+                        let mut cstring = String::new();
+                        {
+                            let c = self.get_connection(id).expect("find connection");
+                            cstring = c.serialize_ron();
+                        }
+                        self.undo.redo_things.push((
+                            UndoableThing::Connection,
+                            IdAction::Modify { id: id },
+                            cstring,
+                        ));
+                        {
+                            let mut c = self.connections.find_mut(id).expect("find connection");
+                            c.reload_from_string(&item.2);
+                        }
+                    }
+                    IdAction::Delete { id } => {
+                        // undo of delete = create
+                        let zombie =
+                            FishConnection::deserialize_ron(&item.2).expect("create a connection");
+                        self.connections.push(zombie);
+                        self.undo.redo_things.push((
+                            UndoableThing::Connection,
+                            IdAction::Create { id: id },
+                            String::new(),
+                        ));
+                    }
+                    _ => {}
+                },
             }
         }
     }
@@ -190,6 +249,10 @@ impl FishPatch {
 
     pub fn get_block(&self, id: u64) -> Option<&FishBlock> {
         self.blocks.iter().find(|&x| x.id == id)
+    }
+
+    pub fn get_connection(&self, id: u64) -> Option<&FishConnection> {
+        self.connections.iter().find(|&x| x.id == id)
     }
 
     pub fn undo_save_block_before_modify(&mut self, id: u64) {

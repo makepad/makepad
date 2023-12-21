@@ -239,10 +239,12 @@ impl MatchEvent for App {
 
         if self.ui.button(id!(undobutton)).clicked(&actions) {
             let _ = self.document.undo().is_ok();
+            self.ui.widget(id!(patchedit)).redraw(cx);
         }
 
         if self.ui.button(id!(redobutton)).clicked(&actions) {
             let _ = self.document.redo().is_ok();
+            self.ui.widget(id!(patchedit)).redraw(cx);
         }
         if self.ui.button(id!(addblockbutton)).clicked(&actions) {
             let _ = self.document.add_block().is_ok();
