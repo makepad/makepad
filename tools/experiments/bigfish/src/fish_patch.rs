@@ -96,7 +96,6 @@ impl FishPatch {
             .push((UndoableThing::OpenMarker, IdAction::Nop, String::new()));
 
         self.undo.undo_level = self.undo.undo_level + 1;
-
         self.undo.undo_level
     }
 
@@ -133,6 +132,7 @@ impl FishPatch {
                         done = true;
                     }
                 }
+
                 UndoableThing::CloseMarker => {
                     level = level + 1;
                 }
@@ -197,6 +197,7 @@ impl FishPatch {
                             cstring,
                         ));
                     }
+
                     IdAction::Modify { id } => {
                         // deserialize old state in to existing block
                         let mut cstring = String::new();
@@ -214,6 +215,7 @@ impl FishPatch {
                             c.reload_from_string(&item.2);
                         }
                     }
+
                     IdAction::Delete { id } => {
                         // undo of delete = create
                         let zombie =
@@ -238,15 +240,38 @@ impl FishPatch {
     }
     pub fn redo(&mut self, lib: &FishBlockLibrary) {}
 
+    pub fn remove_connection(&mut self, id: u64) {
+        self.undo_checkpoint_start();
+
+        let c = self.get_connection(id).expect("find block");
+        let cstring = c.serialize_ron();
+
+        let index = self.connections.iter().position(|x| x.id == id).unwrap();
+        self.connections.remove(index);
+
+        self.undo.undo_things.push((
+            UndoableThing::Connection,
+            IdAction::Delete { id: id },
+            cstring,
+        ));
+
+        self.undo_checkpoint_end();
+    }
+
     pub fn remove_block(&mut self, id: u64) {
         self.undo_checkpoint_start();
 
         // remove connections involving block
         // remove preset data for block
-        let conns = self
-            .connections
-            .retain(|x| x.from_block == id && x.to_block == id);
-
+        let mut deleteconns: Vec<u64> = vec![];
+        for i in 0..self.connections.len() {
+            if self.connections[i].from_block == id || self.connections[i].to_block == id {
+                deleteconns.push(self.connections[i].id.clone());
+            }
+        }
+        for i in 0..deleteconns.len() {
+            self.remove_connection(deleteconns[i]);
+        }
         let b = self.get_block(id).expect("find block");
         let bstring = b.serialize_ron();
 
@@ -269,12 +294,16 @@ impl FishPatch {
     }
 
     pub fn undo_save_block_before_modify(&mut self, id: u64) {
-        let B = self.get_block(id).expect("find block");
-        let Bstring = B.serialize_ron();
+        let bopt = self.get_block(id);
+        if bopt.is_some() == false {
+            return;
+        };
+        let b = bopt.unwrap();
+        let bstring = b.serialize_ron();
 
         self.undo
             .undo_things
-            .push((UndoableThing::Block, IdAction::Modify { id: id }, Bstring));
+            .push((UndoableThing::Block, IdAction::Modify { id: id }, bstring));
     }
 
     pub fn move_block(&mut self, id: u64, x: f64, y: f64) {
