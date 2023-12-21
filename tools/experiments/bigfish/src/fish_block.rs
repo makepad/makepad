@@ -27,6 +27,10 @@ impl FishBlock {
         block
     }
 
+    pub fn reload_from_string(&mut self, serialized: &str) {
+        *self = FishBlock::deserialize_ron(serialized).expect("deserialize a block");
+    }
+
     pub fn get_output_instance(&self, id: u64) -> Option<&FishOutputPortInstance> {
         self.output_ports.iter().find(|&x| x.id == id)
     }

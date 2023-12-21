@@ -1,6 +1,6 @@
 use crate::makepad_widgets::*;
 
-live_design!{
+live_design! {
 
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
@@ -8,7 +8,7 @@ live_design!{
     import makepad_audio_widgets::piano::Piano;
     BigFishHomeScreen=  <View> {
         flow:Down
-        <View>        
+        <View>
         {
         width: Fill,
         height: Fill,
@@ -23,10 +23,10 @@ live_design!{
             draw_text: {
                 color: #f,
                 text_style: {
-                    
+
                     font_size: 20.0,
                     height_factor: 1.0,
-                   
+
                     font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
                 },
             }
