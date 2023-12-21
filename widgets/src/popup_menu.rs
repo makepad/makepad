@@ -135,7 +135,7 @@ impl PopupMenuItem {
 impl PopupMenu {
     
     pub fn menu_contains_pos(&self, cx: &mut Cx, pos: DVec2) -> bool {
-        self.draw_bg.area().get_clipped_rect(cx).contains(pos)
+        self.draw_bg.area().clipped_rect(cx).contains(pos)
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) {

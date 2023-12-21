@@ -230,7 +230,7 @@ impl TabBar {
     
     pub fn is_over_tab(&self, cx:&Cx, abs:DVec2)->Option<(LiveId,Rect)>{
         for (tab_id, tab) in self.tabs.iter() {
-            let rect = tab.area().get_rect(cx);
+            let rect = tab.area().rect(cx);
             if rect.contains(abs){
                 return Some((*tab_id, rect))
             }
@@ -239,7 +239,7 @@ impl TabBar {
     }
     
     pub fn is_over_tab_bar(&self, cx:&Cx, abs:DVec2)->Option<Rect>{
-        let rect = self.scroll_bars.area().get_rect(cx);
+        let rect = self.scroll_bars.area().rect(cx);
         if rect.contains(abs){
             return Some(rect)
         }
