@@ -11,16 +11,19 @@ pub struct ProfileSampleEvent{
 }
 
 #[derive(SerBin, DeBin, Debug)]
+pub struct StudioLogItem{
+    pub file_name:String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub column_start: u32,
+    pub column_end: u32,
+    pub message: String,
+    pub level: LogLevel
+}
+
+#[derive(SerBin, DeBin, Debug)]
 pub enum AppToStudio{
-    Log{
-        file_name:String,
-        line_start: u32,
-        line_end: u32,
-        column_start: u32,
-        column_end: u32,
-        message: String,
-        level: LogLevel
-    },
+    LogItem(StudioLogItem),
     ProfileEvent(ProfileSampleEvent)
 }
 
