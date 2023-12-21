@@ -141,7 +141,7 @@ impl Widget for ProfilerEventChart {
                     // if xsize > 10.0 lets draw a clipped piece of text 
                     if xsize > 10.0{
                         cx.begin_turtle(Walk::abs_rect(rect), Layout::default());
-                        self.draw_label.draw_abs(cx, pos+dvec2(2.0,2.0), &label);
+                        self.draw_label.draw_abs(cx, pos+dvec2(2.0,4.0), &label);
                         cx.end_turtle();
                     }
                 }
