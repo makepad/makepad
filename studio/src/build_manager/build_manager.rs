@@ -225,18 +225,18 @@ impl BuildManager {
             while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
                 for msg in msgs.0{
                     match msg{
-                        AppToStudio::Log{file_name, line_start, line_end, column_start, column_end, message, level}=>{
+                        AppToStudio::LogItem(item)=>{
                             let start = text::Position {
-                                line_index: line_start as usize,
-                                byte_index: column_start as usize
+                                line_index: item.line_start as usize,
+                                byte_index: item.column_start as usize
                             };
                             let end = text::Position {
-                                line_index: line_end as usize,
-                                byte_index: column_end as usize
+                                line_index: item.line_end as usize,
+                                byte_index: item.column_end as usize
                             };
                             //log!("{:?} {:?}", pos, pos + loc.length);
-                            if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
-                                match level{
+                            if let Some(file_id) = file_system.path_to_file_node_id(&item.file_name) {
+                                match item.level{
                                     LogLevel::Warning=>{
                                         file_system.add_decoration(file_id, Decoration::new(
                                             0,
@@ -259,11 +259,11 @@ impl BuildManager {
                                 }
                             }
                             log.push((build_id, LogItem::Location(LogItemLocation{
-                                level,
-                                file_name,
+                                level: item.level,
+                                file_name: item.file_name,
                                 start,
                                 end,
-                                message
+                                message: item.message
                             })));
                             cx.action(AppAction::RedrawLog)
                         }
@@ -374,7 +374,6 @@ impl BuildManager {
         });
         let studio_sender = self.recv_studio_msg.sender();
         std::thread::spawn(move || {
-            
             // TODO fix this proper:
             let makepad_path = "./".to_string();
             let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();

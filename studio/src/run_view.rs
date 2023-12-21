@@ -322,7 +322,7 @@ impl Widget for RunView {
             }
             _ => ()
         }
-        let rect = self.draw_app.area().get_rect(cx);
+        let rect = self.draw_app.area().rect(cx);
         match event {
             Event::MouseDown(e) => {
                 let rel = e.abs - rect.pos;
