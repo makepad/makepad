@@ -7,16 +7,65 @@ use crate::makepad_micro_serde::*;
 use makepad_widgets::*;
 
 #[derive(Clone, Debug, SerRon, DeRon, Default)]
+pub enum UndoableThing {
+    #[default]
+    OpenMarker,
+    CloseMarker,
+    Block,
+    Connection,
+}
+
+#[derive(Clone, Debug, SerRon, DeRon, Default)]
+pub enum IdAction {
+    #[default]
+    Nop,
+    Modify {
+        id: u64,
+    },
+    Delete {
+        id: u64,
+    },
+    Create {
+        id: u64,
+    },
+}
+
+#[derive(Clone, Debug, SerRon, DeRon, Default)]
+pub struct UndoState {
+    pub undo_things: Vec<(UndoableThing, IdAction, String)>,
+    pub redo_things: Vec<(UndoableThing, IdAction, String)>,
+    pub undo_level: usize,
+}
+
+#[derive(Clone, Debug, SerRon, DeRon, Default)]
 pub struct FishPatch {
-    pub id: i32,
+    pub id: u64,
     pub name: String,
     pub presets: Vec<FishPreset>,
     pub blocks: Vec<FishBlock>,
     pub connections: Vec<FishConnection>,
+    pub creationid: u64,
+    pub undo: UndoState,
+}
+pub trait FindBlock {
+    fn find_mut(&mut self, id: u64) -> Option<&mut FishBlock>;
+    fn find(&self, id: u64) -> Option<&FishBlock>;
+}
+
+impl FindBlock for Vec<FishBlock> {
+    fn find_mut(&mut self, id: u64) -> Option<&mut FishBlock> {
+        self.iter_mut().find(|x| x.id == id)
+    }
+    fn find(&self, id: u64) -> Option<&FishBlock> {
+        self.iter().find(|x| x.id == id)
+    }
 }
 
 impl FishPatch {
     pub fn connect(&mut self, blockfrom: u64, outputfrom: u64, blockto: u64, intputto: u64) {
+        // todo: check if connection exists
+        self.undo_checkpoint_start();
+
         self.connections.push(FishConnection {
             id: 0,
             from_block: blockfrom,
@@ -24,39 +73,164 @@ impl FishPatch {
             from_port: outputfrom,
             to_port: intputto,
         });
+        self.undo_checkpoint_end();
+    }
+
+    pub fn undo_checkpoint_start(&mut self) -> usize {
+        self.undo
+            .undo_things
+            .push((UndoableThing::OpenMarker, IdAction::Nop, String::new()));
+
+        self.undo.undo_level = self.undo.undo_level + 1;
+
+        self.undo.undo_level
+    }
+
+    pub fn undo_checkpoint_end(&mut self) {
+        self.undo
+            .undo_things
+            .push((UndoableThing::CloseMarker, IdAction::Nop, String::new()));
+        self.undo.undo_level = self.undo.undo_level - 1;
+    }
+
+    pub fn undo_checkpoint_end_if_match(&mut self, undolevel: usize) -> usize {
+        if self.undo.undo_level == undolevel {
+            self.undo
+                .undo_things
+                .push((UndoableThing::CloseMarker, IdAction::Nop, String::new()));
+            self.undo.undo_level = self.undo.undo_level - 1;
+            return self.undo.undo_level;
+        }
+        undolevel
+    }
+
+    pub fn undo(&mut self, lib: &FishBlockLibrary) {
+        if self.undo.undo_things.len() == 0 {
+            return;
+        }
+        let mut level = 0;
+        let mut done = false;
+        while !done {
+            let item = self.undo.undo_things.pop().unwrap();
+            match item.0 {
+                UndoableThing::OpenMarker => {
+                    level = level - 1;
+                    if level == 0 {
+                        done = true;
+                    }
+                }
+                UndoableThing::CloseMarker => {
+                    level = level + 1;
+                }
+
+                UndoableThing::Block => match item.1 {
+                    IdAction::Create { id } => {
+                        // undo of create = delete
+                        let B = self.get_block(id).expect("find block");
+                        let Bstring = B.serialize_ron();
+
+                        let index = self.blocks.iter().position(|x| x.id == id).unwrap();
+                        self.blocks.remove(index);
+
+                        self.undo.redo_things.push((
+                            UndoableThing::Block,
+                            IdAction::Delete { id: id },
+                            Bstring,
+                        ));
+                    }
+                    IdAction::Modify { id } => {
+                        // deserialize old state in to existing block
+                        let mut Bstring = String::new();
+                        {
+                            let B = self.get_block(id).expect("find block");
+                            Bstring = B.serialize_ron();
+                        }
+                        self.undo.redo_things.push((
+                            UndoableThing::Block,
+                            IdAction::Modify { id: id },
+                            Bstring,
+                        ));
+                        {
+                            let mut B = self.blocks.find_mut(id).expect("find block");
+                            B.reload_from_string(&item.2);
+                        }
+                    }
+                    IdAction::Delete { id } => {
+                        // undo of delete = create
+                        let zombie = FishBlock::deserialize_ron(&item.2).expect("create a block");
+                        self.blocks.push(zombie);
+                        self.undo.redo_things.push((
+                            UndoableThing::Block,
+                            IdAction::Create { id: id },
+                            String::new(),
+                        ));
+                    }
+                    _ => {}
+                },
+                UndoableThing::Connection => {}
+            }
+        }
+    }
+
+    pub fn redo(&mut self, lib: &FishBlockLibrary) {}
+
+    pub fn remove_block(&mut self, id: u64) {
+        self.undo_checkpoint_start();
+
+        // remove connections involving block
+        // remove preset data for block
+
+        self.undo_checkpoint_end();
     }
 
     pub fn get_block(&self, id: u64) -> Option<&FishBlock> {
         self.blocks.iter().find(|&x| x.id == id)
     }
 
+    pub fn undo_save_block_before_modify(&mut self, id: u64) {
+        let B = self.get_block(id).expect("find block");
+        let Bstring = B.serialize_ron();
+
+        self.undo
+            .undo_things
+            .push((UndoableThing::Block, IdAction::Modify { id: id }, Bstring));
+    }
+
     pub fn move_block(&mut self, id: u64, x: f64, y: f64) {
+        self.undo_checkpoint_start();
+        self.undo_save_block_before_modify(id);
         let g = self.blocks.iter_mut().find(|x| x.id == id);
+
         if g.is_none() {
             return;
         }
+
         let b = g.unwrap();
         //let g = self.get_block(id).unwrap();
         let mult = 1;
         let div = 1. / (mult as f64);
         b.x = ((x * div) as i32).max(0) * mult;
         b.y = ((y * div) as i32).max(0) * mult;
+
+        self.undo_checkpoint_end();
     }
 
     pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) {
+        self.undo_checkpoint_start();
         let mut b = lib.create_instance_from_template(&name);
         b.x = x;
         b.y = y;
         b.id = LiveId::unique().0;
 
         self.blocks.push(b);
+        self.undo_checkpoint_end();
     }
 
-    pub fn create_test_patch(id: i32, lib: &FishBlockLibrary) -> FishPatch {
+    pub fn create_test_patch(id: u64, lib: &FishBlockLibrary) -> FishPatch {
         let mut patch = FishPatch::default();
         patch.name = String::from(format!("Test Patch {:?}", id));
         patch.id = id;
-
+        patch.undo_checkpoint_start();
         let mut i = 0;
 
         patch.create_block(
@@ -129,7 +303,7 @@ impl FishPatch {
                 toblock.input_ports[toport].id,
             );
         }*/
-
+        patch.undo_checkpoint_end();
         patch
     }
 }
