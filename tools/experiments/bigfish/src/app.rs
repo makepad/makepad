@@ -102,7 +102,17 @@ live_design! {
 
                 homescreen = <BigFishHomeScreen>{}
 
-                patcheditorscreen = <FishPatchEditor>{}
+                patcheditorscreen = <View>{
+                    flow: Down
+                    <View>
+                    {
+                        flow: Right
+                        height: Fit;
+                        undobutton = <Button>{text:"Undo"}
+                        redobutton = <Button>{text:"Redo"}
+
+                    }
+                    patchedit = <FishPatchEditor>{}}
 
                 debugcontrolscreen = <View>{
                     flow: Down
@@ -181,13 +191,13 @@ live_design! {
 
 app_main!(App);
 
-#[derive(Live, LiveHook)] 
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
     counter: usize,
-    #[rust(FishDoc::create_test_doc())]
+    #[rust]
     document: FishDoc,
 }
 
@@ -207,30 +217,39 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App {
-    fn handle_startup(&mut self, _cx:&mut Cx){
+    fn handle_startup(&mut self, _cx: &mut Cx) {
         self.document = FishDoc::create_test_doc();
     }
-    
-    fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
+
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
         }
-            
+
         if self.ui.button(id!(savebutton)).clicked(&actions) {
             let _ = self.document.save(&"testout.fish").is_ok();
         }
-            
+
         if self.ui.button(id!(loadbutton)).clicked(&actions) {
             let _ = self.document.load(&"testout.fish").is_ok();
+        }
+
+        if self.ui.button(id!(undobutton)).clicked(&actions) {
+            let _ = self.document.undo().is_ok();
+        }
+
+        if self.ui.button(id!(redobutton)).clicked(&actions) {
+            let _ = self.document.redo().is_ok();
         }
     }
 }
 
 impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) { 
-        self.match_event(cx, event); 
-        self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.document));
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
+        self.ui
+            .handle_event(cx, event, &mut Scope::with_data(&mut self.document));
     }
 }

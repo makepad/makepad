@@ -70,6 +70,8 @@ pub struct FishPatchEditor {
     dragstartx: i32,
     #[rust]
     dragstarty: i32,
+    #[rust]
+    active_undo_level: usize,
 
     #[rust]
     connectingid: u64,
@@ -117,13 +119,20 @@ impl Widget for FishPatchEditor {
                     }
                     BlockHeaderButtonAction::RecordDragStart { id } => {
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
-                        let block = patch.get_block(id);
+                        let block = patch.blocks.find(id);
                         if block.is_some() {
                             let b = block.unwrap();
-
                             self.dragstartx = b.x;
                             self.dragstarty = b.y;
+
+                            self.active_undo_level = patch.undo_checkpoint_start();
                         }
+                    }
+                    BlockHeaderButtonAction::RecordDragEnd { id: _ } => {
+                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+
+                        patch.undo_checkpoint_end_if_match(self.active_undo_level);
+                        self.active_undo_level = 0;
                     }
                     _ => {}
                 }
@@ -146,7 +155,7 @@ impl Widget for FishPatchEditor {
                         self.connecting = true;
                         self.scroll_bars.redraw(cx);
                     }
-                    BlockConnectorButtonAction::Move { id, x, y } => {
+                    BlockConnectorButtonAction::Move { id: _, x, y } => {
                         let scroll = self.scroll_bars.get_scroll_pos();
 
                         self.scroll_bars.redraw(cx);
@@ -174,7 +183,7 @@ impl Widget for FishPatchEditor {
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
-        for mut i in &mut patch.blocks.iter_mut() {
+        for i in &mut patch.blocks.iter_mut() {
             let item_id = LiveId::from_num(1, i.id as u64);
             let templateid = match i.category {
                 FishBlockCategory::Effect => live_id!(BlockTemplateEffect),
@@ -305,7 +314,13 @@ impl FishPatchEditor {
 }
 
 impl FishPatchEditor {
-    pub fn draw_active_connection(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
+
+    pub fn redraw(&mut self )
+    {
+        self.scroll_bars.redraw(cx);
+    }
+
+    pub fn draw_active_connection(&mut self, cx: &mut Cx2d, _patch: &FishPatch, scroll_pos: DVec2) {
         let item_id = LiveId::from_str("ActiveConnectionWidget");
 
         let templateid = live_id!(ConnectorTemplate);
