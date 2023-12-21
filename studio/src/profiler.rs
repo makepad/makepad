@@ -5,6 +5,7 @@ use {
         makepad_widgets::*,
     },
     std::{
+        fmt::Write,
         env,
     },
 };
@@ -17,15 +18,36 @@ live_design!{
     ProfilerEventChart = {{ProfilerEventChart}}{
         height: Fill,
         width: Fill
-        bg: {
+        draw_bg: {
             fn pixel(self)->vec4{
                 return #3
             }
         }
-        item:{
+        draw_line: {
+            fn pixel(self)->vec4{
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.rect(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0 ,
+                    self.rect_size.y - 2.0
+                )
+                sdf.fill_keep(#6)
+                return sdf.result
+            }
+        }
+        draw_item:{
             fn pixel(self)->vec4{
                 return self.color
             }
+        }
+        draw_time:{ 
+            color: #f,
+            text_style: <THEME_FONT_LABEL>{}
+        }
+        draw_label:{
+            color: #0,
+            text_style: <THEME_FONT_LABEL>{}
         }
     }
     
@@ -37,57 +59,131 @@ live_design!{
     }
 }
 
+#[derive(Clone)]
+struct TimeRange{
+    start:f64, 
+    end: f64
+}
+
+impl TimeRange{
+    fn len(&self)->f64{self.end - self.start}
+    fn shifted(&self, shift:f64)->Self{Self{start:self.start+shift, end:self.end+shift}}
+}
+
 #[derive(Live, LiveHook, Widget)]
 struct ProfilerEventChart{
     #[walk] walk:Walk,
-    #[redraw] #[live] bg: DrawQuad,
-    #[live] item: DrawColor,
-    #[rust((0.0,1.0))] time_window: (f64,f64), 
+    #[redraw] #[live] draw_bg: DrawQuad,
+    #[live] draw_line: DrawQuad,
+    #[live] draw_item: DrawColor,
+    #[live] draw_label: DrawText,
+    #[live] draw_time: DrawText,
+    #[rust(TimeRange{start:0.0, end: 1.0})] time_range: TimeRange, 
+    #[rust] time_drag: Option<TimeRange>
 }
 
 impl Widget for ProfilerEventChart {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
-        self.bg.begin(cx, walk, Layout::default());
-        // alright lets draw some event blocks
-        // lets assume nonoverlapping events
+        self.draw_bg.begin(cx, walk, Layout::default());
         let bm = &scope.data.get::<AppData>().build_manager;
-        // alright so. first we scan to the first visible item
-        // lets get the first profile ssample store
-        // lets get our current rect
+        let mut label = String::new();
+        
         let rect = cx.turtle().rect(); 
         if let Some(pss) = bm.profile.values().next(){
-            if let Some(first) = pss.events.iter().position(|v| v.end > self.time_window.0){
+            if let Some(first) = pss.events.iter().position(|v| v.end > self.time_range.start){
+                // lets draw the time lines and time text
+                let scale = rect.size.x / self.time_range.len();
+                
+                let mut step_size = 0.008;
+                while self.time_range.len() / step_size > rect.size.x / 80.0{
+                    step_size *= 2.0;
+                }
+                
+                while self.time_range.len() / step_size < rect.size.x / 80.0{
+                    step_size /= 2.0;
+                }
+                
+                let mut iter = (self.time_range.start / step_size).floor() * step_size - self.time_range.start;
+                while iter < self.time_range.len(){
+                    let xpos =  iter * scale;
+                    let pos = dvec2(xpos,0.0)+rect.pos;
+                    self.draw_line.draw_abs(cx, Rect{pos, size:dvec2(3.0, rect.size.y)});
+                    label.clear();
+                    write!(&mut label, "{:.3}s", (iter+self.time_range.start));       
+                    self.draw_time.draw_abs(cx, pos+dvec2(2.0,2.0), &label);
+                    iter += step_size; 
+                }
+                
                 for i in first..pss.events.len(){
                     let sample = &pss.events[i];
-                    if sample.start > self.time_window.1{
+                    if sample.start > self.time_range.end{
                         break;
                     }
-                    // alright lets draw it.
-                    let scale = rect.size.x / (self.time_window.1 - self.time_window.0);
-                    let xpos = rect.pos.x + sample.start * scale;
-                    let xsize = ((sample.end - sample.start) * scale).max(1.0);
                     
-                    // if our rect is bigger than 10px we draw a clipped label
-                    
+                    let xpos = rect.pos.x + (sample.start - self.time_range.start) * scale;
+                    let xsize = ((sample.end - sample.start) * scale).max(2.0);
                     
                     let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
+                    let pos = dvec2(xpos, rect.pos.y+20.0);
+                    let size = dvec2(xsize, 20.0);
+                    let rect = Rect{pos,size};
+                    self.draw_item.color = Vec4::from_u32(color);
                     
-                    self.item.color = Vec4::from_u32(color);
-                    self.item.draw_abs(cx, Rect{
-                        pos: dvec2(xpos, rect.pos.y+10.0),
-                        size: dvec2(xsize, 10.0)
-                    })
+                    self.draw_item.draw_abs(cx, rect);
+                    label.clear();
+                    if sample.end - sample.start > 0.001{
+                        write!(&mut label, "{} {:.2} ms", Event::name_from_u32(sample.event_u32), (sample.end-sample.start)*1000.0);                        
+                    }
+                    else{
+                        write!(&mut label, "{} {:.0} ns", Event::name_from_u32(sample.event_u32), (sample.end-sample.start)*1000000.0);
+                    }
+
+                    // if xsize > 10.0 lets draw a clipped piece of text 
+                    if xsize > 10.0{
+                        cx.begin_turtle(Walk::abs_rect(rect), Layout::default());
+                        self.draw_label.draw_abs(cx, pos+dvec2(2.0,4.0), &label);
+                        cx.end_turtle();
+                    }
                 }
             }
         }
-        self.bg.end(cx);
+        self.draw_bg.end(cx);
         DrawStep::done()
     }
         
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
-        // alright lets make zoom/panning
-        // also lets fill the rect with a clipped label 
-        
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerDown(_fe) => {
+                // ok so we get multiple finger downs
+                cx.set_key_focus(self.draw_bg.area());
+                self.time_drag = Some(self.time_range.clone());
+            },
+            Hit::FingerMove(fe) => {
+                if let Some(start) = &self.time_drag{
+                    // ok so how much did we move?
+                    let moved = fe.abs_start.x - fe.abs.x;
+                    // scale this thing to the time window
+                    let scale = self.time_range.len() / fe.rect.size.x;
+                    let shift_time = moved * scale;
+                    self.time_range = start.shifted(shift_time);
+                    self.draw_bg.redraw(cx);
+                }
+            }
+            Hit::FingerScroll(e)=>{
+               if e.device.is_mouse(){
+                    let zoom = (1.03).powf(e.scroll.y / 150.0);
+                   let scale = self.time_range.len() / e.rect.size.x;
+                   let time = scale * (e.abs.x - e.rect.pos.x) + self.time_range.start;
+                   self.time_range = TimeRange{
+                       start: (self.time_range.start - time) * zoom + time,
+                       end: (self.time_range.end - time) * zoom + time,
+                   }
+               }
+            }
+            Hit::FingerUp(_) => {
+            }
+            _ => ()
+        }
     }
 }
 

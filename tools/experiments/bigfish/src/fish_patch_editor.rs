@@ -204,7 +204,7 @@ impl Widget for FishPatchEditor {
             );
 
             item.draw_all(cx, &mut Scope::empty());
-            let itemarea = item.area().get_rect(cx);
+            let itemarea = item.area().rect(cx);
             i.h = itemarea.size.y as i32;
 
             for inp in &i.input_ports {

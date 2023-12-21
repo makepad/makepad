@@ -598,7 +598,7 @@ impl<'a> Cx2d<'a> {
                     continue;
                 }
                 AlignEntry::ShiftTurtle{area, shift, skip} =>{
-                    let rect = area.get_rect(self);
+                    let rect = area.rect(self);
                     let skip = *skip;
                     self.move_align_list(rect.pos.x+shift.x, rect.pos.y+shift.y, i + 1, skip, true, dvec2(0.0,0.0));
                     i = skip;
@@ -1008,7 +1008,15 @@ impl Walk {
         }
     }
 
-
+    pub fn abs_rect(rect:Rect) -> Self {
+        Self {
+            abs_pos: Some(rect.pos),
+            margin: Margin::default(),
+            width: Size::Fixed(rect.size.x),
+            height: Size::Fixed(rect.size.y),
+        }
+    }
+    
     pub fn fixed(w:f64, h:f64) -> Self {
         Self {
             abs_pos: None,

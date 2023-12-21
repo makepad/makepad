@@ -109,7 +109,7 @@ live_design!{
                 
             file_tree_tabs = Tabs {
                 tabs: [file_tree, search, run_list],
-                selected: 0
+                selected: 2
             }
                 
             edit_tabs = Tabs {

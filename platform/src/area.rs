@@ -137,7 +137,7 @@ impl Area {
     }
 
     // returns the final screen rect
-    pub fn get_clipped_rect(&self, cx: &Cx) -> Rect {
+    pub fn clipped_rect(&self, cx: &Cx) -> Rect {
         
         return match self {
             Area::Instance(inst) => {
@@ -193,7 +193,7 @@ impl Area {
         }
     }
     
-    pub fn get_rect(&self, cx: &Cx) -> Rect {
+    pub fn rect(&self, cx: &Cx) -> Rect {
         
         return match self {
             Area::Instance(inst) => {
