@@ -47,6 +47,12 @@ pub struct CxFontsAtlasAlloc {
     pub ypos: f64,
     pub hmax: f64,
     pub todo: Vec<CxFontsAtlasTodo>,
+    pub sdf: Option<CxFontsAtlasSdfConfig>,
+}
+
+pub struct CxFontsAtlasSdfConfig {
+    pub params: sdfer::esdt::Params,
+    pub scale: f32,
 }
 
 impl CxFontsAtlas {
@@ -66,12 +72,27 @@ impl CxFontsAtlas {
                 ypos: 0.0,
                 hmax: 0.0,
                 todo: Vec::new(),
-            }
+                // Set this to `None` to use CPU-rasterized glyphs instead of SDF.
+                sdf: Some(CxFontsAtlasSdfConfig {
+                    params: sdfer::esdt::Params {
+                        pad: 4,
+                        radius: 8.0,
+                        cutoff: 0.25,
+                        ..Default::default()
+                    },
+                    scale: 2.0,
+                })
+            },
         }
     }
 }
 impl CxFontsAtlasAlloc {
     pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64) -> CxFontAtlasGlyph {
+        // In SDF mode, leave enough room around each glyph (i.e. padding).
+        let (pad, scale) = self.sdf.as_ref()
+            .map_or((0.0, 1.0), |sdf| (sdf.params.pad as f64, sdf.scale as f64));
+        let (w, h) = ((w * scale).ceil() + pad * 2.0, (h * scale).ceil() + pad * 2.0);
+
         if w + self.xpos >= self.texture_size.x {
             self.xpos = 0.0;
             self.ypos += self.hmax + 1.0;
@@ -86,14 +107,17 @@ impl CxFontsAtlasAlloc {
             self.hmax = h;
         }
         
-        let tx1 = self.xpos / self.texture_size.x;
-        let ty1 = self.ypos / self.texture_size.y;
+        let tx1 = (self.xpos + pad) / self.texture_size.x;
+        let ty1 = (self.ypos + pad) / self.texture_size.y;
         
         self.xpos += w + 1.0;
         
         CxFontAtlasGlyph {
             t1: dvec2(tx1, ty1).into(),
-            t2: dvec2( tx1 + (w / self.texture_size.x), ty1 + (h / self.texture_size.y)).into()
+            t2: dvec2(
+                tx1 + (w - pad * 2.0) / self.texture_size.x, 
+                ty1 + (h - pad * 2.0) / self.texture_size.y,
+            ).into()
         }
     }
 }
@@ -271,12 +295,11 @@ impl<'a> Cx2d<'a> {
             
             let texture;
             if USE_SWRAST {
-                texture = Texture::new(cx);
-                texture.set_format(cx, TextureFormat::VecRu8 {
+                texture = Texture::new_with_format(cx, TextureFormat::VecRu8 {
                     width: ATLAS_WIDTH,
                     height: ATLAS_HEIGHT,
                     data: vec![],
-                    unpack_row_length: None,
+                    unpack_row_length: None
                 });
             } else {
                 let draw_fonts_atlas = CxDrawFontsAtlas::new(cx);
@@ -302,8 +325,11 @@ impl<'a> Cx2d<'a> {
         let fonts_atlas = &mut*fonts_atlas;
 
         if USE_SWRAST {
+            // Will be automatically filled after the first use.
+            let mut reuse_sdfer_bufs = None;
+
             for todo in std::mem::take(&mut fonts_atlas.alloc.todo) {
-                self.swrast_atlas_todo(fonts_atlas, todo);
+                self.swrast_atlas_todo(fonts_atlas, todo, &mut reuse_sdfer_bufs);
             }
             return;
         }
@@ -354,6 +380,7 @@ impl<'a> Cx2d<'a> {
         &mut self,
         fonts_atlas: &mut CxFontsAtlas,
         todo: CxFontsAtlasTodo,
+        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
         let size = 1.0;
 
@@ -376,9 +403,12 @@ impl<'a> Cx2d<'a> {
         let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * units_per_em);
         let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
 
+        let (sdf_pad, sdf_scale) = fonts_atlas.alloc.sdf.as_ref()
+            .map_or((0, 1.0), |sdf| (sdf.params.pad, sdf.scale as f64));
+
         let transform = AffineTransformation::identity()
             .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-            .uniform_scale(font_scale_pixels * size);
+            .uniform_scale(font_scale_pixels * size * sdf_scale);
         let commands = glyph
             .outline
             .iter()
@@ -428,7 +458,17 @@ impl<'a> Cx2d<'a> {
             glyph_rast[(x as usize, y as usize)] = sdfer::Unorm8::encode(a);
         });
 
-        let mut glyph_out = glyph_rast;
+        let mut glyph_out = if let Some(sdf_config) = &fonts_atlas.alloc.sdf {
+            let (glyph_sdf, new_reuse_bufs) = sdfer::esdt::glyph_to_sdf(
+                &mut glyph_rast,
+                sdf_config.params,
+                reuse_sdfer_bufs.take(),
+            );
+            *reuse_sdfer_bufs = Some(new_reuse_bufs);
+            glyph_sdf
+        } else {
+            glyph_rast
+        };
 
         let mut atlas_data = vec![];
         fonts_atlas.texture.swap_vec_u8(self.cx, &mut atlas_data);
@@ -438,10 +478,10 @@ impl<'a> Cx2d<'a> {
         } else {
             assert_eq!(atlas_data.len(), atlas_w*atlas_h);
         }
-        let atlas_x0 = tx as usize;
-        let atlas_y0 = ty as usize;
+        let atlas_x0 = tx as usize - sdf_pad;
+        let atlas_y0 = ty as usize - sdf_pad;
         for y in 0..glyph_out.height() {
-            let dst: &mut [u8] = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w][atlas_x0..][..glyph_out.width()];
+            let dst = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w][atlas_x0..][..glyph_out.width()];
             let mut src = glyph_out.cursor_at(0, y);
             for dst in dst {
                 *dst = src.get_mut().to_bits();

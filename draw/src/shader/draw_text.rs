@@ -18,6 +18,8 @@ live_design!{
         
         uniform brightness: float
         uniform curve: float
+        uniform sdf_radius: float
+        uniform sdf_cutoff: float
         
         texture tex: texture2d
         
@@ -61,12 +63,22 @@ live_design!{
         }
         fn pixel(self) -> vec4 {
             let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
+            if (self.sdf_radius != 0.0) {
+                // HACK(eddyb) harcoded atlas size (see asserts below).
+                let texel_coords = self.tex_coord1.xy * 4096.0;
+                let scale = (length(dFdx(texel_coords)) + length(dFdy(texel_coords))) * 0.5;
+                s = clamp((s - (1.0 - self.sdf_cutoff)) * self.sdf_radius / scale + 0.5, 0.0, 1.0);
+            }
             s = pow(s, self.curve);
             let col = self.get_color(); 
             return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
         }
     }
 }
+
+// HACK(eddyb) shader expects hardcoded atlas size (see `fn pixel` above).
+const _: () = assert!(crate::font_atlas::ATLAS_WIDTH == 4096);
+const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 
 #[derive(Clone, Live, LiveHook, LiveRegister)]
 #[live_ignore]
@@ -278,6 +290,10 @@ impl DrawText {
         self.draw_vars.texture_slots[0] = Some(font_atlas.texture.clone());
         self.draw_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
+        let (sdf_radius, sdf_cutoff) = font_atlas.alloc.sdf.as_ref()
+            .map_or((0.0, 0.0), |sdf| (sdf.params.radius, sdf.params.cutoff));
+        self.draw_vars.user_uniforms[2] = sdf_radius;
+        self.draw_vars.user_uniforms[3] = sdf_cutoff;
     }
     
     fn draw_inner(&mut self, cx: &mut Cx2d, pos: DVec2, chunk: &str, fonts_atlas: &mut CxFontsAtlas) {
