@@ -244,6 +244,19 @@ impl FishPatch {
         // remove connections involving block
         // remove preset data for block
 
+        let b = self.get_block(id).expect("find block");
+        let bstring = b.serialize_ron();
+
+        let index = self.blocks.iter().position(|x| x.id == id).unwrap();
+        self.blocks.remove(index);
+
+        self.undo
+            .undo_things
+            .push((UndoableThing::Block, IdAction::Delete { id: id }, bstring));
+
+        let index = self.blocks.iter().position(|x| x.id == id).unwrap();
+        self.blocks.remove(index);
+
         self.undo_checkpoint_end();
     }
 
