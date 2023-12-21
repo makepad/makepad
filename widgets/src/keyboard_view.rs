@@ -35,7 +35,7 @@ enum AnimState{
 impl KeyboardView {
 
     fn compute_max_height(&self, height:f64, cx:&Cx)->f64{
-        let self_rect = self.area.get_rect(cx);
+        let self_rect = self.area.rect(cx);
         let ime_rect = cx.get_ime_area_rect();
         let av_height = self_rect.size.y - height;
         let ime_height = ime_rect.size.y + ime_rect.pos.y + self.keyboard_min_shift;
