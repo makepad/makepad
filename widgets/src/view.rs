@@ -749,7 +749,7 @@ impl Widget for View {
                 };
                                 
                 if self.optimize.needs_draw_list() {
-                    let rect = self.area.get_rect(cx);
+                    let rect = self.area.rect(cx);
                     self.view_size = Some(rect.size);
                     self.draw_list.as_mut().unwrap().end(cx);
                                         
