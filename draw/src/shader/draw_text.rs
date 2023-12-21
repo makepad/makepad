@@ -373,8 +373,15 @@ impl DrawText {
                     let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + self.text_style.font_size * self.text_style.top_drop;
                     
                     // compute subpixel shift
-                    let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
-                    let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
+                    let (subpixel_x_fract , subpixel_y_fract) = if crate::font_atlas::USE_SWRAST {
+                        (0.0, 0.0)
+                    } else {
+                        (
+                            min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor,
+                            min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor,
+                        )
+                    };
+
                     // scale and snap it
                     // only use a subpixel id for small fonts
                     let subpixel_id = if self.text_style.font_size>32.0 {
