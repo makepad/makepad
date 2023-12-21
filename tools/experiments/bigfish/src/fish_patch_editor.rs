@@ -1,8 +1,8 @@
 use crate::{
     block_connector_button::BlockConnectorButtonAction,
-    block_header_button::BlockHeaderButtonAction, fish_block_template::FishBlockCategory,
-    fish_doc::FishDoc, fish_patch::*, fish_ports::ConnectionType, makepad_draw::*,
-    makepad_widgets::*,
+    block_delete_button::BlockDeleteButtonAction, block_header_button::BlockHeaderButtonAction,
+    fish_block_template::FishBlockCategory, fish_doc::FishDoc, fish_patch::*,
+    fish_ports::ConnectionType, makepad_draw::*, makepad_widgets::*,
 };
 
 live_design! {
@@ -136,7 +136,13 @@ impl Widget for FishPatchEditor {
                     }
                     _ => {}
                 }
-
+                match action.as_widget_action().cast() {
+                    BlockDeleteButtonAction::KillBlock { id } => {
+                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                        patch.remove_block(id);
+                    }
+                    _ => {}
+                }
                 match action.as_widget_action().cast() {
                     BlockConnectorButtonAction::ConnectStart {
                         id,
@@ -199,7 +205,7 @@ impl Widget for FishPatchEditor {
 
             item.apply_over(
                 cx,
-                live! {title= {header= {text:"Synth Block", blockid: (i.id)}},
+                live! {title= {topbar = {header= {text:"Synth Block", blockid: (i.id)}, delete = {blockid: (i.id)}}},
                 abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos)},
             );
 
