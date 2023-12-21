@@ -1008,7 +1008,15 @@ impl Walk {
         }
     }
 
-
+    pub fn abs_rect(rect:Rect) -> Self {
+        Self {
+            abs_pos: Some(rect.pos),
+            margin: Margin::default(),
+            width: Size::Fixed(rect.size.x),
+            height: Size::Fixed(rect.size.y),
+        }
+    }
+    
     pub fn fixed(w:f64, h:f64) -> Self {
         Self {
             abs_pos: None,
