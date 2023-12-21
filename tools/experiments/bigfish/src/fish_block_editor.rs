@@ -54,7 +54,7 @@ live_design! {
             }
 
             <FishSlider>{text:"Slider!"}
-
+            <Button>{text:"X"}
 
         }
     }

@@ -110,6 +110,7 @@ live_design! {
                         height: Fit;
                         undobutton = <Button>{text:"Undo"}
                         redobutton = <Button>{text:"Redo"}
+                        addblockbutton = <Button>{text:"New Block"}
 
                     }
                     patchedit = <FishPatchEditor>{}}
@@ -242,6 +243,9 @@ impl MatchEvent for App {
 
         if self.ui.button(id!(redobutton)).clicked(&actions) {
             let _ = self.document.redo().is_ok();
+        }
+        if self.ui.button(id!(addblockbutton)).clicked(&actions) {
+            let _ = self.document.add_block().is_ok();
         }
     }
 }
