@@ -367,8 +367,8 @@ impl Dock {
         
         // lets draw the corners here
         for splitter in self.splitters.values() {
-            self.round_corner.draw_corners(cx, splitter.area_a().get_rect(cx));
-            self.round_corner.draw_corners(cx, splitter.area_b().get_rect(cx));
+            self.round_corner.draw_corners(cx, splitter.area_a().rect(cx));
+            self.round_corner.draw_corners(cx, splitter.area_b().rect(cx));
         }
         self.round_corner.draw_corners(cx, cx.turtle().rect());
         

@@ -56,7 +56,7 @@ pub enum LogLevel{
 }
 
 use crate::cx::Cx;
-use crate::studio::AppToStudio;
+use crate::studio::{AppToStudio,StudioLogItem};
 
 pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:String, level:LogLevel){
     // lets send out our log message on the studio websocket 
@@ -65,7 +65,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
         println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
     }
     else{
-       Cx::send_studio_message(AppToStudio::Log{
+       Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem{
             file_name: file_name.to_string(),
             line_start,
             column_start,
@@ -73,7 +73,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
             column_end,
             message,
             level
-        });
+        }));
     }
 }
 
