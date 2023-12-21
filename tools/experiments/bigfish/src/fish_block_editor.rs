@@ -6,6 +6,7 @@ live_design! {
     import makepad_draw::shader::std::*;
     import do_not_run_bigfish::fish_theme::*;
     import crate::block_header_button::*;
+    import crate::block_delete_button::*;
 
     FishBlockEditor = <View>
     {
@@ -29,6 +30,9 @@ live_design! {
                     return mix(vec4(1,1,0.6,1), vec4(1,1,0.5,1),self.pos.y);
                 }
             },
+            topbar = <View>{
+                flow:Right,
+                height: Fit,
             header = <BlockHeaderButton>
             {
 
@@ -38,6 +42,16 @@ live_design! {
                     text_style: <H2_TEXT_BOLD> {}
                 }
             }
+            delete = <BlockDeleteButton>
+            {
+                width: Fit,
+                draw_text:
+                {
+                    color: #0
+                    text_style: <H2_TEXT_BOLD> {}
+                }
+            }
+        }
         }
         body = <View>
         {
