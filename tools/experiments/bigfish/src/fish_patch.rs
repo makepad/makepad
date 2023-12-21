@@ -243,6 +243,9 @@ impl FishPatch {
 
         // remove connections involving block
         // remove preset data for block
+        let conns = self
+            .connections
+            .retain(|x| x.from_block == id && x.to_block == id);
 
         let b = self.get_block(id).expect("find block");
         let bstring = b.serialize_ron();
@@ -253,9 +256,6 @@ impl FishPatch {
         self.undo
             .undo_things
             .push((UndoableThing::Block, IdAction::Delete { id: id }, bstring));
-
-        let index = self.blocks.iter().position(|x| x.id == id).unwrap();
-        self.blocks.remove(index);
 
         self.undo_checkpoint_end();
     }
