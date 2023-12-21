@@ -42,6 +42,11 @@ impl FishDoc {
         Ok(())
     }
 
+    pub fn add_block(&mut self) -> Result<(), String> {
+        self.patches[0].add_block(&self.lib);
+        Ok(())
+    }
+
     pub fn load(&mut self, filename: &str) -> Result<(), String> {
         let docdata = fs::read_to_string(filename)
             .map_err(|_| format!("Failed to load {:?}", filename))

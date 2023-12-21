@@ -314,12 +314,6 @@ impl FishPatchEditor {
 }
 
 impl FishPatchEditor {
-
-    pub fn redraw(&mut self )
-    {
-        self.scroll_bars.redraw(cx);
-    }
-
     pub fn draw_active_connection(&mut self, cx: &mut Cx2d, _patch: &FishPatch, scroll_pos: DVec2) {
         let item_id = LiveId::from_str("ActiveConnectionWidget");
 

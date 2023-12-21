@@ -172,6 +172,11 @@ impl FishPatch {
         }
     }
 
+    pub fn add_block(&mut self, lib: &FishBlockLibrary) {
+        self.undo_checkpoint_start();
+        self.create_block(lib, String::from("Utility"), 100, 100);
+        self.undo_checkpoint_end();
+    }
     pub fn redo(&mut self, lib: &FishBlockLibrary) {}
 
     pub fn remove_block(&mut self, id: u64) {
@@ -221,8 +226,15 @@ impl FishPatch {
         b.x = x;
         b.y = y;
         b.id = LiveId::unique().0;
+        let id = b.id;
+        let Bstring = b.serialize_ron();
 
         self.blocks.push(b);
+
+        self.undo
+            .undo_things
+            .push((UndoableThing::Block, IdAction::Create { id: id }, Bstring));
+
         self.undo_checkpoint_end();
     }
 
