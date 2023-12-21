@@ -140,6 +140,7 @@ impl Widget for FishPatchEditor {
                     BlockDeleteButtonAction::KillBlock { id } => {
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
                         patch.remove_block(id);
+                        self.scroll_bars.redraw(cx);
                     }
                     _ => {}
                 }
@@ -358,12 +359,15 @@ impl FishPatchEditor {
             let preitem = self.item(cx, item_id, templateid);
             let item = preitem.unwrap();
 
-            let blockfrom = patch.get_block(i.from_block).unwrap();
-            let blockto = patch.get_block(i.to_block).unwrap();
-            let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
-            let _portto = blockto.get_input_instance(i.to_port).unwrap();
+            let blockfromopt = patch.get_block(i.from_block);
+            let blocktoopt = patch.get_block(i.to_block);
+            if blockfromopt.is_some() && blocktoopt.is_some() {
+                let blockfrom = blockfromopt.unwrap();
+                let blockto = blocktoopt.unwrap();
+                let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
+                let _portto = blockto.get_input_instance(i.to_port).unwrap();
 
-            item.apply_over( cx, live! {
+                item.apply_over( cx, live! {
                     start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 10. + 20.  * _portfrom.id as f64) - scroll_pos),
                     end_pos: (dvec2(blockto.x as f64, blockto.y as f64+ 10. + 20. * _portto.id as f64) - scroll_pos ),
                     from_top: (blockfrom.y- scroll_pos.y as i32),
@@ -375,8 +379,8 @@ impl FishPatchEditor {
                    },
             );
 
-            item.draw_all(cx, &mut Scope::empty());
-
+                item.draw_all(cx, &mut Scope::empty());
+            }
             // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
     }
