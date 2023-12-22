@@ -49,10 +49,10 @@ impl ScrollBars {
         if let Event::Trigger(te) = event{
             if let Some(triggers) = te.triggers.get(&self.area){
                 if let Some(trigger) = triggers.iter().find(|t| t.id == live_id!(scroll_focus_nav)){
-                    let self_rect = self.area.get_rect(cx);
+                    let self_rect = self.area.rect(cx);
                     self.scroll_into_view(
                         cx,
-                        trigger.from.get_rect(cx)
+                        trigger.from.rect(cx)
                         .translate(-self_rect.pos + self.scroll)
                         .add_margin(dvec2(5.0,5.0))
                     );
@@ -202,7 +202,7 @@ impl ScrollBars {
     }
     
     pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
-        let self_rect = self.area.get_rect(cx);
+        let self_rect = self.area.rect(cx);
         if self.show_scroll_x {
             self.scroll_bar_x.scroll_into_view(cx, rect.pos.x - self_rect.pos.x, rect.size.x, true);
         }

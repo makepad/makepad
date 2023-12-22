@@ -85,7 +85,7 @@ impl DebugView {
         let areas = debug.take_areas();
         for (area, tl, br, color) in areas {
             self.rect.color = color;
-            let rect = area.get_rect(cx);
+            let rect = area.rect(cx);
             let rect = Rect{pos: rect.pos - tl, size: rect.size + tl + br};
             self.rect.draw_abs(cx, rect);
         }

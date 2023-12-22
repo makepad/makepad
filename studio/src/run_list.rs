@@ -5,7 +5,7 @@ use {
             build_protocol::*,
             build_client::BuildClient
         },
-        app::{AppData},
+        app::{AppData, AppAction}, 
         makepad_widgets::*,
     },
     std::env,
@@ -220,7 +220,7 @@ impl WidgetMatchEvent for RunList{
                             else{
                                 BuildManager::stop_active_build(cx, &mut build_manager.active, &build_manager.clients[0], &binary_name, i);
                             }
-                            build_manager.log.clear();
+                            cx.action(AppAction::ClearLog);
                         }
                     };
                 }
@@ -236,7 +236,7 @@ impl WidgetMatchEvent for RunList{
                                 else{
                                     BuildManager::stop_active_build(cx, &mut build_manager.active, &build_manager.clients[0], &binary_name, i);
                                 }
-                                build_manager.log.clear();
+                                cx.action(AppAction::ClearLog);
                             }
                         }
                     }

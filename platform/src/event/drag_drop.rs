@@ -110,7 +110,7 @@ impl Event {
     pub fn drag_hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> DragHit {
         match self {
             Event::Drag(event) => {
-                let rect = area.get_clipped_rect(cx);
+                let rect = area.clipped_rect(cx);
                 if area == cx.drag_drop.drag_area {
                     if !event.handled.get() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
                         //log!("drag_hist_with_options: Drag, in drag area, event handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
@@ -155,7 +155,7 @@ impl Event {
                 }
             }
             Event::Drop(event) => {
-                let rect = area.get_clipped_rect(cx);
+                let rect = area.clipped_rect(cx);
                 if !event.handled.get() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
                     //log!("drag_hits_with_options: Drop, event not handled and rect {:?} contains ({},{}) in margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                     cx.drag_drop.next_drag_area = Area::default();
