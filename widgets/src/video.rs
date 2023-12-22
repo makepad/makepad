@@ -422,7 +422,7 @@ impl Video {
     }
 
     fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
-        if self.playback_state != PlaybackState::Unprepared {
+        if self.playback_state != PlaybackState::Unprepared && self.playback_state != PlaybackState::CleaningUp {
             cx.cleanup_video_playback_resources(self.id);
         }
         self.playback_state = PlaybackState::CleaningUp;
