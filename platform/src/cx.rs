@@ -199,13 +199,11 @@ impl Cx {
         //crate::makepad_error_log::set_panic_hook();
         // the null texture
         let mut textures = CxTexturePool::default();
-        let null_texture = textures.alloc();
-        let texture = &mut textures[null_texture.texture_id()];
-        texture.format = TextureFormat::VecBGRAu8_32 {
+        let null_texture = textures.alloc(TextureFormat::VecBGRAu8_32 {
             width: 4,
             height: 4,
             data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        };
+        });
         
         let (executor, spawner) = executor::new_executor_and_spawner();
         let (send, recv) = std::sync::mpsc::channel();

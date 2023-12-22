@@ -59,7 +59,7 @@ impl LiveHook for Window {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
-        self.depth_texture.set_format(cx, TextureFormat::DepthD32{
+        self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
             size:TextureSize::Auto
         });
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
