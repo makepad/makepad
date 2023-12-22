@@ -234,22 +234,24 @@ impl RunView {
                         pi.id = cx_stdin::PresentableImageId::alloc();
                     }
                 }
-                let swapchain = v.swapchain.get_or_insert_with(|| {
-                    Swapchain::new(0, 0).images_map(|_| Texture::new(cx))
-                });
 
                 // Update the swapchain allocated size, rounding it up to
                 // reduce the need for further swapchain recreation.
-                swapchain.alloc_width = min_width.max(64).next_power_of_two();
-                swapchain.alloc_height = min_height.max(64).next_power_of_two();
+                let alloc_width = min_width.max(64).next_power_of_two();
+                let alloc_height = min_height.max(64).next_power_of_two();
+                
+                let swapchain = v.swapchain.get_or_insert_with(|| {
+                    Swapchain::new(alloc_width, alloc_height).images_map(|pi| {
+                        // Prepare a version of the swapchain for cross-process sharing.
+                        Texture::new_with_format(cx, TextureFormat::SharedBGRAu8 {
+                            id: pi.id,
+                            width: alloc_width as usize,
+                            height: alloc_height as usize,
+                        })
+                    })
+                });
 
-                // Prepare a version of the swapchain for cross-process sharing.
                 let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
-                    pi.image.set_format(cx, TextureFormat::SharedBGRAu8 {
-                        id: pi.id,
-                        width: swapchain.alloc_width as usize,
-                        height: swapchain.alloc_height as usize,
-                    });
                     cx.share_texture_for_presentable_image(&pi.image)
                 });
 

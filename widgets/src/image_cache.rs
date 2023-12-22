@@ -56,22 +56,13 @@ impl ImageBuffer {
     }
     
     pub fn into_new_texture(self, cx:&mut Cx)->Texture{
-        let texture = Texture::new(cx);
-        self.into_texture(cx, &texture);
+        let texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
+            width: self.width,
+            height: self.height,
+            data: self.data
+        });
         texture
     }
-    
-    pub fn into_texture(self, cx:&mut Cx, texture:&Texture){
-        texture.set_format(
-            cx,
-            TextureFormat::VecBGRAu8_32 {
-                width: self.width,
-                height: self.height,
-                data: self.data
-            },
-        );
-    }
-    
     
     pub fn from_png(
         data: &[u8]
@@ -132,16 +123,10 @@ pub trait ImageCacheImpl {
         }
     }
 
-
     fn load_png_from_data(&mut self, cx:&mut Cx, data:&[u8]){
         match ImageBuffer::from_png(&*data){
             Ok(data)=>{
-                if let Some(texture) = self.get_texture(){
-                    data.into_texture(cx, texture);
-                }
-                else{
-                    self.set_texture(Some(data.into_new_texture(cx)));
-                }
+                self.set_texture(Some(data.into_new_texture(cx)));
             }
             Err(err)=>{
                 error!("load_png_from_data: Cannot load png image from data {}", err);
@@ -152,12 +137,7 @@ pub trait ImageCacheImpl {
     fn load_jpg_from_data(&mut self, cx:&mut Cx, data:&[u8]){
         match ImageBuffer::from_jpg(&*data){
             Ok(data)=>{
-                if let Some(texture) = self.get_texture(){
-                    data.into_texture(cx, texture);
-                }
-                else{
-                    self.set_texture(Some(data.into_new_texture(cx)));
-                }
+                self.set_texture(Some(data.into_new_texture(cx)));
             }
             Err(err)=>{
                 error!("load_jpg_from_data: Cannot load png image from data {}", err);

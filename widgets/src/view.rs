@@ -646,7 +646,7 @@ impl Widget for View {
                         });
                         let texture_cache = self.texture_cache.as_mut().unwrap();
                         //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
-                        texture_cache.color_texture.set_format(cx, TextureFormat::RenderBGRAu8{
+                        texture_cache.color_texture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8{
                             size:TextureSize::Auto
                         });
                         texture_cache.pass.add_color_texture(cx, &texture_cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
