@@ -1,8 +1,8 @@
 use crate::{
     block_connector_button::BlockConnectorButtonAction,
-    block_header_button::BlockHeaderButtonAction, fish_block_template::FishBlockCategory,
-    fish_doc::FishDoc, fish_patch::*, fish_ports::ConnectionType, makepad_draw::*,
-    makepad_widgets::*,
+    block_delete_button::BlockDeleteButtonAction, block_header_button::BlockHeaderButtonAction,
+    fish_block_template::FishBlockCategory, fish_doc::FishDoc, fish_patch::*,
+    fish_ports::ConnectionType, makepad_draw::*, makepad_widgets::*,
 };
 
 live_design! {
@@ -70,6 +70,8 @@ pub struct FishPatchEditor {
     dragstartx: i32,
     #[rust]
     dragstarty: i32,
+    #[rust]
+    active_undo_level: usize,
 
     #[rust]
     connectingid: u64,
@@ -117,17 +119,31 @@ impl Widget for FishPatchEditor {
                     }
                     BlockHeaderButtonAction::RecordDragStart { id } => {
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
-                        let block = patch.get_block(id);
+                        let block = patch.blocks.find(id);
                         if block.is_some() {
                             let b = block.unwrap();
-
                             self.dragstartx = b.x;
                             self.dragstarty = b.y;
+
+                            self.active_undo_level = patch.undo_checkpoint_start();
                         }
+                    }
+                    BlockHeaderButtonAction::RecordDragEnd { id: _ } => {
+                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+
+                        patch.undo_checkpoint_end_if_match(self.active_undo_level);
+                        self.active_undo_level = 0;
                     }
                     _ => {}
                 }
-
+                match action.as_widget_action().cast() {
+                    BlockDeleteButtonAction::KillBlock { id } => {
+                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                        patch.remove_block(id);
+                        self.scroll_bars.redraw(cx);
+                    }
+                    _ => {}
+                }
                 match action.as_widget_action().cast() {
                     BlockConnectorButtonAction::ConnectStart {
                         id,
@@ -146,7 +162,7 @@ impl Widget for FishPatchEditor {
                         self.connecting = true;
                         self.scroll_bars.redraw(cx);
                     }
-                    BlockConnectorButtonAction::Move { id, x, y } => {
+                    BlockConnectorButtonAction::Move { id: _, x, y } => {
                         let scroll = self.scroll_bars.get_scroll_pos();
 
                         self.scroll_bars.redraw(cx);
@@ -174,7 +190,7 @@ impl Widget for FishPatchEditor {
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
-        for mut i in &mut patch.blocks.iter_mut() {
+        for i in &mut patch.blocks.iter_mut() {
             let item_id = LiveId::from_num(1, i.id as u64);
             let templateid = match i.category {
                 FishBlockCategory::Effect => live_id!(BlockTemplateEffect),
@@ -190,7 +206,7 @@ impl Widget for FishPatchEditor {
 
             item.apply_over(
                 cx,
-                live! {title= {header= {text:"Synth Block", blockid: (i.id)}},
+                live! {title= {topbar = {header= {text:"Synth Block", blockid: (i.id)}, delete = {blockid: (i.id)}}},
                 abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos)},
             );
 
@@ -305,7 +321,7 @@ impl FishPatchEditor {
 }
 
 impl FishPatchEditor {
-    pub fn draw_active_connection(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
+    pub fn draw_active_connection(&mut self, cx: &mut Cx2d, _patch: &FishPatch, scroll_pos: DVec2) {
         let item_id = LiveId::from_str("ActiveConnectionWidget");
 
         let templateid = live_id!(ConnectorTemplate);
@@ -343,12 +359,15 @@ impl FishPatchEditor {
             let preitem = self.item(cx, item_id, templateid);
             let item = preitem.unwrap();
 
-            let blockfrom = patch.get_block(i.from_block).unwrap();
-            let blockto = patch.get_block(i.to_block).unwrap();
-            let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
-            let _portto = blockto.get_input_instance(i.to_port).unwrap();
+            let blockfromopt = patch.get_block(i.from_block);
+            let blocktoopt = patch.get_block(i.to_block);
+            if blockfromopt.is_some() && blocktoopt.is_some() {
+                let blockfrom = blockfromopt.unwrap();
+                let blockto = blocktoopt.unwrap();
+                let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
+                let _portto = blockto.get_input_instance(i.to_port).unwrap();
 
-            item.apply_over( cx, live! {
+                item.apply_over( cx, live! {
                     start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 10. + 20.  * _portfrom.id as f64) - scroll_pos),
                     end_pos: (dvec2(blockto.x as f64, blockto.y as f64+ 10. + 20. * _portto.id as f64) - scroll_pos ),
                     from_top: (blockfrom.y- scroll_pos.y as i32),
@@ -360,8 +379,8 @@ impl FishPatchEditor {
                    },
             );
 
-            item.draw_all(cx, &mut Scope::empty());
-
+                item.draw_all(cx, &mut Scope::empty());
+            }
             // println!("{:?} ({:?},{:?})", i.id, i.x,i.y);
         }
     }
