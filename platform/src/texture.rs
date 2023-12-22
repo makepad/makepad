@@ -35,6 +35,7 @@ impl CxTexturePool {
             is_video == item.item.format.is_video()
         }, cx_texture);
 
+        self.0.pool[new_id.id].generation_changed = new_id.generation != 0;
         Texture(Rc::new(new_id))
     }
 }
@@ -509,5 +510,6 @@ impl Texture {
 pub struct CxTexture {
     pub (crate) format: TextureFormat,
     pub (crate) alloc: Option<TextureAlloc>,
-    pub os: CxOsTexture
+    pub os: CxOsTexture,
+    pub generation_changed: bool
 }

@@ -73,22 +73,27 @@ impl<T> IdPool<T> where T: Default {
 
     pub fn alloc_with_reuse_filter<F>(&mut self, mut filter: F, item: T) -> PoolId 
     where F: FnMut(&IdPoolItem<T>) -> bool {
-        let maybe_free_id = {
-            self.free.0.borrow_mut()
-                .iter()
-                .find(|&&id| filter(&self.pool[id]))
-                .cloned()
-        };
+        let maybe_free_id = self.free.0.borrow_mut()
+            .iter()
+            .enumerate()
+            .find_map(|(index, &id)| {
+                if filter(&self.pool[id]) {
+                    Some((index, id))
+                } else {
+                    None
+                }
+            });
     
-        if let Some(id) = maybe_free_id {
+        if let Some((index, id)) = maybe_free_id {
             self.pool[id].generation += 1;
-            self.free.0.borrow_mut().retain(|&x| x != id);
-            
-            PoolId {
+            self.free.0.borrow_mut().remove(index);
+    
+            let pool_id = PoolId {
                 id,
                 generation: self.pool[id].generation,
                 free: self.free.clone()
-            }
+            };
+            pool_id
         } else {
             self.alloc_new(Some(item))
         }
