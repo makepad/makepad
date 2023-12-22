@@ -20,11 +20,23 @@ impl Texture {
 
 #[derive(Default)]
 pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
+
 impl CxTexturePool {
-    pub fn alloc(&mut self) -> Texture {
-        let id = self.0.alloc();
-        self.0.pool[id.id].alloc = None;
-        Texture(Rc::new(id))
+    pub fn alloc(&mut self, requested_format: TextureFormat) -> Texture {
+        let is_video = requested_format.is_video();
+        let cx_texture = CxTexture {
+            format: requested_format,
+            alloc: None,
+            ..Default::default()
+        };
+
+        let new_id = self.0.alloc_with_reuse_filter(|item| {
+            // check for compatibility, not using `is_compatible_with` to avoid passing the whole format and cloning vec contents
+            is_video == item.item.format.is_video()
+        }, cx_texture);
+
+        self.0.pool[new_id.id].generation_changed = new_id.generation != 0;
+        Texture(Rc::new(new_id))
     }
 }
 
@@ -279,12 +291,12 @@ impl TextureFormat{
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub fn is_video(&self) -> bool {
-        match self {
-            Self::VideoRGB => true,
-            _ => false
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        if let Self::VideoRGB = self {
+            return true;
         }
+        false
     }
 
     pub fn vec_width_height(&self)->Option<(usize,usize)>{
@@ -419,6 +431,15 @@ impl TextureFormat{
             _=>None
         }
     }
+
+    #[allow(unused)]
+    fn is_compatible_with(&self, other: &Self) -> bool {
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            return !(self.is_video() ^ other.is_video());
+        }
+        true
+    }
 }
 
 impl Default for TextureFormat {
@@ -429,13 +450,12 @@ impl Default for TextureFormat {
 
 impl Texture {
     pub fn new(cx: &mut Cx) -> Self {
-        let texture = cx.textures.alloc();
-        texture
+        cx.null_texture()
     }
-    
-    pub fn set_format(&self, cx: &mut Cx, format: TextureFormat) {
-        let cxtexture = &mut cx.textures[self.texture_id()];
-        cxtexture.format = format;
+
+    pub fn new_with_format(cx: &mut Cx, format: TextureFormat) -> Self {
+        let texture = cx.textures.alloc(format);
+        texture
     }
     
     pub fn get_format<'a>(&self, cx: &'a mut Cx) -> &'a mut TextureFormat {
@@ -490,5 +510,6 @@ impl Texture {
 pub struct CxTexture {
     pub (crate) format: TextureFormat,
     pub (crate) alloc: Option<TextureAlloc>,
-    pub os: CxOsTexture
+    pub os: CxOsTexture,
+    pub generation_changed: bool
 }

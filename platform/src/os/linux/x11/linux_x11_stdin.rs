@@ -171,7 +171,7 @@ impl Cx {
                                     width: new_swapchain.alloc_width as usize,
                                     height: new_swapchain.alloc_height as usize,
                                 };
-                                new_texture.set_format(self, desc);
+                                new_texture = Texture::new_with_format(self, desc);
                                 self.textures[new_texture.texture_id()]
                                 .update_from_shared_dma_buf_image(
                                     self.os.opengl_cx.as_ref().unwrap(),

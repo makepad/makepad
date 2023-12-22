@@ -68,11 +68,15 @@ impl LiveRegister for App {
 impl MatchEvent for App{
     fn handle_signal(&mut self, cx:&mut Cx){
         while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
-            self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8_32{
-                data: vec![],
-                width: vfb.format.width / 2,
-                height: vfb.format.height
-            });
+            let (current_w, current_h) = self.video_input[id].get_format(cx).vec_width_height().unwrap();
+            if current_w != vfb.format.width / 2 || current_h != vfb.format.height {
+                self.video_input[id] = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32{
+                    data: vec![],
+                    width: vfb.format.width / 2,
+                    height: vfb.format.height
+                });
+            } 
+
             if let Some(buf) = vfb.as_vec_u32() {
                 self.video_input[id].swap_vec_u32(cx, buf);
             }
