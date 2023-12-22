@@ -115,7 +115,7 @@ impl VideoRef {
 
     // It will finish playback and cleanup all resources related to playback
     // including data source, decoding threads, object references, etc.
-    pub fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
+    pub fn stop_and_cleanup_resources(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.stop_and_cleanup_resources(cx);
         }
@@ -324,10 +324,23 @@ impl Video {
         self.video_height = event.video_height as usize;
         self.total_duration = event.duration;
 
+        // TODO: add DPI awareness and fallback sizes
         self.draw_bg
-            .set_uniform(cx, id!(video_height), &[self.video_height as f32]);
+            .set_uniform(cx, id!(source_size), &[self.video_width as f32, self.video_height as f32]);
+        
+        let target_w = if self.walk.width.is_fixed() {
+            self.walk.width.fixed_or_zero()
+        } else {
+            -1
+        };
+        let target_h = if self.walk.height.is_fixed() {
+            self.walk.height.fixed_or_zero()
+        } else {
+            -1
+        };
+
         self.draw_bg
-            .set_uniform(cx, id!(video_width), &[self.video_width as f32]);
+            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
 
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);
