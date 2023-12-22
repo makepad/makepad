@@ -205,13 +205,51 @@ live_design!{
             shape: Solid,
             fill: Image
             texture image: textureOES
+            
+            instance opacity: 1.0
             instance image_scale: vec2(1.0, 1.0)
-            instance image_pan: vec2(0.0, 0.0)
-            uniform is_last_frame: 0.0
+            instance image_pan: vec2(0.5, 0.5)
+
+            uniform source_size: vec2(1.0, 1.0)
+            uniform target_size: vec2(-1.0, -1.0)
+
+            fn get_color_scale_pan(self) -> vec4 {
+                let scale = self.image_scale;
+                let pan = self.image_pan;
+                let source_aspect_ratio = self.source_size.x / self.source_size.y;
+                let target_aspect_ratio = self.target_size.x / self.target_size.y;
+
+                // TODO: only if target_size is setup
+                // Adjust scale based on aspect ratio difference
+                if (source_aspect_ratio != target_aspect_ratio) {
+                    if (source_aspect_ratio > target_aspect_ratio) {
+                        scale.x = target_aspect_ratio / source_aspect_ratio;
+                        scale.y = 1.0;
+                    } else {
+                        scale.x = 1.0;
+                        scale.y = source_aspect_ratio / target_aspect_ratio;
+                    }
+                }
+
+                // Calculate the range for panning
+                let pan_range_x = max(0.0, (1.0 - scale.x));
+                let pan_range_y = max(0.0, (1.0 - scale.y));
+
+                // Adjust the user pan values to be within the pan range
+                let adjusted_pan_x = pan_range_x * pan.x;
+                let adjusted_pan_y = pan_range_y * pan.y;
+                let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y);
+
+                return sample2dOES(self.image, (self.pos * scale) + adjusted_pan);
+            }
+
+            fn get_color(self) -> vec4 {
+                return self.get_color_scale_pan()
+            }
 
             fn pixel(self) -> vec4 {
-                let color = sample2dOES(self.image, self.pos);
-                return color * vec4(1.0, 1.0, 1.0, 0.8);
+                let color = self.get_color();
+                return Pal::premul(vec4(color.xyz, color.w * self.opacity));
             }
         }
     }
