@@ -5,7 +5,7 @@ live_design! {
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
 
-    BlockHeaderButton = {{BlockHeaderButton}} {
+    BlockDeleteButton = {{BlockDeleteButton}} {
 
 
         animator: {
@@ -53,13 +53,14 @@ live_design! {
             width: Fit,
             height: Fit
         }
-
+        text: "XXX",
         draw_text: {
             instance hover: 0.0
             instance pressed: 0.0
             text_style: <THEME_FONT_LABEL>{
                 font_size: 11.0
             }
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -106,19 +107,16 @@ live_design! {
 }
 
 #[derive(Clone, Debug, DefaultNone)]
-pub enum BlockHeaderButtonAction {
+pub enum BlockDeleteButtonAction {
     None,
     Clicked,
     Pressed,
     Released,
-    Select { id: u64 },
-    Move { id: u64, x: f64, y: f64 },
-    RecordDragStart { id: u64 },
-    RecordDragEnd { id: u64 },
+    KillBlock { id: u64 },
 }
 
 #[derive(Live, LiveHook, Widget)]
-pub struct BlockHeaderButton {
+pub struct BlockDeleteButton {
     #[animator]
     animator: Animator,
 
@@ -151,35 +149,19 @@ pub struct BlockHeaderButton {
     pub dragging: bool,
 }
 
-impl Widget for BlockHeaderButton {
+impl Widget for BlockDeleteButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerMove(fe) => {
-                if self.dragging {
-                    cx.widget_action(
-                        uid,
-                        &scope.path,
-                        BlockHeaderButtonAction::Move {
-                            id: self.blockid,
-                            x: fe.abs.x - fe.abs_start.x,
-                            y: fe.abs.y - fe.abs_start.y,
-                        },
-                    );
-                }
-            }
+            Hit::FingerMove(fe) => if self.dragging {},
             Hit::FingerDown(_fe) => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
                 self.dragging = true;
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    BlockHeaderButtonAction::RecordDragStart { id: self.blockid },
-                );
-                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Pressed);
+
+                cx.widget_action(uid, &scope.path, BlockDeleteButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             }
             Hit::FingerHoverIn(_) => {
@@ -192,22 +174,21 @@ impl Widget for BlockHeaderButton {
             Hit::FingerUp(fe) => {
                 if self.dragging {
                     self.dragging = false;
-
+                }
+                if fe.is_over {
+                    cx.widget_action(uid, &scope.path, BlockDeleteButtonAction::Clicked);
                     cx.widget_action(
                         uid,
                         &scope.path,
-                        BlockHeaderButtonAction::RecordDragEnd { id: self.blockid },
+                        BlockDeleteButtonAction::KillBlock { id: self.blockid },
                     );
-                }
-                if fe.is_over {
-                    cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Clicked);
                     if fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));
                     } else {
                         self.animator_play(cx, id!(hover.off));
                     }
                 } else {
-                    cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Released);
+                    cx.widget_action(uid, &scope.path, BlockDeleteButtonAction::Released);
                     self.animator_play(cx, id!(hover.off));
                 }
             }
@@ -233,9 +214,9 @@ impl Widget for BlockHeaderButton {
     }
 }
 
-impl BlockHeaderButtonRef {
+impl BlockDeleteButtonRef {
     pub fn clicked(&self, actions: &Actions) -> bool {
-        if let BlockHeaderButtonAction::Clicked =
+        if let BlockDeleteButtonAction::Clicked =
             actions.find_widget_action(self.widget_uid()).cast()
         {
             return true;
@@ -244,7 +225,7 @@ impl BlockHeaderButtonRef {
     }
 
     pub fn pressed(&self, actions: &Actions) -> bool {
-        if let BlockHeaderButtonAction::Pressed =
+        if let BlockDeleteButtonAction::Pressed =
             actions.find_widget_action(self.widget_uid()).cast()
         {
             return true;
@@ -253,7 +234,7 @@ impl BlockHeaderButtonRef {
     }
 }
 
-impl BlockHeaderButtonSet {
+impl BlockDeleteButtonSet {
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.clicked(actions))
     }
