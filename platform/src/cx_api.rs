@@ -260,14 +260,14 @@ impl Cx {
     pub fn get_pass_rect(&self, pass_id: PassId, dpi:f64) -> Option<Rect> {
         match self.passes[pass_id].pass_rect {
             Some(CxPassRect::Area(area)) => {
-                let rect = area.get_rect(self);
+                let rect = area.rect(self);
                 Some(Rect{
                     pos: (rect.pos * dpi).floor() / dpi,
                     size: (rect.size * dpi).ceil() / dpi
                 })
             }
             Some(CxPassRect::ScaledArea(area, scale)) => {
-                let rect = area.get_rect(self);
+                let rect = area.rect(self);
                 Some(Rect{
                     pos: (rect.pos * dpi).floor() / dpi,
                     size:  scale * (rect.size * dpi).ceil() / dpi
@@ -345,7 +345,7 @@ impl Cx {
     }
     
     pub fn get_ime_area_rect(&self)->Rect{
-        self.ime_area.get_rect(self)
+        self.ime_area.rect(self)
     }
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
