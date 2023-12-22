@@ -114,6 +114,7 @@ pub enum BlockHeaderButtonAction {
     Select { id: u64 },
     Move { id: u64, x: f64, y: f64 },
     RecordDragStart { id: u64 },
+    RecordDragEnd { id: u64 },
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -191,6 +192,12 @@ impl Widget for BlockHeaderButton {
             Hit::FingerUp(fe) => {
                 if self.dragging {
                     self.dragging = false;
+
+                    cx.widget_action(
+                        uid,
+                        &scope.path,
+                        BlockHeaderButtonAction::RecordDragEnd { id: self.blockid },
+                    );
                 }
                 if fe.is_over {
                     cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Clicked);
