@@ -213,8 +213,7 @@ impl LiveHook for Video {
 
         #[cfg(target_os = "android")]
         if self.texture.is_none() {
-            let new_texture = Texture::new(cx);
-            new_texture.set_format(cx, TextureFormat::VideoRGB);
+            let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
             self.texture = Some(new_texture);
         }
 
@@ -423,7 +422,7 @@ impl Video {
     }
 
     fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
-        if self.playback_state != PlaybackState::Unprepared {
+        if self.playback_state != PlaybackState::Unprepared && self.playback_state != PlaybackState::CleaningUp {
             cx.cleanup_video_playback_resources(self.id);
         }
         self.playback_state = PlaybackState::CleaningUp;
