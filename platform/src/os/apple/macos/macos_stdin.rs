@@ -192,13 +192,12 @@ impl Cx {
                         // this is still pretty bad at 100ms if the service is still starting up
                         // we should 
                         if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
-                            let texture = Texture::new(self);
                             let format = TextureFormat::SharedBGRAu8 {
                                 id: presentable_image.id,
                                 width: swapchain.alloc_width as usize,
                                 height: swapchain.alloc_height as usize,
                             };
-                            texture.set_format(self, format);
+                            let texture = Texture::new_with_format(self, format);
                             if self.textures[texture.texture_id()].update_from_shared_handle(
                                 metal_cx,
                                 fb.as_id(),
