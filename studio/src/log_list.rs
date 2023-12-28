@@ -222,7 +222,7 @@ pub struct JumpTo{
 }
 
 #[derive(Live, LiveHook, Widget)]
-struct LogList{
+pub struct LogList{
     #[deref] view:View
 }
 
