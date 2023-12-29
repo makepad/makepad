@@ -108,7 +108,7 @@ impl App {
         // our microphone broadcast network thread
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
-            let mut output_buffer = AudioBuffer::new_with_size(400, 1);
+            let mut output_buffer = AudioBuffer::new_with_size(640, 1);
             loop {
                 // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
@@ -148,18 +148,19 @@ impl App {
                 let read_buf = &read_buf[0..len];
                 
                 let packet = TeamTalkWire::deserialize_bin(&read_buf).unwrap();
-                                
+                
                 // create an audiobuffer from the data
-                let (other_client_uid, buffer) = match packet {
+                let (other_client_uid, buffer, _silence) = match packet {
                     TeamTalkWire::Audio {client_uid, channel_count, data} => {
-                        (client_uid, AudioBuffer::from_i16(&data, channel_count as usize))
+                        (client_uid, AudioBuffer::from_i16(&data, channel_count as usize), false)
                     }
                     TeamTalkWire::Silence {client_uid, frame_count} => {
-                        (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1))
+                        (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1), true)
                     }
                 };
+                
                 if client_uid != other_client_uid{
-                    mix_send.write_buffer(client_uid, buffer).unwrap();
+                    mix_send.write_buffer(other_client_uid, buffer).unwrap();
                 }
             }
         });
@@ -175,9 +176,9 @@ impl App {
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
             mix_recv.try_recv_stream();
-              let mut chan = AudioBuffer::new_like(output_buffer);
+            let mut chan = AudioBuffer::new_like(output_buffer);
             for i in 0..mix_recv.num_routes() {
-                if mix_recv.read_buffer(i, &mut chan, 1,6) != 0 {
+                if mix_recv.read_buffer(i, &mut chan, 1,4) != 0 {
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
