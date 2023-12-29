@@ -296,7 +296,7 @@ impl Widget for LogList {
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>();
-        if let Event::Actions(actions) = event{    
+        if let Event::Actions(actions) = event{
             for (item_id, item) in log_list.items_with_actions(&actions) {
                 if item.link_label(id!(location)).pressed(&actions) {
                     if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {
