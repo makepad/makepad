@@ -66,13 +66,14 @@ impl Image {
         
         let aspect = width / height;
         match self.fit {
-            ImageFit::Stretch => {},
+            ImageFit::Stretch => {
+            }
             ImageFit::Horizontal => {
                 walk.height = Size::Fixed(rect.size.x / aspect);
-            },
+            }
             ImageFit::Vertical => {
                 walk.width = Size::Fixed(rect.size.y * aspect);
-            },
+            }
             ImageFit::Smallest => {
                 let walk_height = rect.size.x / aspect;
                 if walk_height > rect.size.y {
@@ -92,8 +93,6 @@ impl Image {
                 }
             }
         }
-        
-        // lets start a turtle and center horizontally
         
         self.draw_bg.draw_walk(cx, walk);
         
