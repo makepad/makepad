@@ -96,7 +96,7 @@ impl AudioStreamReceiver {
         self.try_recv_stream();
     }
     
-    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_buf: usize) -> usize {
+    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_buf: usize, max_buf:usize) -> usize {
         let mut iself = self.0.lock().unwrap();
         let route = if let Some(route) = iself.routes.get_mut(route_num) {
             route
@@ -117,7 +117,7 @@ impl AudioStreamReceiver {
         }
          
         // flush down the buffer
-        while total > output.frame_count() * 4{
+        while total > output.frame_count() * max_buf{
             let buf = route.buffers.remove(0);
             total -= buf.frame_count();
         }
