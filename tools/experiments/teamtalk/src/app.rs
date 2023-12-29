@@ -108,7 +108,7 @@ impl App {
         // our microphone broadcast network thread
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
-            let mut output_buffer = AudioBuffer::new_with_size(640, 1);
+            let mut output_buffer = AudioBuffer::new_with_size(400, 1);
             loop {
                 // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
