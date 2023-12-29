@@ -177,7 +177,7 @@ impl App {
             mix_recv.try_recv_stream();
               let mut chan = AudioBuffer::new_like(output_buffer);
             for i in 0..mix_recv.num_routes() {
-                if mix_recv.read_buffer(i, &mut chan, 1,4) != 0 {
+                if mix_recv.read_buffer(i, &mut chan, 1,6) != 0 {
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
