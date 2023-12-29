@@ -249,6 +249,7 @@ impl MatchEvent for App {
         }
         if self.ui.button(id!(addblockbutton)).clicked(&actions) {
             let _ = self.document.add_block().is_ok();
+            self.ui.widget(id!(patchedit)).redraw(cx);
         }
     }
 }
