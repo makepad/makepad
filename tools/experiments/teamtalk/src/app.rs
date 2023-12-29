@@ -150,7 +150,7 @@ impl App {
                 let packet = TeamTalkWire::deserialize_bin(&read_buf).unwrap();
                                 
                 // create an audiobuffer from the data
-                let (client_uid, buffer) = match packet {
+                let (other_client_uid, buffer) = match packet {
                     TeamTalkWire::Audio {client_uid, channel_count, data} => {
                         (client_uid, AudioBuffer::from_i16(&data, channel_count as usize))
                     }
@@ -158,8 +158,9 @@ impl App {
                         (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1))
                     }
                 };
-
-                mix_send.write_buffer(client_uid, buffer).unwrap();
+                if client_uid != other_client_uid{
+                    mix_send.write_buffer(client_uid, buffer).unwrap();
+                }
             }
         });
         
