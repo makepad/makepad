@@ -162,7 +162,7 @@ impl Cx {
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     let new_swapchain = new_swapchain.images_map(|pi| {
-                        let new_texture = Texture::new(self);
+                        let mut new_texture = Texture::new(self);
                         match pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
                             Ok(pi) => {
                                 // update texture
