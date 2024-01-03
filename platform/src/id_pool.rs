@@ -85,8 +85,9 @@ impl<T> IdPool<T> where T: Default {
             });
     
         if let Some((index, id)) = maybe_free_id {
-            self.pool[id].generation += 1;
             self.free.0.borrow_mut().remove(index);
+            self.pool[id].generation += 1;
+            self.pool[id].item = item;
     
             let pool_id = PoolId {
                 id,
