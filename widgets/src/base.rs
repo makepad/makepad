@@ -201,6 +201,8 @@ live_design!{
     }
 
     Video = <VideoBase> {
+        width: 100, height: 100
+
         draw_bg: {
             shape: Solid,
             fill: Image
