@@ -860,16 +860,8 @@ pub struct CxOsTexture {
 impl CxTexture {
     
     pub fn update_vec_texture(&mut self) {
-        let should_gen_new = self.generation_changed || self.alloc_vec();
-        if self.generation_changed {
-            if self.os.gl_texture.is_some() {
-                self.free_resources();
-            }
-            self.generation_changed = false;
-        }
-
-        if should_gen_new {
-            //let alloc = self.alloc.as_ref().unwrap();
+        if self.alloc_vec() {
+            self.free_resources();
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -997,13 +989,8 @@ impl CxTexture {
     pub fn setup_video_texture(&mut self) -> bool {
         while unsafe { gl_sys::GetError() } != 0 {}
 
-        let should_gen_new = self.generation_changed || self.alloc_video();
-        if self.generation_changed {
+        if self.alloc_video() {
             self.free_resources();
-            self.generation_changed = false;
-        }
-
-        if should_gen_new {
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
