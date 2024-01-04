@@ -5,7 +5,7 @@ use {
     std::ffi::CStr,
     crate::{
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         audio::*,
         os::linux::libc_sys,
         os::linux::alsa_sys::*
@@ -37,7 +37,7 @@ pub struct AlsaAudioAccess {
     audio_inputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
     device_descs: Vec<AlsaAudioDesc>,
     failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
-    change_signal: Signal
+    change_signal: SignalToUI
 }
 
 #[derive(Debug)]
@@ -50,7 +50,7 @@ macro_rules!alsa_error {
 }
 
 impl AlsaAudioAccess {
-    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         let change_signal_inner = change_signal.clone();
         std::thread::spawn(move || {
             let mut last_card_count = 0;

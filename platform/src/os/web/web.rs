@@ -11,7 +11,7 @@ use {
         makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
-        thread::Signal,
+        thread::SignalToUI,
         window::{
             CxWindowPool
         },
@@ -428,7 +428,7 @@ impl Cx {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 },
                 CxOsOp::ShowTextIME(area, pos) => {
-                    let pos = area.get_clipped_rect(self).pos + pos;
+                    let pos = area.clipped_rect(self).pos + pos;
                     self.os.from_wasm(FromWasmShowTextIME {x: pos.x, y: pos.y});
                 },
                 CxOsOp::HideTextIME => {
@@ -690,7 +690,7 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
 #[export_name = "wasm_check_signal"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_check_signal() -> u32 {
-    if Signal::check_and_clear_ui_signal(){
+    if SignalToUI::check_and_clear_ui_signal(){
         1
     }
     else{
