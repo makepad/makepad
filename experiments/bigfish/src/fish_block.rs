@@ -10,7 +10,7 @@ pub struct FishBlock {
     pub x: i32,
     pub y: i32,
     pub h: i32,
-
+    pub name: String,
     pub category: FishBlockCategory,
     pub block_type: String,
     pub parameters: Vec<FishParamStorage>,
