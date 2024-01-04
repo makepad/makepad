@@ -25,7 +25,7 @@ use {
             metal::{MetalCx, DrawPassMode},
         },
         pass::{CxPassParent},
-        thread::Signal,
+        thread::SignalToUI,
         window::CxWindowPool,
         event::{
             Event,
@@ -146,7 +146,7 @@ impl Cx {
         match &event {
            TvosEvent::Timer(te) => {
                 if te.timer_id == 0 {
-                   if Signal::check_and_clear_ui_signal(){
+                   if SignalToUI::check_and_clear_ui_signal(){
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }

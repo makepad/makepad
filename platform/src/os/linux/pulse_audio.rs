@@ -14,7 +14,7 @@ use {
     },
     crate::{
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         audio::*,
     }
 };
@@ -342,7 +342,7 @@ pub struct PulseAudioAccess {
     device_query: Option<PulseDeviceQuery>,
     
     device_descs: Vec<PulseAudioDesc>,
-    change_signal: Signal,
+    change_signal: SignalToUI,
     context_state: ContextState,
     main_loop: *mut pa_threaded_mainloop,
     main_loop_api: *mut pa_mainloop_api,
@@ -368,7 +368,7 @@ struct PulseDeviceQuery {
 }
 
 impl PulseAudioAccess {
-    pub fn new(change_signal: Signal, alsa_audio: &AlsaAudioAccess) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI, alsa_audio: &AlsaAudioAccess) -> Arc<Mutex<Self >> {
         unsafe {
             let main_loop = pa_threaded_mainloop_new();
             let main_loop_api = pa_threaded_mainloop_get_api(main_loop);

@@ -25,7 +25,7 @@ use {
         makepad_math::*,
         makepad_live_id::*,
         makepad_live_compiler::LiveFileChange,
-        thread::Signal,
+        thread::SignalToUI,
         event::{
             VirtualKeyboardEvent,
             NetworkResponseItem,
@@ -356,7 +356,7 @@ impl Cx {
                 }
             }
             
-            if Signal::check_and_clear_ui_signal() {
+            if SignalToUI::check_and_clear_ui_signal() {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
             }

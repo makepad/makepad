@@ -13,7 +13,7 @@ use {
         window::CxWindowPool,
         event::WindowGeom,
         texture::{Texture,  TextureFormat},
-        thread::Signal,
+        thread::SignalToUI,
         os::{
             d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
@@ -195,7 +195,7 @@ impl Cx {
 
                     // poll the service for updates
                     // check signals
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }

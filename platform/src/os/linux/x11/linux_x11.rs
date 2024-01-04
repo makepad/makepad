@@ -15,7 +15,7 @@ use {
         cx_api::{CxOsOp, CxOsApi}, 
         makepad_math::dvec2,
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         event::Event,
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
@@ -189,7 +189,7 @@ impl Cx {
             XlibEvent::Timer(e) => {
                 //println!("TIMER! {:?}", std::time::Instant::now());
                 if e.timer_id == 0{
-                    if Signal::check_and_clear_ui_signal(){
+                    if SignalToUI::check_and_clear_ui_signal(){
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
