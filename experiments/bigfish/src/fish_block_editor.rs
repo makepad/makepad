@@ -4,7 +4,7 @@ live_design! {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
-    import do_not_run_bigfish::fish_theme::*;
+    import makepad_experiment_bigfish::fish_theme::*;
     import crate::block_header_button::*;
     import crate::block_delete_button::*;
 
