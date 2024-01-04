@@ -67,15 +67,16 @@ live_design! {
                 }
             }
 
-            <FishSlider>{text:"Slider!"}
-            <Button>{text:"X"}
+            <FishSlider>{text:"Slider A"}
+            <FishSlider>{text:"Slider B"}
+            <FishSlider>{text:"Slider C"}
 
         }
     }
 
     FishBlockEditorGenerator = <FishBlockEditor>
     {
-        title = {draw_bg: { fn pixel(self) -> vec4   { return mix(THEME_COLOR_GENERATOR, THEME_COLOR_GENERATOR_DARK, self.pos.y) }} }
+        title = {draw_bg: { fn pixel(self) -> vec4 { return mix(THEME_COLOR_GENERATOR, THEME_COLOR_GENERATOR_DARK, self.pos.y) }} }
         body = {draw_bg: { fn pixel(self) -> vec4 { return THEME_COLOR_GENERATOR_FADE} }  }
     }
 

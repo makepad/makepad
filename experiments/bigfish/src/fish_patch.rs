@@ -91,6 +91,8 @@ impl FishPatch {
     }
 
     pub fn undo_checkpoint_start(&mut self) -> usize {
+        self.undo.redo_things.clear();
+
         self.undo
             .undo_things
             .push((UndoableThing::OpenMarker, IdAction::Nop, String::new()));
@@ -261,6 +263,7 @@ impl FishPatch {
     pub fn undo(&mut self, lib: &FishBlockLibrary) {
         self.action_stack_pump(lib, true);
     }
+
     pub fn redo(&mut self, lib: &FishBlockLibrary) {
         self.action_stack_pump(lib, false);
     }
