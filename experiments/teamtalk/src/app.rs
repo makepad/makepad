@@ -59,8 +59,8 @@ pub struct Store{
 pub struct App {
     #[live] ui: WidgetRef,
     #[live] store: Arc<Store>,
-    #[rust] volume_changed_by_ui: SignalToUI,
-    #[rust] volume_changed_by_network: SignalFromUI,
+    #[rust] volume_changed_by_ui: SignalFromUI,
+    #[rust] volume_changed_by_network: SignalToUI,
 }
 
 impl LiveRegister for App {
