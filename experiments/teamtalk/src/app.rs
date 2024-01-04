@@ -120,7 +120,7 @@ impl AppMain for App {
 // this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
 #[derive(SerBin, DeBin, Debug)]
 enum TeamTalkWire {
-    Volume{client_uid: u64, order:u64, volume: f64},
+    Volume{client_uid: u64, volume: f64},
     Silence {client_uid: u64, frame_count: u32},
     Audio {client_uid: u64, channel_count: u32, data: Vec<i16>},
 }
@@ -147,7 +147,6 @@ impl App {
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
             let mut output_buffer = AudioBuffer::new_with_size(640, 1);
-            let mut order = 0;
             loop {
                 // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
@@ -165,8 +164,7 @@ impl App {
                     let peak = sum / buf.len() as f32;
                     if volume_changed_by_ui.check_and_clear(){
                         wire_data.clear();
-                        order += 1;
-                        TeamTalkWire::Volume{client_uid:my_client_uid, order, volume: store.global_volume.get()}.ser_bin(&mut wire_data);
+                        TeamTalkWire::Volume{client_uid:my_client_uid, volume: store.global_volume.get()}.ser_bin(&mut wire_data);
                         write_audio.send_to(&wire_data, "255.255.255.255:41531").unwrap();
                     }
                     let wire_packet = if peak>0.005 {
@@ -202,10 +200,9 @@ impl App {
                     TeamTalkWire::Silence {client_uid, frame_count} => {
                         (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1), true)
                     }
-                    TeamTalkWire::Volume{client_uid, order, volume}=>{
+                    TeamTalkWire::Volume{client_uid, volume}=>{
                         if client_uid != my_client_uid{
                             store.global_volume.set(volume);
-                            log!("GOT VOLUME {} {}", order, volume);
                             volume_changed_by_network.set();
                         }
                         continue
