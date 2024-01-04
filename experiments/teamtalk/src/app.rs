@@ -9,12 +9,11 @@ use {
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
         makepad_audio_graph::audio_stream::{AudioStreamSender},
         makepad_widgets::*,
+        makepad_platform::live_atomic::*,
     },
-    std::collections::HashMap,
-    std::thread,
-    std::time,
+    std::sync::Arc,
     std::net::UdpSocket,
-    std::time::{Duration, Instant},
+    std::time::{Duration},
 };
 
 // We dont have a UI yet 
@@ -27,7 +26,7 @@ live_design!{
             show_bg: true
             width: Fill,
             height: Fill
-                        
+            window: {inner_size: vec2(400, 300)},
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return mix(#7, #3, self.pos.y);
@@ -50,18 +49,18 @@ live_design!{
 
 app_main!(App);
 
-#[derive(Live, LiveHook, LiveRead, LiveRegister)]
+#[derive(Live, LiveAtomic, LiveHook, LiveRead, LiveRegister)]
 #[live_ignore]
 pub struct Store{
-    #[live(0.5f64)] global_volume: f64,
+    #[live(0.5f64)] global_volume: f64a,
 }
 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[live] store: Store,
-    #[rust] volume_recv: ToUIReceiver<f64>,
-    #[rust] volume_send: FromUISender<f64>
+    #[live] store: Arc<Store>,
+    #[rust] volume_changed_by_ui: SignalToUI,
+    #[rust] volume_changed_by_network: SignalFromUI,
 }
 
 impl LiveRegister for App {
@@ -72,12 +71,12 @@ impl LiveRegister for App {
 }
 
 impl App{
-    pub fn from_store(&self, cx:&mut Cx){
+    pub fn store_to_widgets(&self, cx:&mut Cx){
         let db = DataBindingStore::from_nodes(self.store.live_read());
-        Self::data_bind(db.data_to_widgets(cx, &self.ui));
+        Self::data_bind_map(db.data_to_widgets(cx, &self.ui));
     }
     
-    pub fn data_bind(mut db: DataBindingMap) {
+    pub fn data_bind_map(mut db: DataBindingMap) {
         db.bind(id!(global_volume), ids!(global_volume));
     }
 }
@@ -85,24 +84,21 @@ impl App{
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         let mut db = DataBindingStore::new();
-        db.bind_with_map(cx, actions, &self.ui, Self::data_bind);
+        db.data_bind(cx, actions, &self.ui, Self::data_bind_map);
         self.store.apply_over(cx, &db.nodes);
-        // lets check if global volume changed
         if db.contains(id!(global_volume)){
-            let _ = self.volume_send.send(self.store.global_volume);
+            self.volume_changed_by_ui.set();
         }
     }
     
     fn handle_startup(&mut self,  cx: &mut Cx){
         self.start_network_stack(cx);
-        self.from_store(cx);
+        self.store_to_widgets(cx);
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
-        while let Ok(volume) = self.volume_recv.try_recv(){
-            // we got a volume from the network, lets update it
-            self.store.global_volume = volume;
-            self.from_store(cx);
+        if self.volume_changed_by_network.check_and_clear(){
+            self.store_to_widgets(cx);
         }
     }
     
@@ -133,7 +129,7 @@ impl App {
 
     pub fn start_network_stack(&mut self, cx: &mut Cx) {
         // not a very good uid, but it'l do.
-        let client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0;
+        let my_client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0;
         // Audiostream is an mpsc channel that buffers at the recv side
         // and allows arbitrary chunksized reads. Little utility struct
         let (mic_send, mut mic_recv) = AudioStreamSender::create_pair();
@@ -145,7 +141,8 @@ impl App {
         write_audio.set_broadcast(true).unwrap();
 
         let read_audio = write_audio.try_clone().unwrap();
-        let volume_recv = self.volume_send.receiver();
+        let volume_changed_by_ui = self.volume_changed_by_ui.clone();
+        let store = self.store.clone();
         // our microphone broadcast network thread
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
@@ -165,16 +162,16 @@ impl App {
                         sum += v.abs();
                     }
                     let peak = sum / buf.len() as f32;
-                    while let Ok(volume) = volume_recv.try_recv(){
+                    if volume_changed_by_ui.check_and_clear(){
                         wire_data.clear();
-                        TeamTalkWire::Volume{client_uid, volume}.ser_bin(&mut wire_data);
+                        TeamTalkWire::Volume{client_uid:my_client_uid, volume: store.global_volume.get()}.ser_bin(&mut wire_data);
                         write_audio.send_to(&wire_data, "255.255.255.255:41531").unwrap();
                     }
                     let wire_packet = if peak>0.005 {
-                        TeamTalkWire::Audio {client_uid, channel_count: 1, data: output_buffer.to_i16()}
+                        TeamTalkWire::Audio {client_uid:my_client_uid, channel_count: 1, data: output_buffer.to_i16()}
                     }
                     else {
-                        TeamTalkWire::Silence {client_uid, frame_count: output_buffer.frame_count() as u32}
+                        TeamTalkWire::Silence {client_uid:my_client_uid, frame_count: output_buffer.frame_count() as u32}
                     };
                     // serialise the packet enum for sending over the wire
                     wire_data.clear();
@@ -184,7 +181,8 @@ impl App {
                 };
             }
         });
-        let volume_send = self.volume_recv.sender();
+        let volume_changed_by_network = self.volume_changed_by_network.clone();
+        let store = self.store.clone();
         // the network audio receiving thread
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
@@ -195,21 +193,24 @@ impl App {
                 let packet = TeamTalkWire::deserialize_bin(&read_buf).unwrap();
                 
                 // create an audiobuffer from the data
-                let (other_client_uid, buffer, _silence) = match packet {
+                let (client_uid, buffer, _silence) = match packet {
                     TeamTalkWire::Audio {client_uid, channel_count, data} => {
                         (client_uid, AudioBuffer::from_i16(&data, channel_count as usize), false)
                     }
                     TeamTalkWire::Silence {client_uid, frame_count} => {
                         (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1), true)
                     }
-                    TeamTalkWire::Volume{client_uid:_, volume}=>{
-                        let _ = volume_send.send(volume);
+                    TeamTalkWire::Volume{client_uid, volume}=>{
+                        if client_uid != my_client_uid{
+                            store.global_volume.set(volume);
+                            volume_changed_by_network.set();
+                        }
                         continue
                     }
                 };
                 
-                if client_uid != other_client_uid{
-                    mix_send.write_buffer(other_client_uid, buffer).unwrap();
+                if client_uid != my_client_uid{
+                    mix_send.write_buffer(client_uid, buffer).unwrap();
                 }
             }
         });
@@ -219,17 +220,18 @@ impl App {
             input_buffer.make_single_channel();
             mic_send.write_buffer(0, input_buffer).unwrap();
         });
-        
+        let store = self.store.clone();
         cx.audio_output(0, move | _info, output_buffer | {
             //println!("buffer {:?}",_time);
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
             mix_recv.try_recv_stream();
+            let volume = store.global_volume.get() as f32;
             let mut chan = AudioBuffer::new_like(output_buffer);
             for i in 0..mix_recv.num_routes() {
                 if mix_recv.read_buffer(i, &mut chan, 1,4) != 0 {
                     for i in 0..chan.data.len() {
-                        output_buffer.data[i] += chan.data[i];
+                        output_buffer.data[i] += chan.data[i]*volume;
                     }
                 }
             }

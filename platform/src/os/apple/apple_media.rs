@@ -7,7 +7,7 @@ use {
         event::Event,
         video::*,
         midi::*,
-        thread::Signal,
+        thread::SignalToUI,
         media_api::CxMediaApi,
         os::apple::core_midi::*,
         os::apple::audio_unit::AudioUnitAccess,
@@ -20,9 +20,9 @@ pub struct CxAppleMedia{
     pub (crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
     pub (crate) audio_unit: Option<Arc<Mutex<AudioUnitAccess>>>,
     pub (crate) av_capture: Option<Arc<Mutex<AvCaptureAccess>>>,
-    pub (crate) core_audio_change: Signal,
-    pub (crate) core_midi_change: Signal,
-    pub (crate) av_capture_change: Signal,
+    pub (crate) core_audio_change: SignalToUI,
+    pub (crate) core_midi_change: SignalToUI,
+    pub (crate) av_capture_change: SignalToUI,
 }
 
 impl Cx{

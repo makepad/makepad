@@ -25,7 +25,7 @@ pub struct FileClient {
 
 pub struct FileClientInner {
     pub request_sender: Sender<FileRequest>,
-    pub message_signal: Signal,
+    pub message_signal: SignalToUI,
     pub message_receiver: Receiver<FileClientMessage>,
 }
 
@@ -62,7 +62,7 @@ impl FileClient {
 impl FileClientInner {
     pub fn new_with_local_server(path:&Path) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let message_signal = Signal::new();
+        let message_signal = SignalToUI::new();
         let (message_sender, message_receiver) = mpsc::channel();
         
         /*let mut root = "./".to_string();
@@ -101,7 +101,7 @@ impl FileClientInner {
     
     pub fn new_connect_remote(to_server: &str) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let message_signal = Signal::new();
+        let message_signal = SignalToUI::new();
         let (message_sender, message_receiver) = mpsc::channel();
         
         let stream = TcpStream::connect(to_server).unwrap();
@@ -187,7 +187,7 @@ fn spawn_request_sender(request_receiver: Receiver<FileRequest>, mut stream: Tcp
 
 fn spawn_response_or_notification_receiver(
     mut stream: TcpStream,
-    message_signal: Signal,
+    message_signal: SignalToUI,
     message_sender: Sender<FileClientMessage>,
 ) {
     thread::spawn(move || loop {
@@ -206,7 +206,7 @@ fn spawn_response_or_notification_receiver(
 fn spawn_local_request_handler(
     request_receiver: Receiver<FileRequest>,
     connection: FileServerConnection,
-    action_signal: Signal,
+    action_signal: SignalToUI,
     action_sender: Sender<FileClientMessage>,
 ) {
     thread::spawn(move || loop {

@@ -12,7 +12,7 @@ use {
     crate::{
         makepad_live_id::*,
         midi::*,
-        thread::Signal,
+        thread::SignalToUI,
     }
 };
  
@@ -278,7 +278,7 @@ impl AlsaClient {
 
 impl AlsaMidiAccess {
     
-    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         
         change_signal.set();
         
@@ -363,7 +363,7 @@ impl AlsaMidiAccess {
                         });
                         if senders.len()>0 {
                             // make sure our eventloop runs
-                            Signal::set_ui_signal();
+                            SignalToUI::set_ui_signal();
                         }
                     }
                 }

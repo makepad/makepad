@@ -24,7 +24,7 @@ use {
 
 pub struct BuildClient{
     pub cmd_sender: Sender<BuildCmdWrap>,
-    pub msg_signal: Signal,
+    pub msg_signal: SignalToUI,
     pub msg_receiver: Receiver<BuildClientMessageWrap>,
 }
  
@@ -56,7 +56,7 @@ impl BuildClient {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_local_server(path:&Path) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
-        let msg_signal = Signal::new();
+        let msg_signal = SignalToUI::new();
         let (msg_sender, msg_receiver) = mpsc::channel();
         /*
         let mut root = "./".to_string();
