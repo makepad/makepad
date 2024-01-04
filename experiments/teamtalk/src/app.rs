@@ -17,13 +17,12 @@ use {
     std::time::{Duration, Instant},
 };
 
-// We dont have a UI yet
+// We dont have a UI yet 
 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
     App = {{App}} {
-        
         ui: <Window>{
             show_bg: true
             width: Fill,
@@ -36,6 +35,14 @@ live_design!{
             }
                         
             body = <View>{
+                padding:20
+                global_volume = <Slider> {
+                    padding: 0
+                    height: Fit,
+                    width: 125,
+                    margin: {top: 1, left: 2}
+                    text: "1344"
+                }
             }
         }
     }
@@ -43,12 +50,18 @@ live_design!{
 
 app_main!(App);
 
+#[derive(Live, LiveHook, LiveRead, LiveRegister)]
+#[live_ignore]
+pub struct Store{
+    #[live(0.5f64)] global_volume: f64,
+}
+
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[live(1.0f64)] own_volume: f64,
-    #[live(1.0f64)] global_volume: f64,
-    #[rust] volume_recv: ToUIReceiver<f64>
+    #[live] store: Store,
+    #[rust] volume_recv: ToUIReceiver<f64>,
+    #[rust] volume_send: FromUISender<f64>
 }
 
 impl LiveRegister for App {
@@ -58,23 +71,45 @@ impl LiveRegister for App {
     }
 }
 
-impl MatchEvent for App{
-    fn handle_startup(&mut self,  cx: &mut Cx){
-        self.start_network_stack(cx);
+impl App{
+    pub fn from_store(&self, cx:&mut Cx){
+        let db = DataBindingStore::from_nodes(self.store.live_read());
+        Self::data_bind(db.data_to_widgets(cx, &self.ui));
     }
     
+    pub fn data_bind(mut db: DataBindingMap) {
+        db.bind(id!(global_volume), ids!(global_volume));
+    }
+}
+
+impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        DataBindingStore::new().bind_with_map(cx, actions, &self.ui, |mut db|{
-            db.bind(id!(own_volume), ids!(own_volume));
-            db.bind(id!(global_volume), ids!(global_volume));
-        })
+        let mut db = DataBindingStore::new();
+        db.bind_with_map(cx, actions, &self.ui, Self::data_bind);
+        self.store.apply_over(cx, &db.nodes);
+        // lets check if global volume changed
+        if db.contains(id!(global_volume)){
+            let _ = self.volume_send.send(self.store.global_volume);
+        }
+    }
+    
+    fn handle_startup(&mut self,  cx: &mut Cx){
+        self.start_network_stack(cx);
+        self.from_store(cx);
+    }
+    
+    fn handle_signal(&mut self, cx: &mut Cx){
+        while let Ok(volume) = self.volume_recv.try_recv(){
+            // we got a volume from the network, lets update it
+            self.store.global_volume = volume;
+            self.from_store(cx);
+        }
     }
     
     fn handle_audio_devices(&mut self, cx:& mut Cx, devices:&AudioDevicesEvent){
         for desc in &devices.descs{
             println!("{}", desc)
         }
-        println!("AUDIO DEVICE CHANGE");
         cx.use_audio_inputs(&devices.default_input());
         cx.use_audio_outputs(&devices.default_output());
     }
@@ -108,14 +143,9 @@ impl App {
         let write_audio = UdpSocket::bind("0.0.0.0:41531").unwrap();
         write_audio.set_read_timeout(Some(Duration::new(5, 0))).unwrap();
         write_audio.set_broadcast(true).unwrap();
-        
-        // the audio read/write UDP socket (peer 2 peer)
-        //let read_audio = UdpSocket::bind("0.0.0.0:41532").unwrap();
-        //read_audio.set_read_timeout(Some(Duration::new(5, 0))).unwrap();
-                
+
         let read_audio = write_audio.try_clone().unwrap();
-        
-                
+        let volume_recv = self.volume_send.receiver();
         // our microphone broadcast network thread
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
@@ -135,7 +165,11 @@ impl App {
                         sum += v.abs();
                     }
                     let peak = sum / buf.len() as f32;
-                    
+                    while let Ok(volume) = volume_recv.try_recv(){
+                        wire_data.clear();
+                        TeamTalkWire::Volume{client_uid, volume}.ser_bin(&mut wire_data);
+                        write_audio.send_to(&wire_data, "255.255.255.255:41531").unwrap();
+                    }
                     let wire_packet = if peak>0.005 {
                         TeamTalkWire::Audio {client_uid, channel_count: 1, data: output_buffer.to_i16()}
                     }
@@ -150,7 +184,7 @@ impl App {
                 };
             }
         });
-        
+        let volume_send = self.volume_recv.sender();
         // the network audio receiving thread
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
@@ -168,8 +202,8 @@ impl App {
                     TeamTalkWire::Silence {client_uid, frame_count} => {
                         (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1), true)
                     }
-                    TeamTalkWire::Volume{client_uid, volume}=>{
-                        
+                    TeamTalkWire::Volume{client_uid:_, volume}=>{
+                        let _ = volume_send.send(volume);
                         continue
                     }
                 };
