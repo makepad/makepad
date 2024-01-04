@@ -44,7 +44,7 @@ live_design! {
     const THEME_COLOR_FILTER = #3A3A97ff
     const THEME_COLOR_ENVELOPE = #EDAD3Aff
     const THEME_COLOR_META = #D9FF7Fff
-    const THEME_COLOR_UTILITY = #909090ff
+    const THEME_COLOR_UTILITY = #c0c0c0ff
 
     const CABLE_AUDIO_COLOR = #ffd000ff
     const CABLE_CONTROL_COLOR = #d0d0d0ff
@@ -67,7 +67,7 @@ live_design! {
     const THEME_COLOR_FILTER_DARK = (hsvmod(THEME_COLOR_FILTER,  0.,0.,-0.2))
     const THEME_COLOR_ENVELOPE_DARK = (hsvmod(THEME_COLOR_ENVELOPE,  0.,0.,-0.2))
     const THEME_COLOR_META_DARK = (hsvmod(THEME_COLOR_META,  0.,0.,-0.2))
-    const THEME_COLOR_UTILITY_DARK = (hsvmod(THEME_COLOR_UTILITY,  0.,0.,-0.2))
+    const THEME_COLOR_UTILITY_DARK = #e0e0e0ff
 
 
 
@@ -77,7 +77,7 @@ live_design! {
     const THEME_COLOR_FILTER_FADE = (hsvmod(THEME_COLOR_FILTER, 0.,-0.6,0.3))
     const THEME_COLOR_ENVELOPE_FADE = (hsvmod(THEME_COLOR_ENVELOPE, 0.,-0.6,0.3))
     const THEME_COLOR_META_FADE = (hsvmod(THEME_COLOR_META, 0.,-0.6,0.3))
-    const THEME_COLOR_UTILITY_FADE = (hsvmod(THEME_COLOR_UTILITY, 0.,-0.6,0.3))
+    const THEME_COLOR_UTILITY_FADE = #f0f0f0ff
 
 
 
