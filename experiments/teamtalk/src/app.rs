@@ -46,6 +46,9 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
+    #[live(1.0f64)] own_volume: f64,
+    #[live(1.0f64)] global_volume: f64,
+    #[rust] volume_recv: ToUIReceiver<f64>
 }
 
 impl LiveRegister for App {
@@ -58,6 +61,13 @@ impl LiveRegister for App {
 impl MatchEvent for App{
     fn handle_startup(&mut self,  cx: &mut Cx){
         self.start_network_stack(cx);
+    }
+    
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        DataBindingStore::new().bind_with_map(cx, actions, &self.ui, |mut db|{
+            db.bind(id!(own_volume), ids!(own_volume));
+            db.bind(id!(global_volume), ids!(global_volume));
+        })
     }
     
     fn handle_audio_devices(&mut self, cx:& mut Cx, devices:&AudioDevicesEvent){
@@ -79,6 +89,7 @@ impl AppMain for App {
 // this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
 #[derive(SerBin, DeBin, Debug)]
 enum TeamTalkWire {
+    Volume{client_uid: u64, volume: f64},
     Silence {client_uid: u64, frame_count: u32},
     Audio {client_uid: u64, channel_count: u32, data: Vec<i16>},
 }
@@ -156,6 +167,10 @@ impl App {
                     }
                     TeamTalkWire::Silence {client_uid, frame_count} => {
                         (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1), true)
+                    }
+                    TeamTalkWire::Volume{client_uid, volume}=>{
+                        
+                        continue
                     }
                 };
                 
