@@ -205,6 +205,7 @@ impl FishBlockLibrary {
         let mut f = FishBlock::default();
         f.category = t.category.clone();
         f.library_id = t.id.clone();
+        f.name = t.name.clone();
 
         for i in &t.inputs {
             f.input_ports.push(FishInputPortInstance {

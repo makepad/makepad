@@ -10,6 +10,7 @@ live_design! {
     import crate::homescreen::BigFishHomeScreen;
     import crate::fish_theme::*;
     import crate::fish_connection_widget::*;
+    import crate::lua_console::*;
 
     App = {{App}} {
 
@@ -170,6 +171,9 @@ live_design! {
                 <View>{width:320, height: 320
                         show_bg: true,
                         draw_bg: {fn pixel(self) -> vec4 { return #111}}
+                        console = <LuaConsole>{
+
+                        }
                     }
                 }
                 right_view = <View>{
@@ -214,6 +218,7 @@ impl LiveRegister for App {
         crate::fish_theme::live_design(cx);
         crate::homescreen::live_design(cx);
         crate::fish_connection_widget::live_design(cx);
+        crate::lua_console::live_design(cx);
     }
     // after_new_from_doc
 }
