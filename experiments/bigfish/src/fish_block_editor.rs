@@ -4,7 +4,7 @@ live_design! {
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_widgets::base::*;
     import makepad_draw::shader::std::*;
-    import makepad_experiment_bigfish::fish_theme::*;
+    import crate::fish_theme::*;
     import crate::block_header_button::*;
     import crate::block_delete_button::*;
 
@@ -30,28 +30,28 @@ live_design! {
                     return mix(vec4(1,1,0.6,1), vec4(1,1,0.5,1),self.pos.y);
                 }
             },
-            topbar = <View>{
+            topbar = <View>
+            {
                 flow:Right,
                 height: Fit,
-            header = <BlockHeaderButton>
-            {
-
-                draw_text:
+                header = <BlockHeaderButton>
                 {
-                    color: #0
-                    text_style: <H2_TEXT_BOLD> {}
+                    draw_text:
+                    {
+                        color: #0
+                        text_style: <H2_TEXT_BOLD> {}
+                    }
+                }
+                delete = <BlockDeleteButton>
+                {
+                    width: Fit,
+                    draw_text:
+                    {
+                        color: #0
+                        text_style: <H2_TEXT_BOLD> {}
+                    }
                 }
             }
-            delete = <BlockDeleteButton>
-            {
-                width: Fit,
-                draw_text:
-                {
-                    color: #0
-                    text_style: <H2_TEXT_BOLD> {}
-                }
-            }
-        }
         }
         body = <View>
         {
