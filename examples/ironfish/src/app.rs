@@ -68,7 +68,7 @@ impl LiveRegister for App {
 
 impl App {
     
-    pub fn data_bind(&mut self, mut db: DataBindingMap) {
+    pub fn data_bind(mut db: DataBindingMap) {
         // sequencer
         db.bind(id!(sequencer.playing), ids!(playpause));
         db.bind(id!(sequencer.bpm), ids!(speed.slider));
@@ -189,13 +189,13 @@ impl MatchEvent for App {
         let ui = self.ui.clone();
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
         let mut db = DataBindingStore::from_nodes(ironfish.settings.live_read());
-        self.data_bind(db.data_to_widgets(cx, &ui));
+        Self::data_bind(db.data_to_widgets(cx, &ui));
         ui.piano(id!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
     }
     
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        let mut synth_db = DataBindingStore::new();
+       
         let ui = self.ui.clone();
         let piano = ui.piano(id!(piano));
         
@@ -255,11 +255,10 @@ impl MatchEvent for App {
         if ui.button_set(ids!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx);
         }
-                    
-        self.data_bind(synth_db.widgets_to_data(cx, actions, &ui));
-        self.data_bind(synth_db.data_to_widgets(cx, &ui));
+        let mut db = DataBindingStore::new();
+        db.bind_with_map(cx, actions, &ui, Self::data_bind);
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        ironfish.settings.apply_over(cx, &synth_db.nodes);
+        ironfish.settings.apply_over(cx, &db.nodes);
     }
     
     fn handle_midi_ports(&mut self, cx: &mut Cx, ports:&MidiPortsEvent){

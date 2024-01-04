@@ -1,5 +1,5 @@
 [package]
-name = "do-not-run-bigfish"
+name = "makepad-experiment-bigfish"
 version = "0.1.0"
 authors = ["Stijn Kuipers <stijnkuipers@gmail.com>"]
 edition = "2021"
@@ -8,5 +8,5 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "zqpv-Yj-K7WNVK2I8h5Okhho46Q="
 
 [dependencies]
-makepad-widgets = { path = "../../../widgets", version = "0.6.0" }
-makepad-audio-widgets = { path = "../../../audio_graph/audio_widgets", version = "0.6.0" }
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }
+makepad-audio-widgets = { path = "../../audio_graph/audio_widgets", version = "0.6.0" }

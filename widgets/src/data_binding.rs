@@ -31,6 +31,11 @@ impl DataBindingStore {
             self.mutated_by.push(uid);
         }
     }
+    
+    pub fn bind_with_map<F>(&mut self, cx:&mut Cx,actions:&Actions, ui:&WidgetRef, f:F) where F:Fn(DataBindingMap){
+        f(self.widgets_to_data(cx, actions, ui));
+        f(self.data_to_widgets(cx, ui))
+    }
 }
 
 enum Direction<'a> {
