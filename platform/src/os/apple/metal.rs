@@ -822,16 +822,7 @@ impl CxTexture {
         &mut self,
         metal_cx: &MetalCx,
     ) {
-        // ok lets see if we need to alloc
-        let should_gen_new = self.generation_changed || self.alloc_vec();
-        if self.generation_changed {
-            if self.os.texture.is_some() {
-                self.os.texture = None;
-            }
-            self.generation_changed = false;
-        }
-
-        if should_gen_new {
+        if self.alloc_vec() {
             let alloc = self.alloc.as_ref().unwrap();
             
             let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
