@@ -4,7 +4,7 @@ use {
     std::marker::PhantomData,
     std::{
         sync::Arc,
-        sync::atomic::{AtomicU32, AtomicI32, AtomicI64,  Ordering, AtomicBool},
+        sync::atomic::{AtomicU32, AtomicI32, AtomicI64,  AtomicU64, Ordering, AtomicBool},
     },
     crate::{
         live_traits::*,
@@ -187,6 +187,71 @@ impl LiveNew for f32a {
         Self (AtomicU32::new(0.0f32.to_bits()))
     }
     
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        f32::live_type_info(_cx)
+    }
+}
+
+
+// atomic f32
+
+
+pub struct f64a(AtomicU64);
+
+impl Clone for f64a {
+    fn clone(&self)->Self{ 
+        f64a(AtomicU64::new(self.get().to_bits()))
+    }
+}
+
+impl AtomicGetSet<f64> for f64a {
+    fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+    fn set(&self, val: f64) {
+        self.0.store(val.to_bits(), Ordering::Relaxed);
+    }
+}
+
+impl LiveAtomic for f64a {
+    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        let mut val = 0.0f64;
+        let index = val.apply(cx, apply_from, index, nodes);
+        self.set(val);
+        index
+    }
+}
+
+impl LiveHook for f64a {}
+impl LiveApply for f64a {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, from, index, nodes)
+    }
+}
+
+impl Debug for f64a{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
+    }
+}
+
+impl LiveRead for f64a{
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
+    }
+}
+
+impl Into<f64a> for f64 {
+    fn into(self) -> f64a {
+        f64a(AtomicU64::new(self.to_bits()))
+    }
+}
+
+impl LiveNew for f64a {
+    fn new(_cx: &mut Cx) -> Self {
+        Self (AtomicU64::new(0.0f64.to_bits()))
+    }
+        
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         f32::live_type_info(_cx)
     }

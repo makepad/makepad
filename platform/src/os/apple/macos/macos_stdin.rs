@@ -17,7 +17,7 @@ use {
         window::CxWindowPool,
         event::WindowGeom,
         texture::{Texture, TextureFormat},
-        thread::Signal,
+        thread::SignalToUI,
         os::{
             url_session::{make_http_request},
             apple_sys::*,
@@ -209,7 +209,7 @@ impl Cx {
                     }
 
                     // check signals
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }

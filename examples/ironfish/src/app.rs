@@ -188,7 +188,7 @@ impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx){
         let ui = self.ui.clone();
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let mut db = DataBindingStore::from_nodes(ironfish.settings.live_read());
+        let db = DataBindingStore::from_nodes(ironfish.settings.live_read());
         Self::data_bind(db.data_to_widgets(cx, &ui));
         ui.piano(id!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
@@ -256,7 +256,7 @@ impl MatchEvent for App {
             sequencer.grid_up(cx);
         }
         let mut db = DataBindingStore::new();
-        db.bind_with_map(cx, actions, &ui, Self::data_bind);
+        db.data_bind(cx, actions, &ui, Self::data_bind);
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
         ironfish.settings.apply_over(cx, &db.nodes);
     }

@@ -7,7 +7,7 @@ use {
         makepad_live_id::*,
         cx::*,
         event::*,
-        thread::Signal,
+        thread::SignalToUI,
         os::{
             windows::{
                 windows_media::CxWindowsMedia,
@@ -79,7 +79,7 @@ impl Cx {
         match &event{
             Win32Event::Timer(time) =>{
                 if time.timer_id == 0{
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
@@ -235,7 +235,7 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(e))
             }
             Win32Event::Signal => {
-                if Signal::check_and_clear_ui_signal() {
+                if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_media_signals();
                     self.call_event_handler(&Event::Signal);
                 }

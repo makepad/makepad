@@ -33,7 +33,7 @@ use {
             metal::{MetalCx, DrawPassMode},
         },
         pass::CxPassParent,
-        thread::Signal,
+        thread::SignalToUI,
         cx_stdin::PollTimers,
         window::WindowId,
         event::{
@@ -258,7 +258,7 @@ impl Cx {
                     }
                     
                     // check signals
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
