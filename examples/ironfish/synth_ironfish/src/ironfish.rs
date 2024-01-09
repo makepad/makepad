@@ -1909,8 +1909,8 @@ impl LiveRegister for IronFish{
 }
 
 impl LiveHook for IronFish{
-    fn skip_apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
-        if let ApplyFrom::UpdateFromDoc{..} = apply_from{
+    fn skip_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode])->Option<usize>{
+        if let ApplyFrom::UpdateFromDoc{..} = apply.from{
             log!("NOT HERE");
             return Some(nodes.skip_node(index))
         }

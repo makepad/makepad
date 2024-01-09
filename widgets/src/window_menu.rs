@@ -48,14 +48,14 @@ pub enum WindowMenuAction {
 
     
 impl LiveHook for WindowMenu {
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     if nodes[index].value.is_enum() {
                         let mut dock_item = WindowMenuItem::new(cx);
-                        let index = dock_item.apply(cx, from, index, nodes);
+                        let index = dock_item.apply(cx, apply, index, nodes);
                         self.menu_items.insert(id, dock_item);
                         return index;
                     }
