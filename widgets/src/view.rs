@@ -39,7 +39,7 @@ pub enum ViewDebug {
 }
 
 impl LiveHook for ViewDebug {
-    fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
             LiveValue::Vec4(v) => {
                 *self = Self::Color(*v);
@@ -151,15 +151,15 @@ struct ViewTextureCache {
 }
 
 impl LiveHook for View {
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             //self.children.clear();
             self.draw_order.clear();
             self.find_cache.clear();
         }
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
@@ -182,17 +182,17 @@ impl LiveHook for View {
         */
     }
     
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         //! TODO
         // NOTE FOR LIVE RELOAD
         // the id is always unique
         // Draw order is never cleared.
         
         let id = nodes[index].id;
-        match from {
-            ApplyFrom::Animate | ApplyFrom::ApplyOver => {
+        match apply.from {
+            ApplyFrom::Animate | ApplyFrom::Over => {
                 if let Some(component) = self.children.get_mut(&nodes[index].id) {
-                    component.apply(cx, from, index, nodes)
+                    component.apply(cx, apply, index, nodes)
                 }
                 else {
                     nodes.skip_node(index)
@@ -204,7 +204,7 @@ impl LiveHook for View {
                     return self.children.get_or_insert(cx, id, | cx | {
                         WidgetRef::new(cx)
                     })
-                        .apply(cx, from, index, nodes);
+                        .apply(cx, apply, index, nodes);
                 }
                 else {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);

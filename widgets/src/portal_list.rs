@@ -90,16 +90,16 @@ struct AlignItem {
 }
 
 impl LiveHook for PortalList {
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             self.templates.clear();
         }
     }
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
@@ -107,7 +107,7 @@ impl LiveHook for PortalList {
                     // lets apply this thing over all our childnodes with that template
                     for ((_, templ_id), node) in self.items.iter_mut() {
                         if *templ_id == id {
-                            node.apply(cx, from, index, nodes);
+                            node.apply(cx, apply, index, nodes);
                         }
                     }
                 }
@@ -120,7 +120,7 @@ impl LiveHook for PortalList {
         nodes.skip_node(index)
     }
     
-    fn after_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         if let Flow::Down = self.layout.flow {
             self.vec_index = Vec2Index::Y
         }

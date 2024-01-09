@@ -80,8 +80,8 @@ impl LiveHook for RunView {
         self.draw_app.set_texture(0, &cx.null_texture());
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc{..} = from{
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc{..} = apply.from{
             self.last_size = dvec2(0.0,0.0);
             self.animator_cut(cx, id!(started.on));
         }

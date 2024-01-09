@@ -55,7 +55,7 @@ pub trait AnimatorImpl {
     }
     fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
     fn animator_apply_state(&mut self, cx: &mut Cx);
-    fn animator_after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]);
+    fn animator_after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
     fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event) -> AnimatorAction;
 }
 
@@ -547,8 +547,8 @@ impl LiveNew for Animator {
     }
 }
 impl LiveApply for Animator {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
-        if let Some(file_id) = from.file_id() {
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
+        if let Some(file_id) = apply.from.file_id() {
             self.live_ptr = Some(cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, start_index));
         }
         if !nodes[start_index].value.is_structy_type() {
@@ -687,7 +687,7 @@ impl Animator {
                     };
                     
                     let play = if let Some(play_index) = nodes.child_by_name(track_index, live_id!(play).as_field()) {
-                        Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
+                        Play::new_apply(cx, &mut ApplyFrom::New.into(), play_index, nodes)
                     }
                     else {
                         Play::new(cx)
@@ -715,7 +715,7 @@ impl Animator {
             else {panic!()};
             
             let default_ease = if let Some(ease_index) = nodes.child_by_path(0, &[live_id!(tracks).as_field(), track_id.as_field(), live_id!(ease).as_field()]) {
-                Ease::new_apply(cx, ApplyFrom::New, ease_index, nodes)
+                Ease::new_apply(cx, &mut ApplyFrom::New.into(), ease_index, nodes)
             }
             else {
                 Ease::Linear
@@ -745,7 +745,7 @@ impl Animator {
                     }
                 }
                 else { // try to deserialize a keyframe
-                    let mut kf = KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes);
+                    let mut kf = KeyFrame::new_apply(cx, &mut ApplyFrom::New.into(), node_index, nodes);
                     if nodes.child_by_name(node_index, live_id!(ease).as_field()).is_none() {
                         kf.ease = default_ease.clone();
                     }
@@ -920,7 +920,7 @@ impl Animator {
     pub fn cut_to(&mut self, cx: &mut Cx, state_pair: &[LiveId; 2], index: usize, nodes: &[LiveNode]) {
         
         if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
-            let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
+            let cursor = MouseCursor::new_apply(cx, &mut ApplyFrom::New.into(), index, nodes);
             cx.set_cursor(cursor);
         }
         // if we dont have a state object, lets create a template
@@ -1035,7 +1035,7 @@ impl Animator {
     pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &[LiveId; 2], index: usize, nodes: &[LiveNode]) {
         
         if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
-            let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
+            let cursor = MouseCursor::new_apply(cx, &mut ApplyFrom::New.into(), index, nodes);
             cx.set_cursor(cursor);
         }
         

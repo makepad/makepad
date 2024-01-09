@@ -48,12 +48,12 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         tb.add("impl").stream(generic.clone());
         tb.add("LiveAtomicValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
-        tb.add("    fn apply_value_atomic(&self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
+        tb.add("    fn apply_value_atomic(&self, cx: &mut Cx, apply:&mut Apply, index:usize, nodes:&[LiveNode]) -> usize{");
         tb.add("        match nodes[index].id {");
         
         for field in &fields {
             if field.attrs[0].name == "live" {
-                tb.add("    LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply_atomic(cx, apply_from, index, nodes),");
+                tb.add("    LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply_atomic(cx, apply, index, nodes),");
             }
         }
         tb.add("            _=> {");
@@ -69,7 +69,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         tb.add("impl").stream(generic.clone());
         tb.add("LiveAtomic for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
 
-        tb.add("    fn apply_atomic(&self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
+        tb.add("    fn apply_atomic(&self, cx: &mut Cx, apply:&mut Apply, start_index: usize, nodes: &[LiveNode])->usize {");
         tb.add("        let index = start_index;");
         tb.add("        let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).0).add(");");
         tb.add("        if !nodes[start_index].value.is_structy_type(){");
@@ -83,7 +83,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         tb.add("                index += 1;");
         tb.add("                break;");
         tb.add("            }");
-        tb.add("            index = self.apply_value_atomic(cx, apply_from, index, nodes);");
+        tb.add("            index = self.apply_value_atomic(cx, apply, index, nodes);");
         tb.add("        }");
         tb.add("        index");
         tb.add("    }");
