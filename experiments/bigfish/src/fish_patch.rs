@@ -91,6 +91,8 @@ impl FishPatch {
     }
 
     pub fn undo_checkpoint_start(&mut self) -> usize {
+        self.undo.redo_things.clear();
+
         self.undo
             .undo_things
             .push((UndoableThing::OpenMarker, IdAction::Nop, String::new()));
@@ -117,24 +119,49 @@ impl FishPatch {
         undolevel
     }
 
-    pub fn undo(&mut self, lib: &FishBlockLibrary) {
-        if self.undo.undo_things.len() == 0 {
+    pub fn get_undo_pair(
+        &mut self,
+        undo: bool,
+    ) -> (
+        &mut Vec<(UndoableThing, IdAction, String)>,
+        &mut Vec<(UndoableThing, IdAction, String)>,
+    ) {
+        match (undo) {
+            true => (&mut self.undo.undo_things, &mut self.undo.redo_things),
+            false => (&mut self.undo.redo_things, &mut self.undo.undo_things),
+        }
+    }
+
+    /// pub fn push_action_on_stack(&mut self, bool undo )
+    pub fn action_stack_pump(&mut self, lib: &FishBlockLibrary, undo: bool) {
+        if self.get_undo_pair(undo).0.len() == 0 {
             return;
         }
         let mut level = 0;
         let mut done = false;
         while !done {
-            let item = self.undo.undo_things.pop().unwrap();
+            let item = self.get_undo_pair(undo).0.pop().unwrap();
             match item.0 {
                 UndoableThing::OpenMarker => {
                     level = level - 1;
                     if level == 0 {
                         done = true;
                     }
+
+                    self.get_undo_pair(undo).1.push((
+                        UndoableThing::CloseMarker,
+                        IdAction::Nop,
+                        String::new(),
+                    ));
                 }
 
                 UndoableThing::CloseMarker => {
                     level = level + 1;
+                    self.get_undo_pair(undo).1.push((
+                        UndoableThing::OpenMarker,
+                        IdAction::Nop,
+                        String::new(),
+                    ));
                 }
 
                 UndoableThing::Block => match item.1 {
@@ -146,7 +173,7 @@ impl FishPatch {
                         let index = self.blocks.iter().position(|x| x.id == id).unwrap();
                         self.blocks.remove(index);
 
-                        self.undo.redo_things.push((
+                        self.get_undo_pair(undo).1.push((
                             UndoableThing::Block,
                             IdAction::Delete { id: id },
                             bstring,
@@ -159,7 +186,7 @@ impl FishPatch {
                             let B = self.get_block(id).expect("find block");
                             Bstring = B.serialize_ron();
                         }
-                        self.undo.redo_things.push((
+                        self.get_undo_pair(undo).1.push((
                             UndoableThing::Block,
                             IdAction::Modify { id: id },
                             Bstring,
@@ -173,7 +200,7 @@ impl FishPatch {
                         // undo of delete = create
                         let zombie = FishBlock::deserialize_ron(&item.2).expect("create a block");
                         self.blocks.push(zombie);
-                        self.undo.redo_things.push((
+                        self.get_undo_pair(undo).1.push((
                             UndoableThing::Block,
                             IdAction::Create { id: id },
                             String::new(),
@@ -191,7 +218,7 @@ impl FishPatch {
                         let index = self.connections.iter().position(|x| x.id == id).unwrap();
                         self.connections.remove(index);
 
-                        self.undo.redo_things.push((
+                        self.get_undo_pair(undo).1.push((
                             UndoableThing::Connection,
                             IdAction::Delete { id: id },
                             cstring,
@@ -205,7 +232,7 @@ impl FishPatch {
                             let c = self.get_connection(id).expect("find connection");
                             cstring = c.serialize_ron();
                         }
-                        self.undo.redo_things.push((
+                        self.get_undo_pair(undo).1.push((
                             UndoableThing::Connection,
                             IdAction::Modify { id: id },
                             cstring,
@@ -221,7 +248,7 @@ impl FishPatch {
                         let zombie =
                             FishConnection::deserialize_ron(&item.2).expect("create a connection");
                         self.connections.push(zombie);
-                        self.undo.redo_things.push((
+                        self.get_undo_pair(undo).1.push((
                             UndoableThing::Connection,
                             IdAction::Create { id: id },
                             String::new(),
@@ -233,12 +260,19 @@ impl FishPatch {
         }
     }
 
+    pub fn undo(&mut self, lib: &FishBlockLibrary) {
+        self.action_stack_pump(lib, true);
+    }
+
+    pub fn redo(&mut self, lib: &FishBlockLibrary) {
+        self.action_stack_pump(lib, false);
+    }
+
     pub fn add_block(&mut self, lib: &FishBlockLibrary) {
         self.undo_checkpoint_start();
         self.create_block(lib, String::from("Utility"), 100, 100);
         self.undo_checkpoint_end();
     }
-    pub fn redo(&mut self, lib: &FishBlockLibrary) {}
 
     pub fn remove_connection(&mut self, id: u64) {
         self.undo_checkpoint_start();
