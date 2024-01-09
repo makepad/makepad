@@ -45,8 +45,8 @@ impl LiveHook for AudioGraph {
             let _ = self.from_ui.send(FromUI::NewRoot(graph_node));
         }
     }
-    fn skip_apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
-        if let ApplyFrom::UpdateFromDoc{..} = apply_from{
+    fn skip_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode])->Option<usize>{
+        if let ApplyFrom::UpdateFromDoc{..} = apply.from{
             return Some(nodes.skip_node(index))
         }
         None

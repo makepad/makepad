@@ -82,14 +82,14 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("         self.animator_apply_state(cx);");
             tb.add("    }");
             
-            tb.add("    fn animator_after_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){");
+            tb.add("    fn animator_after_apply(&mut self, cx:&mut Cx, apply:&mut Apply, index:usize, nodes:&[LiveNode]){");
             tb.add("        let mut index = index + 1;");
-            tb.add("        match apply_from{"); // if apply from is file, run defaults
+            tb.add("        match apply.from{"); // if apply from is file, run defaults
             tb.add("            ApplyFrom::NewFromDoc{..} | ApplyFrom::UpdateFromDoc{..}=>{"); // if apply from is file, run defaults
             tb.add("                while !nodes[index].is_close() {");
             tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]){");
             tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), live_id!(apply).as_field()]){");
-            tb.add("                            self.apply(cx, ApplyFrom::AnimatorInit, index, nodes);");
+            tb.add("                            self.apply(cx, &mut ApplyFrom::AnimatorInit.into(), index, nodes);");
             tb.add("                        }");
             tb.add("                    }");
             tb.add("                    index = nodes.skip_node(index);");
@@ -104,7 +104,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                        while !nodes[index].is_close() {");
             tb.add("                            if let LiveValue::Id(state_id) = nodes[index].value{");
             tb.add("                               if let Some(orig_index) = orig_nodes.child_by_path(orig_index, &[nodes[index].id.as_instance(), state_id.as_instance(), live_id!(apply).as_field()]){");
-            tb.add("                                   self.apply(cx, ApplyFrom::AnimatorInit, orig_index, orig_nodes);");
+            tb.add("                                   self.apply(cx, &mut ApplyFrom::AnimatorInit.into(), orig_index, orig_nodes);");
             tb.add("                               }");
             tb.add("                            }");
             tb.add("                            index = nodes.skip_node(index);");
@@ -114,7 +114,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("            }");
             tb.add("            ApplyFrom::Animate=>{"); // find the last id-keys and start animations/cuts
             tb.add("                while !nodes[index].is_close() {");
-            tb.add("                    let state_id = LiveId::new_apply(cx, ApplyFrom::New, index, nodes);");
+            tb.add("                    let state_id = LiveId::new_apply(cx, &mut ApplyFrom::New.into(), index, nodes);");
             tb.add("                    let state_pair = &[nodes[index].id, state_id];");
             tb.add("                    if !self.").ident(&animator_field.name).add(".animator_in_state(cx, state_pair){");
             tb.add("                       self.").ident(&animator_field.name).add(".animate_to_live(cx, state_pair);");
@@ -128,7 +128,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             
             tb.add("    fn animator_apply_state(&mut self, cx: &mut Cx) {");
             tb.add("        if let Some(state) = self.").ident(&animator_field.name).add(".swap_out_state(){");
-            tb.add("            self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,live_id!(state).as_field()).unwrap(), &state);");
+            tb.add("            self.apply(cx, &mut ApplyFrom::Animate.into(), state.child_by_name(0,live_id!(state).as_field()).unwrap(), &state);");
             tb.add("            self.").ident(&animator_field.name).add(".swap_in_state(state);");
             tb.add("        }");
             tb.add("    }");
@@ -157,13 +157,13 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
-        tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
+        tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply:&mut Apply, index:usize, nodes:&[LiveNode]) -> usize{");
         tb.add("        if nodes[index].origin.has_prop_type(LivePropType::Field){");
         tb.add("            match nodes[index].id {");
         
         for field in &fields {
             if field.attrs.iter().any( | a | a.name == "live") || field.attrs.iter().any( | a | a.name == "animator") {
-                tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
+                tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply, index, nodes),");
             }
             else if field.attrs.iter().any( | a | a.name == "walk") {
                 for field in &fields {
@@ -174,10 +174,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                           return error_result(&format!("Name collision between walk splat and {}", field.name));
                       }
                 }
-                tb.add("        live_id!(abs_pos)=>self.").ident(&field.name).add(".abs_pos.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(margin)=>self.").ident(&field.name).add(".margin.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(width)=>self.").ident(&field.name).add(".width.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(height)=>self.").ident(&field.name).add(".height.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(abs_pos)=>self.").ident(&field.name).add(".abs_pos.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(margin)=>self.").ident(&field.name).add(".margin.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(width)=>self.").ident(&field.name).add(".width.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(height)=>self.").ident(&field.name).add(".height.apply(cx, apply, index, nodes),");
             }
             else if field.attrs.iter().any( | a | a.name == "layout") {
                 for field in &fields {
@@ -191,30 +191,30 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                           return error_result(&format!("Name collision between layout splat and {}", field.name));
                       }
                 }
-                tb.add("        live_id!(scroll)=>self.").ident(&field.name).add(".scroll.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(clip_x)=>self.").ident(&field.name).add(".clip_x.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(clip_y)=>self.").ident(&field.name).add(".clip_y.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(padding)=>self.").ident(&field.name).add(".padding.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(align)=>self.").ident(&field.name).add(".align.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(flow)=>self.").ident(&field.name).add(".flow.apply(cx, apply_from, index, nodes),");
-                tb.add("        live_id!(spacing)=>self.").ident(&field.name).add(".spacing.apply(cx, apply_from, index, nodes),");
+                tb.add("        live_id!(scroll)=>self.").ident(&field.name).add(".scroll.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(clip_x)=>self.").ident(&field.name).add(".clip_x.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(clip_y)=>self.").ident(&field.name).add(".clip_y.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(padding)=>self.").ident(&field.name).add(".padding.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(align)=>self.").ident(&field.name).add(".align.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(flow)=>self.").ident(&field.name).add(".flow.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(spacing)=>self.").ident(&field.name).add(".spacing.apply(cx, apply, index, nodes),");
             }
         }
         // Unknown value handling
         if let Some(deref_field) = deref_field {
-            tb.add("            _=> self.").ident(&deref_field.name).add(".apply_value(cx, apply_from, index, nodes)");
+            tb.add("            _=> self.").ident(&deref_field.name).add(".apply_value(cx, apply, index, nodes)");
         }
         else {
-            tb.add("        _=> <Self as LiveHook>::apply_value_unknown(self, cx, apply_from, index, nodes)");
+            tb.add("        _=> <Self as LiveHook>::apply_value_unknown(self, cx, apply, index, nodes)");
         }
         tb.add("            }");
         tb.add("        } else {");
         
         if let Some(deref_field) = deref_field {
-            tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply_from, index, nodes)");
+            tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply, index, nodes)");
         }
         else {
-            tb.add("        <Self as LiveHook>::apply_value_instance(self, cx, apply_from, index, nodes)");
+            tb.add("        <Self as LiveHook>::apply_value_instance(self, cx, apply, index, nodes)");
         }
         tb.add("        }");
         tb.add("    }");
@@ -222,37 +222,37 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         tb.add("impl").stream(generic.clone());
         tb.add("LiveHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-        tb.add("    fn deref_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-        tb.add("        <Self as LiveHook>::before_apply(self, cx, apply_from, index, nodes);");
+        tb.add("    fn deref_before_apply(&mut self, cx: &mut Cx, apply:&mut Apply, index: usize, nodes: &[LiveNode]){");
+        tb.add("        <Self as LiveHook>::before_apply(self, cx, apply, index, nodes);");
         
         if let Some(deref_field) = deref_field {
-            tb.add("    self.").ident(&deref_field.name).add(".deref_before_apply(cx, apply_from, index, nodes);");
+            tb.add("    self.").ident(&deref_field.name).add(".deref_before_apply(cx, apply, index, nodes);");
         }
         tb.add("    }");
         
-        tb.add("    fn deref_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-        tb.add("        <Self as LiveHook>::after_apply(self, cx, apply_from, index, nodes);");
+        tb.add("    fn deref_after_apply(&mut self, cx: &mut Cx, apply:&mut Apply, index: usize, nodes: &[LiveNode]){");
+        tb.add("        <Self as LiveHook>::after_apply(self, cx, apply, index, nodes);");
         
         if let Some(deref_field) = deref_field {
-            tb.add("    self.").ident(&deref_field.name).add(".deref_after_apply(cx, apply_from, index, nodes);");
+            tb.add("    self.").ident(&deref_field.name).add(".deref_after_apply(cx, apply, index, nodes);");
         }
-        tb.add("        <Self as LiveHook>::after_apply_from(self, cx, apply_from);");
+        tb.add("        <Self as LiveHook>::after_apply_from(self, cx, apply);");
         tb.add("    }");
         tb.add("}");
         
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
-        tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
-        tb.add("        self.deref_before_apply(cx, apply_from, start_index, nodes);");
+        tb.add("    fn apply(&mut self, cx: &mut Cx, apply:&mut Apply, start_index: usize, nodes: &[LiveNode])->usize {");
+        tb.add("        self.deref_before_apply(cx, apply, start_index, nodes);");
         if animator_field.is_some() { // apply the default states
             tb.add("    let mut animator_index = None;");
         }
-        tb.add("        let index = if let Some(index) = <Self as LiveHook>::skip_apply(self, cx, apply_from, start_index, nodes){index} else {");
+        tb.add("        let index = if let Some(index) = <Self as LiveHook>::skip_apply(self, cx, apply, start_index, nodes){index} else {");
         tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).0).add(");");
         tb.add("            if !nodes[start_index].value.is_structy_type(){");
         tb.add("                cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
-        tb.add("                <Self as LiveHook>::after_apply(self, cx, apply_from, start_index, nodes);");
+        tb.add("                <Self as LiveHook>::after_apply(self, cx, apply, start_index, nodes);");
         tb.add("                return nodes.skip_node(start_index);");
         tb.add("            }");
         
@@ -266,16 +266,16 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         if let Some(animator_field) = animator_field { // apply the default states
             tb.add("            if nodes[index].id == live_id!(").ident(&animator_field.name).add("){animator_index = Some(index);}");
         }
-        tb.add("                index = self.apply_value(cx, apply_from, index, nodes);");
+        tb.add("                index = self.apply_value(cx, apply, index, nodes);");
         tb.add("            }");
         tb.add("            index");
         tb.add("        };");
         
         if animator_field.is_some() { // apply the default states
-            tb.add("    if let Some(animator_index) = animator_index{self.animator_after_apply(cx, apply_from, animator_index, nodes);}");
+            tb.add("    if let Some(animator_index) = animator_index{self.animator_after_apply(cx, apply, animator_index, nodes);}");
         }
         
-        tb.add("        self.deref_after_apply(cx, apply_from, start_index, nodes);");
+        tb.add("        self.deref_after_apply(cx, apply, start_index, nodes);");
         
         
         tb.add("        return index;");
@@ -508,10 +508,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("LiveApply for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
         //tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
         
-        tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
-        tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
-        tb.add("        if let Some(index) = self.skip_apply(cx, apply_from, start_index, nodes){");
-        tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
+        tb.add("    fn apply(&mut self, cx: &mut Cx, apply:&mut Apply, start_index:usize, nodes: &[LiveNode]) -> usize {");
+        tb.add("        self.before_apply(cx, apply, start_index, nodes);");
+        tb.add("        if let Some(index) = self.skip_apply(cx, apply, start_index, nodes){");
+        tb.add("            self.after_apply(cx, apply, start_index, nodes);");
         tb.add("            return index");
         tb.add("        }");
         tb.add("        let mut index = start_index;");
@@ -555,7 +555,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("                        match nodes[index].id{");
                 for field in fields {
                     tb.add("                        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>{index = (*");
-                    tb.ident(&format!("prefix_{}", field.name)).add(").apply(cx, apply_from, index, nodes);},");
+                    tb.ident(&format!("prefix_{}", field.name)).add(").apply(cx, apply, index, nodes);},");
                 }
                 tb.add("                            _=>{");
                 tb.add("                                cx.apply_error_named_enum_invalid_prop(live_error_origin!(), index, nodes, enum_id, *variant, nodes[index].id);");
@@ -599,7 +599,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("                        let arg = index - start_index - 1;");
                 tb.add("                        match arg{");
                 for i in 0..args.len() {
-                    tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}", i)).add(").apply(cx, apply_from, index, nodes); },");
+                    tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}", i)).add(").apply(cx, apply, index, nodes); },");
                 }
                 tb.add("                            _=>{");
                 tb.add("                                cx.apply_error_tuple_enum_arg_not_found(live_error_origin!(), index, nodes, enum_id, *variant, arg);");
@@ -622,7 +622,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("               index = nodes.skip_node(index);");
         tb.add("            }");
         tb.add("        }");
-        tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
+        tb.add("        self.after_apply(cx, apply, start_index, nodes);");
         tb.add("        index");
         tb.add("    }");
         

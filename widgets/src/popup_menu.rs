@@ -46,10 +46,10 @@ pub struct PopupMenu {
 }
 
 impl LiveHook for PopupMenu {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(list_node).as_field()) {
             for (_, node) in self.menu_items.iter_mut() {
-                node.apply(cx, from, index, nodes);
+                node.apply(cx, apply, index, nodes);
             }
         }
         self.draw_list.redraw(cx);

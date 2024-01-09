@@ -87,11 +87,9 @@ pub use crate::{
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
     widget::{
-        Scope,
         WidgetSet,
         WidgetSetIterator,
         WidgetUid,
-        WidgetPath,
         DrawStep,
         DrawStepApi,
         CreateAt,

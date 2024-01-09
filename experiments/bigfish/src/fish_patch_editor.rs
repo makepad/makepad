@@ -269,8 +269,8 @@ impl Widget for FishPatchEditor {
 impl LiveHook for FishPatchEditor {
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {}
 
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc { .. } = from {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
             self.templates.clear();
         }
     }
@@ -279,12 +279,12 @@ impl LiveHook for FishPatchEditor {
     fn apply_value_instance(
         &mut self,
         cx: &mut Cx,
-        from: ApplyFrom,
+        apply: &mut Apply,
         index: usize,
         nodes: &[LiveNode],
     ) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc { file_id } | ApplyFrom::UpdateFromDoc { file_id } => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     let live_ptr = cx
@@ -295,7 +295,7 @@ impl LiveHook for FishPatchEditor {
                     // lets apply this thing over all our childnodes with that template
                     for (templ_id, node) in self.items.values_mut() {
                         if *templ_id == id {
-                            node.apply(cx, from, index, nodes);
+                            node.apply(cx, apply, index, nodes);
                         }
                     }
                 } else {

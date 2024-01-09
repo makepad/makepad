@@ -1124,7 +1124,7 @@ impl Padding {
 }
 
 impl LiveHook for Padding {
-    fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(v) = nodes[index].value.as_float(){
             *self = Self {left: v, top: v, right: v, bottom: v};
             Some(index + 1)
@@ -1141,7 +1141,7 @@ impl Default for Flow {
 
 
 impl LiveHook for Size {
-    fn skip_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn skip_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {

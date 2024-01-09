@@ -38,10 +38,10 @@ pub struct TabBar {
 }
 
 impl LiveHook for TabBar {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab).as_field()) {
             for tab in self.tabs.values_mut() {
-                tab.apply(cx, from, index, nodes);
+                tab.apply(cx, apply, index, nodes);
             }
         }
         self.view_area.redraw(cx);
