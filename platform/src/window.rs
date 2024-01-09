@@ -81,7 +81,7 @@ impl LiveNew for WindowHandle {
 }
 impl LiveApply for WindowHandle {
     //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
             cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
@@ -96,19 +96,19 @@ impl LiveApply for WindowHandle {
             }
             match nodes[index].id {
                 live_id!(inner_size) => {
-                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_inner_size = Some(v.into());
                 },
                 live_id!(title) => {
-                    let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_title = v;
                 }
                 live_id!(position) => {
-                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_position = Some(v.into());
                 }
                 live_id!(dpi_override) => {
-                    let v:f64 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    let v:f64 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     //log!("DPI OVERRIDE {}", v);
                     cx.windows[self.window_id()].dpi_override = Some(v);
                 }

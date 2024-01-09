@@ -21,6 +21,7 @@ pub mod thread;
 pub mod audio;
 pub mod midi;
 pub mod video;
+pub mod scope;
 
 mod draw_matrix;
 mod draw_shader; 
@@ -123,6 +124,7 @@ pub use {
         os::*,
         cx_api::CxOsApi,
         media_api::CxMediaApi,
+        scope::*,
         draw_list::{
             CxDrawItem,
             CxRectArea,
@@ -237,6 +239,7 @@ pub use {
             LiveApplyValue,
             LiveRead,
             ToLiveValue,
+            Apply,
             ApplyFrom,
         },
         animator::{
