@@ -22,3 +22,4 @@ mod fish_preset;
 mod fish_processor;
 mod fish_theme;
 mod homescreen;
+mod lua_console;

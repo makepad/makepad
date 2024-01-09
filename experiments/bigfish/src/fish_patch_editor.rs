@@ -206,7 +206,7 @@ impl Widget for FishPatchEditor {
 
             item.apply_over(
                 cx,
-                live! {title= {topbar = {header= {text:"Synth Block", blockid: (i.id)}, delete = {blockid: (i.id)}}},
+                live! {title= {topbar = {header= {text: (i.name) , blockid: (i.id)}, delete = {blockid: (i.id)}}},
                 abs_pos: (dvec2(i.x as f64, i.y as f64 )-scroll_pos)},
             );
 

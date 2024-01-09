@@ -69,6 +69,7 @@ impl FishBlockLibrary {
             creator: String::from("Stijn Haring-Kuipers"),
             path: String::from("/oscillator"),
         });
+
         self.allblocks.push(FishBlockTemplate {
             category: FishBlockCategory::Effect,
             outputs: vec![],
@@ -96,6 +97,7 @@ impl FishBlockLibrary {
             creator: String::from("Stijn Haring-Kuipers"),
             path: String::from("/filter"),
         });
+
         self.allblocks.push(FishBlockTemplate {
             category: FishBlockCategory::Meta,
             outputs: vec![],
@@ -123,6 +125,7 @@ impl FishBlockLibrary {
             creator: String::from("Stijn Haring-Kuipers"),
             path: String::from("/util"),
         });
+
         self.allblocks.push(FishBlockTemplate {
             category: FishBlockCategory::Envelope,
             outputs: vec![],
@@ -202,6 +205,7 @@ impl FishBlockLibrary {
         let mut f = FishBlock::default();
         f.category = t.category.clone();
         f.library_id = t.id.clone();
+        f.name = t.name.clone();
 
         for i in &t.inputs {
             f.input_ports.push(FishInputPortInstance {
