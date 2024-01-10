@@ -304,7 +304,7 @@ impl SequencerRef {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {*step = 0};
             inner.set_steps(cx, &steps);
-            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
+            cx.widget_action(inner.widget_uid(), &HeapLiveIdPath::default(), SequencerAction::Change);
         }
     }
     
@@ -317,7 +317,7 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
+            cx.widget_action(inner.widget_uid(), &HeapLiveIdPath::default(), SequencerAction::Change);
         }
     }
     
@@ -330,7 +330,7 @@ impl SequencerRef {
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            cx.widget_action(inner.widget_uid(), &WidgetPath::default(), SequencerAction::Change);
+            cx.widget_action(inner.widget_uid(), &HeapLiveIdPath::default(), SequencerAction::Change);
         }
     }
 }
