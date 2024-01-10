@@ -62,7 +62,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
     // lets send out our log message on the studio websocket 
 
     if !Cx::has_studio_web_socket() {
-        #[cfg(not (target_os = "android")]
+        #[cfg(not (target_os = "android"))]
         println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
        // if android, also log to ADB
         #[cfg(target_os = "android")]
