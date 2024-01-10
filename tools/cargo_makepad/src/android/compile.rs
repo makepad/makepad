@@ -321,13 +321,14 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
 
 fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
-
+    
     let build_crate_dir = get_crate_dir(build_crate) ?;
     let local_resources_path = build_crate_dir.join("resources");
     if local_resources_path.is_dir() {
         let underscore_build_crate = build_crate.replace('-', "_");
         let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{underscore_build_crate}/resources"));
         mkdir(&dst_dir) ?;
+        
         cp_all(&local_resources_path, &dst_dir, false) ?;
 
         let assets = ls(&dst_dir) ?;
@@ -354,7 +355,7 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
         "add",
         build_paths.dst_unaligned_apk.to_str().unwrap(),
     ];
-    for asset in &assets_to_add {
+    for asset in &assets_to_add {  
         aapt_args.push(asset);
     }
 
