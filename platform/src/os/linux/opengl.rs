@@ -495,8 +495,8 @@ impl Cx {
         let gpu_renderer = get_gl_string(gl_sys::RENDERER);
         if gpu_renderer.contains("Adreno") {
             crate::log!("WARNING: This device is using {gpu_renderer} renderer.
-            OpenGL extrnal textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
-            This is likely due to a driver bug. External texture support is being disbaled, which means you won't be able to use the Video widget on this device.");
+            OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
+            This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
         }
     }
 }
