@@ -72,6 +72,8 @@ pub const UNPACK_ALIGNMENT: types::GLenum = 0x0CF5;
 pub const UNPACK_ROW_LENGTH: types::GLenum = 0x0CF2;
 pub const TEXTURE_EXTERNAL_OES: types::GLenum = 0x8D65;
 pub const EXTENSIONS: types::GLenum = 0x1F03;
+pub const VENDOR: types::GLenum = 0x1F00;
+pub const RENDERER: types::GLenum = 0x1F01;
 
 #[inline] pub unsafe fn GenVertexArrays(n: types::GLsizei, arrays: *mut types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenVertexArrays.f)(n, arrays)}
 #[inline] pub unsafe fn BindVertexArray(array: types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::BindVertexArray.f)(array)}
