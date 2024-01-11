@@ -97,7 +97,7 @@ impl MatchEvent for App{
     }
     
     fn handle_video_inputs(&mut self, cx:&mut Cx, devices:&VideoInputsEvent){
-        log!("{:?}", devices);
+        println!("{:?}", devices);
         let input = devices.find_highest_at_res(devices.find_device("FaceTime HD Camera"), 1920, 1080, 30.0);
         cx.use_video_input(&input);
     }
@@ -105,6 +105,7 @@ impl MatchEvent for App{
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
