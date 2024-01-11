@@ -6,8 +6,8 @@ use crate::{
     makepad_audio_widgets::piano::*,
     sequencer::*,
     makepad_audio_widgets::display_audio::*
-};
-
+}; 
+ 
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design!{
@@ -20,7 +20,49 @@ live_design!{
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
     import makepad_widgets::designer::Designer;
-
+    
+    Step1 = <ViewBase> {
+        optimize: Texture,
+        draw_bg: {
+            texture image: texture2d
+            uniform marked: float,
+            varying scale: vec2
+            varying shift: vec2
+            fn vertex(self) -> vec4 {
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = 0.5*self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
+            fn pixel(self) -> vec4 {
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0)+vec4(0.5,0.0,0.0,0.0);
+            }
+        }
+    }
+    
+    Step2 = <ViewBase> {
+        optimize: Texture,
+        draw_bg: {
+            texture image: texture2d
+            uniform marked: float,
+            varying scale: vec2
+            varying shift: vec2
+            fn vertex(self) -> vec4 {
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = 0.5*self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
+            fn pixel(self) -> vec4 {
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0)+vec4(0.0,0.5,0.0,0.0);
+            }
+        }
+    }
+    
     App = {{App}} {
         
         audio_graph: {
@@ -34,6 +76,15 @@ live_design!{
             window: {inner_size: vec2(1280, 1000)},
             pass: {clear_color: #2A}
             block_signal_event: true; 
+            /*body = <Step2>{
+                width: Fill,
+                height: Fill,
+                <Step1>{
+                    width: Fill,
+                    height: Fill,
+                    <AppDesktop> {}
+                }
+            }*/
             body = <AppDesktop> {}
         }
        
