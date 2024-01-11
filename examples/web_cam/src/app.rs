@@ -75,8 +75,7 @@ impl MatchEvent for App{
                     width: vfb.format.width / 2,
                     height: vfb.format.height
                 });
-            } 
-
+            }
             if let Some(buf) = vfb.as_vec_u32() {
                 self.video_input[id].swap_vec_u32(cx, buf);
             }
@@ -97,7 +96,7 @@ impl MatchEvent for App{
     }
     
     fn handle_video_inputs(&mut self, cx:&mut Cx, devices:&VideoInputsEvent){
-        println!("{:?}", devices);
+        log!("{:?}", devices);
         let input = devices.find_highest_at_res(devices.find_device("FaceTime HD Camera"), 1920, 1080, 30.0);
         cx.use_video_input(&input);
     }
