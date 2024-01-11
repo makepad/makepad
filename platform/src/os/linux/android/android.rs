@@ -467,6 +467,8 @@ impl Cx {
             if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
+            cx.maybe_warn_hardware_support();
+
             cx.os.display = Some(CxAndroidDisplay {
                 libegl,
                 egl_display,
