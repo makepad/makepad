@@ -17,7 +17,6 @@ pub use {
         turtle::{Walk, Layout},
         draw_list_2d::{ManyInstances, DrawList2d, RedrawingApi},
         geometry::GeometryQuad2D,
-        shader::draw_trapezoid::DrawTrapezoidVector,
         makepad_vector::font::Glyph,
         makepad_vector::trapezoidator::Trapezoidator,
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
@@ -27,7 +26,6 @@ pub use {
     rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
 };
 
-pub(crate) const USE_SWRAST: bool = true;
 pub(crate) const ATLAS_WIDTH: usize = 4096;
 pub(crate) const ATLAS_HEIGHT: usize = 4096;
 
@@ -186,126 +184,17 @@ impl CxFontsAtlas {
     }
 }
 
-impl DrawTrapezoidVector {
-    
-    // atlas drawing function used by CxAfterDraw
-    fn draw_todo(&mut self, fonts_atlas: &mut CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
-        assert!(!USE_SWRAST);
-
-        //let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
-        let mut size = 1.0;
-        for i in 0..1 {
-            if i == 1 {
-                size = 0.75;
-            }
-            if i == 2 {
-                size = 0.6;
-            }
-            let trapezoids = {
-                let cxfont = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
-                let units_per_em = cxfont.ttf_font.units_per_em;
-                let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
-                let glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
-                
-                let is_one_of_tab_lf_cr = ['\t', '\n', '\r'].iter().any(|&c| {
-                    Some(todo.glyph_id) == cxfont.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
-                });
-                if is_one_of_tab_lf_cr {
-                    return
-                }
-                
-                let glyphtc = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap()[todo.subpixel_id].unwrap();
-                let tx = glyphtc.t1.x as f64 * fonts_atlas.alloc.texture_size.x + todo.subpixel_x_fract * atlas_page.dpi_factor;
-                let ty = 1.0 + glyphtc.t1.y as f64 * fonts_atlas.alloc.texture_size.y - todo.subpixel_y_fract * atlas_page.dpi_factor;
-                
-                let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * units_per_em);
-                let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
-                let mut trapezoids = Vec::new();
-                //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
-                let trapezoidate = self.trapezoidator.trapezoidate(
-                    glyph
-                        .outline
-                        .iter()
-                        .map({
-                        move | command | {
-                            let cmd = command.transform(
-                                &AffineTransformation::identity()
-                                    .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-                                    .uniform_scale(font_scale_pixels * size)
-                                    .translate(Vector::new(tx, ty))
-                        );
-                        
-                            cmd
-                        }
-                    }).linearize(0.5),
-                );
-                if let Some(trapezoidate) = trapezoidate {
-                    trapezoids.extend_from_internal_iter(
-                        trapezoidate
-                    );
-                }
-                trapezoids
-            };
-            for trapezoid in trapezoids {
-                self.a_xs = Vec2 {x: trapezoid.xs[0], y: trapezoid.xs[1]};
-                self.a_ys = Vec4 {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
-                self.chan = i as f32;
-                many.instances.extend_from_slice(self.draw_vars.as_slice());
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct CxDrawFontsAtlasRc(pub Rc<RefCell<CxDrawFontsAtlas >>);
-
-pub struct CxDrawFontsAtlas {
-    pub draw_trapezoid: DrawTrapezoidVector,
-    pub atlas_pass: Pass,
-    pub atlas_draw_list: DrawList2d,
-    pub atlas_texture: Texture,
-    pub counter: usize
-}
-
-impl CxDrawFontsAtlas {
-    pub fn new(cx: &mut Cx) -> Self {
-        assert!(!USE_SWRAST);
-        
-        let atlas_texture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8{
-            size: TextureSize::Auto
-        });
-        //cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
-        
-        let draw_trapezoid = DrawTrapezoidVector::new_local(cx);
-        // ok we need to initialize drawtrapezoidtext from a live pointer.
-        Self {
-            counter: 0,
-            draw_trapezoid,
-            atlas_pass: Pass::new(cx),
-            atlas_draw_list: DrawList2d::new(cx),
-            atlas_texture: atlas_texture
-        }
-    }
-}
-
 impl<'a> Cx2d<'a> {
     pub fn lazy_construct_font_atlas(cx: &mut Cx){
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxFontsAtlasRc>() {
             
-            let texture;
-            if USE_SWRAST {
-                texture = Texture::new_with_format(cx, TextureFormat::VecRu8 {
-                    width: ATLAS_WIDTH,
-                    height: ATLAS_HEIGHT,
-                    data: vec![],
-                    unpack_row_length: None
-                });
-            } else {
-                let draw_fonts_atlas = CxDrawFontsAtlas::new(cx);
-                texture = draw_fonts_atlas.atlas_texture.clone();
-                cx.set_global(CxDrawFontsAtlasRc(Rc::new(RefCell::new(draw_fonts_atlas))));
-            }
+            let texture = Texture::new_with_format(cx, TextureFormat::VecRu8 {
+                width: ATLAS_WIDTH,
+                height: ATLAS_HEIGHT,
+                data: vec![],
+                unpack_row_length: None
+            });
             
             let fonts_atlas = CxFontsAtlas::new(texture);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
@@ -324,56 +213,12 @@ impl<'a> Cx2d<'a> {
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
 
-        if USE_SWRAST {
-            // Will be automatically filled after the first use.
-            let mut reuse_sdfer_bufs = None;
+        // Will be automatically filled after the first use.
+        let mut reuse_sdfer_bufs = None;
 
-            for todo in std::mem::take(&mut fonts_atlas.alloc.todo) {
-                self.swrast_atlas_todo(fonts_atlas, todo, &mut reuse_sdfer_bufs);
-            }
-            return;
+        for todo in std::mem::take(&mut fonts_atlas.alloc.todo) {
+            self.swrast_atlas_todo(fonts_atlas, todo, &mut reuse_sdfer_bufs);
         }
-
-        let draw_fonts_atlas_rc = self.cx.get_global::<CxDrawFontsAtlasRc>().clone();
-        let mut draw_fonts_atlas = draw_fonts_atlas_rc.0.borrow_mut();
-
-        //let start = Cx::profile_time_ns();
-        // we need to start a pass that just uses the texture
-        if fonts_atlas.alloc.todo.len()>0 {
-            self.begin_pass(&draw_fonts_atlas.atlas_pass, None);
-
-            let texture_size = fonts_atlas.alloc.texture_size;
-            draw_fonts_atlas.atlas_pass.set_size(self.cx, texture_size);
-            
-            let clear = if fonts_atlas.clear_buffer {
-                fonts_atlas.clear_buffer = false;
-                PassClearColor::ClearWith(Vec4::default())
-            }
-            else {
-                PassClearColor::InitWith(Vec4::default())
-            };
-            
-            draw_fonts_atlas.atlas_pass.clear_color_textures(self.cx);
-            draw_fonts_atlas.atlas_pass.add_color_texture(self.cx, &draw_fonts_atlas.atlas_texture, clear);
-            draw_fonts_atlas.atlas_draw_list.begin_always(self);
-
-            let mut atlas_todo = Vec::new();
-            std::mem::swap(&mut fonts_atlas.alloc.todo, &mut atlas_todo);
-            
-            if let Some(mut many) = self.begin_many_instances(&draw_fonts_atlas.draw_trapezoid.draw_vars) {
-
-                for todo in atlas_todo {
-                    draw_fonts_atlas.draw_trapezoid.draw_todo(fonts_atlas, todo, &mut many);
-                }
-                
-                self.end_many_instances(many);
-            }
-            
-            draw_fonts_atlas.counter += 1;
-            draw_fonts_atlas.atlas_draw_list.end(self);
-            self.end_pass(&draw_fonts_atlas.atlas_pass);
-        }
-        //println!("TOTALT TIME {}", Cx::profile_time_ns() - start);
     }
 
     fn swrast_atlas_todo(
