@@ -384,61 +384,27 @@ impl DrawText {
                     let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
                     let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
                     
-                    // this one needs pixel snapping
-                    let min_pos_x = walk_x + font_size_logical * glyph.bounds.p_min.x;
-                    let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + self.text_style.font_size * self.text_style.top_drop;
-                    
-                    // compute subpixel shift
-                    let (subpixel_x_fract , subpixel_y_fract) = if true {
-                        (0.0, 0.0)
-                    } else {
-                        (
-                            min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor,
-                            min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor,
-                        )
-                    };
-
-                    // scale and snap it
-                    // only use a subpixel id for small fonts
-                    let subpixel_id = if self.text_style.font_size>32.0 {
-                        0
-                    }
-                    else { // subtle 64 index subpixel id
-                        ((subpixel_y_fract * dpi_factor * 7.0) as usize) << 3 |
-                        (subpixel_x_fract * dpi_factor * 7.0) as usize
-                    };
-                    
-                    let subpixel_map = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
+                    let tc = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
                         tc
                     }
                     else{
-                        atlas_page.atlas_glyphs.insert(glyph_id, [None; crate::font_atlas::ATLAS_SUBPIXEL_SLOTS]);
-                        atlas_page.atlas_glyphs.get_mut(&glyph_id).unwrap()
-                    };
-                    
-                    let tc = if let Some(tc) = &subpixel_map[subpixel_id]{
-                        tc
-                    }
-                    else {
                         // see if we can fit it
                         // allocate slot
                         fonts_atlas.alloc.todo.push(CxFontsAtlasTodo {
-                            subpixel_x_fract,
-                            subpixel_y_fract,
                             font_id,
                             atlas_page_id,
                             glyph_id,
-                            subpixel_id
                         });
                         
-                        subpixel_map[subpixel_id] = Some(
-                            fonts_atlas.alloc.alloc_atlas_glyph(w, h)
+                        atlas_page.atlas_glyphs.insert(
+                            glyph_id, 
+                            fonts_atlas.alloc.alloc_atlas_glyph(w, h),
                         );
-                        subpixel_map[subpixel_id].as_ref().unwrap()
+                        atlas_page.atlas_glyphs.get_mut(&glyph_id).unwrap()
                     };
                     
-                    let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
-                    let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
+                    let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x;
+                    let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop;
                     // give the callback a chance to do things
                     //et scaled_min_pos_x = walk_x + delta_x;
                     //let scaled_min_pos_y = pos.y - delta_y;
