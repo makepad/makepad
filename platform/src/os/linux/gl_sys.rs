@@ -55,6 +55,7 @@ pub const RGBA: types::GLenum = 0x1908;
 pub const BGRA: types::GLenum = 0x80E1;
 pub const RED: types::GLenum = 0x1903;
 pub const RG: types::GLenum =  0x8227;
+pub const R8: types::GLenum =  0x8229;
 pub const UNSIGNED_BYTE: types::GLenum = 0x1401;
 pub const HALF_FLOAT: types::GLenum =  0x140B;
 pub const FLOAT: types::GLenum = 0x1406;
