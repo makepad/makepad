@@ -33,7 +33,7 @@ live_design!{
     }
     
     AppUI =  <Window> {
-        caption_bar = {visible: true, caption_label = {label = {text: "Makepad Studio"}}},
+        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
         window: {inner_size: vec2(1600, 900)},
         window_menu = {
             main = Main {items: [app, file, edit, selection, view, run, window, help]}
@@ -223,7 +223,7 @@ live_design!{
             RunList = <RunList> {
             }
             Search = <RectView> {
-                draw_bg: {color: #2}
+                draw_bg: {color: #x28}
                 //  margin:{left: 0, top: 0}
                 <View> {
                     margin:10
@@ -233,22 +233,30 @@ live_design!{
                         flow: Right
                         height: Fit
                         <TextInput>{
+                            draw_bg: {
+                                fn pixel(self) -> vec4 {
+                                    return #x00000044
+                                }
+                            }
                             width: Fill,
-                            empty_message:"Search here.."                           
+                            empty_message:"Search here"                           
                         }
                         //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
-                    <Button> {
-                        text:"Search!"
+                    // <Button> {
+                    //     text:"Search"
                             
-                        draw_icon: {
-                            svg_file: (ICO_SEARCH)
-                            fn get_color(self) -> vec4 {
-                                return #f;
-                            }
-                        } 
-                        icon_walk:  {
-                            width: Fit, height: 17.0} 
-                    }
+                    //     draw_icon: {
+                    //         svg_file: (ICO_SEARCH)
+                    //         fn get_color(self) -> vec4 {
+                    //             return #8;
+                    //         }
+                    //     } 
+                    //     icon_walk:  {
+                    //         margin: {left: 10}
+                    //         width: Fit,
+                    //         // height: 12.0
+                    //     } 
+                    // }
                 }
                     <Label>
                     {
