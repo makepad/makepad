@@ -42,8 +42,8 @@ live_design!{
             let normalized: vec2 = (self.clipped - min_pos) / vec2(self.rect_size.x, -self.rect_size.y)
             
             self.tex_coord1 = mix(
-                self.font_t1.xy,
-                self.font_t2.xy,
+                vec2(self.font_t1.x, 1.0-self.font_t1.y),
+                vec2(self.font_t2.x, 1.0-self.font_t2.y),
                 normalized.xy
             )
             self.pos = normalized;
@@ -62,7 +62,8 @@ live_design!{
             return incol
         }
         fn pixel(self) -> vec4 {
-            let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
+            let s = sample2d(self.tex, self.tex_coord1.xy).x;
+            
             if (self.sdf_radius != 0.0) {
                 // HACK(eddyb) harcoded atlas size (see asserts below).
                 let texel_coords = self.tex_coord1.xy * 4096.0;
