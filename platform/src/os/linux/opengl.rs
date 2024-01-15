@@ -932,7 +932,7 @@ impl CxTexture {
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
-                        gl_sys::RED as i32,
+                        gl_sys::R8 as i32,
                         *width as i32,
                         *height as i32,
                         0,
