@@ -32,7 +32,7 @@ impl LiveHook for RotatedImage {
         self.lazy_create_image_cache(cx);
         let source = self.source.clone();
         if source.as_str().len()>0{
-            self.load_image_dep_by_path(cx, source.as_str())
+            let _ = self.load_image_dep_by_path(cx, source.as_str());
         }
     }
 }
