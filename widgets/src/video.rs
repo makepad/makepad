@@ -64,6 +64,10 @@ pub struct Video {
     #[rust]
     audio_state: AudioState,
 
+    // Actions
+    #[rust(false)]
+    should_dispatch_texture_updates: bool,
+
     // Original video metadata
     #[rust]
     video_width: usize,
@@ -124,6 +128,12 @@ impl VideoRef {
     pub fn set_source(&mut self, source: VideoDataSource) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_source(source);
+        }
+    }
+
+    pub fn should_dispatch_texture_updates(&self, should_dispatch: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.should_dispatch_texture_updates = should_dispatch;
         }
     }
 
@@ -253,7 +263,9 @@ impl Widget for Video {
                     self.playback_state = PlaybackState::Playing;
                     cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
                 }
-                cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
+                if self.should_dispatch_texture_updates {
+                    cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
+                }
             }
             Event::VideoPlaybackCompleted(event) =>  if event.video_id == self.id {
                 if !self.is_looping {
