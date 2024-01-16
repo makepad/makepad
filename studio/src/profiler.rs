@@ -79,7 +79,36 @@ struct ProfilerEventChart{
     #[live] draw_label: DrawText,
     #[live] draw_time: DrawText,
     #[rust(TimeRange{start:0.0, end: 1.0})] time_range: TimeRange, 
-    #[rust] time_drag: Option<TimeRange>
+    #[rust] time_drag: Option<TimeRange>,
+    #[rust] tmp_label: String,
+}
+
+impl ProfilerEventChart{
+    fn draw_block(&mut self, cx: &mut Cx2d, rect:&Rect, sample_start:f64, sample_end: f64, label:&str){
+        let scale = rect.size.x / self.time_range.len();
+        let xpos = rect.pos.x + (sample_start - self.time_range.start) * scale;
+        let xsize = ((sample_end - sample_start) * scale).max(2.0);
+        
+        let pos = dvec2(xpos, rect.pos.y+20.0);
+        let size = dvec2(xsize, 20.0);
+        let rect = Rect{pos,size};
+                
+        self.draw_item.draw_abs(cx, rect);
+        self.tmp_label.clear();
+        if sample_end - sample_start > 0.001{
+            write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0);                        
+        }
+        else{
+            write!(&mut self.tmp_label, "{} {:.0} ns", label, (sample_end-sample_start)*1000000.0);
+        }
+        
+        // if xsize > 10.0 lets draw a clipped piece of text 
+        if xsize > 10.0{
+            cx.begin_turtle(Walk::abs_rect(rect), Layout::default());
+            self.draw_label.draw_abs(cx, pos+dvec2(2.0,4.0), &self.tmp_label);
+            cx.end_turtle();
+        }
+    }
 }
 
 impl Widget for ProfilerEventChart {
@@ -90,60 +119,53 @@ impl Widget for ProfilerEventChart {
         
         let rect = cx.turtle().rect(); 
         if let Some(pss) = bm.profile.values().next(){
-            if let Some(first) = pss.events.iter().position(|v| v.end > self.time_range.start){
+            let scale = rect.size.x / self.time_range.len();
+                            
+            let mut step_size = 0.008;
+            while self.time_range.len() / step_size > rect.size.x / 80.0{
+                step_size *= 2.0;
+            }
+                            
+            while self.time_range.len() / step_size < rect.size.x / 80.0{
+                step_size /= 2.0;
+            }
+                        
+            let mut iter = (self.time_range.start / step_size).floor() * step_size - self.time_range.start;
+            while iter < self.time_range.len(){
+                let xpos =  iter * scale;
+                let pos = dvec2(xpos,0.0)+rect.pos;
+                self.draw_line.draw_abs(cx, Rect{pos, size:dvec2(3.0, rect.size.y)});
+                label.clear();
+                write!(&mut label, "{:.3}s", (iter+self.time_range.start));       
+                self.draw_time.draw_abs(cx, pos+dvec2(2.0,2.0), &label);
+                iter += step_size; 
+            }
+            
+            if let Some(first) = pss.event.iter().position(|v| v.end > self.time_range.start){
                 // lets draw the time lines and time text
-                let scale = rect.size.x / self.time_range.len();
-                
-                let mut step_size = 0.008;
-                while self.time_range.len() / step_size > rect.size.x / 80.0{
-                    step_size *= 2.0;
-                }
-                
-                while self.time_range.len() / step_size < rect.size.x / 80.0{
-                    step_size /= 2.0;
-                }
-                
-                let mut iter = (self.time_range.start / step_size).floor() * step_size - self.time_range.start;
-                while iter < self.time_range.len(){
-                    let xpos =  iter * scale;
-                    let pos = dvec2(xpos,0.0)+rect.pos;
-                    self.draw_line.draw_abs(cx, Rect{pos, size:dvec2(3.0, rect.size.y)});
-                    label.clear();
-                    write!(&mut label, "{:.3}s", (iter+self.time_range.start));       
-                    self.draw_time.draw_abs(cx, pos+dvec2(2.0,2.0), &label);
-                    iter += step_size; 
-                }
-                
-                for i in first..pss.events.len(){
-                    let sample = &pss.events[i];
+                for i in first..pss.event.len(){
+                    let sample = &pss.event[i];
                     if sample.start > self.time_range.end{
                         break;
                     }
-                    
-                    let xpos = rect.pos.x + (sample.start - self.time_range.start) * scale;
-                    let xsize = ((sample.end - sample.start) * scale).max(2.0);
-                    
                     let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
-                    let pos = dvec2(xpos, rect.pos.y+20.0);
-                    let size = dvec2(xsize, 20.0);
-                    let rect = Rect{pos,size};
                     self.draw_item.color = Vec4::from_u32(color);
-                    
-                    self.draw_item.draw_abs(cx, rect);
-                    label.clear();
-                    if sample.end - sample.start > 0.001{
-                        write!(&mut label, "{} {:.2} ms", Event::name_from_u32(sample.event_u32), (sample.end-sample.start)*1000.0);                        
+                    self.draw_block(cx, &rect, sample.start, sample.end, Event::name_from_u32(sample.event_u32));
+                }
+            }
+            
+            self.draw_item.color = Vec4::from_u32(0x7f7f7fff);
+            if let Some(first) = pss.gpu.iter().position(|v| v.end > self.time_range.start){
+                // lets draw the time lines and time text
+                for i in first..pss.gpu.len(){
+                    let sample = &pss.gpu[i];
+                    if sample.start > self.time_range.end{
+                        break;
                     }
-                    else{
-                        write!(&mut label, "{} {:.0} ns", Event::name_from_u32(sample.event_u32), (sample.end-sample.start)*1000000.0);
-                    }
-
-                    // if xsize > 10.0 lets draw a clipped piece of text 
-                    if xsize > 10.0{
-                        cx.begin_turtle(Walk::abs_rect(rect), Layout::default());
-                        self.draw_label.draw_abs(cx, pos+dvec2(2.0,4.0), &label);
-                        cx.end_turtle();
-                    }
+                    self.draw_block(cx, &Rect{
+                        pos:rect.pos + dvec2(0.0,25.0),
+                        size:rect.size
+                    }, sample.start, sample.end, "GPU");
                 }
             }
         }
