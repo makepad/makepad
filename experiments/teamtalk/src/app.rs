@@ -93,6 +93,7 @@ impl MatchEvent for App{
     
     fn handle_startup(&mut self,  cx: &mut Cx){
         self.start_network_stack(cx);
+        self.start_artnet_client(cx);
         self.store_to_widgets(cx);
     }
     
@@ -125,7 +126,30 @@ enum TeamTalkWire {
     Audio {client_uid: u64, channel_count: u32, data: Vec<i16>},
 }
 
+pub const ARTNET_HEADER: &[u8; 8] = b"Art-Net\0";
+pub const ARTNET_PROTOCOL_VERSION: [u8; 2] = [0, 14];
+
 impl App {
+    pub fn start_artnet_client(&mut self, _cx:&mut Cx){
+        let socket = UdpSocket::bind("0.0.0.0:6454").unwrap();
+        let _broadcast_addr = "255.255.255.255:6454";
+        socket.set_broadcast(true).unwrap();
+        let mut buffer = [0u8; 2048];
+        std::thread::spawn(move || {
+            loop {
+                let (length, _addr) = socket.recv_from(&mut buffer).unwrap();
+                let buffer =  &buffer[0..length];
+                if !buffer.starts_with(ARTNET_HEADER){
+                    continue;
+                }
+                let buffer = &buffer[ARTNET_HEADER.len()..];
+                log!("{:x?}",buffer);
+                if buffer[1] == 50{ // T
+                    
+                }
+            }
+        });
+    }
 
     pub fn start_network_stack(&mut self, cx: &mut Cx) {
         // not a very good uid, but it'l do.
@@ -154,8 +178,8 @@ impl App {
                     if mic_recv.read_buffer(0, &mut output_buffer, 1, 255) == 0 {
                         break;
                     }
-                    
-                    let buf = output_buffer.channel(0);
+                    ?>
+                    let buf = output_b-+uffer.channel(0);
                     // do a quick volume check so we can send 1 byte packets if silent
                     let mut sum = 0.0;
                     for v in buf {
