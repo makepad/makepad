@@ -25,6 +25,7 @@ use {
         draw_list::DrawListId,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth, PassId},
+        studio::{AppToStudio, GPUSample},
         texture::{
             CxTexture,
             Texture,
@@ -32,6 +33,7 @@ use {
             TextureFormat,
         },
     },
+    std::time::{Instant},
     std::sync::{
         Arc,
         Condvar,
@@ -484,20 +486,30 @@ impl Cx {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
-        
+        let start_time = self.start_time;
         let () = unsafe {msg_send![
             command_buffer,
-            addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
+            addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
+                let start:f64 = unsafe {msg_send![command_buffer, GPUStartTime]};
+                let end:f64 = unsafe {msg_send![command_buffer, GPUEndTime]};
                 if let Some(_stdin_frame) = stdin_frame {
                     #[cfg(target_os = "macos")]
                     Self::stdin_send_draw_complete(_stdin_frame);
                 }
+                // lets send off our gpu time
+                crate::log!("{}", end - start);
+                let duration = end - start;
+                let start = Instant::now().duration_since(start_time).as_secs_f64() - duration;
+                let end = start + duration;
+                Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
+                    start, end
+                }));
+                
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
     } 
-    
     
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
         for draw_shader_ptr in &self.draw_shaders.compile_set {
