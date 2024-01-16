@@ -2,7 +2,7 @@ use crate::{
     makepad_audio_graph::*, makepad_audio_widgets::display_audio::*,
     makepad_audio_widgets::piano::*, makepad_synth_ironfish::ironfish::*, makepad_widgets::*,
     sequencer::*,
-};
+}; 
 
 //use std::fs::File;
 //use std::io::prelude::*;
@@ -128,7 +128,7 @@ live_design! {
             window: {inner_size: vec2(1280, 1000)},
             pass: {clear_color: #2A}
             block_signal_event: true;
-            body = <View>{
+            /*body2 = <View>{
                 step4 = <BlurStage>{
                     width: Fill,
                     height: Fill,
@@ -150,8 +150,8 @@ live_design! {
                         }
                     }
                 }
-            }
-          //  body = <AppDesktop> {}
+            }*/
+            body = <AppDesktop> {}
         }
 
     }
