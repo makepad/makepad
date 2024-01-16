@@ -497,7 +497,6 @@ impl Cx {
                     Self::stdin_send_draw_complete(_stdin_frame);
                 }
                 // lets send off our gpu time
-                crate::log!("{}", end - start);
                 let duration = end - start;
                 let start = Instant::now().duration_since(start_time).as_secs_f64() - duration;
                 let end = start + duration;
