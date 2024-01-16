@@ -3,30 +3,34 @@ use crate::{
     widget::*,
 };
 
-// Currently only supported on Android
-
-// DSL Usage
-// source - determines the source for the video playback, can be either:
-//  - Network { url: "https://www.someurl.com/video.mkv" }. On Android it supports: HLS, DASH, RTMP, RTSP, and progressive HTTP downloads
-//  - Filesystem { path: "/storage/.../DCIM/Camera/video.mp4" }. On Android it requires read permissions that must be granted at runtime.
-//  - Dependency { path: dep("crate://self/resources/video.mp4") }. For in-memory videos loaded through LiveDependencies
-// is_looping - determines if the video should be played in a loop. defaults to false.
-// hold_to_pause - determines if the video should be paused when the user hold the pause button. defaults to false.
-// autoplay - determines if the video should start playback when the widget is created. defaults to false.
-
-// Not yet implemented:
-// UI
-//  - Playback controls
-//  - Progress/seek-to bar
-
-// API
-//  - Option to restart playback manually when not looping.
-//  - Mute/Unmute
-//  - Hotswap video source
-
 live_design! {
     VideoBase = {{Video}} {}
 }
+
+/// Currently only supported on Android
+
+/// DSL Usage
+/// 
+/// `source` - determines the source for the video playback, can be either:
+///  - `Network { url: "https://www.someurl.com/video.mkv" }`. On Android it supports: HLS, DASH, RTMP, RTSP, and progressive HTTP downloads
+///  - `Filesystem { path: "/storage/.../DCIM/Camera/video.mp4" }`. On Android it requires read permissions that must be granted at runtime.
+///  - `Dependency { path: dep("crate://self/resources/video.mp4") }`. For in-memory videos loaded through LiveDependencies
+/// 
+/// `is_looping` - determines if the video should be played in a loop. defaults to false.
+/// 
+/// `hold_to_pause` - determines if the video should be paused when the user hold the pause button. defaults to false.
+/// 
+/// `autoplay` - determines if the video should start playback when the widget is created. defaults to false.
+
+/// Not yet supported:
+/// UI
+///  - Playback controls
+///  - Progress/seek-to bar
+
+/// Widget API
+///  - Seek to timestamp
+///  - Option to restart playback manually when not looping.
+///  - Hotswap video source, `set_source(VideoDataSource)` only works if video is in Unprepared state.
 
 #[derive(Live, Widget)]
 pub struct Video {
@@ -81,56 +85,71 @@ pub struct Video {
 }
 
 impl VideoRef {
+    /// Prepares the video for playback. Does not start playback or update the video texture.
+    /// 
+    /// Once playback is prepared, [`begin_playback`] can be called to start the actual playback.
+    /// 
+    /// Alternatively, [`begin_playback`] (which uses [`prepare_playback`]) can be called if you want to start playback as soon as it's prepared.
     pub fn prepare_playback(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.prepare_playback(cx);
         }
     }
 
+    /// Starts the video playback. Calls `prepare_playback(cx)` if the video not already prepared.
     pub fn begin_playback(&mut self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.begin_playback(cx);
         }
     }
 
+    /// Pauses the video playback. Ignores if the video is not currently playing.
     pub fn pause_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.pause_playback(cx);
         }
     }
 
+    /// Pauses the video playback. Ignores if the video is already playing.
     pub fn resume_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.resume_playback(cx);
         }
     }
 
+    /// Mutes the video playback. Ignores if the video is not currently playing or already muted.
     pub fn mute_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.mute_playback(cx);
         }
     }
 
+    /// Unmutes the video playback. Ignores if the video is not currently muted or not playing.
     pub fn unmute_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.unmute_playback(cx);
         }
     }
 
-    // It will finish playback and cleanup all resources related to playback
-    // including data source, decoding threads, object references, etc.
+    /// Stops playback and performs cleanup of all resources related to playback,
+    /// including data source, decoding threads, object references, etc.
+    /// 
+    /// In order to play the video again you must either call [`prepare_playback`] or [`begin_playback`].
     pub fn stop_and_cleanup_resources(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.stop_and_cleanup_resources(cx);
         }
     }
 
+    /// Updates the source of the video data. Currently it only proceeds if the video is in Unprepared state.
     pub fn set_source(&mut self, source: VideoDataSource) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_source(source);
         }
     }
 
+    /// Determines if this video instance should dispatch [`VideoAction::TextureUpdated`] actions on each texture update.
+    /// This is disbaled by default because it can be quite nosiy when debugging actions.
     pub fn should_dispatch_texture_updates(&self, should_dispatch: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.should_dispatch_texture_updates = should_dispatch;
@@ -293,7 +312,6 @@ impl Widget for Video {
 }
 
 impl Video {
-
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
             if self.texture_handle.is_none() {
@@ -447,6 +465,13 @@ impl Video {
     }
 }
 
+/// The source of the video data.
+/// 
+/// [`Dependency`]: The path to a LiveDependency (an asset loaded with `dep("crate://..)`).
+/// 
+/// [`Network`]: The URL of a video file, it can be any regular HTTP download or HLS, DASH, RTMP, RTSP.
+/// 
+/// [`Filesystem`]: The path to a video file on the local filesystem. This requires runtime-approved permissions for reading storage.
 #[derive(Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum VideoDataSource {
