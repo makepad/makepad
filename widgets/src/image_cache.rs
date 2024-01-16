@@ -31,12 +31,6 @@ impl ImageBuffer {
         out.resize(pixels, 0u32);
         // input pixel packing
         match in_data.len() / pixels {
-            3 => for i in 0..pixels {
-                let r = in_data[i*3];
-                let g = in_data[i*3+1];
-                let b = in_data[i*3+2];
-                out[i] = 0xff000000 | ((r as u32)<<16) | ((g as u32)<<8) | ((b as u32)<<0);
-            }
             4 => for i in 0..pixels {
                 let r = in_data[i*4];
                 let g = in_data[i*4+1];
@@ -44,10 +38,25 @@ impl ImageBuffer {
                 let a = in_data[i*4+3];
                 out[i] = ((a as u32)<<24) | ((r as u32)<<16) | ((g as u32)<<8) | ((b as u32)<<0);
             }
-            unsupported => {
-                error!("ImageBuffer::new Image buffer pixel alignment of {unsupported} is unsupported; must be 3 or 4");
-                return Err(ImageError::InvalidPixelAlignment(unsupported));
+            3 => for i in 0..pixels {
+                let r = in_data[i*3];
+                let g = in_data[i*3+1];
+                let b = in_data[i*3+2];
+                out[i] = 0xff000000 | ((r as u32)<<16) | ((g as u32)<<8) | ((b as u32)<<0);
             }
+            2 => for i in 0..pixels {
+                let r = in_data[i*2];
+                let a = in_data[i*2+1];
+                out[i] = ((a as u32)<<24) | ((r as u32)<<16) | ((r as u32)<<8) | ((r as u32)<<0);
+            }
+            1 => for i in 0..pixels {
+                let r = in_data[i];
+                out[i] = ((0xff as u32)<<24) | ((r as u32)<<16) | ((r as u32)<<8) | ((r as u32)<<0);
+            }   
+            unsupported => {
+                error!("ImageBuffer::new Image buffer pixel alignment of {unsupported} is unsupported.");
+                return Err(ImageError::InvalidPixelAlignment(unsupported));
+            }     
         }
         Ok(ImageBuffer {
             width,
