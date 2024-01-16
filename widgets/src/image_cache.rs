@@ -30,6 +30,7 @@ impl ImageBuffer {
         let pixels = width * height;
         out.resize(pixels, 0u32);
         // input pixel packing
+        log!("{}", in_data.len() /  pixels);
         if in_data.len() /  pixels == 3{
             for i in 0..pixels{
                 let r = in_data[i*3];
@@ -46,6 +47,19 @@ impl ImageBuffer {
                 let a = in_data[i*4+3];
                 out[i] = ((a as u32)<<24) | ((r as u32)<<16) | ((g as u32)<<8) | ((b as u32)<<0);
             }
+        }
+        else if in_data.len() / pixels == 2{
+            for i in 0..pixels{
+                let r = in_data[i*2];
+                let a = in_data[i*2+1];
+                out[i] = ((a as u32)<<24) | ((r as u32)<<16) | ((r as u32)<<8) | ((r as u32)<<0);
+            }
+        }
+        else if in_data.len() / pixels == 1{
+            for i in 0..pixels{
+                let r = in_data[i];
+                out[i] = ((0xff as u32)<<24) | ((r as u32)<<16) | ((r as u32)<<8) | ((r as u32)<<0);
+            }        
         }
         else {
             error!("ImageBuffer::new Image buffer pixel alignment was not 3 or 4");
