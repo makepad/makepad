@@ -82,6 +82,10 @@ impl App{
 }
 
 impl MatchEvent for App{
+    fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
+        cx.use_midi_inputs(&ports.all_inputs());
+    }
+    
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &self.ui, Self::data_bind_map);
@@ -126,27 +130,59 @@ enum TeamTalkWire {
     Audio {client_uid: u64, channel_count: u32, data: Vec<i16>},
 }
 
-pub const ARTNET_HEADER: &[u8; 8] = b"Art-Net\0";
-pub const ARTNET_PROTOCOL_VERSION: [u8; 2] = [0, 14];
+pub const DMXOUTPUT_HEADER: [u8;18] = [
+    b'A',b'r',b't',b'-',b'N',b'e',b't',b'\0', 
+    0, // opcode hi 
+    0x50, // opcode lo = output
+    0, // proto hi
+    0xe, // proto lo = 14
+    0, // sequence
+    0, // physical 
+    0,  // sub uni
+    0,  // net
+    2,  // buffer hi size (512)
+    0   // buffer lo
+];
 
 impl App {
-    pub fn start_artnet_client(&mut self, _cx:&mut Cx){
+    pub fn start_artnet_client(&mut self, cx:&mut Cx){
         let socket = UdpSocket::bind("0.0.0.0:6454").unwrap();
-        let _broadcast_addr = "255.255.255.255:6454";
+        let broadcast_addr = "255.255.255.255:6454";
         socket.set_broadcast(true).unwrap();
         let mut buffer = [0u8; 2048];
         std::thread::spawn(move || {
             loop {
                 let (length, _addr) = socket.recv_from(&mut buffer).unwrap();
                 let buffer =  &buffer[0..length];
-                if !buffer.starts_with(ARTNET_HEADER){
-                    continue;
-                }
-                let buffer = &buffer[ARTNET_HEADER.len()..];
+                //let buffer = &buffer[ARTNET_HEADER.len()..];
                 log!("{:x?}",buffer);
                 if buffer[1] == 50{ // T
-                    
                 }
+            }
+        });
+        // alright the sender thread where we at 44hz poll our midi input and set up a DMX packet
+        let mut midi_input = cx.midi_input();
+        std::thread::spawn(move || {
+            let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
+            for i in 0..DMXOUTPUT_HEADER.len(){universe[i] = DMXOUTPUT_HEADER[i];}
+            loop {
+                // lets poll midi
+                while let Some((_,data)) = midi_input.receive(){
+                    let mut dmx = &mut universe[DMXOUTPUT_HEADER.len()..];
+                    match data.decode() {
+                        MidiEvent::ControlChange(cc) => match cc.param{
+                            13=>{ // KORG STUDIO NANO ROTARY 1
+                                log!("{}",cc.value)
+                            }
+                            _=>()
+                        }
+                        _=>()
+                    }
+                }
+                //socket.send(&universe, broadcast_add.into());
+                // lets sleep 1/44th of a second
+                std::thread::sleep(Duration::from_secs_f64(1.0/44.0))
+                
             }
         });
     }
@@ -178,8 +214,7 @@ impl App {
                     if mic_recv.read_buffer(0, &mut output_buffer, 1, 255) == 0 {
                         break;
                     }
-                    ?>
-                    let buf = output_b-+uffer.channel(0);
+                    let buf = output_buffer.channel(0);
                     // do a quick volume check so we can send 1 byte packets if silent
                     let mut sum = 0.0;
                     for v in buf {
