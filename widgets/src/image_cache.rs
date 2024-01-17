@@ -30,7 +30,6 @@ impl ImageBuffer {
         let pixels = width * height;
         out.resize(pixels, 0u32);
         // input pixel packing
-        log!("{}", in_data.len() /  pixels);
         if in_data.len() /  pixels == 3{
             for i in 0..pixels{
                 let r = in_data[i*3];

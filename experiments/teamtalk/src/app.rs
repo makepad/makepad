@@ -32,7 +32,7 @@ live_design!{
                     return mix(#7, #3, self.pos.y);
                 }
             }
-                        
+            
             body = <View>{
                 padding:20
                 global_volume = <Slider> {
