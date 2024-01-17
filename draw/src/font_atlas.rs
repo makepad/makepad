@@ -324,7 +324,7 @@ impl<'a> Cx2d<'a> {
             assert_eq!(atlas_data.len(), atlas_w*atlas_h);
         }
         let atlas_x0 = tx as usize - sdf_pad + 1;
-        let atlas_y0 = ty as usize - sdf_pad + 1;
+        let atlas_y0 = ty as usize - sdf_pad;
         for y in 0..glyph_out.height() {
             let dst = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w][atlas_x0..][..glyph_out.width()];
             let mut src = glyph_out.cursor_at(0, y);
