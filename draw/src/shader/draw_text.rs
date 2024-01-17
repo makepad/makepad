@@ -61,18 +61,60 @@ live_design!{
         fn blend_color(self, incol:vec4)->vec4{
             return incol
         }
-        fn pixel(self) -> vec4 {
-            let s = sample2d(self.tex, self.tex_coord1.xy).x;
-            
+        
+        fn sample_color(self, scale:float, pos:vec2)->vec4{
+            let s = sample2d(self.tex, pos).x;
             if (self.sdf_radius != 0.0) {
                 // HACK(eddyb) harcoded atlas size (see asserts below).
-                let texel_coords = self.tex_coord1.xy * 4096.0;
-                let scale = (length(dFdx(texel_coords)) + length(dFdy(texel_coords))) * 0.5;
+                let texel_coords = pos.xy * 4096.0;
                 s = clamp((s - (1.0 - self.sdf_cutoff)) * self.sdf_radius / scale + 0.5, 0.0, 1.0);
             }
             s = pow(s, self.curve);
             let col = self.get_color(); 
             return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
+        }
+        
+        fn pixel(self) -> vec4 {
+            let texel_coords = self.tex_coord1.xy;
+            let dxt = length(dFdx(texel_coords));
+            let dyt = length(dFdy(texel_coords));
+            let scale = (dxt + dyt) * 4096.0 *0.5;
+            // ok lets take our delta in the x direction
+            /*
+            //4x AA
+            */
+            /*
+            let x1 = self.sample_color(scale, self.tex_coord1.xy);
+            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * 0.5,0.0));
+            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* 0.5,dyt* 0.5));
+            let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt* 0.5));
+            return (x1+x2+x3+x4)/4;
+            */
+            
+            //16x AA
+            let d = 0.25;
+            let d2 = d * 2.0; 
+            let d3 = d * 3.0; 
+            let x1 = self.sample_color(scale, self.tex_coord1.xy);
+            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,0.0));
+            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,0.0));
+            let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,0.0));
+                        
+            let x5 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d));
+            let x6 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d));
+            let x7 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
+            let x8 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
+                        
+            let x9 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d2));
+            let x10 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d2));
+            let x11 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d2));
+            let x12 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d2));           
+            
+            let x13 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d3));
+            let x14 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d3));
+            let x15 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d3));
+            let x16 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d3));            
+            return (x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)/16 ;
         }
     }
 }
@@ -87,7 +129,7 @@ pub struct TextStyle {
     #[live()] pub font: Font,
     #[live(9.0)] pub font_size: f64,
     #[live(1.0)] pub brightness: f32,
-    #[live(0.6)] pub curve: f32,
+    #[live(0.5)] pub curve: f32,
     #[live(1.4)] pub line_spacing: f64,
     #[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
@@ -381,10 +423,11 @@ impl DrawText {
                     
                     let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                     
-                    // snap width/height to pixel granularity
+                    // make w/h one pixel bigger
                     let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
-                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
-                    
+                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 2.0;
+                    let (w,h) = if w <= 1.0{(0.0,0.0)}else {(w,h)};
+                                        
                     let tc = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
                         tc
                     }
