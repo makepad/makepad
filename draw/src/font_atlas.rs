@@ -108,7 +108,7 @@ impl CxFontsAtlasAlloc {
         let tx1 = (self.xpos + pad) / self.texture_size.x;
         let ty1 = (self.ypos + pad) / self.texture_size.y;
         
-        self.xpos += w + 2.0;
+        self.xpos += w + 1.0;
         
         CxFontAtlasGlyph {
             t1: dvec2(tx1, ty1).into(),
@@ -323,8 +323,8 @@ impl<'a> Cx2d<'a> {
         } else {
             assert_eq!(atlas_data.len(), atlas_w*atlas_h);
         }
-        let atlas_x0 = tx as usize - sdf_pad;
-        let atlas_y0 = ty as usize - sdf_pad;
+        let atlas_x0 = tx as usize - sdf_pad + 1;
+        let atlas_y0 = ty as usize - sdf_pad + 1;
         for y in 0..glyph_out.height() {
             let dst = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w][atlas_x0..][..glyph_out.width()];
             let mut src = glyph_out.cursor_at(0, y);
