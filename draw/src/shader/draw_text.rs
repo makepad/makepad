@@ -381,9 +381,9 @@ impl DrawText {
                     
                     let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                     
-                    // snap width/height to pixel granularity
-                    let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
-                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 2.0;
+                    // make w/h one pixel bigger
+                    let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels)+1.0;//.ceil() + 1.0;
+                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels)+2.0;//.ceil() + 2.0;
                     
                     let tc = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
                         tc
