@@ -76,15 +76,35 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             let texel_coords = self.tex_coord1.xy;
-            let dxt = length(dFdx(texel_coords))*0.5;
-            let dyt = length(dFdy(texel_coords))*0.5;
-            let scale = (dxt + dyt) * 4096.0;
+            let dxt = length(dFdx(texel_coords));
+            let dyt = length(dFdy(texel_coords));
+            let scale = (dxt + dyt) * 4096.0 *0.5;
             // ok lets take our delta in the x direction
+            /*
+            //4x AA
+            */
+            /*
             let x1 = self.sample_color(scale, self.tex_coord1.xy);
-            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt,0.0));
-            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt,dyt));
-            let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt));
+            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * 0.5,0.0));
+            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* 0.5,dyt* 0.5));
+            let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt* 0.5));
             return (x1+x2+x3+x4)/4;
+            */
+            
+            //9x AA
+            let d = 0.333333333333;
+            let d2 = d * 2.0; 
+            let x1 = self.sample_color(scale, self.tex_coord1.xy);
+            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,0.0));
+            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,0.0));
+            let x4 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d));
+            let x5 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d));
+            let x6 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
+            let x7 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d2));
+            let x8 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d2));
+            let x9 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d2));
+            return (x1+x2+x3+x4+x5+x6+x7+x8+x9)/9;
+            
         }
     }
 }
