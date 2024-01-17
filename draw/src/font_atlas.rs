@@ -108,7 +108,7 @@ impl CxFontsAtlasAlloc {
         let tx1 = (self.xpos + pad) / self.texture_size.x;
         let ty1 = (self.ypos + pad) / self.texture_size.y;
         
-        self.xpos += w + 1.0;
+        self.xpos += w + 2.0;
         
         CxFontAtlasGlyph {
             t1: dvec2(tx1, ty1).into(),
