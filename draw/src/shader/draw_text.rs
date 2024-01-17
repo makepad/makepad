@@ -91,19 +91,30 @@ live_design!{
             return (x1+x2+x3+x4)/4;
             */
             
-            //9x AA
-            let d = 0.333333333333;
+            //16x AA
+            let d = 0.25;
             let d2 = d * 2.0; 
+            let d3 = d * 3.0; 
             let x1 = self.sample_color(scale, self.tex_coord1.xy);
             let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,0.0));
             let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,0.0));
-            let x4 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d));
-            let x5 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d));
-            let x6 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
-            let x7 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d2));
-            let x8 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d2));
-            let x9 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d2));
-            return (x1+x2+x3+x4+x5+x6+x7+x8+x9)/9;
+            let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,0.0));
+                        
+            let x5 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d));
+            let x6 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d));
+            let x7 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
+            let x8 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
+                        
+            let x9 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d2));
+            let x10 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d2));
+            let x11 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d2));
+            let x12 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d2));           
+            
+            let x13 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d3));
+            let x14 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d3));
+            let x15 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d3));
+            let x16 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d3));            
+            return (x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)/16;
             
         }
     }
