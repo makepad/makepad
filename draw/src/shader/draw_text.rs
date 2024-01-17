@@ -61,18 +61,30 @@ live_design!{
         fn blend_color(self, incol:vec4)->vec4{
             return incol
         }
-        fn pixel(self) -> vec4 {
-            let s = sample2d(self.tex, self.tex_coord1.xy).x;
-            
+        
+        fn sample_color(self, scale:float, pos:vec2)->vec4{
+            let s = sample2d(self.tex, pos).x;
             if (self.sdf_radius != 0.0) {
                 // HACK(eddyb) harcoded atlas size (see asserts below).
-                let texel_coords = self.tex_coord1.xy * 4096.0;
-                let scale = (length(dFdx(texel_coords)) + length(dFdy(texel_coords))) * 0.5;
+                let texel_coords = pos.xy * 4096.0;
                 s = clamp((s - (1.0 - self.sdf_cutoff)) * self.sdf_radius / scale + 0.5, 0.0, 1.0);
             }
             s = pow(s, self.curve);
             let col = self.get_color(); 
             return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
+        }
+        
+        fn pixel(self) -> vec4 {
+            let texel_coords = self.tex_coord1.xy;
+            let dxt = length(dFdx(texel_coords))*0.5;
+            let dyt = length(dFdy(texel_coords))*0.5;
+            let scale = (dxt + dyt) * 4096.0;
+            // ok lets take our delta in the x direction
+            let x1 = self.sample_color(scale, self.tex_coord1.xy);
+            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt,0.0));
+            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt,dyt));
+            let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt));
+            return (x1+x2+x3+x4)/4;
         }
     }
 }

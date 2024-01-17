@@ -164,6 +164,10 @@ impl App {
         let mut midi_input = cx.midi_input();
         std::thread::spawn(move || {
             let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
+            struct State{
+                sliders:[f64;8],
+                
+            }
             for i in 0..DMXOUTPUT_HEADER.len(){universe[i] = DMXOUTPUT_HEADER[i];}
             loop {
                 // lets poll midi
