@@ -303,7 +303,7 @@ impl FileTree {
             
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
             self.stack.push(tree_node.opened as f64 * scale);
-            if tree_node.opened == 0.0 {
+            if tree_node.opened <= 0.001 {
                 self.end_folder();
                 return Err(());
             }
