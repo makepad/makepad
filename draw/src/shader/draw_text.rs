@@ -129,7 +129,7 @@ pub struct TextStyle {
     #[live()] pub font: Font,
     #[live(9.0)] pub font_size: f64,
     #[live(1.0)] pub brightness: f32,
-    #[live(0.6)] pub curve: f32,
+    #[live(0.5)] pub curve: f32,
     #[live(1.4)] pub line_spacing: f64,
     #[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
