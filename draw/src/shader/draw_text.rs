@@ -383,7 +383,7 @@ impl DrawText {
                     
                     // snap width/height to pixel granularity
                     let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
-                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
+                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 2.0;
                     
                     let tc = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
                         tc
