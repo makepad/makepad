@@ -302,7 +302,7 @@ live_design!{
             
     App = {{App}} {
         ui: <Window> {
-            window: {inner_size: vec2(428, 926), dpi_override: 2},
+            window: {inner_size: vec2(428, 926)},
             show_bg: true
             draw_bg: {
                 fn pixel(self) -> vec4 {
