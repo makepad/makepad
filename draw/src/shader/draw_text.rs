@@ -114,8 +114,7 @@ live_design!{
             let x14 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d3));
             let x15 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d3));
             let x16 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d3));            
-            return (x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)/16;
-            
+            return (x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)/16 ;
         }
     }
 }
@@ -426,7 +425,7 @@ impl DrawText {
                     
                     // make w/h one pixel bigger
                     let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
-                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
+                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 2.0;
                     let (w,h) = if w <= 1.0{(0.0,0.0)}else {(w,h)};
                                         
                     let tc = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
