@@ -733,6 +733,16 @@ pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_
     updated != 0
 }
 
+pub unsafe fn to_java_begin_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
+    ndk_utils::call_void_method!(
+        env,
+        ACTIVITY,
+        "beginVideoPlayback",
+        "(J)V",
+        video_id
+    );
+}
+
 pub unsafe fn to_java_pause_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
