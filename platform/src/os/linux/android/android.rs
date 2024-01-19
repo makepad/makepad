@@ -703,6 +703,12 @@ impl Cx {
                         android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop);
                     }
                 },
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_begin_video_playback(env, video_id);
+                    }
+                }
                 CxOsOp::PauseVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();

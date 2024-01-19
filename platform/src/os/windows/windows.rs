@@ -370,6 +370,7 @@ impl Cx {
                     todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
                 CxOsOp::MuteVideoPlayback(_) => todo!(),
