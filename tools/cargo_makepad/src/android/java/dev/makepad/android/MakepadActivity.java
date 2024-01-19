@@ -516,6 +516,13 @@ MidiManager.OnDeviceOpenedListener{
         mVideoPlaybackHandler.post(runnable);
     }
 
+    public void beginVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.beginPlayback();
+        }
+    }
+
     public void pauseVideoPlayback(long videoId) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {

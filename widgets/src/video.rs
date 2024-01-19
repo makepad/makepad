@@ -414,6 +414,8 @@ impl Video {
             self.should_prepare_playback = true;
             self.autoplay = true;
             self.maybe_prepare_playback(cx);
+        } else if self.playback_state == PlaybackState::Prepared {
+            cx.begin_video_playback(self.id);
         }
     }
 
