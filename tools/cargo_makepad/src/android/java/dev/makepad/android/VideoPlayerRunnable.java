@@ -18,6 +18,10 @@ public class VideoPlayerRunnable implements Runnable {
         }
     }
 
+    public void beginPlayback() {
+        mVideoPlayer.beginPlayback();
+    }
+
     public void pausePlayback() {
         mVideoPlayer.pausePlayback();
     }
