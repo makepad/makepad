@@ -313,7 +313,13 @@ impl Cx {
                         self.call_event_handler(&e);
                     },
                     FromJavaMessage::VideoPlayerReleased {video_id} => {
-                        self.os.video_surfaces.remove(&LiveId(video_id));
+                        if let Some(decoder_ref) = self.os.video_surfaces.remove(&LiveId(video_id)) {
+                            unsafe {
+                                let env = attach_jni_env();
+                                android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
+                            }
+                        }
+                        
                         let e = Event::VideoPlaybackResourcesReleased(
                             VideoPlaybackResourcesReleasedEvent {
                                 video_id: LiveId(video_id)

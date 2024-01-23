@@ -714,6 +714,8 @@ pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id
         autoplay as jni_sys::jboolean as std::ffi::c_uint,
         should_loop as jni_sys::jboolean as std::ffi::c_uint
     );
+
+    (**env).DeleteLocalRef.unwrap()(env, video_source);
 }
 
 pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_ref: jni_sys::jobject) -> bool {
@@ -791,4 +793,8 @@ pub unsafe fn to_java_cleanup_video_playback_resources(env: *mut jni_sys::JNIEnv
         "(J)V",
         video_id
     );
+}
+
+pub unsafe fn to_java_cleanup_video_decoder_ref(env: *mut jni_sys::JNIEnv, video_decoder_ref: jni_sys::jobject) {
+    (**env).DeleteGlobalRef.unwrap()(env, video_decoder_ref);
 }
