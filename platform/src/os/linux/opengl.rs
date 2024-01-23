@@ -875,8 +875,8 @@ impl CxTexture {
             }                       
             match &self.format{
                 TextureFormat::VecBGRAu8_32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -891,7 +891,7 @@ impl CxTexture {
                 }
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level}=>unsafe{
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -908,8 +908,8 @@ impl CxTexture {
                     gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
                 },
                 TextureFormat::VecRGBAf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -923,8 +923,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
@@ -942,8 +942,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRGu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
@@ -961,8 +961,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
