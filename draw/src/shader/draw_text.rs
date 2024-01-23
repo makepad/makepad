@@ -90,11 +90,24 @@ live_design!{
             let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt* 0.5));
             return (x1+x2+x3+x4)/4;
             */
-            
+            /*
+            let d = 0.333;
+            let x1 = self.sample_color(scale, self.tex_coord1.xy);
+            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * -d,0.0));
+            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* d,0.0));
+            let x4 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0, dyt * -d));
+            let x5 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * -d,dyt * -d));
+            let x6 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* d,dyt * -d));
+            let x7 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0, dyt * d));
+            let x8 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * -d,dyt * d));
+            let x9 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* d,dyt * d));
+            return (x1+x2+x3+x4+x5+x6+x7+x8+x9)/9;
+            */
             //16x AA
+            
             let d = 0.25;
-            let d2 = d * 2.0; 
-            let d3 = d * 3.0; 
+            let d2 = 0.5; 
+            let d3 = 0.75; 
             let x1 = self.sample_color(scale, self.tex_coord1.xy);
             let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,0.0));
             let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,0.0));
@@ -360,7 +373,6 @@ impl DrawText {
             return
         }
         //let mut char_offset = char_offset;
-        
         if !self.many_instances.is_some() {
             self.begin_many_instances_internal(cx, fonts_atlas);
         }
