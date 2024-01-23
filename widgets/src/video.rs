@@ -1,6 +1,6 @@
 use crate::{
     makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_playback::*,
-    widget::*,
+    widget::*, image_cache::ImageCacheImpl,
 };
 
 live_design! {
@@ -15,6 +15,8 @@ live_design! {
 ///  - `Network { url: "https://www.someurl.com/video.mkv" }`. On Android it supports: HLS, DASH, RTMP, RTSP, and progressive HTTP downloads
 ///  - `Filesystem { path: "/storage/.../DCIM/Camera/video.mp4" }`. On Android it requires read permissions that must be granted at runtime.
 ///  - `Dependency { path: dep("crate://self/resources/video.mp4") }`. For in-memory videos loaded through LiveDependencies
+/// 
+/// `thumbnail_source` - determines the source for the thumbnail image, currently only supports LiveDependencies.
 /// 
 /// `is_looping` - determines if the video should be played in a loop. defaults to false.
 /// 
@@ -44,13 +46,18 @@ pub struct Video {
     #[live]
     scale: f64,
 
-    // Texture
+    // Textures
     #[live]
     source: VideoDataSource,
     #[rust]
-    texture: Option<Texture>,
+    video_texture: Option<Texture>,
     #[rust]
-    texture_handle: Option<u32>,
+    video_texture_handle: Option<u32>,
+    /// Requires [`show_thumbnail_before_playback`] to be `true`.
+    #[live]
+    thumbnail_source: Option<LiveDependency>,
+    #[rust]
+    thumbnail_texture: Option<Texture>,
 
     // Playback
     #[live(false)]
@@ -67,6 +74,9 @@ pub struct Video {
     should_prepare_playback: bool,
     #[rust]
     audio_state: AudioState,
+    /// Whether to show the provided thumbnail when the video has not yet started playing.
+    #[live(false)]
+    show_thumbnail_before_playback: bool,
 
     // Actions
     #[rust(false)]
@@ -156,6 +166,13 @@ impl VideoRef {
         }
     }
 
+    pub fn set_thumbnail_texture(&mut self, cx: &mut Cx, texture: Option<Texture>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.thumbnail_texture = texture;
+            inner.load_thumbnail_image(cx);
+        }
+    }
+
     pub fn is_unprepared(&self) -> bool {
         if let Some(inner) = self.borrow() {
             return inner.playback_state == PlaybackState::Unprepared
@@ -221,10 +238,12 @@ enum PlaybackState {
     Prepared,
     Playing,
     Paused,
-    // Completed is only used when not looping, means playback reached end of stream
+    /// When playback reached end of stream, only observable when not looping.
     Completed,
-    // CleaningUp happens when the platform is called to stop playback and release all resources
-    // including data source, object references, decoding threads, etc.
+    /// When the platform is called to stop playback and release all resources
+    /// including data source, object references, decoding threads, etc.
+    /// 
+    /// Once cleanup has completed, the video will go into `Unprepared` state.
     CleaningUp,
 }
 
@@ -241,14 +260,22 @@ impl LiveHook for Video {
         self.id = LiveId::unique();
 
         #[cfg(target_os = "android")]
-        if self.texture.is_none() {
+        if self.video_texture.is_none() {
             let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
-            self.texture = Some(new_texture);
+            self.video_texture = Some(new_texture);
         }
 
-        let texture = self.texture.as_mut().unwrap();
+        let texture = self.video_texture.as_mut().unwrap();
         self.draw_bg.draw_vars.set_texture(0, &texture);
         self.should_prepare_playback = self.autoplay;
+    }
+
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if self.show_thumbnail_before_playback {
+            self.load_thumbnail_image(cx);
+            self.draw_bg
+            .set_uniform(cx, id!(show_thumbnail), &[1.0]);
+        }
     }
 }
 
@@ -263,8 +290,12 @@ pub enum VideoAction {
 }
 
 impl Widget for Video {
-    
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+        if let Some(texture) = &self.thumbnail_texture {
+            self.draw_bg.draw_vars.set_texture(1, texture);
+        }
+
         self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
     }
@@ -281,6 +312,8 @@ impl Widget for Video {
                 if self.playback_state == PlaybackState::Prepared {
                     self.playback_state = PlaybackState::Playing;
                     cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
+                    self.draw_bg
+                    .set_uniform(cx, id!(show_thumbnail), &[0.0]);
                 }
                 if self.should_dispatch_texture_updates {
                     cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
@@ -297,8 +330,8 @@ impl Widget for Video {
                 cx.widget_action(uid, &scope.path, VideoAction::PlayerReset);
             }
             Event::TextureHandleReady(event) => {
-                if event.texture_id == self.texture.clone().unwrap().texture_id() {
-                    self.texture_handle = Some(event.handle);
+                if event.texture_id == self.video_texture.clone().unwrap().texture_id() {
+                    self.video_texture_handle = Some(event.handle);
                     self.maybe_prepare_playback(cx);
                 }
             }
@@ -311,10 +344,20 @@ impl Widget for Video {
     }
 }
 
+impl ImageCacheImpl for Video {
+    fn get_texture(&self) -> &Option<Texture> {
+        &self.thumbnail_texture
+    }
+
+    fn set_texture(&mut self, texture: Option<Texture>) {
+        self.thumbnail_texture = texture;
+    }
+}
+
 impl Video {
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
-            if self.texture_handle.is_none() {
+            if self.video_texture_handle.is_none() {
                 // texture is not yet ready, this method will be called again on TextureHandleReady
                 return;
             }
@@ -338,7 +381,7 @@ impl Video {
             cx.prepare_video_playback(
                 self.id,
                 source,
-                self.texture_handle.unwrap(),
+                self.video_texture_handle.unwrap(),
                 self.autoplay,
                 self.is_looping,
             );
@@ -374,9 +417,13 @@ impl Video {
                     self.pause_playback(cx);
                 }
             }
-            Hit::FingerUp(_fe) => {
-                if self.hold_to_pause {
-                    self.resume_playback(cx);
+            Hit::FingerUp(fe) => {
+                if self.hold_to_pause && fe.was_tap() {
+                    if self.playback_state == PlaybackState::Playing {
+                        self.pause_playback(cx);
+                    } else if self.playback_state == PlaybackState::Paused {
+                        self.resume_playback(cx);
+                    }
                 }
             }
             _ => (),
@@ -441,7 +488,7 @@ impl Video {
     }
 
     fn unmute_playback(&mut self, cx: &mut Cx) {
-        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared 
+        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared
         && self.audio_state == AudioState::Muted {
             cx.unmute_video_playback(self.id);
             self.audio_state = AudioState::Playing;
@@ -463,6 +510,16 @@ impl Video {
                 "Attempted to set source while player state is: {:?}",
                 self.playback_state
             );
+        }
+    }
+
+    fn load_thumbnail_image(&mut self, cx: &mut Cx) {
+        if let Some(path) = self.thumbnail_source.clone() {
+            let path_str = path.as_str();
+
+            if path_str.len() > 0 {
+                let _ = self.load_image_dep_by_path(cx, path_str);
+            }
         }
     }
 }
