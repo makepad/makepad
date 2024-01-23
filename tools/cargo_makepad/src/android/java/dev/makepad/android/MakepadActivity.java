@@ -555,6 +555,7 @@ MidiManager.OnDeviceOpenedListener{
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {
             runnable.cleanupVideoPlaybackResources();
+            runnable = null;
         }
     }
 }
