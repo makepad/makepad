@@ -206,8 +206,10 @@ live_design!{
         draw_bg: {
             shape: Solid,
             fill: Image
-            texture image: textureOES
-            
+            texture video_texture: textureOES
+            texture thumbnail_texture: texture2d
+            uniform show_thumbnail: 0.0
+
             instance opacity: 1.0
             instance image_scale: vec2(1.0, 1.0)
             instance image_pan: vec2(0.5, 0.5)
@@ -242,15 +244,15 @@ live_design!{
                 let adjusted_pan_y = pan_range_y * pan.y;
                 let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y);
 
-                return sample2dOES(self.image, (self.pos * scale) + adjusted_pan);
-            }
-
-            fn get_color(self) -> vec4 {
-                return self.get_color_scale_pan()
+                if self.show_thumbnail > 0.0 {
+                    return sample2d(self.thumbnail_texture, (self.pos * scale) + adjusted_pan).xyzw;
+                } else {
+                    return sample2dOES(self.video_texture, (self.pos * scale) + adjusted_pan);
+                }      
             }
 
             fn pixel(self) -> vec4 {
-                let color = self.get_color();
+                let color = self.get_color_scale_pan();
                 return Pal::premul(vec4(color.xyz, color.w * self.opacity));
             }
         }
