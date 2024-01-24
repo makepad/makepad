@@ -4,7 +4,9 @@ use crate::{
     widget::*,
     label::*,
     button::*,
-    view::*
+    view::*,
+    WidgetMatchEvent,
+    WindowAction,
 };
 
 live_design! {
@@ -21,10 +23,13 @@ pub enum StackNavigationAction {
 #[derive(Live, LiveHook, Widget)]
 pub struct StackNavigationView {
     #[deref]
-    view:View,
+    view: View,
 
     #[live]
     offset: f64,
+
+    #[rust(10000.0)]
+    offset_to_hide: f64,
 
     #[animator]
     animator: Animator,
@@ -32,17 +37,22 @@ pub struct StackNavigationView {
 
 impl Widget for StackNavigationView {
     fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope) {
-        if self.animator_handle_event(cx, event).is_animating() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.view.redraw(cx);
+            dbg!(self.offset);
         }
 
         self.view.handle_event(cx, event, scope);
         self.widget_match_event(cx, event, scope);
 
         if self.animator.animator_in_state(cx, id!(slide.hide))
-            && !self.animator.is_track_animating(cx, id!(slide))
         {
-            self.apply_over(cx, live! {visible: false});
+            if self.offset > self.offset_to_hide {
+                self.animator_cut(cx, id!(slide.hide));
+            }
+            if !self.animator.is_track_animating(cx, id!(slide)) {
+                self.apply_over(cx, live! {visible: false});
+            }
         }
     }
 
@@ -67,9 +77,10 @@ impl WidgetMatchEvent for StackNavigationView {
 }
 
 impl StackNavigationViewRef {
-    pub fn show(&mut self, cx: &mut Cx) {
+    pub fn show(&mut self, cx: &mut Cx, root_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.apply_over(cx, live! {visible: true});
+            inner.apply_over(cx, live! {offset: (root_width), visible: true});
+            inner.offset_to_hide = root_width;
             inner.animator_play(cx, id!(slide.show));
         }
     }
@@ -90,6 +101,12 @@ impl StackNavigationViewRef {
             false
         }
     }
+
+    pub fn set_offset_to_hide(&mut self, offset_to_hide: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.offset_to_hide = offset_to_hide;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -105,17 +122,29 @@ pub struct StackNavigation {
     view: View,
 
     #[rust]
+    screen_width: f64,
+
+    #[rust]
     active_stack_view: ActiveStackView,
 }
 
 impl LiveHook for StackNavigation {
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        self.active_stack_view = ActiveStackView::None;
+    fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
+        if apply.from.is_new_from_doc() {
+            self.active_stack_view = ActiveStackView::None;
+        } else {
+            if let ActiveStackView::Active(stack_view_id) = self.active_stack_view {
+                // Make sure current stack view is visible when code reloads
+                let stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
+                stack_view_ref.apply_over(cx, live! {visible: true, offset: 0.0});
+            }
+        }
     }
 }
 
 impl Widget for StackNavigation {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.widget_match_event(cx, event, scope);
         for widget_ref in self.get_active_views(cx).iter() {
             widget_ref.handle_event(cx, event, scope);
         }
@@ -145,12 +174,26 @@ impl WidgetNode for StackNavigation {
     }
 }
 
+impl WidgetMatchEvent for StackNavigation {
+    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
+        for action in actions {
+            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
+                self.screen_width = ce.new_geom.inner_size.x;
+                if let ActiveStackView::Active(stack_view_id) = self.active_stack_view {
+                    let mut stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
+                    stack_view_ref.set_offset_to_hide(self.screen_width);
+                }
+            }
+        }
+    }
+}
+
 
 impl StackNavigation {
     pub fn show_stack_view_by_id(&mut self, stack_view_id: LiveId, cx: &mut Cx) {
         if let ActiveStackView::None = self.active_stack_view {
             let mut stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
-            stack_view_ref.show(cx);
+            stack_view_ref.show(cx, self.screen_width);
             self.active_stack_view = ActiveStackView::Active(stack_view_id);
             self.redraw(cx);
         }
