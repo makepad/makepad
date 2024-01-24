@@ -78,7 +78,7 @@ impl CxFontsAtlas {
                         cutoff: 0.25,
                         ..Default::default()
                     },
-                    scale: 4.0,
+                    scale: 2.0,
                 })
             },
         }
