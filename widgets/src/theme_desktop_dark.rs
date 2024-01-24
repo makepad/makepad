@@ -2362,22 +2362,22 @@ live_design! {
 
         header = <StackViewHeader> {}
 
-        // TBD Adjust this based on actual screen size
-        offset: 400.0
+        offset: 1000.0
 
         animator: {
             slide = {
                 default: hide,
                 hide = {
+                    redraw: true
                     ease: ExpDecay {d1: 0.80, d2: 0.97}
-                    from: {all: Forward {duration: 0.3}}
-                    // Bug: Constants are not working as part of an live state value
-                    apply: {offset: 400.0}
+                    from: {all: Forward {duration: 0.5}}
+                    apply: {offset: 1000.0}
                 }
 
                 show = {
+                    redraw: true
                     ease: ExpDecay {d1: 0.82, d2: 0.95}
-                    from: {all: Forward {duration: 0.3}}
+                    from: {all: Forward {duration: 0.5}}
                     apply: {offset: 0.0}
                 }
             }
