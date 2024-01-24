@@ -218,12 +218,21 @@ live_design!{
             uniform target_size: vec2(-1.0, -1.0)
 
             fn get_color_scale_pan(self) -> vec4 {
+                // Early return for default scaling and panning,
+                // used when walk size is not specified or non-fixed.
+                if self.target_size.x <= 0.0 && self.target_size.y <= 0.0 {
+                    if self.show_thumbnail > 0.0 {
+                        return sample2d(self.thumbnail_texture, self.pos).xyzw;
+                    } else {
+                        return sample2dOES(self.video_texture, self.pos);
+                    }  
+                }
+
                 let scale = self.image_scale;
                 let pan = self.image_pan;
                 let source_aspect_ratio = self.source_size.x / self.source_size.y;
                 let target_aspect_ratio = self.target_size.x / self.target_size.y;
 
-                // TODO: only if target_size is setup
                 // Adjust scale based on aspect ratio difference
                 if (source_aspect_ratio != target_aspect_ratio) {
                     if (source_aspect_ratio > target_aspect_ratio) {
@@ -243,11 +252,12 @@ live_design!{
                 let adjusted_pan_x = pan_range_x * pan.x;
                 let adjusted_pan_y = pan_range_y * pan.y;
                 let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y);
+                let adjusted_pos = (self.pos * scale) + adjusted_pan;
 
                 if self.show_thumbnail > 0.0 {
-                    return sample2d(self.thumbnail_texture, (self.pos * scale) + adjusted_pan).xyzw;
+                    return sample2d(self.thumbnail_texture, adjusted_pos).xyzw;
                 } else {
-                    return sample2dOES(self.video_texture, (self.pos * scale) + adjusted_pan);
+                    return sample2dOES(self.video_texture, adjusted_pos);
                 }      
             }
 
