@@ -271,6 +271,7 @@ impl LiveHook for Video {
     }
 
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        self.thumbnail_texture = Some(Texture::new(cx));
         if self.show_thumbnail_before_playback {
             self.load_thumbnail_image(cx);
             self.draw_bg
