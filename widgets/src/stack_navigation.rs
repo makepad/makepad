@@ -36,10 +36,8 @@ impl Widget for StackNavigationView {
             self.view.redraw(cx);
         }
 
-        let actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
-        if self.button(id!(left_button)).clicked(&actions) {
-            self.animator_play(cx, id!(slide.hide));
-        }
+        self.view.handle_event(cx, event, scope);
+        self.widget_match_event(cx, event, scope);
 
         if self.animator.animator_in_state(cx, id!(slide.hide))
             && !self.animator.is_track_animating(cx, id!(slide))
@@ -57,6 +55,14 @@ impl Widget for StackNavigationView {
                 y: 0.,
             }),
         )
+    }
+}
+
+impl WidgetMatchEvent for StackNavigationView {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
+        if self.button(id!(left_button)).clicked(&actions) {
+            self.animator_play(cx, id!(slide.hide));
+        }
     }
 }
 
