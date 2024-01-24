@@ -2288,8 +2288,9 @@ live_design! {
     // StackView DSL begin
 
     StackViewHeader = <View> {
-        width: Fill, height: Fit, margin: 0
-        padding: {bottom: 5., top: 50.}
+        width: Fill, height: Fit,
+        margin: 0
+        padding: {bottom: 10., top: 50.}
         show_bg: true
         draw_bg: {
             color: #EDEDED
