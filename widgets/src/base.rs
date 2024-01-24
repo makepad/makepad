@@ -102,7 +102,6 @@ live_design!{
     }
     
     RotatedImage = <RotatedImageBase> {
-        
         width: Fit
         height: Fit
         
