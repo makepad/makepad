@@ -2287,9 +2287,10 @@ live_design! {
 
     // StackView DSL begin
 
+    HEADER_HEIGHT = 80.0
+
     StackViewHeader = <View> {
-        width: Fill, height: Fit,
-        margin: 0
+        width: Fill, height: (HEADER_HEIGHT),
         padding: {bottom: 10., top: 50.}
         show_bg: true
         draw_bg: {
@@ -2337,10 +2338,26 @@ live_design! {
     StackNavigationView = <StackNavigationViewBase> {
         visible: false
         width: Fill, height: Fill
-        flow: Down
+        flow: Overlay
+
         show_bg: true
         draw_bg: {
             color: #fff
+        }
+
+        // Empty slot to place a generic full-screen background
+        background = <View> {
+            width: Fill, height: Fill
+            visible: false
+        }
+
+        body = <View> {
+            width: Fill,
+            height: Fill,
+            flow: Down,
+
+            // Space between body and header can be adjusted overriding this margin
+            margin: {top: (HEADER_HEIGHT)},
         }
 
         header = <StackViewHeader> {}
