@@ -69,7 +69,7 @@ live_design!{
                 let texel_coords = pos.xy * 4096.0;
                 s = clamp((s - (1.0 - self.sdf_cutoff)) * self.sdf_radius / scale + 0.5, 0.0, 1.0);
             }
-            s = pow(s, self.curve);
+            //s = pow(s, self.curve);
             let col = self.get_color(); 
             return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
         }
@@ -79,6 +79,7 @@ live_design!{
             let dxt = length(dFdx(texel_coords));
             let dyt = length(dFdy(texel_coords));
             let scale = (dxt + dyt) * 4096.0 *0.5;
+            return self.sample_color(scale, self.tex_coord1.xy);
             // ok lets take our delta in the x direction
             /*
             //4x AA
@@ -90,11 +91,24 @@ live_design!{
             let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt* 0.5));
             return (x1+x2+x3+x4)/4;
             */
-            
+            /*
+            let d = 0.333;
+            let x1 = self.sample_color(scale, self.tex_coord1.xy);
+            let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * -d,0.0));
+            let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* d,0.0));
+            let x4 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0, dyt * -d));
+            let x5 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * -d,dyt * -d));
+            let x6 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* d,dyt * -d));
+            let x7 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0, dyt * d));
+            let x8 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * -d,dyt * d));
+            let x9 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt* d,dyt * d));
+            return (x1+x2+x3+x4+x5+x6+x7+x8+x9)/9;
+            */
             //16x AA
+            /*
             let d = 0.25;
-            let d2 = d * 2.0; 
-            let d3 = d * 3.0; 
+            let d2 = 0.5; 
+            let d3 = 0.75; 
             let x1 = self.sample_color(scale, self.tex_coord1.xy);
             let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,0.0));
             let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,0.0));
@@ -114,7 +128,7 @@ live_design!{
             let x14 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d3));
             let x15 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d3));
             let x16 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d3));            
-            return (x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)/16 ;
+            return (x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)/16 ;*/
         }
     }
 }
@@ -360,7 +374,6 @@ impl DrawText {
             return
         }
         //let mut char_offset = char_offset;
-        
         if !self.many_instances.is_some() {
             self.begin_many_instances_internal(cx, fonts_atlas);
         }

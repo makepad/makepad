@@ -99,9 +99,7 @@ live_design! {
                 return pos;
             }
 
-            fn pixel(self) -> vec4
-            {
-
+            fn pixel(self) -> vec4{
                 let col = sample2d_rt(self.image, self.o0) ;
                 col +=  (sample2d_rt(self.image, self.o1a) + sample2d_rt(self.image, self.o1b)) * self.g1;
                 col +=  (sample2d_rt(self.image, self.o2a) + sample2d_rt(self.image, self.o2b)) * self.g2 ;
