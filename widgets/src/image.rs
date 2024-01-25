@@ -149,7 +149,8 @@ pub enum ImageError {
     /// The image data buffer was empty.
     EmptyData,
     /// The image's pixel data was not aligned to 3-byte or 4-byte pixels.
-    InvalidPixelAlignment,
+    /// The unsupported alignment value (in bytes) is included.
+    InvalidPixelAlignment(usize),
     /// The image data could not be decoded as a JPEG.
     JpgDecode(JpgDecodeErrors),
     /// The image file at the given resource path could not be found.

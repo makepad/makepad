@@ -34,15 +34,15 @@ public class VideoPlayer {
         try {
             mSurfaceTexture = new SurfaceTexture(mExternalTextureHandle);
 
-            HandlerThread handlerThread = new HandlerThread("GLHandlerThread");
-            handlerThread.start();
-            Handler glHandler = new Handler(handlerThread.getLooper());
+            mHandlerThread = new HandlerThread("GLHandlerThread");
+            mHandlerThread.start();
+            mGlHandler = new Handler(mHandlerThread.getLooper());
             mSurfaceTexture.setOnFrameAvailableListener(new SurfaceTexture.OnFrameAvailableListener() {
                 @Override 
                 public void onFrameAvailable(SurfaceTexture surfaceTexture) {
                     mAvailableFrames.incrementAndGet();
                 }
-            }, glHandler);
+            }, mGlHandler);
 
             Surface surface = new Surface(mSurfaceTexture);
 
@@ -149,8 +149,33 @@ public class VideoPlayer {
 
 
     public void stopAndCleanup() {
-        mMediaPlayer.stop();
-        mMediaPlayer.release();
+        // stop and release MediaPlayer
+        if (mMediaPlayer != null) {
+            mMediaPlayer.stop();
+            mMediaPlayer.release();
+            mMediaPlayer = null;
+        }
+
+        mSource = null;
+
+        // release the SurfaceTexture and Surface
+        if (mSurfaceTexture != null) {
+            mSurfaceTexture.release();
+            mSurfaceTexture = null;
+        }
+
+        // stop the HandlerThread
+        if (mHandlerThread != null) {
+            mHandlerThread.quitSafely();
+            try {
+                mHandlerThread.join();
+                mHandlerThread = null;
+                mGlHandler = null;
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
         Activity activity = mActivityReference.get();
         if (activity != null) {
             activity.runOnUiThread(() -> {
@@ -185,6 +210,8 @@ public class VideoPlayer {
     private int mExternalTextureHandle;
     private SurfaceTexture mSurfaceTexture;
     private AtomicInteger mAvailableFrames = new AtomicInteger(0);
+    private Handler mGlHandler;
+    private HandlerThread mHandlerThread;
 
     // playback
     private boolean mAutoplay = false;

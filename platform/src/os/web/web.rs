@@ -495,6 +495,7 @@ impl Cx {
                     });
                 },*/
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
                 CxOsOp::MuteVideoPlayback(_) => todo!(),

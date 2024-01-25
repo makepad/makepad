@@ -313,7 +313,13 @@ impl Cx {
                         self.call_event_handler(&e);
                     },
                     FromJavaMessage::VideoPlayerReleased {video_id} => {
-                        self.os.video_surfaces.remove(&LiveId(video_id));
+                        if let Some(decoder_ref) = self.os.video_surfaces.remove(&LiveId(video_id)) {
+                            unsafe {
+                                let env = attach_jni_env();
+                                android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
+                            }
+                        }
+                        
                         let e = Event::VideoPlaybackResourcesReleased(
                             VideoPlaybackResourcesReleasedEvent {
                                 video_id: LiveId(video_id)
@@ -467,6 +473,8 @@ impl Cx {
             if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
+            cx.maybe_warn_hardware_support();
+
             cx.os.display = Some(CxAndroidDisplay {
                 libegl,
                 egl_display,
@@ -703,6 +711,12 @@ impl Cx {
                         android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop);
                     }
                 },
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_begin_video_playback(env, video_id);
+                    }
+                }
                 CxOsOp::PauseVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();
