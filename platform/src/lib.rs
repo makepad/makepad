@@ -48,6 +48,8 @@ pub mod web_socket;
 
 pub mod audio_stream;
 
+pub mod file_dialogs;
+
 mod media_api;
 
 #[macro_use]

@@ -1,0 +1,94 @@
+// mildly stripped down version of native_dialog_rs dialog interface.
+use std::path::{Path, PathBuf};
+
+
+/// Represents a set of file extensions and their description.
+#[derive(Debug, Clone)]
+pub struct Filter<'a> {
+    pub(crate) description: &'a str,
+    pub(crate) extensions: &'a [&'a str],
+}
+
+/// Builds and shows file dialogs.
+#[derive(Debug, Clone)]
+pub struct FileDialog<'a> {
+    pub(crate) filename: Option<&'a str>,
+    pub(crate) location: Option<&'a Path>,
+    pub(crate) filters: Vec<Filter<'a>>,
+    pub(crate) title: Option<&'a str>,
+}
+
+impl<'a> FileDialog<'a> {
+    /// Creates a file dialog builder.
+    pub fn new() -> Self {
+        FileDialog {
+            filename: None,
+            location: None,
+            filters: vec![],           
+            title: None,
+        }
+    }
+
+    /// Sets the window title for the dialog.
+    pub fn set_title(mut self, title: &'a str) -> Self {
+        self.title = Some(title);
+        self
+    }
+
+    /// Sets the default value of the filename text field in the dialog. For open dialogs of macOS
+    /// and zenity, this is a no-op because there's no such text field on the dialog.
+    pub fn set_filename(mut self, filename: &'a str) -> Self {
+        self.filename = Some(filename);
+        self
+    }
+
+    /// Resets the default value of the filename field in the dialog.
+    pub fn reset_filename(mut self) -> Self {
+        self.filename = None;
+        self
+    }
+
+    /// Sets the default location that the dialog shows at open.
+    pub fn set_location<P: AsRef<Path> + ?Sized>(mut self, path: &'a P) -> Self {
+        self.location = Some(path.as_ref());
+        self
+    }
+
+    /// Resets the default location that the dialog shows at open. Without a default location set,
+    /// the dialog will probably use the current working directory as default location.
+    pub fn reset_location(mut self) -> Self {
+        self.location = None;
+        self
+    }
+
+    /// Adds a file type filter. The filter must contains at least one extension, otherwise this
+    /// method will panic. For dialogs that open directories, this is a no-op.
+    pub fn add_filter(mut self, description: &'a str, extensions: &'a [&'a str]) -> Self {
+        if extensions.is_empty() {
+            panic!("The file extensions of a filter must be specified.")
+        }
+        self.filters.push(Filter {
+            description,
+            extensions,
+        });
+        self
+    }
+
+    /// Removes all file type filters.
+    pub fn remove_all_filters(mut self) -> Self {
+        self.filters = vec![];
+        self
+    }
+
+
+
+}
+
+
+
+impl Default for FileDialog<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
