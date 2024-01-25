@@ -20,6 +20,26 @@ pub enum StackNavigationAction {
     NavigateTo(LiveId)
 }
 
+/// Actions that are delivered to an incoming or outgoing "active" widget/view
+/// within a stack navigation container.
+#[derive(Clone, DefaultNone, Eq, Hash, PartialEq, Debug)]
+pub enum StackNavigationTransitionAction {
+    None,
+    /// The widget is being shown.
+    /// This is sent to the widget/view being animated in,
+    /// at the very beginning of that animate-in process.
+    Show,
+    /// The widget is being hidden.
+    /// This is sent to the widget/view being animated out,
+    /// at the very beginning of that animate-out process.
+    HideBegin,
+    /// The widget is being hidden.
+    /// This is sent to the widget/view being animated out,
+    /// at the very end of that animate-out process.
+    HideEnd,
+
+}
+
 #[derive(Live, LiveHook, Widget)]
 pub struct StackNavigationView {
     #[deref]
@@ -39,19 +59,35 @@ impl Widget for StackNavigationView {
     fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.view.redraw(cx);
-            dbg!(self.offset);
         }
 
         self.view.handle_event(cx, event, scope);
         self.widget_match_event(cx, event, scope);
 
+        // Clicking the "back" button on the mouse
+        // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
+        let back_mouse_button_released = match event {
+            Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
+            _ => false,
+        };
+        if back_mouse_button_released {
+            self.hide_stack_view(cx);
+        }
+
         if self.animator.animator_in_state(cx, id!(slide.hide))
         {
             if self.offset > self.offset_to_hide {
-                self.animator_cut(cx, id!(slide.hide));
-            }
-            if !self.animator.is_track_animating(cx, id!(slide)) {
                 self.apply_over(cx, live! {visible: false});
+
+                // The active stack view is about to be no longer active, so let's
+                // send a `HideEnd` action to it so it can be aware of the transition conclusion.
+                cx.widget_action(
+                    self.widget_uid(),
+                    &HeapLiveIdPath::default(),
+                    StackNavigationTransitionAction::HideEnd,
+                );
+
+                self.animator_cut(cx, id!(slide.hide));
             }
         }
     }
@@ -70,9 +106,21 @@ impl Widget for StackNavigationView {
 
 impl WidgetMatchEvent for StackNavigationView {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        if self.button(id!(left_button)).clicked(&actions) {
-            self.animator_play(cx, id!(slide.hide));
+        let left_button_clicked = self.button(id!(left_button)).clicked(&actions);
+        if left_button_clicked {
+            self.hide_stack_view(cx);
         }
+    }
+}
+
+impl StackNavigationView {
+    fn hide_stack_view(&mut self, cx: &mut Cx) {
+        self.animator_play(cx, id!(slide.hide));
+        cx.widget_action(
+            self.widget_uid(),
+            &HeapLiveIdPath::default(),
+            StackNavigationTransitionAction::HideBegin,
+        );
     }
 }
 
@@ -195,6 +243,14 @@ impl StackNavigation {
             let mut stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
             stack_view_ref.show(cx, self.screen_width);
             self.active_stack_view = ActiveStackView::Active(stack_view_id);
+
+            // Send a `Show` action to the view being shown so it can be aware of the transition.
+            cx.widget_action(
+                stack_view_ref.widget_uid(),
+                &HeapLiveIdPath::default(),
+                StackNavigationTransitionAction::Show,
+            );
+
             self.redraw(cx);
         }
     }
