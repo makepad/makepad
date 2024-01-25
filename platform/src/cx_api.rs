@@ -81,7 +81,7 @@ pub enum CxOsOp {
     CleanupVideoPlaybackResources(LiveId),
     UpdateVideoSurfaceTexture(LiveId),
     
-    SaveFileDialog(FileDialog<'_>),
+    SaveFileDialog(FileDialog),
     SelectFileDialog(FileDialog),
     SaveFolderDialog(FileDialog),
     SelectFolderDialog(FileDialog),    
@@ -523,20 +523,20 @@ impl Cx {
     }
 
     pub fn open_system_savefile_dialog(&mut self) {
-        self.platform_ops.push(CxOsOp::SaveFileDialog);
+        self.platform_ops.push(CxOsOp::SaveFileDialog(FileDialog::new()));
     }
 
     pub fn open_system_openfile_dialog(&mut self) {
-        self.platform_ops.push(CxOsOp::SelectFileDialog);
+        self.platform_ops.push(CxOsOp::SelectFileDialog(FileDialog::new()));
     }
 
     pub fn open_system_savefolder_dialog(&mut self) {
-        self.platform_ops.push(CxOsOp::SaveFolderDialog);
+        self.platform_ops.push(CxOsOp::SaveFolderDialog(FileDialog::new()));
 
     }
 
     pub fn open_system_openfolder_dialog(&mut self) {
-        self.platform_ops.push(CxOsOp::SelectFolderDialog);
+        self.platform_ops.push(CxOsOp::SelectFolderDialog(FileDialog::new()));
 
     }
 }
