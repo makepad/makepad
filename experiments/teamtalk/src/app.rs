@@ -6,7 +6,7 @@ helicopter-headset experience, silent disco, and so on.
 
 use { 
     crate::{
-        makepad_micro_serde::{SerBin, DeBin, DeBinErr},
+        makepad_micro_serde::*,
         makepad_audio_graph::audio_stream::{AudioStreamSender},
         makepad_widgets::*,
         makepad_platform::live_atomic::*,
@@ -83,6 +83,7 @@ impl App{
 
 impl MatchEvent for App{
     fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
+        log!("MIDI PORTS");
         cx.use_midi_inputs(&ports.all_inputs());
     }
     
@@ -109,7 +110,7 @@ impl MatchEvent for App{
     
     fn handle_audio_devices(&mut self, cx:& mut Cx, devices:&AudioDevicesEvent){
         for desc in &devices.descs{
-            println!("{}", desc)
+            //println!("{}", desc)
         }
         cx.use_audio_inputs(&devices.default_input());
         cx.use_audio_outputs(&devices.default_output());
@@ -149,44 +150,224 @@ impl App {
         let socket = UdpSocket::bind("0.0.0.0:6454").unwrap();
         let broadcast_addr = "255.255.255.255:6454";
         socket.set_broadcast(true).unwrap();
+        socket.set_read_timeout(Some(Duration::from_nanos(1))).unwrap();
         let mut buffer = [0u8; 2048];
-        std::thread::spawn(move || {
-            loop {
-                let (length, _addr) = socket.recv_from(&mut buffer).unwrap();
-                let buffer =  &buffer[0..length];
-                //let buffer = &buffer[ARTNET_HEADER.len()..];
-                log!("{:x?}",buffer);
-                if buffer[1] == 50{ // T
-                }
+        
+        #[derive(Debug,Default,SerRon, DeRon)]
+        struct State{ 
+            fade:[f32;8],
+            dial:[f32;8], 
+            roto:[f32;8]  
+        }
+        let mut state = State::default();
+        if let Ok(result) = std::fs::read_to_string("dmx.ron"){
+            State::deserialize_ron(&result).unwrap();
+            if let Ok(load) = State::deserialize_ron(&result){
+                log!("LOADED");
+                state = load   
             }
-        });
+        }
         // alright the sender thread where we at 44hz poll our midi input and set up a DMX packet
         let mut midi_input = cx.midi_input();
         std::thread::spawn(move || {
             let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
-            struct State{
-                sliders:[f64;8],
-                
+            
+            fn map_wargb(val:f32, fade:f32, out:&mut [u8], bases: &[usize]){
+                let colors = ["fff", "ff7", "f00","ff0","0f0","0ff","00f","f0f"];
+                let len = (colors.len()-1) as f32;
+                // pick where we are in between
+                let a = (val * len).floor();
+                let b = (val * len).ceil();
+                let gap = val * len - a; 
+                use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
+                let c1 = Vec4::from_u32(hex_bytes_to_u32(colors[a as usize].as_bytes()).unwrap());
+                let c2 = Vec4::from_u32(hex_bytes_to_u32(colors[b as usize].as_bytes()).unwrap());
+                let c = Vec4::from_lerp(c1, c2, gap);
+                for base in bases{
+                    out[base-1] = (c.x * 255.0 * fade) as u8;
+                    out[base+0] = (c.y * 255.0 * fade) as u8;
+                    out[base+1] = (c.z * 255.0 * fade) as u8;
+                }
             }
+            
+            fn dmx_u8(val: u8, out:&mut[u8], bases:&[usize], chan:usize){
+                for base in bases{
+                    out[base - 1 + chan - 1] = val
+                }
+            }
+            fn dmx_f32(val: f32, out:&mut[u8], bases:&[usize], chan:usize){
+                for base in bases{
+                    out[base - 1 + chan - 1] = (val *255.0).min(255.0).max(0.0) as u8
+                }
+            }
+                        
             for i in 0..DMXOUTPUT_HEADER.len(){universe[i] = DMXOUTPUT_HEADER[i];}
+            let mut counter = 0;
             loop {
+                while let Ok((length, _addr)) = socket.recv_from(&mut buffer){
+                    //log!("READ {:x?}",&buffer[0..length]);
+                }
                 // lets poll midi
-                while let Some((_,data)) = midi_input.receive(){
-                    let mut dmx = &mut universe[DMXOUTPUT_HEADER.len()..];
+                while let Some((port,data)) = midi_input.receive(){
+                    
                     match data.decode() {
-                        MidiEvent::ControlChange(cc) => match cc.param{
-                            13=>{ // KORG STUDIO NANO ROTARY 1
-                                log!("{}",cc.value)
+                        MidiEvent::ControlChange(cc) => { 
+                            if port.0.0 == 0x8b6cdab3a9fcbc0f{
+                                log!("{:?}", cc);
+                                match cc.param{
+                                    20..=27=>{
+                                        state.roto[cc.param as usize - 20] = cc.value as f32 / 127.0;
+                                    }
+                                    _=>()
+                                }
                             }
-                            _=>()
+                            else{
+                                match cc.param{
+                                    2..=6=>{state.fade[cc.param as usize - 2] = cc.value as f32 / 127.0},
+                                    8..=9=>{state.fade[cc.param as usize - 3] = cc.value as f32 / 127.0},
+                                    12=>{state.fade[7] = cc.value as f32 / 127.0},
+                                    13..=20=>{
+                                        state.dial[cc.param as usize - 13] = cc.value as f32 / 127.0;
+                                    }
+                                    21..=53=>{ // button grid
+                                        log!("{}", cc.value)
+                                    }
+                                    62=>{} // rew
+                                    63=>{} // stop
+                                    80=>{} // play
+                                    81=>{} // next
+                                    58=>{} // ffwd left
+                                    59=>{} // ffwd right
+                                    60=>{} // left
+                                    61=>{} // right
+                                    54=>{} // 
+                                    55=>{}
+                                    56=>{}
+                                    57=>{}
+                                    _=>{
+                                        log!("{} {}", cc.param, cc.value);
+                                    }
+                                }
+                            }
                         }
                         _=>()
                     }
                 }
+                universe[12] = counter as u8;
+                if counter > 255{ counter = 0}
+                counter += 1;
+                let dmx = &mut universe[DMXOUTPUT_HEADER.len()..];
+                // RIGHT KITCHEN 1 (A)
+                // RIGHT WINDOW 5 (B)
+                // LEFT WINDOW 8 (A)
+                // DINNER TABLE2 11 (A)
+                // DINNER TABLE3 14 (B)
+                // DINNER TABLE1 17 (C)
+                // DINNER TABLE4 20 (C)
+                // FRONT DOOR 23 (A)
+                // CENTER WINDOW 26 (C)
+                // KITCHEN CENTER 29 (C)
+                // KITCHEN LEFT 32 (B)
+                // KITCHEN STRIP 35 (C)
+                // DESK 38 (B) 
+                // TABLE 41 (B)
+                map_wargb(state.dial[0], state.fade[0], dmx, &[2, 8, 11, 23]); // slider 1
+                map_wargb(state.dial[1], state.fade[1], dmx, &[5, 14, 32, 41, 38]); // slider 2
+                map_wargb(state.dial[2], state.fade[2], dmx, &[17, 20, 26, 29, 35]); // slider 3
+                
+                map_wargb(state.dial[3], 1.0, dmx, &[110+2-1]); // RGB laser color
+                // lets set the laser mode with the slider
+                let rgb_laser_addr = 110;
+                match (state.fade[3] * 3.0) as usize{
+                    0=>{ // laser off
+                        dmx_u8(0, dmx, &[rgb_laser_addr], 1);
+                    }
+                    1=>{ // laser on left
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    2=>{ // laser on right
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    _=>{}
+                }
+                // overload the other laser onto the this laser
+                let rgb_laser_addr = 110;
+                map_wargb(state.dial[3], 1.0, dmx, &[rgb_laser_addr+2-1]); // RGB laser color
+                match (state.fade[3] * 4.0) as usize{
+                    0=>{ // laser off
+                        dmx_u8(0, dmx, &[rgb_laser_addr], 1);
+                    }
+                    1=>{ // laser on left
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    2=>{ // laser on right
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    3=>{
+                        dmx_u8(0, dmx, &[rgb_laser_addr], 1);
+                    }
+                    _=>{}
+                }
+                let multi_fx_addr = 100;
+                dmx_f32((state.fade[3]-0.5).max(0.0)*2.0, dmx, &[multi_fx_addr], 3);
+                dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 1);
+                dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 2);
+                dmx_f32(state.dial[4], dmx, &[multi_fx_addr], 4);
+                let rgb_strobe = 120;
+                
+                map_wargb(state.dial[5], state.fade[5], dmx, &[rgb_strobe+3-1]); // Strobe RGB
+                dmx_f32(1.0, dmx, &[rgb_strobe], 1);
+                dmx_f32(1.0-(state.fade[5].max(0.5).min(1.0)-0.5)*2.0, dmx, &[rgb_strobe], 10);
+                
+                dmx_f32(state.fade[6]*10.0, dmx, &[rgb_strobe], 6);
+                dmx_f32(state.fade[6], dmx, &[rgb_strobe], 8);
+                dmx_f32(state.dial[6], dmx, &[rgb_strobe], 7);
+                dmx_f32(state.dial[6], dmx, &[rgb_strobe], 11);
+                dmx_f32(state.dial[6], dmx, &[rgb_strobe], 9);
+                
+                // and finally the moving head
+                let spot = 200;
+                dmx_f32(1.0, dmx, &[spot], 6);
+                //dmx_f32(state.fade[7], dmx, &[spot], 22);
+                //dmx_f32(state.dial[7], dmx, &[spot], 23);
+                
+                dmx_f32(state.roto[0], dmx, &[spot], 1);
+                dmx_f32(state.roto[1], dmx, &[spot], 3);
+                dmx_f32(state.roto[2], dmx, &[spot], 14);
+                map_wargb(state.roto[3], 1.0, dmx, &[spot+16-1]); // Strobe RGB
+                
+                dmx_f32(state.roto[4], dmx, &[spot], 12);
+                
+                dmx_f32(state.roto[5], dmx, &[spot], 13);
+                dmx_f32(state.roto[6], dmx, &[spot], 10);
+                                                
+                dmx_f32(state.roto[7], dmx, &[spot], 8);
+                //map_wargb(state.dial[7], 1.0, dmx, &[spot + 16 - 1]); // Strobe RGB
+                //dmx_f32(state.fade[7], dmx, &[spot], 6);
+                                
+                // alright so we want dial 
+                // alright slider 4 = laser mode +RGB dial
+                // slider 5 = matrix / uv mode
+                // slider 6 = strobe white - slider = speed, dial =  mode
+                // slider 7 = strobe RGB  - slider = mode, dial = color
+                // slider 8 = moving head mode dial + thing
+                
+                // alright lets send out this thing 
+                socket.send_to(&universe, broadcast_addr).unwrap();
+                
+                std::fs::write("dmx.ron", state.serialize_ron().as_bytes()).unwrap();
+                
                 //socket.send(&universe, broadcast_add.into());
                 // lets sleep 1/44th of a second
                 std::thread::sleep(Duration::from_secs_f64(1.0/44.0))
-                
             }
         });
     }
