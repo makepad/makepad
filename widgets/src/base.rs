@@ -39,6 +39,8 @@ live_design!{
     import crate::text_input::TextInputBase;
     import crate::scroll_shadow::DrawScrollShadowBase;
     import crate::page_flip::PageFlipBase;
+    import crate::stack_navigation::StackNavigationViewBase;
+    import crate::stack_navigation::StackNavigationBase;
     import crate::keyboard_view::KeyboardViewBase;
     import crate::window_menu::WindowMenuBase;
     
@@ -100,7 +102,6 @@ live_design!{
     }
     
     RotatedImage = <RotatedImageBase> {
-        
         width: Fit
         height: Fit
         
@@ -564,4 +565,6 @@ live_design!{
     TextInputBase = <TextInputBase>{}
     DrawScrollShadowBase = <DrawScrollShadowBase>{}
     WindowMenuBase = <WindowMenuBase>{}
+    StackNavigationViewBase = <StackNavigationViewBase>{}
+    StackNavigationBase = <StackNavigationBase>{}
 }

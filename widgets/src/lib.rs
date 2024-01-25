@@ -28,6 +28,7 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod portal_list;
+pub mod stack_navigation;
 pub mod desktop_button;
 pub mod window;
 pub mod scroll_shadow;
@@ -79,6 +80,7 @@ pub use crate::{
     slide_panel::*,
     fold_button::*,
     dock::*,
+    stack_navigation::*,
     window::*,
     tab::TabClosable,
     scroll_bars::{ScrollBars},
@@ -154,4 +156,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::tab_close_button::live_design(cx);
     crate::keyboard_view::live_design(cx);
     crate::vectorline::live_design(cx);
+    crate::stack_navigation::live_design(cx);
 }
