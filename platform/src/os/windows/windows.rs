@@ -118,9 +118,14 @@ impl Cx {
                     window.stop_resize();
                 }
             }
-            Win32Event::WindowGeomChange(re) => { // do this here because mac
+            Win32Event::WindowGeomChange(mut re) => { // do this here because mac
                
                 if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                    if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
+                        re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
+                        re.new_geom.dpi_factor = dpi_override;
+                    }
+                                        
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
                     // redraw just this windows root draw list
