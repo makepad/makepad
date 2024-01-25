@@ -423,7 +423,7 @@ impl Video {
                     self.resume_playback(cx);
                 }
             }
-            }
+            
             _ => (),
         }
     }
