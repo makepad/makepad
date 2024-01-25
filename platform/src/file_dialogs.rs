@@ -3,22 +3,23 @@ use std::path::{Path, PathBuf};
 
 
 /// Represents a set of file extensions and their description.
-#[derive(Debug, Clone)]
-pub struct Filter<'a> {
-    pub(crate) description: &'a str,
-    pub(crate) extensions: &'a [&'a str],
+#[derive(Debug, PartialEq)]
+pub struct Filter {
+    pub description: String,
+    pub extensions: Vec<String>,
 }
 
 /// Builds and shows file dialogs.
-#[derive(Debug, Clone)]
-pub struct FileDialog<'a> {
-    pub(crate) filename: Option<&'a str>,
-    pub(crate) location: Option<&'a Path>,
-    pub(crate) filters: Vec<Filter<'a>>,
-    pub(crate) title: Option<&'a str>,
+
+#[derive(Debug, PartialEq)]
+pub struct FileDialog {
+    pub filename: Option<String>,
+    pub location: Option<PathBuf>,
+    pub filters: Vec<Filter>,
+    pub title: Option<String>,
 }
 
-impl<'a> FileDialog<'a> {
+impl FileDialog {
     /// Creates a file dialog builder.
     pub fn new() -> Self {
         FileDialog {
@@ -30,14 +31,14 @@ impl<'a> FileDialog<'a> {
     }
 
     /// Sets the window title for the dialog.
-    pub fn set_title(mut self, title: &'a str) -> Self {
+    pub fn set_title(mut self, title: String) -> Self {
         self.title = Some(title);
         self
     }
 
     /// Sets the default value of the filename text field in the dialog. For open dialogs of macOS
     /// and zenity, this is a no-op because there's no such text field on the dialog.
-    pub fn set_filename(mut self, filename: &'a str) -> Self {
+    pub fn set_filename(mut self, filename:  String) -> Self {
         self.filename = Some(filename);
         self
     }
@@ -49,8 +50,8 @@ impl<'a> FileDialog<'a> {
     }
 
     /// Sets the default location that the dialog shows at open.
-    pub fn set_location<P: AsRef<Path> + ?Sized>(mut self, path: &'a P) -> Self {
-        self.location = Some(path.as_ref());
+    pub fn set_location(mut self, path:  PathBuf) -> Self {
+        self.location = Some(path);
         self
     }
 
@@ -63,7 +64,7 @@ impl<'a> FileDialog<'a> {
 
     /// Adds a file type filter. The filter must contains at least one extension, otherwise this
     /// method will panic. For dialogs that open directories, this is a no-op.
-    pub fn add_filter(mut self, description: &'a str, extensions: &'a [&'a str]) -> Self {
+    pub fn add_filter(mut self, description: String, extensions:  Vec<String>) -> Self {
         if extensions.is_empty() {
             panic!("The file extensions of a filter must be specified.")
         }
@@ -86,7 +87,7 @@ impl<'a> FileDialog<'a> {
 
 
 
-impl Default for FileDialog<'_> {
+impl Default for FileDialog {
     fn default() -> Self {
         Self::new()
     }
