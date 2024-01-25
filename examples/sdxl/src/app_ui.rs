@@ -704,8 +704,8 @@ live_design!{
                             flow: Down
                             settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
                             settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
-                            settings_steps = <SettingsSlider> {label = {text: "steps:"}, input = {text: "4", min:4, max: 8, step:1}}
-                            settings_cfg = <SettingsSlider> {label = {text: "cfg:"}, input = {text: "1.8", min:1.0, max:8.0, step:0.01}}
+                            settings_steps = <SettingsSlider> {label = {text: "steps:"}, input = {text: "10", min:1, max: 10, step:1}}
+                            settings_cfg = <SettingsSlider> {label = {text: "cfg:"}, input = {text: "2.0", min:1.0, max:8.0, step:0.01}}
                             settings_denoise = <SettingsSlider> {label = {text: "denoise:"}, input = {text: "0.85", min:0.2, max:1.0, step:0.01}}
                         }
                         <View>{ 
