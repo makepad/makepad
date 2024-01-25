@@ -681,6 +681,14 @@ impl Cx {
                         outer_size: size,
                     };
                     window.is_created = true;
+
+                    let new_geom = window.window_geom.clone();
+                    let old_geom = window.window_geom.clone();
+                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                        window_id,
+                        new_geom,
+                        old_geom
+                    }));
                 },
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);

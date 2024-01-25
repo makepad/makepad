@@ -226,7 +226,7 @@ impl WidgetMatchEvent for StackNavigation {
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         for action in actions {
             if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
-                self.screen_width = ce.new_geom.inner_size.x;
+                self.screen_width = ce.new_geom.inner_size.x * ce.new_geom.dpi_factor;
                 if let ActiveStackView::Active(stack_view_id) = self.active_stack_view {
                     let mut stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
                     stack_view_ref.set_offset_to_hide(self.screen_width);
