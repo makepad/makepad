@@ -2362,7 +2362,7 @@ live_design! {
 
         header = <StackViewHeader> {}
 
-        offset: 1000.0
+        offset: 4000.0
 
         animator: {
             slide = {
@@ -2370,8 +2370,10 @@ live_design! {
                 hide = {
                     redraw: true
                     ease: ExpDecay {d1: 0.80, d2: 0.97}
-                    from: {all: Forward {duration: 0.5}}
-                    apply: {offset: 1000.0}
+                    from: {all: Forward {duration: 5.0}}
+                    // Large enough number to cover several screens,
+                    // but we need a way to parametrize it
+                    apply: {offset: 4000.0}
                 }
 
                 show = {
