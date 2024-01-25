@@ -3,7 +3,7 @@ package dev.makepad.android;
 import java.nio.ByteBuffer;
 
 public class VideoPlayerRunnable implements Runnable {
-    private final VideoPlayer mVideoPlayer;
+    private VideoPlayer mVideoPlayer;
     private boolean mIsPrepared = false;
 
     public VideoPlayerRunnable(VideoPlayer VideoPlayer) {
@@ -16,6 +16,10 @@ public class VideoPlayerRunnable implements Runnable {
             mVideoPlayer.prepareVideoPlayback();
             mIsPrepared = true;
         }
+    }
+
+    public void beginPlayback() {
+        mVideoPlayer.beginPlayback();
     }
 
     public void pausePlayback() {
@@ -36,5 +40,6 @@ public class VideoPlayerRunnable implements Runnable {
 
     public void cleanupVideoPlaybackResources() {
         mVideoPlayer.stopAndCleanup();
+        mVideoPlayer = null;
     }
 }
