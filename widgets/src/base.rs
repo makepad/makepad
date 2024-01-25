@@ -202,17 +202,69 @@ live_design!{
     }
 
     Video = <VideoBase> {
+        width: 100, height: 100
+
         draw_bg: {
             shape: Solid,
             fill: Image
-            texture image: textureOES
+            texture video_texture: textureOES
+            texture thumbnail_texture: texture2d
+            uniform show_thumbnail: 0.0
+
+            instance opacity: 1.0
             instance image_scale: vec2(1.0, 1.0)
-            instance image_pan: vec2(0.0, 0.0)
-            uniform is_last_frame: 0.0
+            instance image_pan: vec2(0.5, 0.5)
+
+            uniform source_size: vec2(1.0, 1.0)
+            uniform target_size: vec2(-1.0, -1.0)
+
+            fn get_color_scale_pan(self) -> vec4 {
+                // Early return for default scaling and panning,
+                // used when walk size is not specified or non-fixed.
+                if self.target_size.x <= 0.0 && self.target_size.y <= 0.0 {
+                    if self.show_thumbnail > 0.0 {
+                        return sample2d(self.thumbnail_texture, self.pos).xyzw;
+                    } else {
+                        return sample2dOES(self.video_texture, self.pos);
+                    }  
+                }
+
+                let scale = self.image_scale;
+                let pan = self.image_pan;
+                let source_aspect_ratio = self.source_size.x / self.source_size.y;
+                let target_aspect_ratio = self.target_size.x / self.target_size.y;
+
+                // Adjust scale based on aspect ratio difference
+                if (source_aspect_ratio != target_aspect_ratio) {
+                    if (source_aspect_ratio > target_aspect_ratio) {
+                        scale.x = target_aspect_ratio / source_aspect_ratio;
+                        scale.y = 1.0;
+                    } else {
+                        scale.x = 1.0;
+                        scale.y = source_aspect_ratio / target_aspect_ratio;
+                    }
+                }
+
+                // Calculate the range for panning
+                let pan_range_x = max(0.0, (1.0 - scale.x));
+                let pan_range_y = max(0.0, (1.0 - scale.y));
+
+                // Adjust the user pan values to be within the pan range
+                let adjusted_pan_x = pan_range_x * pan.x;
+                let adjusted_pan_y = pan_range_y * pan.y;
+                let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y);
+                let adjusted_pos = (self.pos * scale) + adjusted_pan;
+
+                if self.show_thumbnail > 0.5 {
+                    return sample2d(self.thumbnail_texture, adjusted_pos).xyzw;
+                } else {
+                    return sample2dOES(self.video_texture, adjusted_pos);
+                }      
+            }
 
             fn pixel(self) -> vec4 {
-                let color = sample2dOES(self.image, self.pos);
-                return color * vec4(1.0, 1.0, 1.0, 0.8);
+                let color = self.get_color_scale_pan();
+                return Pal::premul(vec4(color.xyz, color.w * self.opacity));
             }
         }
     }
