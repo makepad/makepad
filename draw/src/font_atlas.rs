@@ -41,9 +41,9 @@ pub struct CxFontsAtlas {
 pub struct CxFontsAtlasAlloc {
     pub texture_size: DVec2,
     pub full: bool,
-    pub xpos: f64,
-    pub ypos: f64,
-    pub hmax: f64,
+    pub xpos: usize,
+    pub ypos: usize,
+    pub hmax: usize,
     pub todo: Vec<CxFontsAtlasTodo>,
     pub sdf: Option<CxFontsAtlasSdfConfig>,
 }
@@ -65,9 +65,9 @@ impl CxFontsAtlas {
                     x: ATLAS_WIDTH as f64,
                     y: ATLAS_HEIGHT as f64
                 },
-                xpos: 0.0,
-                ypos: 0.0,
-                hmax: 0.0,
+                xpos: 0,
+                ypos: 0,
+                hmax: 0,
                 todo: Vec::new(),
                 // Set this to `None` to use CPU-rasterized glyphs instead of SDF.
                 sdf: Some(CxFontsAtlasSdfConfig {
@@ -85,7 +85,7 @@ impl CxFontsAtlas {
 impl CxFontsAtlasAlloc {
     pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64, todo: CxFontsAtlasTodo) -> CxFontAtlasGlyph {
         // In SDF mode, leave enough room around each glyph (i.e. padding).
-        let pad = self.sdf.as_ref().map_or(0.0, |sdf| sdf.params.pad as f64);
+        let pad = self.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
 
         // Preserve the aspect ratio, while still scaling up at least one side
         // to a power of 2, and that side has to the larger side, due to the
@@ -101,16 +101,16 @@ impl CxFontsAtlasAlloc {
         let scale = ((max * 1.5).ceil() as usize).next_power_of_two().max(64) as f64 / max;
 
         let (w, h) = (
-            (w * scale).ceil() + pad * 2.0,
-            (h * scale).ceil() + pad * 2.0,
+            (w * scale).ceil() as usize + pad * 2,
+            (h * scale).ceil() as usize + pad * 2,
         );
 
-        if w + self.xpos >= self.texture_size.x {
-            self.xpos = 0.0;
+        if w + self.xpos >= self.texture_size.x as usize {
+            self.xpos = 0;
             self.ypos += self.hmax;
-            self.hmax = 0.0;
+            self.hmax = 0;
         }
-        if h + self.ypos >= self.texture_size.y {
+        if h + self.ypos >= self.texture_size.y as usize {
             // ok so the fontatlas is full..
             self.full = true;
             println!("FONT ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
@@ -119,19 +119,26 @@ impl CxFontsAtlasAlloc {
             self.hmax = h;
         }
 
-        let tx1 = (self.xpos + pad) / self.texture_size.x;
-        let ty1 = (self.ypos + pad) / self.texture_size.y;
+        let x_range = self.xpos..(self.xpos + w);
+        let y_range = self.ypos..(self.ypos + h);
 
         self.xpos += w;
 
         self.todo.push(todo);
 
         CxFontAtlasGlyph {
-            t1: dvec2(tx1, ty1).into(),
-            t2: dvec2(
-                tx1 + (w - pad * 2.0) / self.texture_size.x, 
-                ty1 + (h - pad * 2.0) / self.texture_size.y,
-            ).into()
+            t1: (dvec2(
+                (x_range.start + pad) as f64,
+                (y_range.start + pad) as f64,
+            ) / self.texture_size).into(),
+
+            // NOTE(eddyb) `- 1` is because the texture coordinate rectangle
+            // formed by `t1` and `t2` is *inclusive*, while the integer ranges
+            // (i.e. `x_range` and `y_range`) are (inherently) *exclusive*.
+            t2: (dvec2(
+                (x_range.end - pad - 1) as f64,
+                (y_range.end - pad - 1) as f64,
+            ) / self.texture_size).into(),
         }
     }
 }
@@ -191,9 +198,9 @@ impl CxFontsAtlas {
         }
         self.alloc.todo.clear();
         self.alloc.full = false;
-        self.alloc.xpos = 0.;
-        self.alloc.ypos = 0.;
-        self.alloc.hmax = 0.;
+        self.alloc.xpos = 0;
+        self.alloc.ypos = 0;
+        self.alloc.hmax = 0;
         self.clear_buffer = true;
     }
     
@@ -274,9 +281,12 @@ impl<'a> Cx2d<'a> {
             ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels).ceil() + render_pad_dpx * 2.0,
         );
 
+        // NOTE(eddyb) `+ 1.0` is because the texture coordinate rectangle
+        // formed by `t1` and `t2` is *inclusive*, see also the comment in
+        // `alloc_atlas_glyph` (about its `- 1` counterpart to this `+ 1.0`).
         let atlas_alloc_wh = dvec2(
-            (glyphtc.t2.x - glyphtc.t1.x) as f64 * fonts_atlas.alloc.texture_size.x,
-            (glyphtc.t2.y - glyphtc.t1.y) as f64 * fonts_atlas.alloc.texture_size.y,
+            (glyphtc.t2.x - glyphtc.t1.x) as f64 * fonts_atlas.alloc.texture_size.x + 1.0,
+            (glyphtc.t2.y - glyphtc.t1.y) as f64 * fonts_atlas.alloc.texture_size.y + 1.0,
         );
 
         // HACK(eddyb) because `render_wh` can be larger than the `glyph.bounds`
