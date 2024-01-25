@@ -1,3 +1,5 @@
+use crate::file_dialogs::FileDialog;
+
 use {
     std::{
         rc::Rc,
@@ -743,4 +745,26 @@ impl MacosApp {
             cocoa_window.start_dragging(ns_event, items);
         };
     }*/
+
+
+    pub fn open_save_file_dialog(&mut self, settings: FileDialog)
+    {
+        println!("open save file dialog!");
+    }
+
+    pub fn open_select_file_dialog(&mut self, settings: FileDialog )
+    {
+        println!("open select file dialog!");
+    }
+
+    pub fn open_save_folder_dialog(&mut self,  settings: FileDialog)
+    {
+        println!("open save folder dialog!");
+    }
+
+    pub fn open_select_folder_dialog(&mut self, settings: FileDialog)
+    {
+        println!("open select folder dialog!");
+    }
+
 }
