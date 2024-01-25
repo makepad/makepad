@@ -121,6 +121,8 @@ live_design! {
                     <View>{flow: Right
                         loadbutton = <Button>{text:"Load"}
                         savebutton = <Button>{text:"Save"}
+                        loaddialogbutton = <Button>{text:"Load Dialog"}
+                        savedialogbutton = <Button>{text:"Save Dialog"}
                     }
                     <FishBlockEditor>{
                         flow: Overlay;
@@ -255,6 +257,14 @@ impl MatchEvent for App {
         if self.ui.button(id!(addblockbutton)).clicked(&actions) {
             let _ = self.document.add_block().is_ok();
             self.ui.widget(id!(patchedit)).redraw(cx);
+        }
+
+        if self.ui.button(id!(savedialogbutton)).clicked(&actions) {
+            cx.open_system_savefile_dialog();
+        }
+
+        if self.ui.button(id!(loaddialogbutton)).clicked(&actions) {
+           cx.open_system_openfile_dialog();
         }
     }
 }
