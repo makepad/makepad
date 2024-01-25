@@ -173,6 +173,8 @@ impl CxFontsAtlas {
                 cxfont.atlas_pages.clear();
             }
         }
+        self.alloc.todo.clear();
+        self.alloc.full = false;
         self.alloc.xpos = 0.;
         self.alloc.ypos = 0.;
         self.alloc.hmax = 0.;
@@ -212,6 +214,10 @@ impl<'a> Cx2d<'a> {
         let fonts_atlas_rc = self.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
+
+        if fonts_atlas.alloc.full {
+            fonts_atlas.reset_fonts_atlas();
+        }
 
         // Will be automatically filled after the first use.
         let mut reuse_sdfer_bufs = None;
