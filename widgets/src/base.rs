@@ -254,7 +254,7 @@ live_design!{
                 let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y);
                 let adjusted_pos = (self.pos * scale) + adjusted_pan;
 
-                if self.show_thumbnail > 0.0 {
+                if self.show_thumbnail > 0.5 {
                     return sample2d(self.thumbnail_texture, adjusted_pos).xyzw;
                 } else {
                     return sample2dOES(self.video_texture, adjusted_pos);
