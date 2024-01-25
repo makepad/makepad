@@ -1,5 +1,3 @@
-use crate::file_dialogs::FileDialog;
-
 use {
     std::{
         rc::Rc,
@@ -542,19 +540,19 @@ impl Cx {
                     get_macos_app_global().open_save_file_dialog(settings);
                 }
                 
-                CxOsOp::SelectFileDialog => 
+                CxOsOp::SelectFileDialog(settings) => 
                 {
-                    get_macos_app_global().open_select_file_dialog();                   
+                    get_macos_app_global().open_select_file_dialog(settings);                   
                 }
                 
-                CxOsOp::SaveFolderDialog => 
+                CxOsOp::SaveFolderDialog(settings) => 
                 {
-                    get_macos_app_global().open_save_folder_dialog();
+                    get_macos_app_global().open_save_folder_dialog(settings);
                 }
                 
-                CxOsOp::SelectFolderDialog => 
+                CxOsOp::SelectFolderDialog(settings) => 
                 {
-                    get_macos_app_global().open_select_folder_dialog();
+                    get_macos_app_global().open_select_folder_dialog(settings);
                 }
             }
         }
