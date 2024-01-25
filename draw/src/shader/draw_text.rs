@@ -68,8 +68,9 @@ live_design!{
                 // HACK(eddyb) harcoded atlas size (see asserts below).
                 let texel_coords = pos.xy * 4096.0;
                 s = clamp((s - (1.0 - self.sdf_cutoff)) * self.sdf_radius / scale + 0.5, 0.0, 1.0);
+            } else {
+                s = pow(s, self.curve);
             }
-            //s = pow(s, self.curve);
             let col = self.get_color(); 
             return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
         }
@@ -436,29 +437,28 @@ impl DrawText {
                     
                     let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                     
-                    // make w/h one pixel bigger
-                    let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
-                    let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 2.0;
-                    let (w,h) = if w <= 1.0{(0.0,0.0)}else {(w,h)};
+                    // HACK(eddyb) this is a different padding from the SDF padding,
+                    // this allows the glyph rasterization to avoid touching the
+                    // edges of the raster area, while the SDF padding exists for
+                    // e.g. bilinear sampling to have excess texels to sample.
+                    let pad_dpx = 2.0;
+                    let w_dpx = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + pad_dpx * 2.0;
+                    let h_dpx = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + pad_dpx * 2.0;
+                    let (w_dpx, h_dpx) = if w_dpx <= pad_dpx * 2.0{(0.0,0.0)}else { (w_dpx, h_dpx) };
                                         
-                    let tc = if let Some(tc) = atlas_page.atlas_glyphs.get_mut(&glyph_id){
-                        tc
-                    }
-                    else{
+                    let tc = *atlas_page.atlas_glyphs.entry(glyph_id).or_insert_with(|| {
                         // see if we can fit it
                         // allocate slot
-                        fonts_atlas.alloc.todo.push(CxFontsAtlasTodo {
+                        fonts_atlas.alloc.alloc_atlas_glyph(w_dpx, h_dpx, CxFontsAtlasTodo {
                             font_id,
                             atlas_page_id,
                             glyph_id,
-                        });
-                        
-                        atlas_page.atlas_glyphs.insert(
-                            glyph_id, 
-                            fonts_atlas.alloc.alloc_atlas_glyph(w, h),
-                        );
-                        atlas_page.atlas_glyphs.get_mut(&glyph_id).unwrap()
-                    };
+                        })
+                    });
+
+                    let pad = pad_dpx * self.font_scale / dpi_factor;
+                    let w = w_dpx * self.font_scale / dpi_factor;
+                    let h = h_dpx * self.font_scale / dpi_factor;
                     
                     let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x;
                     let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop;
@@ -467,8 +467,8 @@ impl DrawText {
                     //let scaled_min_pos_y = pos.y - delta_y;
                     self.font_t1 = tc.t1;
                     self.font_t2 = tc.t2;
-                    self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
-                    self.rect_size = dvec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor).into();
+                    self.rect_pos = dvec2(walk_x + delta_x - pad, pos.y + delta_y - pad).into();
+                    self.rect_size = dvec2(w, h).into();
                     self.char_depth = char_depth;
                     self.delta.x = delta_x as f32;
                     self.delta.y = delta_y as f32;
