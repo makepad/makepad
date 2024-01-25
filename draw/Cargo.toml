@@ -19,4 +19,4 @@ rustybuzz = { version = "0.8.0", git = "https://github.com/RazrFalcon/rustybuzz"
 unicode-bidi = "0.3"
 
 ab_glyph_rasterizer = "0.1.8"
-sdfer = "0.2.0"
+sdfer = "0.2.1"
