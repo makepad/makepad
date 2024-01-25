@@ -460,14 +460,15 @@ impl DrawText {
                     let w = w_dpx * self.font_scale / dpi_factor;
                     let h = h_dpx * self.font_scale / dpi_factor;
                     
-                    let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x;
-                    let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop;
+                    let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - pad;
+                    let delta_y = -(font_size_logical * self.font_scale * glyph.bounds.p_min.y - pad)
+                        + self.text_style.font_size * self.font_scale * self.text_style.top_drop;
                     // give the callback a chance to do things
                     //et scaled_min_pos_x = walk_x + delta_x;
                     //let scaled_min_pos_y = pos.y - delta_y;
                     self.font_t1 = tc.t1;
                     self.font_t2 = tc.t2;
-                    self.rect_pos = dvec2(walk_x + delta_x - pad, pos.y + delta_y - pad).into();
+                    self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
                     self.rect_size = dvec2(w, h).into();
                     self.char_depth = char_depth;
                     self.delta.x = delta_x as f32;
