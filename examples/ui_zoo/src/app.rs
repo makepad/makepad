@@ -44,7 +44,7 @@ live_design!{
 
 
     ZooDesc = <Label> {
-        margin: 0,
+        margin: {top: 10},
         padding: 0,
         spacing: 0,
         draw_text: {
@@ -87,7 +87,7 @@ live_design!{
             height: Fill
             draw_bg: {
                 fn pixel(self) -> vec4 {                   
-                    return #c;
+                    return #d;
                 }
             }
             
@@ -138,6 +138,57 @@ live_design!{
                              <ZooBlock>{draw_bg:{color: #ff0}}
                              <ZooBlock>{draw_bg:{color: #00f}}
                           }
+
+                          <ZooDesc>{text:"This view is bigger on the inside"}
+                          <View>
+                           {
+                            scroll_bars: <ScrollBars>{}
+                            width: 150
+                            height: 150
+                            flow: Right,
+                              show_bg: true,
+                              draw_bg:{ 
+                                  
+                                  fn pixel(self) -> vec4{
+                                  return #bbb
+                              }}         
+                              
+                              <View>{  
+                                show_bg: false,
+                                width: Fit,
+                                height: Fit,
+                              padding: 0
+                              spacing: 10
+                              flow: Down,                    
+                              <ZooBlock>{draw_bg:{color: #f00}}
+                              <ZooBlock>{draw_bg:{color: #ff0}}
+                              <ZooBlock>{draw_bg:{color: #00f}}
+                              }
+                              
+                              <View>{  
+                                show_bg: false,
+                                width: Fit,
+                                height: Fit,
+                              padding: 0
+                              spacing: 10
+                              flow: Down,                    
+                              <ZooBlock>{draw_bg:{color: #f00}}
+                              <ZooBlock>{draw_bg:{color: #ff0}}
+                              <ZooBlock>{draw_bg:{color: #00f}}
+                              }
+                              <View>{  
+                                show_bg: false,
+                                width: Fit,
+                                height: Fit,
+                              padding: 0
+                              spacing: 10
+                              flow: Down,                    
+                              <ZooBlock>{draw_bg:{color: #f00}}
+                              <ZooBlock>{draw_bg:{color: #ff0}}
+                              <ZooBlock>{draw_bg:{color: #00f}}
+                              }
+                           }
+
      
                 }   
 
@@ -200,11 +251,14 @@ live_design!{
 
                 <ZooHeader>{
                     title = {text:"Label"}
-                    <ZooDesc>{text:"Simple 1 line textbox"}
+                    <ZooDesc>
+                    {
+                        text:"Simple 1 line textbox"
+                    }
                    
-                    <Label> {
-                        text: "This is a small line of text"
-                        
+                    <Label> 
+                    {
+                        text: "This is a small line of text"                        
                     }
 
                     <Label> {
