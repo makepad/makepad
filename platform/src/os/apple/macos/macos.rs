@@ -1,3 +1,5 @@
+use crate::file_dialogs::FileDialog;
+
 use {
     std::{
         rc::Rc,
@@ -534,6 +536,26 @@ impl Cx {
                 CxOsOp::UnmuteVideoPlayback(_) => todo!(),
                 CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
                 CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
+
+                CxOsOp::SaveFileDialog(settings) => 
+                {
+                    get_macos_app_global().open_save_file_dialog(settings);
+                }
+                
+                CxOsOp::SelectFileDialog => 
+                {
+                    get_macos_app_global().open_select_file_dialog();                   
+                }
+                
+                CxOsOp::SaveFolderDialog => 
+                {
+                    get_macos_app_global().open_save_folder_dialog();
+                }
+                
+                CxOsOp::SelectFolderDialog => 
+                {
+                    get_macos_app_global().open_select_folder_dialog();
+                }
             }
         }
         EventFlow::Poll
