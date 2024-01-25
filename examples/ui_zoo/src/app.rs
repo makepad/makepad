@@ -3,6 +3,7 @@ use makepad_widgets::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
+    import makepad_draw::shader::std::*;
 
     ZooHeader = <View> {
         show_bg: true
@@ -11,16 +12,22 @@ live_design!{
         height: Fit
         flow: Down
          spacing: 10, padding: 15, margin:{bottom:10}
+         divider = <View>
+         {
+            width: Fill, height: 2
+            show_bg: true
+            draw_bg: {color: #ccc}
+        }
         title = <Label> {
             draw_text: {
-                color: #9
+                color: #f50
                 text_style: {
                     line_spacing:1.0
                     font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
                     font_size: 14
                 }
             }
-            text: "SlideTitle"
+            text: "Header"
         }
     }
 
@@ -31,7 +38,7 @@ live_design!{
         flow: Down, spacing: 10, padding: 0, margin: 20
         title = <Label> {
             draw_text: {
-                color: #2
+                color: #1
                 text_style: {
                     line_spacing:1.0
                     font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
@@ -92,6 +99,25 @@ live_design!{
             }
             
             body = <View>{
+
+
+                flow:Right
+                
+                width: Fill, 
+                height: Fill,
+                margin: 0 
+                padding: 0
+                spacing: 0
+                <View>{
+                    <FileTree>{
+                        <FileTreeNode>{text:"bleh"} 
+                        <Label>{text: "item"}
+                    }
+                    margin: 0
+                    width: 200
+                    show_bg: true
+                }
+                <View>{
                 flow: Down,
                 width: Fill, 
                 height: Fill,
@@ -218,73 +244,111 @@ live_design!{
 
 
                 <ZooHeader>{
-                    title = {text:"Button"}
-                    <ZooDesc>{text:"A small clickable region"}
-                   
-                     <Button> {
-                        text: "I can be clicked"
-                    }
-                     <IconButton> 
-                     {
-                            draw_icon: 
-                            {
-                                svg_file: (ICO_SEQ_SWEEP)
+                        title = {text:"Button"}
+                        <ZooDesc>{text:"A small clickable region"}
+                    
+                        <Button> {
+                            text: "I can be clicked"
+                        }
+                        <Button> 
+                        {
+
+                            draw_icon: {
+                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                color: #000;
+                                brightness: 0.8;
                             }
-                            icon_walk: {width: 15.0, height: Fit}
-                    }
-                     <Button> {
-                        text: "I can also be clicked, and I have an icon!"
-                    }
-                }   
+                            text:"I can have a lovely icon!"
 
+                             icon_walk: {width: 30, margin:14, height: Fit}
+                        }
+                        <Button> {
 
-                <ZooHeader>{
-                    title = {text:"TextInput"}
-                    <ZooDesc>{text:"Simple 1 line textbox"}
-                   
-                    <TextInput> {
-                        width: 100, height: 30
-                        text: "Click to count"
-                    }
-                }   
-
-
-                <ZooHeader>{
-                    title = {text:"Label"}
-                    <ZooDesc>
-                    {
-                        text:"Simple 1 line textbox"
-                    }
-                   
-                    <Label> 
-                    {
-                        text: "This is a small line of text"                        
-                    }
-
-                    <Label> {
-                        draw_text: 
-                        { 
-                            color: #00c  
-                            text_style:{font_size: 20
-                            font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}}
-                        },
-                        text: "You can style text using colors and fonts"                        
-                    }
-
-                    <Label> {
-                        draw_text: 
-                        { 
-                            fn get_color(self) ->vec4{
-                                return mix(#f0f, #0f0, self.pos.x)
+                            draw_bg: {
+                                fn pixel(self) -> vec4 {                                    
+                                    return #f40 + self.pressed * vec4(1,1,1,1)
+                                }
                             }
-                            color: #ffc  
-                            text_style:{font_size: 40
-                            font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}}
-                        },
-                        text: "Or even some pixelshaders"                        
-                    }
+                            draw_text: {
+                                fn get_color(self) -> vec4 {                                    
+                                    return #fff - vec4(0,.1,.4,0) *self.hover - self.pressed * vec4(1,1,1,0);
+                                }                             
+                            }
+                            
+                            text: "I can be styled!"
 
-                }                
+                        }
+                    }   
+
+
+                    <ZooHeader>{
+                        title = {text:"TextInput"}
+                        <ZooDesc>{text:"Simple 1 line textbox"}
+                    
+                        <TextInput> {
+                            width: 100, height: 30
+                            text: "Click to count"
+                        }
+                    }   
+
+
+                    <ZooHeader>{
+                        title = {text:"Label"}
+                        <ZooDesc>
+                        {
+                            text:"Simple 1 line textbox"
+                        }
+                    
+                        <Label> 
+                        {
+                            text: "This is a small line of text"                        
+                        }
+
+                        <Label> {
+                            draw_text: 
+                            { 
+                                color: #00c  
+                                text_style:{font_size: 20
+                                font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}}
+                            },
+                            text: "You can style text using colors and fonts"                        
+                        }
+
+                        <Label> {
+                            draw_text: 
+                            { 
+                                fn get_color(self) ->vec4{
+                                    return mix(#f0f, #0f0, self.pos.x)
+                                }
+                                color: #ffc  
+                                text_style:{font_size: 40
+                                font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}}
+                            },
+                            text: "Or even some pixelshaders"                        
+                        }
+
+                    }                
+
+                    <ZooHeader>{
+                        title = {text:"Slider"}
+                        <ZooDesc>
+                        {
+                            text:"A parameter dragger"
+                        }
+                    
+                        <Slider> 
+                        {
+                            draw_slider:{
+                            slider_type: Horizontal
+                            }
+                            text: "param"                        
+                        }
+
+                     
+
+                    }                
+
+                }
             }
         }
     }
