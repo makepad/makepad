@@ -74,6 +74,7 @@ pub enum CxOsOp {
     },
 
     PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
+    BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
     MuteVideoPlayback(LiveId),
@@ -493,6 +494,10 @@ impl Cx {
             autoplay,
             should_loop,
         ));
+    }
+
+    pub fn begin_video_playback(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::BeginVideoPlayback(video_id));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
