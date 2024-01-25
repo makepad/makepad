@@ -418,14 +418,11 @@ impl Video {
                     self.pause_playback(cx);
                 }
             }
-            Hit::FingerUp(fe) => {
-                if self.hold_to_pause && fe.was_tap() {
-                    if self.playback_state == PlaybackState::Playing {
-                        self.pause_playback(cx);
-                    } else if self.playback_state == PlaybackState::Paused {
-                        self.resume_playback(cx);
-                    }
+            Hit::FingerUp(_fe) => {
+                if self.hold_to_pause {
+                    self.resume_playback(cx);
                 }
+            }
             }
             _ => (),
         }
