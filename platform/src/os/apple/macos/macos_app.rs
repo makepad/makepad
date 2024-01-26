@@ -747,22 +747,22 @@ impl MacosApp {
     }*/
 
 
-    pub fn open_save_file_dialog(&mut self, settings: FileDialog)
+    pub fn open_save_file_dialog(&mut self, _settings: FileDialog)
     {
         println!("open save file dialog!");
     }
 
-    pub fn open_select_file_dialog(&mut self, settings: FileDialog )
+    pub fn open_select_file_dialog(&mut self, _settings: FileDialog )
     {
         println!("open select file dialog!");
     }
 
-    pub fn open_save_folder_dialog(&mut self,  settings: FileDialog)
+    pub fn open_save_folder_dialog(&mut self,  _settings: FileDialog)
     {
         println!("open save folder dialog!");
     }
 
-    pub fn open_select_folder_dialog(&mut self, settings: FileDialog)
+    pub fn open_select_folder_dialog(&mut self, _settings: FileDialog)
     {
         println!("open select folder dialog!");
     }
