@@ -4,7 +4,7 @@ use {
         io::prelude::*,
         mem,
         ptr,
-        ffi::CStr,
+        ffi::{c_char, CStr},
     },
     self::super::gl_sys,
     crate::{
@@ -807,7 +807,7 @@ impl CxOsDrawShader {
 
 fn get_gl_string(key: gl_sys::types::GLenum) -> String {
     unsafe {
-        let string_ptr = gl_sys::GetString(key) as *const u8;
+        let string_ptr = gl_sys::GetString(key) as *const c_char;
         CStr::from_ptr(string_ptr).to_string_lossy().into_owned()
     }
 }
