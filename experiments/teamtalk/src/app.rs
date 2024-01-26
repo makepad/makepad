@@ -150,6 +150,10 @@ impl App {
         // open up port udp X and forward packets
     }
     
+    pub fn send_hue_colors(&mut self, cx:&mut Cx){
+        
+    }
+    
     pub fn start_artnet_client(&mut self, cx:&mut Cx){
         let socket = UdpSocket::bind("0.0.0.0:6454").unwrap();
         let broadcast_addr = "255.255.255.255:6454";
@@ -244,7 +248,7 @@ impl App {
                 // lets poll midi
                 while let Some((_port,data)) = midi_input.receive(){
                     match data.decode() {
-                        MidiEvent::ControlChange(cc) => { 
+                        MidiEvent::ControlChange(cc) => {
                             let v = cc.value as f32 / 127.0;
                             log!("{}", cc.param);
                             match cc.param{
