@@ -84,7 +84,7 @@ pub struct App {
         Machine::new("DESKTOP-2:8188", id_lut!(m2)),
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
         Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
-        Machine::new("10.0.0.116:8188", id_lut!(m1)),
+        Machine::new("192.168.1.78:8188", id_lut!(m1)),
        /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
     ])] machines: Vec<Machine>,
     
@@ -105,6 +105,8 @@ pub struct App {
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust(true)] take_photo:bool,
+    #[rust(0.5)] dial1: f32,
+    #[rust(0.5)] dial2: f32
     //#[rust(Instant::now())] last_flip: Instant
 }
 
@@ -140,6 +142,34 @@ impl App {
             width,
             height
         );
+        // lets fix the pixels
+        for y in 0..height{
+            for x in 0..width{
+                // lets grab rgb into a Vec4
+                let r = out[y*width*3 + x*3 + 0];
+                let g = out[y*width*3 + x*3 + 1];
+                let b = out[y*width*3 + x*3 + 2];
+                let c = Vec4{x:r as f32 / 255.0, y:g as f32 / 255.0,z:b as f32 / 255.0,w:1.0};
+                let d1 = (self.dial1-0.5)*2.0;
+                let d2 = (self.dial2*5.0).powf(2.0);
+                let shift = vec4(d1,d1,d1,0.0);
+                let scale = vec4(d2,d2,d2,1.0);
+                let c = (c - shift)*scale + shift;
+                //let c = Vec4::from_lerp(vec4(c.x,c.x,c.x,1.0), c, 1.0 - self.dial2);
+                out[y*width*3 + x*3 + 0] = (c.x * 255.0).min(255.0).max(0.0) as u8;
+                out[y*width*3 + x*3 + 1] = (c.y * 255.0).min(255.0).max(0.0) as u8;
+                out[y*width*3 + x*3 + 2] = (c.z * 255.0).min(255.0).max(0.0) as u8;
+            }
+        }
+        /*
+        let d1 = (self.dial1-0.5)*2.0;
+        let d2 = pow(self.dial2*10.0,2.0);
+        let shift = vec4(d1,d1,d1,0.0)
+        let scale = vec4(d2,d2,d2,1.0)
+        let c = (self.get_video_pixel(self.pos)-shift)*scale + shift;
+        return mix(vec4(c.x, c.x,c.x, 1.0), c, 1.0-self.dial2)
+        */
+        
         self.video_input[0].swap_vec_u32(cx, &mut buf);
         // lets encode it
         let mut jpeg = Vec::new();
@@ -528,16 +558,45 @@ impl MatchEvent for App {
                         format!("{} ({}:1.0)", out, what)
                     }
                     let pad_table = [
-                        "bright colours"
+                        "esoteric", //1
+                        "hermetism",
+                        "ecological",
+                        "color explosions",
+                        "psychedelic colours",
+                        "parametric",
+                        "nature",
+                        "fractals",
                     ];
                     let note_table = [
-                        "disney pixar"
+                        "mushrooms",
+                        "slime mold",
+                        "jewelry",
+                        "ouroboros",
+                        "space chicken",
+                        "books",
+                        "architecture",
+                        "underwater creatures",
+                        "consciousness",
+                        "amsterdam",
+                        "robert fludd",
+                        "dante's inferno",
+                        "western esotericism",
+                        "rembrandt",
+                        "rome",
+                        "sacred geometry",
+                        "athens",
+                        "classical egypt",
+                        "classical greece",
+                        "pythagoras",
+                        "cornelius drebbel",
+                        "cymatics",
+                        "spider web",
                     ];
                     let pads = [
                         43,48,50,49,36,38,42,46
                     ];
                     let notes = [
-                        48,50,52,53,55,57,59,60,62,64,65,67,69,71,72,
+                        48,50,52,53,55,57,59,60,62,64,65,67,69,71,
                         49,51,54,56,58,61,63,66,68,70,
                     ];
                     let shift = 48;
@@ -555,6 +614,9 @@ impl MatchEvent for App {
                             let text = toggle_block(&text, pad_table[pos]);
                             self.ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
                         }
+                    }
+                    if n.note_number == 72 - shift{
+                       self.ui.widget(id!(positive)).set_text_and_redraw(cx, "");
                     }
                 }
                 MidiEvent::ControlChange(cc) => {
@@ -608,7 +670,7 @@ impl MatchEvent for App {
                     
                     match cc.param{
                         20=>{
-                            self.ui.widget(id!(settings_denoise.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*0.5+0.5));
+                            self.ui.widget(id!(settings_denoise.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*0.8+0.2));
                         }
                         21=>{
                             self.ui.widget(id!(settings_cfg.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*7.0+1.0));
@@ -626,10 +688,20 @@ impl MatchEvent for App {
                             weight(&self.ui, 2, cc.value, cx);
                         }
                         27=>{
-                            weight(&self.ui, 3, cc.value, cx);
+                            let val = cc.value as f32 / 127.0;
+                            self.dial2 = val;
+                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+                                draw_bg:{dial2:(val)}
+                            });
+                            //weight(&self.ui, 3, cc.value, cx);
                         }
                         23=>{
-                            weight(&self.ui, 4, cc.value, cx);
+                            let val = cc.value as f32 / 127.0;
+                            self.dial1 = val;
+                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+                                draw_bg:{dial1:(val)}
+                            });
+                            //weight(&self.ui, 4, cc.value, cx);
                         }
                         _=>()
                     }
@@ -762,6 +834,8 @@ impl MatchEvent for App {
     fn handle_key_down(&mut self, cx:&mut Cx, event:&KeyEvent){
         match event{
             KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..}=>{
+                return
+                /*
                 self.clear_todo(cx);
                 if modifiers.logo || modifiers.control {
                     self.render(cx, true);
@@ -771,7 +845,7 @@ impl MatchEvent for App {
                 }
                 else {
                     self.render(cx, false);
-                }
+                }*/
             }
             KeyEvent {is_repeat: false, key_code: KeyCode::Backspace, modifiers, ..}=>{
                 if modifiers.logo {
