@@ -109,7 +109,7 @@ impl MatchEvent for App{
     }
     
     fn handle_audio_devices(&mut self, cx:& mut Cx, devices:&AudioDevicesEvent){
-        for desc in &devices.descs{
+        for _desc in &devices.descs{
             //println!("{}", desc)
         }
         cx.use_audio_inputs(&devices.default_input());
@@ -146,6 +146,10 @@ pub const DMXOUTPUT_HEADER: [u8;18] = [
 ];
 
 impl App {
+    pub fn start_forza_forward(&mut self, _cx:&mut Cx){
+        // open up port udp X and forward packets
+    }
+    
     pub fn start_artnet_client(&mut self, cx:&mut Cx){
         let socket = UdpSocket::bind("0.0.0.0:6454").unwrap();
         let broadcast_addr = "255.255.255.255:6454";
@@ -155,13 +159,40 @@ impl App {
         
         #[derive(Debug,Default,SerRon, DeRon)]
         struct State{ 
-            fade:[f32;8],
-            dial:[f32;8], 
-            roto:[f32;8]  
+            fade:[f32;9],
+            dial_a:[f32;8], 
+            dial_b:[f32;8], 
+            dial_c:[f32;8], 
         }
+        #[derive(Debug,Clone,Default)]
+        struct Buttons{
+            mute:[bool;9],
+            rec:[bool;9],
+            solo:bool,
+            bank_left:bool,
+            bank_right:bool
+        }
+        impl Buttons{
+            fn delta(old:&Buttons, new:&Buttons)->Self{
+                let mut mute = [false;9];
+                let mut rec = [false;9];
+                for i in 0..9{
+                    mute[i] = !old.mute[i] && new.mute[i];
+                    rec[i] = !old.rec[i] && new.rec[i];
+                }
+                Self{
+                    mute,
+                    rec,
+                    solo: !old.solo && new.solo,
+                    bank_left: !old.bank_left && new.bank_left,
+                    bank_right: !old.bank_right && new.bank_right
+                }
+            }
+        }
+        
         let mut state = State::default();
+        
         if let Ok(result) = std::fs::read_to_string("dmx.ron"){
-            State::deserialize_ron(&result).unwrap();
             if let Ok(load) = State::deserialize_ron(&result){
                 log!("LOADED");
                 state = load   
@@ -171,6 +202,9 @@ impl App {
         let mut midi_input = cx.midi_input();
         std::thread::spawn(move || {
             let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
+                        
+            let mut new_buttons = Buttons::default();
+            let mut old_buttons = Buttons::default();
             
             fn map_wargb(val:f32, fade:f32, out:&mut [u8], bases: &[usize]){
                 let colors = ["fff", "ff7", "f00","ff0","0f0","0ff","00f","f0f"];
@@ -204,55 +238,68 @@ impl App {
             for i in 0..DMXOUTPUT_HEADER.len(){universe[i] = DMXOUTPUT_HEADER[i];}
             let mut counter = 0;
             loop {
-                while let Ok((length, _addr)) = socket.recv_from(&mut buffer){
+                while let Ok((_length, _addr)) = socket.recv_from(&mut buffer){
                     //log!("READ {:x?}",&buffer[0..length]);
-                }
+                } 
                 // lets poll midi
-                while let Some((port,data)) = midi_input.receive(){
-                    
+                while let Some((_port,data)) = midi_input.receive(){
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => { 
-                            if port.0.0 == 0x8b6cdab3a9fcbc0f{
-                                log!("{:?}", cc);
-                                match cc.param{
-                                    20..=27=>{
-                                        state.roto[cc.param as usize - 20] = cc.value as f32 / 127.0;
-                                    }
-                                    _=>()
-                                }
-                            }
-                            else{
-                                match cc.param{
-                                    2..=6=>{state.fade[cc.param as usize - 2] = cc.value as f32 / 127.0},
-                                    8..=9=>{state.fade[cc.param as usize - 3] = cc.value as f32 / 127.0},
-                                    12=>{state.fade[7] = cc.value as f32 / 127.0},
-                                    13..=20=>{
-                                        state.dial[cc.param as usize - 13] = cc.value as f32 / 127.0;
-                                    }
-                                    21..=53=>{ // button grid
-                                        log!("{}", cc.value)
-                                    }
-                                    62=>{} // rew
-                                    63=>{} // stop
-                                    80=>{} // play
-                                    81=>{} // next
-                                    58=>{} // ffwd left
-                                    59=>{} // ffwd right
-                                    60=>{} // left
-                                    61=>{} // right
-                                    54=>{} // 
-                                    55=>{}
-                                    56=>{}
-                                    57=>{}
-                                    _=>{
-                                        log!("{} {}", cc.param, cc.value);
-                                    }
+                            let v = cc.value as f32 / 127.0;
+                            log!("{}", cc.param);
+                            match cc.param{
+                                16=>state.dial_a[0] = v,
+                                17=>state.dial_b[0] = v,
+                                18=>state.dial_c[0] = v,
+                                19=>state.fade[0] = v,
+                                20=>state.dial_b[1] = v,
+                                21=>state.dial_c[1] = v,
+                                22=>state.dial_c[1] = v,
+                                23=>state.fade[1] = v,
+                                24=>state.dial_b[2] = v,
+                                25=>state.dial_c[2] = v,
+                                26=>state.dial_c[2] = v,
+                                27=>state.fade[2] = v,
+                                28=>state.dial_b[3] = v,
+                                29=>state.dial_c[3] = v,
+                                30=>state.dial_c[3] = v,
+                                31=>state.fade[3] = v,                               
+                                46=>state.dial_b[4] = v,
+                                47=>state.dial_c[4] = v,
+                                48=>state.dial_c[4] = v,
+                                49=>state.fade[4] = v, 
+                                50=>state.dial_b[5] = v,
+                                51=>state.dial_c[5] = v,
+                                52=>state.dial_c[5] = v,
+                                53=>state.fade[5] = v,
+                                54=>state.dial_b[6] = v,
+                                55=>state.dial_c[6] = v,
+                                56=>state.dial_c[6] = v,
+                                57=>state.fade[6] = v,
+                                58=>state.dial_b[7] = v,
+                                59=>state.dial_c[7] = v,
+                                60=>state.dial_c[7] = v,
+                                61=>state.fade[7] = v,
+                                62=>state.fade[8] = v,
+                                _=>{
+                                    log!("{} {}", cc.param, cc.value);
                                 }
                             }
                         }
-                        _=>()
+                        MidiEvent::Note(n)=>match n.note_number{
+                            48..=55=>new_buttons.mute[n.note_number as usize -48] = n.is_on,
+                            56..=63=>new_buttons.rec[n.note_number as usize -56] = n.is_on,
+                            25=>new_buttons.bank_left = n.is_on,
+                            26=>new_buttons.bank_right = n.is_on,
+                            27=>new_buttons.solo = n.is_on,
+                            x=>{log!("{}",x)}
+                        }
+                        x=>log!("{:?}",x)
                     }
                 }
+                let _buttons = Buttons::delta(&old_buttons,&new_buttons);
+                old_buttons = new_buttons.clone();
+                
                 universe[12] = counter as u8;
                 if counter > 255{ counter = 0}
                 counter += 1;
@@ -271,11 +318,11 @@ impl App {
                 // KITCHEN STRIP 35 (C)
                 // DESK 38 (B) 
                 // TABLE 41 (B)
-                map_wargb(state.dial[0], state.fade[0], dmx, &[2, 8, 11, 23]); // slider 1
-                map_wargb(state.dial[1], state.fade[1], dmx, &[5, 14, 32, 41, 38]); // slider 2
-                map_wargb(state.dial[2], state.fade[2], dmx, &[17, 20, 26, 29, 35]); // slider 3
+                map_wargb(state.dial_c[0], state.fade[0], dmx, &[2, 8, 11, 23]); // slider 1
+                map_wargb(state.dial_c[1], state.fade[1], dmx, &[5, 14, 32, 41, 38]); // slider 2
+                map_wargb(state.dial_c[2], state.fade[2], dmx, &[17, 20, 26, 29, 35]); // slider 3
                 
-                map_wargb(state.dial[3], 1.0, dmx, &[110+2-1]); // RGB laser color
+                map_wargb(state.dial_c[3], 1.0, dmx, &[110+2-1]); // RGB laser color
                 // lets set the laser mode with the slider
                 let rgb_laser_addr = 110;
                 match (state.fade[3] * 3.0) as usize{
@@ -296,7 +343,7 @@ impl App {
                 }
                 // overload the other laser onto the this laser
                 let rgb_laser_addr = 110;
-                map_wargb(state.dial[3], 1.0, dmx, &[rgb_laser_addr+2-1]); // RGB laser color
+                map_wargb(state.dial_c[3], 1.0, dmx, &[rgb_laser_addr+2-1]); // RGB laser color
                 match (state.fade[3] * 4.0) as usize{
                     0=>{ // laser off
                         dmx_u8(0, dmx, &[rgb_laser_addr], 1);
@@ -320,18 +367,18 @@ impl App {
                 dmx_f32((state.fade[3]-0.5).max(0.0)*2.0, dmx, &[multi_fx_addr], 3);
                 dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 1);
                 dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 2);
-                dmx_f32(state.dial[4], dmx, &[multi_fx_addr], 4);
+                dmx_f32(state.dial_c[4], dmx, &[multi_fx_addr], 4);
                 let rgb_strobe = 120;
                 
-                map_wargb(state.dial[5], state.fade[5], dmx, &[rgb_strobe+3-1]); // Strobe RGB
+                map_wargb(state.dial_c[5], state.fade[5], dmx, &[rgb_strobe+3-1]); // Strobe RGB
                 dmx_f32(1.0, dmx, &[rgb_strobe], 1);
                 dmx_f32(1.0-(state.fade[5].max(0.5).min(1.0)-0.5)*2.0, dmx, &[rgb_strobe], 10);
                 
                 dmx_f32(state.fade[6]*10.0, dmx, &[rgb_strobe], 6);
                 dmx_f32(state.fade[6], dmx, &[rgb_strobe], 8);
-                dmx_f32(state.dial[6], dmx, &[rgb_strobe], 7);
-                dmx_f32(state.dial[6], dmx, &[rgb_strobe], 11);
-                dmx_f32(state.dial[6], dmx, &[rgb_strobe], 9);
+                dmx_f32(state.dial_c[6], dmx, &[rgb_strobe], 7);
+                dmx_f32(state.dial_c[6], dmx, &[rgb_strobe], 11);
+                dmx_f32(state.dial_c[6], dmx, &[rgb_strobe], 9);
                 
                 // and finally the moving head
                 let spot = 200;
@@ -339,17 +386,17 @@ impl App {
                 //dmx_f32(state.fade[7], dmx, &[spot], 22);
                 //dmx_f32(state.dial[7], dmx, &[spot], 23);
                 
-                dmx_f32(state.roto[0], dmx, &[spot], 1);
-                dmx_f32(state.roto[1], dmx, &[spot], 3);
-                dmx_f32(state.roto[2], dmx, &[spot], 14);
-                map_wargb(state.roto[3], 1.0, dmx, &[spot+16-1]); // Strobe RGB
+                dmx_f32(state.dial_a[0], dmx, &[spot], 1);
+                dmx_f32(state.dial_a[1], dmx, &[spot], 3);
+                dmx_f32(state.dial_a[2], dmx, &[spot], 14); 
+                map_wargb(state.dial_c[3], 1.0, dmx, &[spot+16-1]); // Strobe RGB
                 
-                dmx_f32(state.roto[4], dmx, &[spot], 12);
+                dmx_f32(state.dial_a[4], dmx, &[spot], 12);
                 
-                dmx_f32(state.roto[5], dmx, &[spot], 13);
-                dmx_f32(state.roto[6], dmx, &[spot], 10);
+                dmx_f32(state.dial_a[5], dmx, &[spot], 13);
+                dmx_f32(state.dial_a[6], dmx, &[spot], 10);
                                                 
-                dmx_f32(state.roto[7], dmx, &[spot], 8);
+                dmx_f32(state.dial_a[7], dmx, &[spot], 8);
                 //map_wargb(state.dial[7], 1.0, dmx, &[spot + 16 - 1]); // Strobe RGB
                 //dmx_f32(state.fade[7], dmx, &[spot], 6);
                                 

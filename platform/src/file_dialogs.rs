@@ -1,5 +1,5 @@
 // mildly stripped down version of native_dialog_rs dialog interface.
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 
 
 /// Represents a set of file extensions and their description.
