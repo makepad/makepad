@@ -241,6 +241,7 @@ impl App {
                         
             for i in 0..DMXOUTPUT_HEADER.len(){universe[i] = DMXOUTPUT_HEADER[i];}
             let mut counter = 0;
+            let mut clock = 0.0f64;
             loop {
                 while let Ok((_length, _addr)) = socket.recv_from(&mut buffer){
                     //log!("READ {:x?}",&buffer[0..length]);
@@ -250,38 +251,37 @@ impl App {
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => {
                             let v = cc.value as f32 / 127.0;
-                            log!("{}", cc.param);
                             match cc.param{
                                 16=>state.dial_a[0] = v,
                                 17=>state.dial_b[0] = v,
                                 18=>state.dial_c[0] = v,
                                 19=>state.fade[0] = v,
-                                20=>state.dial_b[1] = v,
-                                21=>state.dial_c[1] = v,
+                                20=>state.dial_a[1] = v,
+                                21=>state.dial_b[1] = v,
                                 22=>state.dial_c[1] = v,
                                 23=>state.fade[1] = v,
-                                24=>state.dial_b[2] = v,
-                                25=>state.dial_c[2] = v,
+                                24=>state.dial_a[2] = v,
+                                25=>state.dial_b[2] = v,
                                 26=>state.dial_c[2] = v,
                                 27=>state.fade[2] = v,
-                                28=>state.dial_b[3] = v,
-                                29=>state.dial_c[3] = v,
+                                28=>state.dial_a[3] = v,
+                                29=>state.dial_b[3] = v,
                                 30=>state.dial_c[3] = v,
                                 31=>state.fade[3] = v,                               
-                                46=>state.dial_b[4] = v,
-                                47=>state.dial_c[4] = v,
+                                46=>state.dial_a[4] = v,
+                                47=>state.dial_b[4] = v,
                                 48=>state.dial_c[4] = v,
                                 49=>state.fade[4] = v, 
-                                50=>state.dial_b[5] = v,
-                                51=>state.dial_c[5] = v,
+                                50=>state.dial_a[5] = v,
+                                51=>state.dial_b[5] = v,
                                 52=>state.dial_c[5] = v,
                                 53=>state.fade[5] = v,
-                                54=>state.dial_b[6] = v,
-                                55=>state.dial_c[6] = v,
+                                54=>state.dial_a[6] = v,
+                                55=>state.dial_b[6] = v,
                                 56=>state.dial_c[6] = v,
                                 57=>state.fade[6] = v,
-                                58=>state.dial_b[7] = v,
-                                59=>state.dial_c[7] = v,
+                                58=>state.dial_a[7] = v,
+                                59=>state.dial_b[7] = v,
                                 60=>state.dial_c[7] = v,
                                 61=>state.fade[7] = v,
                                 62=>state.fade[8] = v,
@@ -306,6 +306,7 @@ impl App {
                 
                 universe[12] = counter as u8;
                 if counter > 255{ counter = 0}
+                clock += 1.0/44.0;
                 counter += 1;
                 let dmx = &mut universe[DMXOUTPUT_HEADER.len()..];
                 // RIGHT KITCHEN 1 (A)
@@ -322,9 +323,9 @@ impl App {
                 // KITCHEN STRIP 35 (C)
                 // DESK 38 (B) 
                 // TABLE 41 (B)
-                map_wargb(state.dial_c[0], state.fade[0], dmx, &[2, 8, 11, 23]); // slider 1
-                map_wargb(state.dial_c[1], state.fade[1], dmx, &[5, 14, 32, 41, 38]); // slider 2
-                map_wargb(state.dial_c[2], state.fade[2], dmx, &[17, 20, 26, 29, 35]); // slider 3
+                map_wargb(state.dial_c[0], state.fade[0]*state.fade[8], dmx, &[2, 8, 11, 23]); // slider 1
+                map_wargb(state.dial_c[1], state.fade[1]*state.fade[8], dmx, &[5, 14, 32, 41, 38]); // slider 2
+                map_wargb(state.dial_c[2], state.fade[2]*state.fade[8], dmx, &[17, 20, 26, 29, 35]); // slider 3
                 
                 map_wargb(state.dial_c[3], 1.0, dmx, &[110+2-1]); // RGB laser color
                 // lets set the laser mode with the slider
@@ -380,27 +381,42 @@ impl App {
                 
                 dmx_f32(state.fade[6]*10.0, dmx, &[rgb_strobe], 6);
                 dmx_f32(state.fade[6], dmx, &[rgb_strobe], 8);
-                dmx_f32(state.dial_c[6], dmx, &[rgb_strobe], 7);
-                dmx_f32(state.dial_c[6], dmx, &[rgb_strobe], 11);
-                dmx_f32(state.dial_c[6], dmx, &[rgb_strobe], 9);
-                
+                dmx_f32(state.dial_b[0], dmx, &[rgb_strobe], 7);
+                dmx_f32(state.dial_b[1], dmx, &[rgb_strobe], 11);
+                dmx_f32(state.dial_b[2], dmx, &[rgb_strobe], 9);
+                dmx_f32(state.dial_b[3], dmx, &[rgb_strobe], 13);
+                                
                 // and finally the moving head
-                let spot = 200;
-                dmx_f32(1.0, dmx, &[spot], 6);
-                //dmx_f32(state.fade[7], dmx, &[spot], 22);
-                //dmx_f32(state.dial[7], dmx, &[spot], 23);
+                let spot1 = 200;
+                let spot2 = 250;
+                dmx_f32(state.fade[7], dmx, &[spot1, spot2], 6);
+                dmx_f32(state.dial_a[0], dmx, &[spot1], 1);
+                dmx_f32(state.dial_a[0], dmx, &[ spot2], 1);
+                dmx_f32(state.dial_a[1], dmx, &[spot1, spot2], 3);
+                dmx_f32(state.dial_a[2], dmx, &[spot1, spot2], 14); 
+                map_wargb(state.dial_a[3], 1.0, dmx, &[spot1+16-1, spot2+16-1]); // Strobe RGB
                 
-                dmx_f32(state.dial_a[0], dmx, &[spot], 1);
-                dmx_f32(state.dial_a[1], dmx, &[spot], 3);
-                dmx_f32(state.dial_a[2], dmx, &[spot], 14); 
-                map_wargb(state.dial_c[3], 1.0, dmx, &[spot+16-1]); // Strobe RGB
+                dmx_f32(state.dial_a[4], dmx, &[spot1, spot2], 12);
                 
-                dmx_f32(state.dial_a[4], dmx, &[spot], 12);
-                
-                dmx_f32(state.dial_a[5], dmx, &[spot], 13);
-                dmx_f32(state.dial_a[6], dmx, &[spot], 10);
+                dmx_f32(state.dial_a[5], dmx, &[spot1, spot2], 13);
+                dmx_f32(state.dial_a[6], dmx, &[spot1, spot2], 10);
                                                 
-                dmx_f32(state.dial_a[7], dmx, &[spot], 8);
+                dmx_f32(state.dial_a[7], dmx, &[spot1, spot2], 8);
+                
+                // smoke machine
+                let smoke = 300;
+                // ok so depending on the state of c_[7] we do a percentage of a 
+                let slot = 101.0f64;
+                let needed = slot * state.dial_c[7] as f64;
+                let t = clock.rem_euclid(slot);
+                if t < needed{
+                    dmx_f32(1.0, dmx, &[smoke], 1);
+                }
+                else{
+                    dmx_f32(0.0, dmx, &[smoke], 1);
+                }
+                // in time modulus 
+                
                 //map_wargb(state.dial[7], 1.0, dmx, &[spot + 16 - 1]); // Strobe RGB
                 //dmx_f32(state.fade[7], dmx, &[spot], 6);
                                 
