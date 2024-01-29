@@ -81,7 +81,7 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
     else if let Some(class) = parser.eat_any_ident(){
         let class_id = LiveId::from_str_with_lut(&class).unwrap().0;
         // could be local class or enum
-        if parser.eat_double_colon_destruct(){
+        /*if parser.eat_double_colon_destruct(){
             let variant = parser.expect_any_ident()?;
             let variant_id = LiveId::from_str_with_lut(&variant).unwrap().0;
             // now check if we have a , eot or ( or {
@@ -120,7 +120,8 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
                 return Err(error("Not a valid enum type"));
             }
         }
-        else if parser.is_brace(){ 
+        else */
+        if parser.is_brace(){ 
             tb.add("LiveNode{").stream(Some(node_start.clone())).add(",value:LiveValue::Clone(");
             tb.add("LiveId(").suf_u64(class_id).add("))},");
             parser.open_group();
@@ -134,10 +135,16 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
             tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Bool(false)},");
         }
         else{
-            tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Id(");
-            tb.add("LiveId(").suf_u64(class_id).add("))},");
+            if class.chars().next().unwrap().is_uppercase(){
+                tb.add("LiveNode{").stream(Some(node_start)).add(",value:BareEnum::Id(");
+                tb.add("LiveId(").suf_u64(class_id).add("))},");
+            }
+            else{
+                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Id(");
+                tb.add("LiveId(").suf_u64(class_id).add("))},");
+            }
         }
-    }
+}
     else if parser.eat_punct_alone('#'){ // coLor!
         // ok we now eat an ident
         let color = parser.expect_any_ident()?;
