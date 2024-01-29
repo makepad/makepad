@@ -272,6 +272,12 @@ impl LiveHook for Video {
 
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         self.thumbnail_texture = Some(Texture::new(cx));
+
+        let target_w = self.walk.width.fixed_or_zero();
+        let target_h = self.walk.height.fixed_or_zero();
+        self.draw_bg
+            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
+
         if self.show_thumbnail_before_playback {
             self.load_thumbnail_image(cx);
             self.draw_bg
@@ -400,11 +406,6 @@ impl Video {
 
         self.draw_bg
             .set_uniform(cx, id!(source_size), &[self.video_width as f32, self.video_height as f32]);
-        
-        let target_w = self.walk.width.fixed_or_zero();
-        let target_h = self.walk.height.fixed_or_zero();
-        self.draw_bg
-            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
 
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);
@@ -494,7 +495,9 @@ impl Video {
     }
 
     fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
-        if self.playback_state != PlaybackState::Unprepared && self.playback_state != PlaybackState::CleaningUp {
+        if self.playback_state != PlaybackState::Unprepared 
+            && self.playback_state != PlaybackState::Preparing
+            && self.playback_state != PlaybackState::CleaningUp {
             cx.cleanup_video_playback_resources(self.id);
         }
         self.playback_state = PlaybackState::CleaningUp;
