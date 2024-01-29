@@ -43,7 +43,9 @@ pub struct Button {
 impl Widget for Button {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        self.animator_handle_event(cx, event);
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+        }
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 if self.grab_key_focus {

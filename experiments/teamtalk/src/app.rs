@@ -366,7 +366,7 @@ impl App {
                     3=>{
                         dmx_u8(0, dmx, &[rgb_laser_addr], 1);
                     }
-                    _=>{}
+                    _=>{} 
                 }
                 let multi_fx_addr = 100;
                 dmx_f32((state.fade[3]-0.5).max(0.0)*2.0, dmx, &[multi_fx_addr], 3);
