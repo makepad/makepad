@@ -42,6 +42,7 @@ pub trait MatchEvent{
     
     
     fn handle_draw(&mut self, _cx: &mut Cx, _e:&DrawEvent){}
+    fn handle_timer(&mut self, _cx: &mut Cx, _e:&TimerEvent){}
     fn handle_draw_2d(&mut self, _cx: &mut Cx2d){}
     fn handle_key_down(&mut self, _cx: &mut Cx, _e:&KeyEvent){}
     fn handle_key_up(&mut self, _cx: &mut Cx, _e:&KeyEvent){}
@@ -53,6 +54,7 @@ pub trait MatchEvent{
             Event::Resume=>self.handle_resume(cx),
             Event::Signal=>self.handle_signal(cx),
             Event::AppGotFocus=>self.handle_app_got_focus(cx),
+            Event::Timer(te)=>self.handle_timer(cx, te),
             Event::AppLostFocus=>self.handle_app_lost_focus(cx),
             Event::NextFrame(e)=>self.handle_next_frame(cx, e),
             Event::Actions(e)=>self.handle_actions(cx,e),

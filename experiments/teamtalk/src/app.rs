@@ -14,6 +14,7 @@ use {
     std::sync::Arc,
     std::net::UdpSocket,
     std::time::{Duration},
+    std::collections::HashMap
 };
 
 // We dont have a UI yet 
@@ -61,6 +62,16 @@ pub struct App {
     #[live] store: Arc<Store>,
     #[rust] volume_changed_by_ui: SignalFromUI,
     #[rust] volume_changed_by_network: SignalToUI,
+    #[rust] hue_light_change: ToUIReceiver<(usize,HueLight)>,
+    #[rust] hue_light_last: HashMap<usize, HueLight>,
+    #[rust] hue_light_set: HashMap<usize, HueLight>,
+    #[rust] hue_poll: Timer,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum HueLight{
+    Switch{on: bool},
+    Color{on: bool, hue: f32, sat: f32, val: f32}
 }
 
 impl LiveRegister for App {
@@ -83,7 +94,6 @@ impl App{
 
 impl MatchEvent for App{
     fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
-        log!("MIDI PORTS");
         cx.use_midi_inputs(&ports.all_inputs());
     }
     
@@ -107,11 +117,52 @@ impl MatchEvent for App{
         self.start_artnet_client(cx);
         self.store_to_widgets(cx);
         self.fetch_hue_lights(cx);
+        self.hue_poll = cx.start_interval(0.1);
+    }
+    
+    fn handle_timer(&mut self, cx:&mut Cx, e:&TimerEvent){
+        // lets remove ids out of the hue light set one at a time
+        if self.hue_poll.is_timer(e).is_some(){
+            if let Some(key) = self.hue_light_set.keys().next(){
+                let key = key.clone();
+                let light = self.hue_light_set.remove(&key).unwrap();
+                // lets set the light
+                let url = format!("https://{}/api/{}/lights/{}/state", HUE_BRIDGE, HUE_KEY, key);
+                let mut request = HttpRequest::new(url, HttpMethod::PUT);
+                request.set_header("Content-Type".to_string(), "application/json".to_string());
+                match light{
+                    HueLight::Color{on, hue, sat, val}=>{
+                        let ws = format!("{{\"on\":{}, \"sat\":{}, \"bri\":{},\"hue\":{}}}",
+                            on,
+                            (sat*255.0) as u32,
+                            (val*255.0) as u32,
+                            (hue*65535.0) as u32
+                        );
+                        request.set_body(ws.as_bytes().to_vec());
+                    }
+                    HueLight::Switch{on}=>{
+                        let ws = format!("{{\"on\":{}}}",
+                        on,
+                    );
+                    request.set_body(ws.as_bytes().to_vec());
+                    }
+                }
+                request.set_ignore_ssl_cert();
+                cx.http_request(live_id!(hue_set), request);
+            }
+        };
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
         if self.volume_changed_by_network.check_and_clear(){
             self.store_to_widgets(cx);
+        }
+        // lets fetch the latest hue IDs
+        while let Ok((id,data)) = self.hue_light_change.try_recv(){
+            if self.hue_light_last.get(&id) != Some(&data){
+                self.hue_light_set.insert(id, data.clone());
+            }
+            self.hue_light_last.insert(id, data);
         }
     }
     
@@ -152,6 +203,7 @@ pub const DMXOUTPUT_HEADER: [u8;18] = [
     0   // buffer lo
 ];
 
+// get a HUE key from here: https://developers.meethue.com/develop/get-started-2/
 const HUE_KEY:&'static str = "Ay0O7saTTq3FNogyKhDwB8WWY7MdIyzeFzzsydRz";
 const HUE_BRIDGE:&'static str = "10.0.0.104";
 
@@ -160,7 +212,7 @@ impl App {
         // open up port udp X and forward packets
     }
     
-    pub fn handle_hue_lights(&mut self, cx:&mut Cx, res:&HttpResponse){
+    pub fn handle_hue_lights(&mut self, _cx:&mut Cx, res:&HttpResponse){
         if let Some(data) = res.get_string_body() {
             let value = JsonValue::deserialize_json(&data).unwrap();
             // lets push these ids into a vec
@@ -170,11 +222,9 @@ impl App {
                 lights.push((id, light.key("name").string(), light.key("uniqueid").string()));
             }
             lights.sort_by(|a,b| a.0.cmp(&b.0));
-            for (id,name,unique) in lights{
-                log!("{} {}", id, name);
+            for (id, name, _unique) in lights{
+                log!("Hue light {}: {}", id, name);
             }
-            // alright time to send it a packet
-            
         }
     }
     
@@ -230,19 +280,19 @@ impl App {
         
         if let Ok(result) = std::fs::read_to_string("dmx.ron"){
             if let Ok(load) = State::deserialize_ron(&result){
-                log!("LOADED");
                 state = load   
             }
         }
         // alright the sender thread where we at 44hz poll our midi input and set up a DMX packet
         let mut midi_input = cx.midi_input();
+        let mut hue_sender = self.hue_light_change.sender();
         std::thread::spawn(move || {
             let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
                         
             let mut new_buttons = Buttons::default();
             let mut old_buttons = Buttons::default();
             
-            fn map_wargb(val:f32, fade:f32, out:&mut [u8], bases: &[usize]){
+            fn map_color(val:f32, fade:f32)->Vec4{
                 let colors = ["fff", "ff7", "f00","ff0","0f0","0ff","00f","f0f"];
                 let len = (colors.len()-1) as f32;
                 // pick where we are in between
@@ -252,11 +302,37 @@ impl App {
                 use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
                 let c1 = Vec4::from_u32(hex_bytes_to_u32(colors[a as usize].as_bytes()).unwrap());
                 let c2 = Vec4::from_u32(hex_bytes_to_u32(colors[b as usize].as_bytes()).unwrap());
-                let c = Vec4::from_lerp(c1, c2, gap);
+                let c = Vec4::from_lerp(c1, c2, gap) * fade;
+                c
+            }
+            
+            fn map_wargb(val:f32, fade:f32, out:&mut [u8], bases: &[usize]){
+                let c = map_color(val, fade);
                 for base in bases{
-                    out[base-1] = (c.x * 255.0 * fade) as u8;
-                    out[base+0] = (c.y * 255.0 * fade) as u8;
-                    out[base+1] = (c.z * 255.0 * fade) as u8;
+                    out[base-1] = (c.x * 255.0) as u8;
+                    out[base+0] = (c.y * 255.0) as u8;
+                    out[base+1] = (c.z * 255.0) as u8;
+                }
+            }
+            
+            fn hue_wargb(sender: &mut ToUISender<(usize, HueLight)>, on:bool, val:f32, fade:f32, hueids: &[usize]){
+                let c = map_color(val, fade);
+                let c = c.to_hsva();
+                for id in hueids{
+                    let _ = sender.send((*id,HueLight::Color{
+                        on,
+                        hue: c.x,
+                        sat: c.y,
+                        val: c.z
+                    }));
+                }
+            }
+            
+            fn hue_switch(sender: &mut ToUISender<(usize, HueLight)>, on:bool, hueids:&[usize]){
+                for id in hueids{
+                    let _ = sender.send((*id,HueLight::Switch{
+                        on,
+                    }));
                 }
             }
             
@@ -333,7 +409,7 @@ impl App {
                         x=>log!("{:?}",x)
                     }
                 }
-                let _buttons = Buttons::delta(&old_buttons,&new_buttons);
+                let buttons = Buttons::delta(&old_buttons,&new_buttons);
                 old_buttons = new_buttons.clone();
                 
                 universe[12] = counter as u8;
@@ -341,24 +417,56 @@ impl App {
                 clock += 1.0/44.0;
                 counter += 1;
                 let dmx = &mut universe[DMXOUTPUT_HEADER.len()..];
-                // RIGHT KITCHEN 1 (A)
-                // RIGHT WINDOW 5 (B)
-                // LEFT WINDOW 8 (A)
-                // DINNER TABLE2 11 (A)
-                // DINNER TABLE3 14 (B)
-                // DINNER TABLE1 17 (C)
-                // DINNER TABLE4 20 (C)
-                // FRONT DOOR 23 (A)
-                // CENTER WINDOW 26 (C)
-                // KITCHEN CENTER 29 (C)
-                // KITCHEN LEFT 32 (B)
-                // KITCHEN STRIP 35 (C)
-                // DESK 38 (B) 
-                // TABLE 41 (B)
-                map_wargb(state.dial_c[0], state.fade[0]*state.fade[8], dmx, &[2, 8, 11, 23]); // slider 1
-                map_wargb(state.dial_c[1], state.fade[1]*state.fade[8], dmx, &[5, 14, 32, 41, 38]); // slider 2
-                map_wargb(state.dial_c[2], state.fade[2]*state.fade[8], dmx, &[17, 20, 26, 29, 35]); // slider 3
                 
+                // alright so these things are now Hue ids
+                // except we need to throttle them
+                // and turn them into HSV values
+                
+                // RIGHT KITCHEN (A) - 3
+                // RIGHT WINDOW (B) - 8
+                // LEFT WINDOW (A) - 19
+                // DINNER TABLE2 (A) - 22
+                // DINNER TABLE3 (B) - 23
+                // DINNER TABLE1 (C) - 24
+                // DINNER TABLE4 (C) - 25
+                // FRONT DOOR 23 (A) - 29
+                // CENTER WINDOW (C) - 32
+                // KITCHEN CENTER (C) - 33
+                // KITCHEN LEFT (B) - 34
+                // KITCHEN STRIP (C) - 38
+                // DESK (B)  - 39
+                // TABLE (B) - 40
+                hue_wargb(&mut hue_sender, true, state.dial_c[0], state.fade[0]*state.fade[8], &[3, 19, 22, 29]);
+                hue_wargb(&mut hue_sender, true, state.dial_c[1], state.fade[1]*state.fade[8], &[8, 23, 34, 40, 39]);
+                hue_wargb(&mut hue_sender, true, state.dial_c[2], state.fade[2]*state.fade[8], &[24, 25, 32, 33, 38]);
+                if buttons.mute[7]{
+                    hue_switch(&mut hue_sender,true, &[41]);
+                }
+                else if buttons.rec[7]{
+                    hue_switch(&mut hue_sender,false, &[41]);
+                }
+                
+                if buttons.mute[6]{
+                    hue_wargb(&mut hue_sender,true, 0.0, 1.0, &[12,13]);
+                }
+                else if buttons.rec[6]{
+                    hue_wargb(&mut hue_sender,false, 0.0, 1.0, &[12,13]);
+                }
+                
+                if buttons.mute[5]{
+                    hue_wargb(&mut hue_sender,true, 0.0, 1.0, &[18]);
+                }
+                else if buttons.rec[5]{
+                    hue_wargb(&mut hue_sender,false, 0.0, 1.0, &[18]);
+                }                
+                
+                if buttons.mute[4]{
+                    hue_switch(&mut hue_sender,true,  &[16,21,26]);
+                }
+                else if buttons.rec[4]{
+                    hue_switch(&mut hue_sender,false,  &[16,21,26]); 
+                }                 
+                 
                 map_wargb(state.dial_c[3], 1.0, dmx, &[110+2-1]); // RGB laser color
                 // lets set the laser mode with the slider
                 let rgb_laser_addr = 110;
