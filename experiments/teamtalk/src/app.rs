@@ -162,7 +162,19 @@ impl App {
     
     pub fn handle_hue_lights(&mut self, cx:&mut Cx, res:&HttpResponse){
         if let Some(data) = res.get_string_body() {
-            log!("{}", data)
+            let value = JsonValue::deserialize_json(&data).unwrap();
+            // lets push these ids into a vec
+            let mut lights = Vec::new();
+            for (id,light) in value.key("lights").object(){
+                let id = id.parse::<u64>().unwrap();
+                lights.push((id, light.key("name").string(), light.key("uniqueid").string()));
+            }
+            lights.sort_by(|a,b| a.0.cmp(&b.0));
+            for (id,name,unique) in lights{
+                log!("{} {}", id, name);
+            }
+            // alright time to send it a packet
+            
         }
     }
     
