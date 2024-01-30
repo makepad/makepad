@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map};
+use std::collections::{HashMap};
 use std::hash::Hash;
 use std::str::Chars;
 
