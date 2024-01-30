@@ -56,6 +56,7 @@ pub struct HttpRequest {
     pub url: String,
     pub method: HttpMethod,
     pub headers: BTreeMap<String, Vec<String>>,
+    pub ignore_ssl_cert: bool,
     pub body: Option<Vec<u8>>,
 }
 
@@ -65,9 +66,14 @@ impl HttpRequest {
             metadata_id: LiveId(0),
             url,
             method,
+            ignore_ssl_cert: false,
             headers: BTreeMap::new(),
             body: None
         }
+    }
+    
+    pub fn set_ignore_ssl_cert(&mut self){
+        self.ignore_ssl_cert = true
     }
     
     pub fn set_metadata_id(&mut self, id: LiveId){
