@@ -184,7 +184,6 @@ live_design!{
         list = <PortalList> {
             grab_key_focus: true
             auto_tail: true
-            allow_empty: true
             drag_scrolling: false
             height: Fill,
             width: Fill
