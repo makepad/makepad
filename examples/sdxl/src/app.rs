@@ -373,7 +373,7 @@ impl App {
         }
     }
     
-    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
+    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: usize, row: usize) {
         self.ui.redraw(cx);
         if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
             self.set_current_image(cx, image_files[row.min(*image_count)].clone());
@@ -801,7 +801,7 @@ impl MatchEvent for App {
         while let Some(next) = self.ui.draw(cx, &mut Scope::empty()).step() {
             if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                 // alright now we draw the items
-                image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
+                image_list.set_item_range(cx, 0, self.filtered.list.len());
                                     
                 while let Some(item_id) = image_list.next_visible_item(cx) {
                                             
