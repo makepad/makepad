@@ -26,9 +26,9 @@ enum ScrollState {
 #[derive(Clone)]
 enum ListDrawState {
     Begin,
-    Down {index: u64, pos: f64, viewport: Rect},
-    Up {index: u64, pos: f64, hit_bottom: bool, viewport: Rect},
-    DownAgain {index: u64, pos: f64, viewport: Rect},
+    Down {index: usize, pos: f64, viewport: Rect},
+    Up {index: usize, pos: f64, hit_bottom: bool, viewport: Rect},
+    DownAgain {index: usize, pos: f64, viewport: Rect},
     End {viewport: Rect}
 }
 
@@ -51,9 +51,9 @@ pub struct PortalList {
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     
-    #[rust] range_start: u64,
-    #[rust(u64::MAX)] range_end: u64,
-    #[rust(0u64)] view_window: u64,
+    #[rust] range_start: usize,
+    #[rust(usize::MAX)] range_end: usize,
+    #[rust(0usize)] view_window: usize,
     #[live(0.2)] flick_scroll_minimum: f64,
     #[live(80.0)] flick_scroll_maximum: f64,
     #[live(0.005)] flick_scroll_scaling: f64,
@@ -64,7 +64,7 @@ pub struct PortalList {
     #[live(false)] grab_key_focus: bool,
     #[live(true)] drag_scrolling: bool,
     #[live(false)] allow_empty: bool,
-    #[rust] first_id: u64,
+    #[rust] first_id: usize,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
@@ -77,7 +77,7 @@ pub struct PortalList {
     #[rust(false)] tail_range: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
+    #[rust] items: ComponentMap<(usize, LiveId), WidgetRef>,
     //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
@@ -86,7 +86,7 @@ struct AlignItem {
     align_range: TurtleAlignRange,
     size: DVec2,
     shift: f64,
-    index: u64
+    index: usize
 }
 
 impl LiveHook for PortalList {
@@ -297,7 +297,7 @@ impl PortalList {
         cx.end_turtle_with_area(&mut self.area);
     }
     
-    pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<u64> {
+    pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
         if let Some(draw_state) = self.draw_state.get() {
             match draw_state {
@@ -437,7 +437,7 @@ impl PortalList {
         None
     }
     
-    pub fn item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
@@ -447,7 +447,7 @@ impl PortalList {
         None
     }
     
-    pub fn set_item_range(&mut self, cx: &mut Cx, range_start: u64, range_end: u64) {
+    pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
         self.range_start = range_start;
         if self.range_end != range_end {
             self.range_end = range_end;
@@ -500,8 +500,7 @@ impl Widget for PortalList {
                 self.tail_range = false;
             }
 
-            let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
-            self.first_id = scroll_to;
+            self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as usize;
             self.first_scroll = 0.0;
             cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
             self.area.redraw(cx);
@@ -720,20 +719,20 @@ impl Widget for PortalList {
 }
 
 impl PortalListRef {
-    pub fn set_first_id_and_scroll(&self, id: u64, s: f64) {
+    pub fn set_first_id_and_scroll(&self, id: usize, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
             inner.first_scroll = s;
         }
     }
     
-    pub fn set_first_id(&self, id: u64) {
+    pub fn set_first_id(&self, id: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
         }
     }
     
-    pub fn first_id(&self) -> u64 {
+    pub fn first_id(&self) -> usize {
         if let Some(inner) = self.borrow() {
             inner.first_id
         }
@@ -748,7 +747,7 @@ impl PortalListRef {
         }
     }
     
-    pub fn item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.item(cx, entry_id, template)
         }
@@ -757,13 +756,13 @@ impl PortalListRef {
         }
     }
     
-    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(u64, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
         set
     }
     
-    fn items_with_actions_vec(&self, actions: &Actions, set: &mut Vec<(u64, WidgetRef)>) {
+    fn items_with_actions_vec(&self, actions: &Actions, set: &mut ItemsWithActions) {
         let uid = self.widget_uid();
         for action in actions {
             if let Some(action) = action.as_widget_action(){
@@ -783,15 +782,17 @@ impl PortalListRef {
     }
 }
 
+type ItemsWithActions = Vec<(usize, WidgetRef)>;
+
 impl PortalListSet {
-    pub fn set_first_id(&self, id: u64) {
+    pub fn set_first_id(&self, id: usize) {
         for list in self.iter() {
             list.set_first_id(id)
         }
     }
     
     
-    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(u64, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
         let mut set = Vec::new();
         for list in self.iter() {
             list.items_with_actions_vec(actions, &mut set)
