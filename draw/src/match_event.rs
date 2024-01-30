@@ -19,7 +19,28 @@ pub trait MatchEvent{
     fn handle_audio_devices(&mut self, _cx: &mut Cx, _e:&AudioDevicesEvent){}
     fn handle_midi_ports(&mut self, _cx: &mut Cx, _e:&MidiPortsEvent){}
     fn handle_video_inputs(&mut self, _cx: &mut Cx, _e:&VideoInputsEvent){}
-    fn handle_network_responses(&mut self, _cx: &mut Cx, _e:&NetworkResponsesEvent ){}
+    
+    fn handle_http_response(&mut self, _cx:&mut Cx, _request_id:LiveId, _response:&HttpResponse){}
+    fn handle_http_request_error(&mut self, _cx:&mut Cx, _request_id:LiveId, _err:&str){}
+    fn handle_http_progress(&mut self, _cx:&mut Cx, _request_id:LiveId, _loaded:u64, _total:u64){}
+    
+    fn handle_network_responses(&mut self, cx: &mut Cx, e:&NetworkResponsesEvent ){
+        for e in e{
+            match &e.response{
+                NetworkResponse::HttpRequestError(err)=>{
+                    self.handle_http_request_error(cx, e.request_id, err);
+                }
+                NetworkResponse::HttpResponse(res)=>{
+                    self.handle_http_response(cx, e.request_id, res);                  
+                }
+                NetworkResponse::HttpProgress{loaded, total}=>{
+                    self.handle_http_progress(cx, e.request_id, *loaded, *total);                
+                }
+            }
+        }
+    }
+    
+    
     fn handle_draw(&mut self, _cx: &mut Cx, _e:&DrawEvent){}
     fn handle_draw_2d(&mut self, _cx: &mut Cx2d){}
     fn handle_key_down(&mut self, _cx: &mut Cx, _e:&KeyEvent){}

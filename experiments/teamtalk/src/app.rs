@@ -87,8 +87,10 @@ impl MatchEvent for App{
         cx.use_midi_inputs(&ports.all_inputs());
     }
     
-    fn handle_network_responses(&mut self,cx: &mut Cx, e:&NetworkResponsesEvent ){
-        self.handle_hue_lights(cx, e);
+    fn handle_http_response(&mut self, cx:&mut Cx, request_id:LiveId, res:&HttpResponse){
+        if request_id == live_id!(hue_fetch){
+            self.handle_hue_lights(cx, res);
+        }
     }
     
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
@@ -158,8 +160,10 @@ impl App {
         // open up port udp X and forward packets
     }
     
-    pub fn handle_hue_lights(&mut self, cx:&mut Cx, e:&NetworkResponsesEvent){
-       // alright we can connect
+    pub fn handle_hue_lights(&mut self, cx:&mut Cx, res:&HttpResponse){
+        if let Some(data) = res.get_string_body() {
+            log!("{}", data)
+        }
     }
     
     pub fn fetch_hue_lights(&mut self, cx:&mut Cx){
