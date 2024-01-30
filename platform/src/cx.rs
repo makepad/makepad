@@ -123,7 +123,7 @@ pub struct Cx {
 }
 
 #[derive(Clone)]
-pub struct CxRef(pub Rc<RefCell<Cx>>); //TODO: I probably shouldn't remove the (crate)
+pub struct CxRef(pub Rc<RefCell<Cx>>);
 
 pub struct CxDependency {
     pub data: Option<Result<Rc<Vec<u8>>, String >>
@@ -131,7 +131,8 @@ pub struct CxDependency {
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,
-    pub density: f64
+    pub density: f64,
+    pub is_emulator: bool,
 }
 
 #[derive(Clone, Debug)]
