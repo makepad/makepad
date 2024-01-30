@@ -87,6 +87,10 @@ impl MatchEvent for App{
         cx.use_midi_inputs(&ports.all_inputs());
     }
     
+    fn handle_network_responses(&mut self,cx: &mut Cx, e:&NetworkResponsesEvent ){
+        self.handle_hue_lights(cx, e);
+    }
+    
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &self.ui, Self::data_bind_map);
@@ -100,6 +104,7 @@ impl MatchEvent for App{
         self.start_network_stack(cx);
         self.start_artnet_client(cx);
         self.store_to_widgets(cx);
+        self.fetch_hue_lights(cx);
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
@@ -145,13 +150,24 @@ pub const DMXOUTPUT_HEADER: [u8;18] = [
     0   // buffer lo
 ];
 
+const HUE_KEY:&'static str = "Ay0O7saTTq3FNogyKhDwB8WWY7MdIyzeFzzsydRz";
+const HUE_BRIDGE:&'static str = "10.0.0.104";
+
 impl App {
     pub fn start_forza_forward(&mut self, _cx:&mut Cx){
         // open up port udp X and forward packets
     }
     
-    pub fn send_hue_colors(&mut self, cx:&mut Cx){
-        
+    pub fn handle_hue_lights(&mut self, cx:&mut Cx, e:&NetworkResponsesEvent){
+       // alright we can connect
+    }
+    
+    pub fn fetch_hue_lights(&mut self, cx:&mut Cx){
+        // lets http request the hue bridge
+        let url = format!("https://{}/api/{}", HUE_BRIDGE, HUE_KEY);
+        let mut request = HttpRequest::new(url, HttpMethod::GET);
+        request.set_ignore_ssl_cert();
+        cx.http_request(live_id!(hue_fetch), request);
     }
     
     pub fn start_artnet_client(&mut self, cx:&mut Cx){

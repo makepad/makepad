@@ -7,7 +7,7 @@ use {
     },
     crate::{
         makepad_live_id::*,
-        makepad_objc_sys::{objc_block},
+        makepad_objc_sys::{objc_block, objc_block_invoke},
         makepad_objc_sys::runtime::{ObjcId},
         os::{
             //cocoa_app::{MacosApp, get_macos_class_global},
@@ -46,11 +46,44 @@ pub fn define_web_socket_delegate() -> *const Class {
         decl.add_method(sel!(webSocketTask: didOpenWithProtocol:), did_open_with_protocol as extern fn(&Object, Sel, ObjcId, ObjcId));
         decl.add_method(sel!(webSocketTask: didCloseWithCode: reason:), did_close_with_code as extern fn(&Object, Sel, ObjcId, usize, ObjcId));
     }
-    // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("macos_app_ptr");
     
     return decl.register();
 }
+
+// this allows for locally signed SSL certificates to pass
+// TODO make this configurable
+pub fn define_url_session_delegate() -> *const Class {
+    extern fn did_receive_challenge(_this: &Object, _: Sel, _session: ObjcId, challenge: ObjcId, completion: ObjcId) {
+        unsafe{
+            let pspace: ObjcId = msg_send![challenge, protectionSpace];
+            let trust: ObjcId = msg_send![pspace, serverTrust];
+            if trust == nil{
+                objc_block_invoke!(completion, invoke(
+                    (0): usize,
+                    (nil): ObjcId
+                ));
+            }
+            else{
+                let credential: ObjcId = msg_send![class!(NSURLCredential), credentialForTrust:trust];
+                objc_block_invoke!(completion, invoke(
+                    (0): usize,
+                    (credential): ObjcId
+                ));
+            }
+        }
+    }
+        
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("NSURLSessionDelegate", superclass).unwrap();
+        
+    // Add callback methods
+    unsafe {
+        decl.add_method(sel!(URLSession: didReceiveChallenge: completionHandler:), did_receive_challenge as extern fn(&Object, Sel, ObjcId,ObjcId, ObjcId));
+    }
+        
+    return decl.register();
+}
+
 
 unsafe fn make_ns_request(request: &HttpRequest) -> ObjcId {
     // Prepare the NSMutableURLRequest instance
@@ -58,6 +91,7 @@ unsafe fn make_ns_request(request: &HttpRequest) -> ObjcId {
     msg_send![class!(NSURL), URLWithString: str_to_nsstring(&request.url)];
     
     let mut ns_request: ObjcId = msg_send![class!(NSMutableURLRequest), alloc];
+    
     ns_request = msg_send![ns_request, initWithURL: url];
     let () = msg_send![ns_request, setHTTPMethod: str_to_nsstring(&request.method.to_string())];
     
@@ -117,7 +151,16 @@ impl OsWebSocket{
             
             //self.lazy_init_ns_url_session();
             let ns_request = make_ns_request(&request);
-            let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
+            
+            let session: ObjcId = if request.ignore_ssl_cert{
+                let config: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
+                let deleg: ObjcId = msg_send![get_apple_class_global().url_session_delegate, new];
+                msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: deleg delegateQueue:nil]
+            }     
+            else{
+                msg_send![class!(NSURLSession), sharedSession]
+            };
+            
             //let session  = self.ns_url_session.unwrap();
             let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
             let web_socket_delegate_instance: ObjcId = msg_send![get_apple_class_global().web_socket_delegate, new];
@@ -165,6 +208,7 @@ impl OsWebSocket{
 
 pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseItem>) {
     unsafe {
+        let ignore_ssl_cert = request.ignore_ssl_cert;
         let ns_request = make_ns_request(&request);
                 
         // Build the NSURLSessionDataTask instance
@@ -208,8 +252,16 @@ pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_se
             };
             networking_sender.send(message).unwrap();
         });
+        
+        let session: ObjcId = if ignore_ssl_cert{
+            let config: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
+            let deleg: ObjcId = msg_send![get_apple_class_global().url_session_delegate, new];
+            msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: deleg delegateQueue:nil]
+        }     
+        else{
+            msg_send![class!(NSURLSession), sharedSession]
+        };
                 
-        let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
         let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request completionHandler: &response_handler];
                 
         // Run the request task
