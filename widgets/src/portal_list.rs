@@ -317,7 +317,7 @@ impl PortalList {
                 }
                 ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
                     let is_down_again = draw_state.is_down_again();
-                    assert!(cx.turtle_has_align_items(), "item {index} was not drawn");
+                    let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -327,7 +327,7 @@ impl PortalList {
                         index
                     });
                     
-                    if pos + rect.size.index(vi) > viewport.size.index(vi) {
+                    if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) {
                         // lets scan upwards
                         if self.first_id>0 && !is_down_again {
                             self.draw_state.set(ListDrawState::Up {
@@ -372,7 +372,7 @@ impl PortalList {
                     return Some(index + 1)
                 }
                 ListDrawState::Up {index, pos, hit_bottom, viewport} => {
-                    assert!(cx.turtle_has_align_items(), "item {index} was not drawn");
+                    let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -408,7 +408,7 @@ impl PortalList {
                         return None
                     }
                     
-                    if pos < if hit_bottom {-viewport.size.index(vi)} else {0.0} {
+                    if !did_draw || pos < if hit_bottom {-viewport.size.index(vi)} else {0.0} {
                         self.draw_state.set(ListDrawState::End {viewport});
                         return None
                     }
