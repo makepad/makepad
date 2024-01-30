@@ -170,10 +170,12 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
     _: jni_sys::jclass,
     cache_path: jni_sys::jstring,
     density: jni_sys::jfloat,
+    is_emulator: jni_sys::jboolean,
 ) {
     send_from_java_message(FromJavaMessage::Init(AndroidParams {
         cache_path: jstring_to_string(env, cache_path),
         density: density as f64,
+        is_emulator: is_emulator != 0,
     }));
 }
 
