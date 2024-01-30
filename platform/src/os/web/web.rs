@@ -245,7 +245,7 @@ impl Cx {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
+                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
                     });
                 }
 
@@ -253,7 +253,7 @@ impl Cx {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
+                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
                     });
                 }
                 /*
