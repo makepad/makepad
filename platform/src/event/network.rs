@@ -16,7 +16,7 @@ pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 pub enum NetworkResponse{
     HttpRequestError(String),
     HttpResponse(HttpResponse),
-    HttpProgress{loaded:u32, total:u32},
+    HttpProgress{loaded:u64, total:u64},
 }
 
 pub struct NetworkResponseIter<I> {
