@@ -396,7 +396,7 @@ impl PortalList {
                                     viewport
                                 });
                                 cx.begin_turtle(Walk {
-                                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + total_height)),
                                     margin: Default::default(),
                                     width: Size::Fill,
                                     height: Size::Fit
