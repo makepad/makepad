@@ -12,7 +12,7 @@ public class MakepadNative {
     public native static void activityOnPause();
     public native static void activityOnStop();
     public native static void activityOnDestroy();
-    public static native void onAndroidParams(String cache_path, float dentify);
+    public static native void onAndroidParams(String cache_path, float dentify, boolean isEmulator);
 
     // belongs to QuadSurface class
     public native static void surfaceOnSurfaceCreated(Surface surface);
