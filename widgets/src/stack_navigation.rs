@@ -22,8 +22,8 @@ pub enum StackNavigationAction {
 
 #[derive(Clone, Default, Eq, Hash, PartialEq, Debug)]
 pub enum StackNavigationViewState {
-    Active,
     #[default] Inactive,
+    Active,
 }
 
 /// Actions that are delivered to an incoming or outgoing "active" widget/view
@@ -31,19 +31,10 @@ pub enum StackNavigationViewState {
 #[derive(Clone, DefaultNone, Eq, Hash, PartialEq, Debug)]
 pub enum StackNavigationTransitionAction {
     None,
-    /// The widget is being shown.
-    /// This is sent to the widget/view being animated in,
-    /// at the very beginning of that animate-in process.
-    Show,
-    /// The widget is being hidden.
-    /// This is sent to the widget/view being animated out,
-    /// at the very beginning of that animate-out process.
+    ShowBegin,
+    ShowDone,
     HideBegin,
-    /// The widget is being hidden.
-    /// This is sent to the widget/view being animated out,
-    /// at the very end of that animate-out process.
     HideEnd,
-
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -71,6 +62,7 @@ impl Widget for StackNavigationView {
         }
 
         self.handle_stack_view_closure_request(cx, event, scope);
+        self.trigger_action_post_opening_if_done(cx);
         self.finish_closure_animation_if_done(cx);
         self.view.handle_event(cx, event, scope);
     }
@@ -141,6 +133,22 @@ impl StackNavigationView {
             }
         }
     }
+
+    fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
+        if self.state == StackNavigationViewState::Inactive &&
+            self.animator.animator_in_state(cx, id!(slide.show))
+        {
+            const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
+            if self.offset < OPENING_OFFSET_THRESHOLD {
+                cx.widget_action(
+                    self.widget_uid(),
+                    &HeapLiveIdPath::default(),
+                    StackNavigationTransitionAction::ShowDone,
+                );
+                self.state = StackNavigationViewState::Active;
+            }
+        }
+    }
 }
 
 impl StackNavigationViewRef {
@@ -148,7 +156,6 @@ impl StackNavigationViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.apply_over(cx, live! {offset: (root_width), visible: true});
             inner.offset_to_hide = root_width;
-            inner.state = StackNavigationViewState::Active;
             inner.animator_play(cx, id!(slide.show));
         }
     }
@@ -279,7 +286,7 @@ impl StackNavigation {
             cx.widget_action(
                 stack_view_ref.widget_uid(),
                 &HeapLiveIdPath::default(),
-                StackNavigationTransitionAction::Show,
+                StackNavigationTransitionAction::ShowBegin,
             );
 
             self.redraw(cx);

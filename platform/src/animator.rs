@@ -189,6 +189,10 @@ impl Ease {
     pub fn map(&self, t: f64) -> f64 {
         match self {
             Self::ExpDecay {d1, d2, max} => { // there must be a closed form for this
+                if t > 0.999 {
+                    return 1.0;
+                }
+
                 // first we count the number of steps we'd need to decay
                 let mut di = *d1;
                 let mut dt = 1.0;
