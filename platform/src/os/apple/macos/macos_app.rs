@@ -344,7 +344,7 @@ impl MacosApp {
     
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+        (time_now.duration_since(self.time_start)).as_secs_f64() 
     }
     
     unsafe fn process_ns_event(ns_event: ObjcId) {

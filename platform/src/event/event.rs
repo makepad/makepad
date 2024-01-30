@@ -391,6 +391,13 @@ impl Timer {
         None
     }
     
+    pub fn is_timer(&self, event:&TimerEvent)->Option<TimerEvent>{
+        if event.timer_id == self.0{
+            return Some(event.clone())
+        }
+        None
+    }
+    
     pub fn empty() -> Timer {
         Timer(0)
     }
