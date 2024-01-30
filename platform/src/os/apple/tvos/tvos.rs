@@ -270,10 +270,10 @@ impl Cx {
                 CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
                 CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
 
-                CxOsOp::SaveFileDialog => todo!(),
-                CxOsOp::SelectFileDialog => todo!(),
-                CxOsOp::SaveFolderDialog => todo!(),
-                CxOsOp::SelectFolderDialog => todo!(),
+                CxOsOp::SaveFileDialog(_) => todo!(),
+                CxOsOp::SelectFileDialog(_) => todo!(),
+                CxOsOp::SaveFolderDialog(_) => todo!(),
+                CxOsOp::SelectFolderDialog(_) => todo!(),
                 
             }
         }
