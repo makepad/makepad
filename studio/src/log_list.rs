@@ -228,7 +228,7 @@ pub struct LogList{
 
 impl LogList{
     fn draw_log(&mut self, cx: &mut Cx2d, list:&mut PortalList, build_manager:&mut BuildManager){
-        list.set_item_range(cx, 0, build_manager.log.len() as u64);
+        list.set_item_range(cx, 0, build_manager.log.len());
                                 
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id & 1 == 0;
