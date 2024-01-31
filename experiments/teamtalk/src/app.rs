@@ -315,12 +315,12 @@ impl App {
                 }
             }
             
-            fn hue_wargb(sender: &mut ToUISender<(usize, HueLight)>, on:bool, val:f32, fade:f32, hueids: &[usize]){
+            fn hue_wargb(sender: &mut ToUISender<(usize, HueLight)>,val:f32, fade:f32, hueids: &[usize]){
                 let c = map_color(val, fade);
                 let c = c.to_hsva();
                 for id in hueids{
                     let _ = sender.send((*id,HueLight::Color{
-                        on,
+                        on: if fade>0.01{true}else{false},
                         hue: c.x,
                         sat: c.y,
                         val: c.z
@@ -436,9 +436,9 @@ impl App {
                 // KITCHEN STRIP (C) - 38
                 // DESK (B)  - 39
                 // TABLE (B) - 40
-                hue_wargb(&mut hue_sender, true, state.dial_c[0], state.fade[0]*state.fade[8], &[3, 19, 22, 29]);
-                hue_wargb(&mut hue_sender, true, state.dial_c[1], state.fade[1]*state.fade[8], &[8, 23, 34, 40, 39]);
-                hue_wargb(&mut hue_sender, true, state.dial_c[2], state.fade[2]*state.fade[8], &[24, 25, 32, 33, 38]);
+                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0]*state.fade[8], &[3, 19, 22, 29]);
+                hue_wargb(&mut hue_sender, state.dial_c[1], state.fade[1]*state.fade[8], &[8, 23, 34, 40, 39]);
+                hue_wargb(&mut hue_sender, state.dial_c[2], state.fade[2]*state.fade[8], &[24, 25, 32, 33, 38]);
                 if buttons.mute[7]{
                     hue_switch(&mut hue_sender,true, &[41]);
                 }
@@ -447,17 +447,17 @@ impl App {
                 }
                 
                 if buttons.mute[6]{
-                    hue_wargb(&mut hue_sender,true, 0.0, 1.0, &[12,13]);
+                    hue_wargb(&mut hue_sender,0.0, 1.0, &[12,13]);
                 }
                 else if buttons.rec[6]{
-                    hue_wargb(&mut hue_sender,false, 0.0, 1.0, &[12,13]);
+                    hue_wargb(&mut hue_sender,0.0, 0.0, &[12,13]);
                 }
                 
                 if buttons.mute[5]{
-                    hue_wargb(&mut hue_sender,true, 0.0, 1.0, &[18]);
+                    hue_wargb(&mut hue_sender,0.0, 1.0, &[18]);
                 }
                 else if buttons.rec[5]{
-                    hue_wargb(&mut hue_sender,false, 0.0, 1.0, &[18]);
+                    hue_wargb(&mut hue_sender,0.0, 0.0, &[18]);
                 }                
                 
                 if buttons.mute[4]{
