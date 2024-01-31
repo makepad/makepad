@@ -285,6 +285,7 @@ impl LiveHook for Video {
     }
 
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        self.lazy_create_image_cache(cx);
         self.thumbnail_texture = Some(Texture::new(cx));
 
         let target_w = self.walk.width.fixed_or_zero();
