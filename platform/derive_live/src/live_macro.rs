@@ -136,7 +136,7 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
         }
         else{
             if class.chars().next().unwrap().is_uppercase(){
-                tb.add("LiveNode{").stream(Some(node_start)).add(",value:BareEnum::Id(");
+                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::BareEnum(");
                 tb.add("LiveId(").suf_u64(class_id).add("))},");
             }
             else{
