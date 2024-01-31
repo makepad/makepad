@@ -1143,6 +1143,37 @@ impl Default for Flow {
 impl LiveHook for Size {
     fn skip_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
+            LiveValue::Array => {
+                fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
+                    if let Some(index) = nodes.last_child(index) {
+                        if nodes[index].value.is_object() {
+                            return nodes.child_by_name(index, live_id!(value).as_field());
+                        }
+                        else {
+                            return Some(index)
+                        }
+                    }
+                    None
+                }
+
+                if let Some(inner_index) = last_keyframe_value_from_array(index, nodes) {
+                    match &nodes[inner_index].value {
+                        LiveValue::Float64(val) => {
+                            *self = Self::Fixed(*val);
+                        }
+                        LiveValue::Int64(val) => {
+                            *self = Self::Fixed(*val as f64);
+                        }
+                        _ => {
+                            cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Animation array");
+                        }
+                    }
+                }
+                else {
+                    cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Animation array");
+                }
+                Some(nodes.skip_node(index))
+            }
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
