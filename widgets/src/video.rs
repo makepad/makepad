@@ -260,13 +260,27 @@ impl LiveHook for Video {
         self.id = LiveId::unique();
 
         #[cfg(target_os = "android")]
-        if self.video_texture.is_none() {
-            let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
-            self.video_texture = Some(new_texture);
+        {
+            if self.video_texture.is_none() {
+                let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
+                self.video_texture = Some(new_texture);
+            }
+            let texture = self.video_texture.as_mut().unwrap();
+            self.draw_bg.draw_vars.set_texture(0, &texture);
         }
 
-        let texture = self.video_texture.as_mut().unwrap();
-        self.draw_bg.draw_vars.set_texture(0, &texture);
+        #[cfg(not(target_os = "android"))]
+        error!("Video Widget is currently only supported on Android.");
+
+        match cx.os_type() {
+            OsType::Android(params) => {
+                if params.is_emulator {
+                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+                }
+            },
+            _ => {}
+        }
+        
         self.should_prepare_playback = self.autoplay;
     }
 
