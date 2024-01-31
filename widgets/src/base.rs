@@ -41,6 +41,7 @@ live_design!{
     import crate::page_flip::PageFlipBase;
     import crate::stack_navigation::StackNavigationViewBase;
     import crate::stack_navigation::StackNavigationBase;
+    import crate::expandable_panel::ExpandablePanelBase;
     import crate::keyboard_view::KeyboardViewBase;
     import crate::window_menu::WindowMenuBase;
     
@@ -575,7 +576,7 @@ live_design!{
             }
         }
     }
-    
+
     CachedRoundedView = <ViewBase> {
                 
         optimize: Texture,
@@ -622,7 +623,43 @@ live_design!{
             }
         }
     }
-    
+
+    ExpandablePanel = <ExpandablePanelBase> {
+        flow: Overlay,
+        width: Fill,
+        height: Fill,
+
+        initial_offset: 400.0;
+
+        body = <View> {}
+
+        panel = <View> {
+            flow: Down,
+            width: Fill,
+            height: Fit,
+
+            show_bg: true,
+            draw_bg: {
+                color: #FFF
+            }
+
+            align: { x: 0.5, y: 0 }
+            padding: 20,
+            spacing: 10,
+
+            scroll_handler = <RoundedView> {
+                width: 40,
+                height: 6,
+
+                show_bg: true,
+                draw_bg: {
+                    color: #333
+                    radius: 2.
+                }
+            }
+        }
+    }
+
     MultiWindow = <MultiWindowBase>{}
     PageFlip = <PageFlipBase>{}
     KeyboardView = <KeyboardViewBase>{}
@@ -667,4 +704,5 @@ live_design!{
     WindowMenuBase = <WindowMenuBase>{}
     StackNavigationViewBase = <StackNavigationViewBase>{}
     StackNavigationBase = <StackNavigationBase>{}
+    ExpandablePanelBase = <ExpandablePanelBase>{}
 }

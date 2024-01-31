@@ -29,6 +29,7 @@ pub mod tab_bar;
 pub mod tab_close_button;
 pub mod portal_list;
 pub mod stack_navigation;
+pub mod expandable_panel;
 pub mod desktop_button;
 pub mod window;
 pub mod scroll_shadow;
@@ -53,6 +54,8 @@ pub mod nav_control;
 pub mod view;
 pub mod widget;
 pub mod widget_match_event;
+
+pub mod touch_gesture;
 
 #[macro_use]
 pub mod data_binding;
@@ -81,6 +84,7 @@ pub use crate::{
     fold_button::*,
     dock::*,
     stack_navigation::*,
+    expandable_panel::*,
     window::*,
     tab::TabClosable,
     scroll_bars::{ScrollBars},
@@ -157,4 +161,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::keyboard_view::live_design(cx);
     crate::vectorline::live_design(cx);
     crate::stack_navigation::live_design(cx);
+    crate::expandable_panel::live_design(cx);
 }
