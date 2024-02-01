@@ -518,7 +518,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        let enum_id = LiveId(").suf_u64(LiveId::from_str(&enum_name).0).add(");");
         tb.add("        match &nodes[start_index].value{");
         
-        tb.add("            LiveValue::BareEnum(variant)=>{");
+        tb.add("            LiveValue::Id(variant) | LiveValue::BareEnum(variant)=>{");
         tb.add("                match variant{");
         for item in &items {
             if let EnumKind::Bare = item.kind {

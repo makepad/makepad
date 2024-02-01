@@ -151,7 +151,7 @@ live_design! {
 
         draw_cursor: {
           //  draw_depth: 4.0,
-            instance blink: 0.0
+            uniform blink: 0.0
             instance focus: 0.0
             fn pixel(self) -> vec4 {
                 let color = mix(#0000,mix(self.color, #0000, self.blink),self.focus);

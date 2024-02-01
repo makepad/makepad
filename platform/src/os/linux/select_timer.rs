@@ -53,7 +53,7 @@ impl SelectTimers {
                 tv_sec: timer.delta_timeout.trunc() as libc_sys::time_t,
                 // `tv_usec` is in microseconds, so take the fractional part of
                 // `delta_timeout` 1000000.0.
-                tv_usec: (timer.delta_timeout.fract() * 1000000.0) as libc_sys::time_t,
+                tv_usec: (timer.delta_timeout.fract() * 1000_000.0) as libc_sys::time_t,
             })
         }  
         else { 
@@ -71,7 +71,7 @@ impl SelectTimers {
     
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+        (time_now.duration_since(self.time_start)).as_secs_f64() 
     }
     
     pub fn update_timers(&mut self, out: &mut Vec<u64>) {
