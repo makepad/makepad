@@ -260,18 +260,39 @@ impl LiveHook for Video {
         self.id = LiveId::unique();
 
         #[cfg(target_os = "android")]
-        if self.video_texture.is_none() {
-            let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
-            self.video_texture = Some(new_texture);
+        {
+            if self.video_texture.is_none() {
+                let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
+                self.video_texture = Some(new_texture);
+            }
+            let texture = self.video_texture.as_mut().unwrap();
+            self.draw_bg.draw_vars.set_texture(0, &texture);
         }
 
-        let texture = self.video_texture.as_mut().unwrap();
-        self.draw_bg.draw_vars.set_texture(0, &texture);
+        #[cfg(not(target_os = "android"))]
+        error!("Video Widget is currently only supported on Android.");
+
+        match cx.os_type() {
+            OsType::Android(params) => {
+                if params.is_emulator {
+                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+                }
+            },
+            _ => {}
+        }
+        
         self.should_prepare_playback = self.autoplay;
     }
 
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        self.lazy_create_image_cache(cx);
         self.thumbnail_texture = Some(Texture::new(cx));
+
+        let target_w = self.walk.width.fixed_or_zero();
+        let target_h = self.walk.height.fixed_or_zero();
+        self.draw_bg
+            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
+
         if self.show_thumbnail_before_playback {
             self.load_thumbnail_image(cx);
             self.draw_bg
@@ -400,11 +421,6 @@ impl Video {
 
         self.draw_bg
             .set_uniform(cx, id!(source_size), &[self.video_width as f32, self.video_height as f32]);
-        
-        let target_w = self.walk.width.fixed_or_zero();
-        let target_h = self.walk.height.fixed_or_zero();
-        self.draw_bg
-            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
 
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);
@@ -494,7 +510,9 @@ impl Video {
     }
 
     fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
-        if self.playback_state != PlaybackState::Unprepared && self.playback_state != PlaybackState::CleaningUp {
+        if self.playback_state != PlaybackState::Unprepared 
+            && self.playback_state != PlaybackState::Preparing
+            && self.playback_state != PlaybackState::CleaningUp {
             cx.cleanup_video_playback_resources(self.id);
         }
         self.playback_state = PlaybackState::CleaningUp;

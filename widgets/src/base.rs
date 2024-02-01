@@ -41,6 +41,7 @@ live_design!{
     import crate::page_flip::PageFlipBase;
     import crate::stack_navigation::StackNavigationViewBase;
     import crate::stack_navigation::StackNavigationBase;
+    import crate::expandable_panel::ExpandablePanelBase;
     import crate::keyboard_view::KeyboardViewBase;
     import crate::window_menu::WindowMenuBase;
     
@@ -575,6 +576,90 @@ live_design!{
             }
         }
     }
+
+    CachedRoundedView = <ViewBase> {
+                
+        optimize: Texture,
+        draw_bg: {
+            instance border_width: 0.0
+            instance border_color: #0000
+            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+            instance radius: 2.5
+            
+            texture image: texture2d
+            uniform marked: float,
+            varying scale: vec2
+            varying shift: vec2
+                        
+            fn get_border_color(self) -> vec4 {
+                return self.border_color
+            }
+                    
+            fn vertex(self) -> vec4 {
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
+            
+            fn pixel(self) -> vec4 {
+                
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.inset.x + self.border_width,
+                    self.inset.y + self.border_width,
+                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                    max(1.0, self.radius)
+                )
+                let color = sample2d_rt(self.image, self.pos * self.scale + self.shift);
+                sdf.fill_keep_premul(color);
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_width)
+                }
+                return sdf.result;
+            }
+        }
+    }
+
+    ExpandablePanel = <ExpandablePanelBase> {
+        flow: Overlay,
+        width: Fill,
+        height: Fill,
+
+        initial_offset: 400.0;
+
+        body = <View> {}
+
+        panel = <View> {
+            flow: Down,
+            width: Fill,
+            height: Fit,
+
+            show_bg: true,
+            draw_bg: {
+                color: #FFF
+            }
+
+            align: { x: 0.5, y: 0 }
+            padding: 20,
+            spacing: 10,
+
+            scroll_handler = <RoundedView> {
+                width: 40,
+                height: 6,
+
+                show_bg: true,
+                draw_bg: {
+                    color: #333
+                    radius: 2.
+                }
+            }
+        }
+    }
+
     MultiWindow = <MultiWindowBase>{}
     PageFlip = <PageFlipBase>{}
     KeyboardView = <KeyboardViewBase>{}
@@ -619,4 +704,5 @@ live_design!{
     WindowMenuBase = <WindowMenuBase>{}
     StackNavigationViewBase = <StackNavigationViewBase>{}
     StackNavigationBase = <StackNavigationBase>{}
+    ExpandablePanelBase = <ExpandablePanelBase>{}
 }

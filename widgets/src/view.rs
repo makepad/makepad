@@ -681,14 +681,29 @@ impl Widget for View {
                                 .draw_vars
                                 .set_texture(0, &texture_cache.color_texture);
                             let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
-                            rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
+                            // NOTE(eddyb) see comment lower below for why this is
+                            // disabled (it used to match `set_pass_scaled_area`).
+                            if false {
+                                rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
+                            }
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
-                            cx.set_pass_scaled_area(
-                                &texture_cache.pass,
-                                self.area,
-                                2.0 / self.dpi_factor.unwrap_or(1.0),
-                            );
+                            if false {
+                                // FIXME(eddyb) this was the previous logic,
+                                // but the only tested apps that use `CachedView`
+                                // are sized correctly (regardless of `dpi_factor`)
+                                // *without* extra scaling here.
+                                cx.set_pass_scaled_area(
+                                    &texture_cache.pass,
+                                    self.area,
+                                    2.0 / self.dpi_factor.unwrap_or(1.0),
+                                );
+                            } else {
+                                cx.set_pass_area(
+                                    &texture_cache.pass,
+                                    self.area,
+                                );
+                            }
                         }
                         return DrawStep::done();
                     }
@@ -823,11 +838,22 @@ impl Widget for View {
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
-                        cx.set_pass_scaled_area(
-                            &texture_cache.pass,
-                            area,
-                            2.0 / self.dpi_factor.unwrap_or(1.0),
-                        );
+                        if false {
+                            // FIXME(eddyb) this was the previous logic,
+                            // but the only tested apps that use `CachedView`
+                            // are sized correctly (regardless of `dpi_factor`)
+                            // *without* extra scaling here.
+                            cx.set_pass_scaled_area(
+                                &texture_cache.pass,
+                                area,
+                                2.0 / self.dpi_factor.unwrap_or(1.0),
+                            );
+                        } else {
+                            cx.set_pass_area(
+                                &texture_cache.pass,
+                                area,
+                            );
+                        }
                     }
                 }
                 self.draw_state.end();
