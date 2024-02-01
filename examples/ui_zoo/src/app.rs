@@ -183,24 +183,24 @@ live_design!{
                                 show_bg: false,
                                 width: Fit,
                                 height: Fit,
-                              padding: 0
-                              spacing: 10
-                              flow: Down,                    
-                              <ZooBlock>{draw_bg:{color: #f00}}
-                              <ZooBlock>{draw_bg:{color: #ff0}}
-                              <ZooBlock>{draw_bg:{color: #00f}}
+                                padding: 0
+                                spacing: 10
+                                flow: Down,                    
+                                <ZooBlock>{draw_bg:{color: #f00}}
+                                <ZooBlock>{draw_bg:{color: #ff0}}
+                                <ZooBlock>{draw_bg:{color: #00f}}
                               }
                               
                               <View>{  
                                 show_bg: false,
                                 width: Fit,
                                 height: Fit,
-                              padding: 0
-                              spacing: 10
-                              flow: Down,                    
-                              <ZooBlock>{draw_bg:{color: #f00}}
-                              <ZooBlock>{draw_bg:{color: #ff0}}
-                              <ZooBlock>{draw_bg:{color: #00f}}
+                                padding: 0
+                                spacing: 10
+                                flow: Down,                    
+                                <ZooBlock>{draw_bg:{color: #f00}}
+                                <ZooBlock>{draw_bg:{color: #ff0}}
+                                <ZooBlock>{draw_bg:{color: #00f}}
                               }
                               <View>{  
                                 show_bg: false,
@@ -229,8 +229,9 @@ live_design!{
                             
                             radius: 10.0
                             fn get_color(self) -> vec4{
-                            return #bbb
-                        }}           
+                                return #bbb
+                            }
+                        }           
                         padding: 10
                         spacing: 10
                         height: Fit
@@ -247,12 +248,11 @@ live_design!{
                         title = {text:"Button"}
                         <ZooDesc>{text:"A small clickable region"}
                     
-                        <Button> {
+                        basicbutton = <Button> {
                             text: "I can be clicked"
                         }
-                        <Button> 
-                        {
-
+                        
+                        iconbutton = <Button> {
                             draw_icon: {
                                 svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 color: #000;
@@ -262,8 +262,8 @@ live_design!{
 
                              icon_walk: {width: 30, margin:14, height: Fit}
                         }
-                        <Button> {
 
+                        styledbutton = <Button> {
                             draw_bg: {
                                 fn pixel(self) -> vec4 {                                    
                                     return #f40 + self.pressed * vec4(1,1,1,1)
@@ -273,24 +273,38 @@ live_design!{
                                 fn get_color(self) -> vec4 {                                    
                                     return #fff - vec4(0,.1,.4,0) *self.hover - self.pressed * vec4(1,1,1,0);
                                 }                             
-                            }
-                            
+                            }                            
                             text: "I can be styled!"
-
                         }
-                    }   
-
+                    }
 
                     <ZooHeader>{
-                        title = {text:"TextInput"}
-                        <ZooDesc>{text:"Simple 1 line textbox"}
-                    
-                        <TextInput> {
-                            width: 100, height: 30
-                            text: "Click to count"
-                        }
-                    }   
+                        title = {text:"TextInput"}                        
+                        <ZooDesc>{text:"Simple 1 line textbox"}                        
+                        <View>{
+                            height: Fit,
+                            width: Fit,
+                            flow: Right,
+                            padding: 10,
 
+                            draw_bg: {
+                                fn pixel(self) -> vec4{
+                                    return #222
+                                }
+                            }
+
+                           show_bg: true;
+
+                            simpletextinput= <TextInput> {
+                                width: 100
+                                text: "This is inside a textbox!"
+                            }
+                            
+                            simpletextinput_outputbox = <Label> {
+                                text: "Output"
+                            }
+                        }
+                    }
 
                     <ZooHeader>{
                         title = {text:"Label"}
@@ -338,16 +352,13 @@ live_design!{
                     
                         <Slider> 
                         {
+                            width: Fit,
                             draw_slider:{
                             slider_type: Horizontal
                             }
                             text: "param"                        
-                        }
-
-                     
-
+                        }                
                     }                
-
                 }
             }
         }
@@ -370,12 +381,35 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
-            log!("BUTTON CLICKED {}", self.counter); 
+
+        if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
+
+            log!("TEXTBOX CHANGED {}", self.counter); 
             self.counter += 1;
-            let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+            let lbl = self.ui.button(id!(simpletextinput_outputbox));
+            lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, txt));
+
         }
+        if self.ui.button(id!(basicbutton)).clicked(&actions) {
+            log!("BASIC BUTTON CLICKED {}", self.counter); 
+            self.counter += 1;
+            let btn = self.ui.button(id!(basicbutton));
+            btn.set_text_and_redraw(cx,&format!("Clicky clicky! {}", self.counter));
+        }
+
+        if self.ui.button(id!(styledbutton)).clicked(&actions) {
+            log!("STYLED BUTTON CLICKED {}", self.counter); 
+            self.counter += 1;
+            let btn = self.ui.button(id!(styledbutton));
+            btn.set_text_and_redraw(cx,&format!("Styled button clicked: {}", self.counter));        
+        }
+
+        if self.ui.button(id!(iconbutton)).clicked(&actions) {
+            log!("ICON BUTTON CLICKED {}", self.counter); 
+            self.counter += 1;
+            let btn = self.ui.button(id!(iconbutton));
+            btn.set_text_and_redraw(cx,&format!("Icon button clicked: {}", self.counter));
+        }       
     }
 }
 
