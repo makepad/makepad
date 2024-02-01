@@ -477,11 +477,10 @@ pub struct PollTimer {
 }
 
 impl PollTimer {
-    pub fn new(interval_ms: f64, repeats: bool) -> Self {
-        let interval_ns = (interval_ms * 1e6) as u64;
+    pub fn new(interval_s: f64, repeats: bool) -> Self {
         Self {
             start_time: Instant::now(),
-            interval: Duration::from_nanos(interval_ns),
+            interval: Duration::from_secs_f64(interval_s),
             repeats,
             step: 0,
         }
@@ -506,7 +505,7 @@ impl PollTimers{
    
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+        (time_now.duration_since(self.time_start)).as_secs_f64()
     }
 
     pub fn get_dispatch(&mut self)->Vec<Event>{

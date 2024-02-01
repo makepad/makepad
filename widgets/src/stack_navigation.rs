@@ -20,24 +20,21 @@ pub enum StackNavigationAction {
     NavigateTo(LiveId)
 }
 
+#[derive(Clone, Default, Eq, Hash, PartialEq, Debug)]
+pub enum StackNavigationViewState {
+    #[default] Inactive,
+    Active,
+}
+
 /// Actions that are delivered to an incoming or outgoing "active" widget/view
 /// within a stack navigation container.
 #[derive(Clone, DefaultNone, Eq, Hash, PartialEq, Debug)]
 pub enum StackNavigationTransitionAction {
     None,
-    /// The widget is being shown.
-    /// This is sent to the widget/view being animated in,
-    /// at the very beginning of that animate-in process.
-    Show,
-    /// The widget is being hidden.
-    /// This is sent to the widget/view being animated out,
-    /// at the very beginning of that animate-out process.
+    ShowBegin,
+    ShowDone,
     HideBegin,
-    /// The widget is being hidden.
-    /// This is sent to the widget/view being animated out,
-    /// at the very end of that animate-out process.
     HideEnd,
-
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -53,43 +50,21 @@ pub struct StackNavigationView {
 
     #[animator]
     animator: Animator,
+
+    #[rust]
+    state: StackNavigationViewState,
 }
 
 impl Widget for StackNavigationView {
-    fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.view.redraw(cx);
         }
 
+        self.handle_stack_view_closure_request(cx, event, scope);
+        self.trigger_action_post_opening_if_done(cx);
+        self.finish_closure_animation_if_done(cx);
         self.view.handle_event(cx, event, scope);
-        self.widget_match_event(cx, event, scope);
-
-        // Clicking the "back" button on the mouse
-        // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
-        let back_mouse_button_released = match event {
-            Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
-            _ => false,
-        };
-        if back_mouse_button_released {
-            self.hide_stack_view(cx);
-        }
-
-        if self.animator.animator_in_state(cx, id!(slide.hide))
-        {
-            if self.offset > self.offset_to_hide {
-                self.apply_over(cx, live! {visible: false});
-
-                // The active stack view is about to be no longer active, so let's
-                // send a `HideEnd` action to it so it can be aware of the transition conclusion.
-                cx.widget_action(
-                    self.widget_uid(),
-                    &HeapLiveIdPath::default(),
-                    StackNavigationTransitionAction::HideEnd,
-                );
-
-                self.animator_cut(cx, id!(slide.hide));
-            }
-        }
     }
 
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk) -> DrawStep{
@@ -121,6 +96,58 @@ impl StackNavigationView {
             &HeapLiveIdPath::default(),
             StackNavigationTransitionAction::HideBegin,
         );
+    }
+
+    fn handle_stack_view_closure_request(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // This will invoke WidgetMatchEvent::handle_actions() on the widget.
+        // If the back button was clicked, it will be handled there.
+        self.widget_match_event(cx, event, scope);
+
+        // Clicking the "back" button on the mouse must also hide the active stack view.
+        let back_mouse_button_released = match event {
+            Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
+            _ => false,
+        };
+        if back_mouse_button_released {
+            self.hide_stack_view(cx);
+        }
+
+        // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
+    }
+
+    fn finish_closure_animation_if_done(&mut self, cx: &mut Cx) {
+        if self.state == StackNavigationViewState::Active
+            && self.animator.animator_in_state(cx, id!(slide.hide))
+        {
+            if self.offset > self.offset_to_hide {
+                self.apply_over(cx, live! { visible: false });
+
+                cx.widget_action(
+                    self.widget_uid(),
+                    &HeapLiveIdPath::default(),
+                    StackNavigationTransitionAction::HideEnd,
+                );
+
+                self.animator_cut(cx, id!(slide.hide));
+                self.state = StackNavigationViewState::Inactive;
+            }
+        }
+    }
+
+    fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
+        if self.state == StackNavigationViewState::Inactive &&
+            self.animator.animator_in_state(cx, id!(slide.show))
+        {
+            const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
+            if self.offset < OPENING_OFFSET_THRESHOLD {
+                cx.widget_action(
+                    self.widget_uid(),
+                    &HeapLiveIdPath::default(),
+                    StackNavigationTransitionAction::ShowDone,
+                );
+                self.state = StackNavigationViewState::Active;
+            }
+        }
     }
 }
 
@@ -192,10 +219,14 @@ impl LiveHook for StackNavigation {
 
 impl Widget for StackNavigation {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.widget_match_event(cx, event, scope);
         for widget_ref in self.get_active_views(cx).iter() {
             widget_ref.handle_event(cx, event, scope);
         }
+
+        // Leaving this to the final step, so that the active stack view can handle the event first.
+        // It is releveant when the active stack view is animating out and want to handle
+        // the StackNavigationTransitionAction::HideEnd action.
+        self.widget_match_event(cx, event, scope);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep  {
@@ -216,7 +247,7 @@ impl WidgetNode for StackNavigation {
             widget_ref.redraw(cx);
         }
     }
-    
+
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
     }
@@ -225,12 +256,19 @@ impl WidgetNode for StackNavigation {
 impl WidgetMatchEvent for StackNavigation {
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         for action in actions {
+            // If the window is resized, we need to record the new screen width to
+            // fit the transition animation for the new dimensions.
             if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
                 self.screen_width = ce.new_geom.inner_size.x * ce.new_geom.dpi_factor;
                 if let ActiveStackView::Active(stack_view_id) = self.active_stack_view {
                     let mut stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
                     stack_view_ref.set_offset_to_hide(self.screen_width);
                 }
+            }
+
+            // If the active stack view is already hidden, we need to reset the active stack view.
+            if let StackNavigationTransitionAction::HideEnd = action.as_widget_action().cast() {
+                self.active_stack_view = ActiveStackView::None;
             }
         }
     }
@@ -248,7 +286,7 @@ impl StackNavigation {
             cx.widget_action(
                 stack_view_ref.widget_uid(),
                 &HeapLiveIdPath::default(),
-                StackNavigationTransitionAction::Show,
+                StackNavigationTransitionAction::ShowBegin,
             );
 
             self.redraw(cx);
@@ -268,12 +306,10 @@ impl StackNavigation {
                     if stack_view_ref.is_animating(cx) {
                         views.push(self.view.widget(id!(root_view)));
                     }
-                    views.push(stack_view_ref.0.clone());
-                    views
-                } else {
-                    self.active_stack_view = ActiveStackView::None;
-                    vec![self.view.widget(id!(root_view))]
                 }
+
+                views.push(stack_view_ref.0.clone());
+                views
             }
         }
     }
