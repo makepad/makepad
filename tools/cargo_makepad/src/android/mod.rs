@@ -188,7 +188,8 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install(&targets) ?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
             sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets) ?;
-            sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
+            // FIXME: re-enable this before merging
+            // sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
             println!("\nAndroid toolchain has been installed\n");
             Ok(())
         }
