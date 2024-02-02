@@ -20,7 +20,6 @@ pub struct BuildResult {
 }
 
 fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
-    println!("manifest_xml(): label: {:?}, class_name: {:?}, url: {:?}", label, class_name, url); // TODO: remove before merge
     format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <manifest xmlns:android="http://schemas.android.com/apk/res/android"
         xmlns:tools="http://schemas.android.com/tools"
@@ -208,8 +207,6 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
     let r_class_path = build_paths.tmp_dir.join(makepad_package_path).join("R.java");
     let makepad_java_classes_dir = &cargo_manifest_dir.join("src/android/java/").join(makepad_package_path);
 
-    println!("compile_java: {:?}", &build_paths.java_file);  // TODO: remove before merge
-
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
@@ -242,7 +239,6 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
 
     let compiled_java_classes_dir = build_paths.out_dir.join(makepad_package_path);
-    println!("build_dex(): compiled_java_classes_dir: {:?}", compiled_java_classes_dir); // TODO: remove before merge
 
     shell_env_cap( 
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
