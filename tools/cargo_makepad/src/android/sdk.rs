@@ -199,8 +199,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
             let copy_fn = if full_ndk { shell::cp_all } else { shell::cp };
             copy_fn(&mount_point.join(source_path), &sdk_dir.join(dest_path), *exec) ?;
         }
-        // TODO: restore before merging
-        // shell(sdk_dir, "umount", &[mount_point.to_str().unwrap()]) ?;
+        shell(sdk_dir, "umount", &[mount_point.to_str().unwrap()]) ?;
         Ok(())
     }
     
