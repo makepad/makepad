@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use crate::android::{HostOs, AndroidTarget};
 use crate::utils::*;
 use crate::makepad_shell::*;
+use super::sdk::NDK_VERSION_FULL;
 
 struct BuildPaths {
     tmp_dir: PathBuf,
@@ -19,6 +20,7 @@ pub struct BuildResult {
 }
 
 fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
+    println!("manifest_xml(): label: {:?}, class_name: {:?}, url: {:?}", label, class_name, url); // TODO: remove before merge
     format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <manifest xmlns:android="http://schemas.android.com/apk/res/android"
         xmlns:tools="http://schemas.android.com/tools"
@@ -33,7 +35,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
             tools:targetApi="33">
             <meta-data android:name="android.max_aspect" android:value="2.1" />
             <activity
-                android:name="{class_name}"
+                android:name=".{class_name}"
                 android:configChanges="orientation|screenSize|keyboardHidden"
                 android:exported="true">
                 <intent-filter>
@@ -74,13 +76,14 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
     for android_target in android_targets {
         let clang_filename = format!("{}33-clang", android_target.clang());
         
-        let linker = match host_os{
-            HostOs::MacosX64=>format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/{clang_filename}"),
-            HostOs::MacosAarch64=>format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/{clang_filename}"),
-            HostOs::WindowsX64=>format!("NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/{clang_filename}.cmd"),
-            HostOs::LinuxX64=>format!("NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/{clang_filename}"),
-            _=>panic!()
+        let bin_path = |bin_filename: &str| match host_os {
+            HostOs::MacosX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
+            HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
+            HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.cmd"),
+            HostOs::LinuxX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/bin/{bin_filename}"),
+            _ => panic!()
         };
+        let full_clang_path = sdk_dir.join(bin_path(&clang_filename));
 
         let toolchain = android_target.toolchain();
         let target_opt = format!("--target={toolchain}");
@@ -100,12 +103,20 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
             args_out.push(arg);
         }
 
-        let target_str = android_target.to_str();
-        let cfg_flag = format!("--cfg android_target=\"{}\"", target_str);
+        let target_arch_str = android_target.to_str();
+        let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
          
         shell_env(
-            &[ 
-                (&android_target.linker_env_var(), (sdk_dir.join(linker).to_str().unwrap())),
+            &[
+                // Set the linker env var to the path of the target-specific `clang` binary.
+                (&android_target.linker_env_var(), full_clang_path.to_str().unwrap()),
+
+                // We set these three env vars to allow native library C/C++ builds to succeed with no additional app-side config.
+                // The naming conventions of these env variable keys are established by the `cc` Rust crate.
+                (&format!("CC_{toolchain}"),     full_clang_path.to_str().unwrap()),
+                (&format!("AR_{toolchain}"),     sdk_dir.join(bin_path("llvm-ar")).to_str().unwrap()),
+                (&format!("RANLIB_{toolchain}"), sdk_dir.join(bin_path("llvm-ranlib")).to_str().unwrap()),
+
                 ("RUSTFLAGS", &cfg_flag),
                 ("MAKEPAD", "lines"),
             ],
@@ -197,6 +208,8 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
     let r_class_path = build_paths.tmp_dir.join(makepad_package_path).join("R.java");
     let makepad_java_classes_dir = &cargo_manifest_dir.join("src/android/java/").join(makepad_package_path);
 
+    println!("compile_java: {:?}", &build_paths.java_file);  // TODO: remove before merge
+
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
@@ -229,6 +242,7 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
 
     let compiled_java_classes_dir = build_paths.out_dir.join(makepad_package_path);
+    println!("build_dex(): compiled_java_classes_dir: {:?}", compiled_java_classes_dir); // TODO: remove before merge
 
     shell_env_cap( 
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
