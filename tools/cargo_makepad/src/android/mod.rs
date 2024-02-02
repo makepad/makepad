@@ -131,6 +131,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut package_name = None;
     let mut app_label = None;
     let mut targets = vec![AndroidTarget::aarch64];
+    let mut keep_sdk_sources = false;
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
@@ -148,6 +149,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         }
         else if let Some(opt) = v.strip_prefix("--abi=") {
             targets = AndroidTarget::from_str(opt)?;
+        }
+        else if v.trim() == "--keep-sdk-sources" {
+            keep_sdk_sources = true;
         }
         else {
             args = &args[i..];
@@ -188,8 +192,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install(&targets) ?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
             sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets) ?;
-            // FIXME: re-enable this before merging
-            // sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
+            if !keep_sdk_sources {
+                sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
+            }
             println!("\nAndroid toolchain has been installed\n");
             Ok(())
         }
