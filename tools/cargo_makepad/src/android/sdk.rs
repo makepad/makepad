@@ -1,7 +1,8 @@
+#![allow(non_snake_case)]
 
 use makepad_miniz::zip_file::*;
 use std::{
-    path::{Path},
+    path::Path,
     fs::{File, OpenOptions},
     io::{Write, Read, Seek},
 };
@@ -24,6 +25,11 @@ const URL_PLATFORM_TOOLS_33_WINDOWS: &str = "https://dl.google.com/android/repos
 const URL_NDK_33_MACOS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg";
 const URL_NDK_33_LINUX: &str = "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip";
 const URL_NDK_33_WINDOWS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip";
+
+pub const _NDK_VERSION_MAJOR: &str = "25";
+pub const _NDK_VERSION_MINOR: &str = "2";
+pub const _NDK_VERSION_BUILD: &str = "9519653";
+pub const NDK_VERSION_FULL:  &str = "25.2.9519653";
 
 const URL_OPENJDK_17_0_2_WINDOWS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_windows-x64_bin.zip";
 const URL_OPENJDK_17_0_2_MACOS_AARCH64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-aarch64_bin.tar.gz";
@@ -217,16 +223,15 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                 ("platform-tools/AdbWinUsbApi.dll", false),
             ]) ?;
             const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64";
-            const NDK_OUT: &str = "NDK/toolchains/llvm/prebuilt/windows-x86_64";
+            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64");
             
             let mut ndk_extract = Vec::new();
-            #[allow(non_snake_case)]
             for target in targets{
                 let sys_dir = target.sys_dir();
                 let clang = target.clang();
                 let unwind_dir = target.unwind_dir();
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
+                let SYS_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let UNWIND_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
                 
                 ndk_extract.extend_from_slice(&[
@@ -258,7 +263,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
             unzip(4, src_dir, sdk_dir, URL_NDK_33_WINDOWS, &ndk_extract) ?;
             // patch the .cmd file to stop complaining
             {
-                let cmd_file_path = sdk_dir.join("NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd");
+                let cmd_file_path = sdk_dir.join("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd");
 
                 // Open the file for reading
                 let mut ndk_cmd = OpenOptions::new()
@@ -324,7 +329,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                 ("platform-tools/adb", true),
             ]) ?;
             const NDK_IN: &str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64";
-            const NDK_OUT: &str = "NDK/toolchains/llvm/prebuilt/darwin-x86_64";
+            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64");
             
             let mut ndk_extract = Vec::new();
             #[allow(non_snake_case)]
@@ -333,7 +338,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                 let clang = target.clang();
                 let unwind_dir = target.unwind_dir();
                 let SYS_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
+                let SYS_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let UNWIND_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
@@ -405,7 +410,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                 ("platform-tools/adb", true),
             ]) ?;
             const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64";
-            const NDK_OUT: &str = "NDK/toolchains/llvm/prebuilt/linux-x86_64";
+            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64");
             
             let mut ndk_extract = Vec::new();
             #[allow(non_snake_case)]
@@ -414,7 +419,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[A
                 let clang = target.clang();
                 let unwind_dir = target.unwind_dir();
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
+                let SYS_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let UNWIND_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
                 ndk_extract.extend_from_slice(&[
                     (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
