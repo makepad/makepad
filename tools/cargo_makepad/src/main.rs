@@ -57,6 +57,7 @@ fn show_help(err: &str){
     println!("       --package-name=\"package\"                The package name");
     println!("       --app-label=\"applabel\"                  The app label");
     println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
+    println!("       --full-ndk                                Install the full NDK prebuilts for the selected Host OS (default is a minimal subset).");
     println!("       --host-os=<linux-x64|windows-x64|macos-aarch64|macos-x64>");
     println!("                                                 Host OS is autodetected but can be overridden here");
     println!("    [Android install-toolchain separated steps]");
