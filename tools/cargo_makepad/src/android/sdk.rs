@@ -342,18 +342,17 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
                 #[cfg(any(target_os = "macos", target_os = "linux"))] {
                     use std::os::unix::fs::PermissionsExt;
                     let bin_dir = sdk_dir.join(NDK_OUT).join("bin");
-                    for bin_file in std::fs::read_dir(bin_dir)
+                    std::fs::read_dir(bin_dir)
                         .expect("failed to read NDK `bin/` dir: {bin_dir:?}")
                         .filter_map(|r| r.ok().and_then(|entry| {
                             let path = entry.path();
                             path.is_file().then_some(path)
                         }))
-                    {
-                        std::fs::set_permissions(&bin_file, PermissionsExt::from_mode(0o744))
-                            .expect("failed to set exec permissions on {bin_file:?}");
-                    }
+                        .for_each(|bin_file|
+                            std::fs::set_permissions(&bin_file, PermissionsExt::from_mode(0o744))
+                                .expect("failed to set exec permissions on {bin_file:?}")
+                        );
                 }
-
             } else {
                 let mut ndk_extract = Vec::new();
                 #[allow(non_snake_case)]
