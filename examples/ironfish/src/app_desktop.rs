@@ -1362,6 +1362,73 @@ live_design! {
         }
     }
 
+
+    ShadowFXPanel = <View> {
+        width: Fill,
+        height: Fit
+        flow: Down
+
+            <View> {
+            flow: Right,
+            align: {x: 0.0, y: 0.0}
+            width: Fill,
+            height: Fit
+
+                <SubheaderContainer> {
+                margin: {top: (SSPACING_0)}
+                <FishSubTitle> {
+                    label = {
+                        text: "Shadow",
+                        draw_text: {color: (COLOR_FX)},
+                    }
+                }
+
+                <FillerV> {}
+
+
+            }
+        }
+
+        <View> {
+            width: Fill,
+            height: Fit,
+            flow: Down,
+            shadowopacity = <InstrumentSlider> {
+                width: Fill,
+                height: Fit
+                slider = {
+                    draw_slider: {line_color: (COLOR_FX)}
+                    min: 0.0
+                    max: 1.0
+                    text: "Opacity"
+
+                }
+            }
+            shadowx = <InstrumentSlider> {
+                width: Fill,
+                height: Fit
+                slider = {
+                    draw_slider: {line_color: (COLOR_FX)}
+                    min: 0.0
+                    max: 100.0
+                    text: "X"
+
+                }
+            }
+            shadowy = <InstrumentSlider> {
+                width: Fill,
+                height: Fit
+                slider = {
+                    draw_slider: {line_color: (COLOR_FX)}
+                    min: 0.0
+                    max: 100.0
+                    text: "Y"
+
+                }
+            }
+        }
+    }
+
     CrushFXPanel = <View> {
         width: Fill,
         height: Fit
@@ -1956,6 +2023,7 @@ live_design! {
                 osc2 = <OscPanel> {}
             }
             <BlurFXPanel> {}
+            <ShadowFXPanel> {}
             <FillerV> {}
         }
     }
