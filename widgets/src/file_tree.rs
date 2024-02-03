@@ -234,7 +234,6 @@ impl FileTreeNode {
     }
 }
 
-
 impl FileTree {
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
