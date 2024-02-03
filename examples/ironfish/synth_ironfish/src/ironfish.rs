@@ -206,6 +206,17 @@ pub struct BlurSettings {
     std: f32a,
 }
 
+
+#[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
+pub struct ShadowSettings {
+    #[live(0.4)]
+    opacity: f32a,
+    #[live(2.0)]
+    x: f32a,
+    #[live(2.0)]
+    y: f32a
+}
+
 #[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct DelaySettings {
     #[live(0.15)]
@@ -307,6 +318,8 @@ pub struct IronFishSettings {
 
     #[live]
     blur: BlurSettings,
+    #[live]
+    shadow: ShadowSettings,
 }
 
 #[derive(Copy, Clone)]
