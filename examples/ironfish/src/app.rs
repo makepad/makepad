@@ -113,6 +113,49 @@ live_design! {
         }
     }
 
+
+    ShadowStage = <ViewBase> {
+        optimize: Texture,
+        draw_bg: {
+            texture image: texture2d
+
+            uniform shadowopacity:  0.9,
+            uniform shadowx: 1.0,
+            uniform shadowy: 1.0,
+
+            varying o0: vec2,
+            varying oShadow: vec2,
+            
+            fn vertex(self) -> vec4
+            {
+                
+                let dpi = self.dpi_factor;
+                
+               
+                let pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size);
+
+                self.o0 = self.pos;
+                self.oShadow = self.pos - vec2(self.shadowx * dpi, self.shadowy * dpi)*0.001;
+
+                return pos;
+            }
+
+            fn pixel(self) -> vec4{
+                
+                let shadow = sample2d_rt(self.image, self.oShadow);
+                let main = sample2d_rt(self.image, self.o0);
+
+                let col =  (vec4(0.0,0.0,0.0,self.shadowopacity)  * shadow.a ) * ( 1 - main.a) + main;
+
+                //col +=  (sample2d_rt(self.image, self.o0) )*0.3;
+                
+
+                return col;
+            }
+        }
+    }
+
+
     App = {{App}} {
 
         audio_graph: {
@@ -149,7 +192,21 @@ live_design! {
                     }
                 }
             }*/
-            body = <AppDesktop> {}
+            body = <View>
+            {
+                
+                width: Fill,
+                height: Fill,
+                
+                shadowstep = <ShadowStage> {
+                    width: Fill,
+                    height: Fill,
+                    draw_bg:{shadowy: 10.0, shadowx: 10.0, shadowopacity: 2.0}
+                    padding: 10
+                    <AppDesktop> {}
+                }
+            }
+
         }
 
     }
@@ -281,6 +338,13 @@ impl App {
         db.bind(id!(blur.size), ids!(blursize.slider));
         db.bind(id!(blur.std), ids!(blurstd.slider));
 
+
+
+
+        db.bind(id!(shadow.opacity), ids!(shadowopacity.slider));
+        db.bind(id!(shadow.x), ids!(shadowx.slider));
+        db.bind(id!(shadow.y), ids!(shadowy.slider));
+
         // sequencer
         db.bind(id!(sequencer.steps), ids!(sequencer));
 
@@ -353,6 +417,11 @@ impl App {
             ids!(vol_env.display, draw_bg.release),
             |v| v,
         );
+
+        db.apply(id!(shadow.opacity), ids!(shadowstep, draw_bg.shadowopacity), |v| v);
+        db.apply(id!(shadow.x), ids!(shadowstep, draw_bg.shadowx), |v| v);
+        db.apply(id!(shadow.y), ids!(shadowstep, draw_bg.shadowy), |v| v);
+
         db.apply(id!(blur.size), ids!(step1, draw_bg.blursize), |v| v);
         db.apply(id!(blur.std), ids!(step1, draw_bg.blurstd), |v| v);
         db.apply(id!(blur.size), ids!(step2, draw_bg.blursize), |v| v);
