@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     fs::File,
-    io::{Write},
+    io::Write,
     fs,
     io::prelude::*,
     io::BufReader,
