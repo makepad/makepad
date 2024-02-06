@@ -4,6 +4,7 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
     import makepad_draw::shader::std::*;
+    import makepad_ui_zoo::demofiletree::*;
 
     ZooHeader = <View> {
         show_bg: true
@@ -29,6 +30,21 @@ live_design!{
             }
             text: "Header"
         }
+    }
+    ZooGroup = <View>{ 
+        
+            height: Fit,
+            width: Fill,
+            flow: Right,
+            padding: 10,
+
+            draw_bg: {
+                fn pixel(self) -> vec4{
+                    return #aaa
+                }
+            }
+
+           show_bg: true;
     }
 
     ZooTitle = <View> {
@@ -150,15 +166,8 @@ live_design!{
                          <ZooDesc>{text:"This is a view with flow set to Down"}
                          <View>
                           {
-                             show_bg: true,
-                             draw_bg:{ 
-                                 
-                                 fn pixel(self) -> vec4{
-                                 return #bbb
-                             }}           
                              padding: 10
                              spacing: 10
-                             height: Fit
                              flow: Down,                    
                              <ZooBlock>{draw_bg:{color: #f00}}
                              <ZooBlock>{draw_bg:{color: #ff0}}
@@ -177,30 +186,31 @@ live_design!{
                                   
                                   fn pixel(self) -> vec4{
                                   return #bbb
-                              }}         
+                              }
+                            }         
                               
                               <View>{  
                                 show_bg: false,
                                 width: Fit,
                                 height: Fit,
-                              padding: 0
-                              spacing: 10
-                              flow: Down,                    
-                              <ZooBlock>{draw_bg:{color: #f00}}
-                              <ZooBlock>{draw_bg:{color: #ff0}}
-                              <ZooBlock>{draw_bg:{color: #00f}}
+                                padding: 0
+                                spacing: 10
+                                flow: Down,                    
+                                <ZooBlock>{draw_bg:{color: #f00}}
+                                <ZooBlock>{draw_bg:{color: #ff0}}
+                                <ZooBlock>{draw_bg:{color: #00f}}
                               }
                               
                               <View>{  
                                 show_bg: false,
                                 width: Fit,
                                 height: Fit,
-                              padding: 0
-                              spacing: 10
-                              flow: Down,                    
-                              <ZooBlock>{draw_bg:{color: #f00}}
-                              <ZooBlock>{draw_bg:{color: #ff0}}
-                              <ZooBlock>{draw_bg:{color: #00f}}
+                                padding: 0
+                                spacing: 10
+                                flow: Down,                    
+                                <ZooBlock>{draw_bg:{color: #f00}}
+                                <ZooBlock>{draw_bg:{color: #ff0}}
+                                <ZooBlock>{draw_bg:{color: #00f}}
                               }
                               <View>{  
                                 show_bg: false,
@@ -229,8 +239,9 @@ live_design!{
                             
                             radius: 10.0
                             fn get_color(self) -> vec4{
-                            return #bbb
-                        }}           
+                                return #bbb
+                            }
+                        }           
                         padding: 10
                         spacing: 10
                         height: Fit
@@ -247,12 +258,11 @@ live_design!{
                         title = {text:"Button"}
                         <ZooDesc>{text:"A small clickable region"}
                     
-                        <Button> {
+                        basicbutton = <Button> {
                             text: "I can be clicked"
                         }
-                        <Button> 
-                        {
-
+                        
+                        iconbutton = <Button> {
                             draw_icon: {
                                 svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 color: #000;
@@ -262,8 +272,8 @@ live_design!{
 
                              icon_walk: {width: 30, margin:14, height: Fit}
                         }
-                        <Button> {
 
+                        styledbutton = <Button> {
                             draw_bg: {
                                 fn pixel(self) -> vec4 {                                    
                                     return #f40 + self.pressed * vec4(1,1,1,1)
@@ -273,24 +283,25 @@ live_design!{
                                 fn get_color(self) -> vec4 {                                    
                                     return #fff - vec4(0,.1,.4,0) *self.hover - self.pressed * vec4(1,1,1,0);
                                 }                             
-                            }
-                            
+                            }                            
                             text: "I can be styled!"
-
                         }
-                    }   
-
+                    }
 
                     <ZooHeader>{
-                        title = {text:"TextInput"}
-                        <ZooDesc>{text:"Simple 1 line textbox"}
-                    
-                        <TextInput> {
-                            width: 100, height: 30
-                            text: "Click to count"
+                        title = {text:"TextInput"}                        
+                        <ZooDesc>{text:"Simple 1 line textbox"}                        
+                        <ZooGroup>{
+                            simpletextinput= <TextInput> {
+                                width: 100
+                                text: "This is inside a textbox!"
+                            }
+                            
+                            simpletextinput_outputbox = <Label> {
+                                text: "Output"
+                            }
                         }
-                    }   
-
+                    }
 
                     <ZooHeader>{
                         title = {text:"Label"}
@@ -298,12 +309,13 @@ live_design!{
                         {
                             text:"Simple 1 line textbox"
                         }
-                    
+                        <ZooGroup>{
                         <Label> 
                         {
                             text: "This is a small line of text"                        
                         }
-
+                    }
+                    <ZooGroup>{
                         <Label> {
                             draw_text: 
                             { 
@@ -313,7 +325,8 @@ live_design!{
                             },
                             text: "You can style text using colors and fonts"                        
                         }
-
+                    }
+                    <ZooGroup>{
                         <Label> {
                             draw_text: 
                             { 
@@ -326,6 +339,7 @@ live_design!{
                             },
                             text: "Or even some pixelshaders"                        
                         }
+                    }
 
                     }                
 
@@ -335,19 +349,88 @@ live_design!{
                         {
                             text:"A parameter dragger"
                         }
-                    
-                        <Slider> 
-                        {
-                            draw_slider:{
-                            slider_type: Horizontal
+                        <ZooGroup> {
+                            <Slider> 
+                            {
+                                value: 0.0
+                                width: 100,
+                                height: 30, 
+                                draw_slider:{
+                                slider_type: Horizontal
+                                }
+                                text: "param"                        
+                            }          
+                        }      
+                     
+                    }              
+
+                    <ZooHeader>{title = {text:"KeyboardView"} <ZooDesc>{text:"KeyboardView ?"}<ZooGroup> {<KeyboardView>{}}  }              
+                    <ZooHeader>{title = {text:"CheckBox"} <ZooDesc>{text:"Checkbox ?"}<ZooGroup> 
+                    {
+                        flow: Down
+                        simplecheckbox = <CheckBox>{text:"Check me out!"}
+                        simplecheckbox_output = <Label>{text:"hmm"}
+                }  
+            }              
+                    <ZooHeader>{title = {text:"RadioButton"} <ZooDesc>{text:"RadioButton ?"}<ZooGroup>
+                     {
+                        <RadioButtonSet>{
+                        <RadioButton>{text:"Option 1: yey"}
+                        <RadioButton>{text:"Option 2: hah"}
+                        <RadioButton>{text:"Option 3: hmm"}
+                        <RadioButton>{text:"Option 4: all of the above"}
+                        }
+                    }
+                }               
+                    <ZooHeader>{title = {text:"DesktopButton"} <ZooDesc>{text:"Desktop Button ?"}<ZooGroup> {<DesktopButton>{}}  }              
+                    <ZooHeader>{title = {text:"DropDown"} <ZooDesc>{text:"DropDown ?"}<ZooGroup> 
+                    {
+                        <DropDown>{
+                        height: 30,
+                        width: 200
+                        popup_menu: {
+                            menu_item: {
+                                indent_width: 10.0
+                                width: Fill,
+                                height: Fit
+                                padding: 3
+                
+                                draw_bg: {
+                                    color: #x48,
+                                    color_selected: #x6
+                                }
                             }
-                            text: "param"                        
                         }
 
-                     
+                        dropdown = {
+                            labels: ["These","Drop","Down"]
+                            values: [0, 1, 2]
+                        }
 
-                    }                
 
+                    }}  }              
+                       
+                    
+                    <ZooHeader>{title = {text:"DemoFileTree"} <ZooDesc>{text:"DemoFileTree ?"}<ZooGroup> {<DemoFileTree>{width: Fill, height: 100}}  }     
+                    <ZooHeader>{title = {text:"StackViewHeader"} <ZooDesc>{text:"StackViewHeader ?"}<ZooGroup> {<StackViewHeader>{}}  }     
+                    <ZooHeader>{title = {text:"FoldHeader"} <ZooDesc>{text:"Fold header ?"}<ZooGroup> {
+                        <FoldButton>{text:"Origami"}
+                        <FoldHeader>{
+                            text:"Origami"
+                        }}  }     
+
+
+                    <ZooHeader>{title = {text:"Image"} <ZooDesc>{text:"A static inline image from a resource."}
+                        <ZooGroup> {
+                            <Image> {
+                                source: dep("crate://self/resources/ducky.png" ),
+                                width: (1000 * 0.175),
+                                height: (1000 * 0.175),
+                                margin: 0
+                            }
+
+                        }  
+                    }     
                 }
             }
         }
@@ -365,16 +448,50 @@ pub struct App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
+        crate::demofiletree::live_design(cx);
     }
 }
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
-            log!("BUTTON CLICKED {}", self.counter); 
+
+        if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
+
+            log!("TEXTBOX CHANGED {}", self.counter); 
             self.counter += 1;
-            let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+            let lbl = self.ui.label(id!(simpletextinput_outputbox));
+            lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, txt));
+
+        }
+        if self.ui.button(id!(basicbutton)).clicked(&actions) {
+            log!("BASIC BUTTON CLICKED {}", self.counter); 
+            self.counter += 1;
+            let btn = self.ui.button(id!(basicbutton));
+            btn.set_text_and_redraw(cx,&format!("Clicky clicky! {}", self.counter));
+        }
+
+        if self.ui.button(id!(styledbutton)).clicked(&actions) {
+            log!("STYLED BUTTON CLICKED {}", self.counter); 
+            self.counter += 1;
+            let btn = self.ui.button(id!(styledbutton));
+            btn.set_text_and_redraw(cx,&format!("Styled button clicked: {}", self.counter));        
+        }
+
+        if self.ui.button(id!(iconbutton)).clicked(&actions) {
+            log!("ICON BUTTON CLICKED {}", self.counter); 
+            self.counter += 1;
+            let btn = self.ui.button(id!(iconbutton));
+            btn.set_text_and_redraw(cx,&format!("Icon button clicked: {}", self.counter));
+        }       
+
+
+        if let Some(check) = self.ui.check_box(id!(simplecheckbox)).changed(actions) {
+            log!("CHECK BUTTON CLICKED {} {}", self.counter, check); 
+            self.counter += 1;                  
+            let lbl = self.ui.label(id!(simplecheckbox_output));
+            lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, check));
+            
+
         }
     }
 }

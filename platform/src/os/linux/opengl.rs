@@ -10,7 +10,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_shader_compiler::generate_glsl,
-        cx::Cx,
+        cx::{Cx, OsType, OsType::Android},
         texture::{Texture, TextureFormat, TexturePixel, CxTexture},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
@@ -481,7 +481,7 @@ impl Cx {
                 }
                 
                 if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(&vertex, &pixel);
+                    let shp = CxOsDrawShader::new(&vertex, &pixel, &self.os_type);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -746,7 +746,7 @@ impl GlShader{
 }
 
 impl CxOsDrawShader {
-    pub fn new(vertex: &str, pixel: &str) -> Self {
+    pub fn new(vertex: &str, pixel: &str, os_type: &OsType) -> Self {
         // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
         let available_extensions = get_gl_string(gl_sys::EXTENSIONS);
         let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
@@ -754,11 +754,18 @@ impl CxOsDrawShader {
         let mut maybe_ext_tex_extension_import = String::new();
         let mut maybe_ext_tex_extension_sampler = String::new();
 
+        // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
+        // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
+        let is_emulator = match os_type {
+            Android(params) => params.is_emulator,
+            _ => false,
+        };
+
         // Some Android devices running Adreno GPUs suddenly stopped compiling shaders when passing the samplerExternalOES sampler to texture2D functions. 
         // This seems like a driver bug (no confirmation from Qualcomm yet).
         // Therefore we're disabling the external texture support for Adreno until this is fixed.
         let is_vendor_adreno = get_gl_string(gl_sys::RENDERER).contains("Adreno"); 
-        if is_external_texture_supported && !is_vendor_adreno {
+        if is_external_texture_supported && !is_vendor_adreno && !is_emulator {
             maybe_ext_tex_extension_import = "#extension GL_OES_EGL_image_external : require\n".to_string();
             maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
         }
