@@ -269,8 +269,9 @@ MidiManager.OnDeviceOpenedListener{
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
+        boolean isEmulator = this.isEmulator();
 
-        MakepadNative.onAndroidParams(cache_path, density);
+        MakepadNative.onAndroidParams(cache_path, density, isEmulator);
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
@@ -557,5 +558,18 @@ MidiManager.OnDeviceOpenedListener{
             runnable.cleanupVideoPlaybackResources();
             runnable = null;
         }
+    }
+
+    public boolean isEmulator() {
+        // hints that the app is running on emulator
+        return Build.MODEL.startsWith("sdk")
+            || "google_sdk".equals(Build.MODEL)
+            || Build.MODEL.contains("Emulator")
+            || Build.MODEL.contains("Android SDK")
+            || Build.MODEL.toLowerCase().contains("droid4x")
+            || Build.FINGERPRINT.startsWith("generic")
+            || Build.PRODUCT == "sdk"
+            || Build.PRODUCT == "google_sdk"
+            || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
     }
 }
