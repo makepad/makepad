@@ -1,0 +1,17 @@
+[package]
+name = "makepad-experiment-esp-rc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+resolver = "2"
+
+[profile.release]
+lto = "off"
+opt-level = 3
+[profile.dev]
+lto = "off"
+
+[dependencies]
+makepad-easy-esp = { path = "../../libs/easy_esp"}
+
+[workspace]

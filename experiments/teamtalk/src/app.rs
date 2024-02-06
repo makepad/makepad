@@ -26,7 +26,7 @@ live_design!{
         ui: <Window>{
             show_bg: true
             width: Fill,
-            height: Fill
+            height: Fill,
             window: {inner_size: vec2(400, 300)},
             draw_bg: {
                 fn pixel(self) -> vec4 {
@@ -117,6 +117,8 @@ impl MatchEvent for App{
         self.start_artnet_client(cx);
         self.store_to_widgets(cx);
         self.fetch_hue_lights(cx);
+        self.start_imu_forward(cx);
+        self.start_forza_forward(cx);
         self.hue_poll = cx.start_interval(0.1);
     }
     
@@ -207,9 +209,160 @@ pub const DMXOUTPUT_HEADER: [u8;18] = [
 const HUE_KEY:&'static str = "Ay0O7saTTq3FNogyKhDwB8WWY7MdIyzeFzzsydRz";
 const HUE_BRIDGE:&'static str = "10.0.0.104";
 
+#[allow(unused)]
+#[derive(DeBin)]
+struct ForzaTelemetryDash{
+    // = 1 when race is on. = 0 when in menus/race stopped …
+    is_race_on: i32,
+    // Can overflow to 0 eventually
+    time_stamp_ms: u32,
+    
+    engine_max_rpm: f32,
+    engine_idle_rpm: f32,
+    current_engine: f32,
+    // In the car's local space; X = right, Y = up, Z = forward
+    acceleration_x: f32,
+    acceleration_y: f32,
+    acceleration_z: f32,
+    // In the car's local space; X = right, Y = up, Z = forward
+    velocity_x: f32,
+    velocity_y: f32,
+    velocity_z: f32,
+    // In the car's local space; X = pitch, Y = yaw, Z = roll
+    angular_velocity_x: f32,
+    angular_velocity_y: f32,
+    angular_velocity_z: f32,
+    yaw: f32,
+    pitch: f32,
+    roll: f32,
+    // Suspension travel normalized: 0.0f = max stretch; 1.0 = max compression
+    normalized_suspension_travel_front_left: f32,
+    normalized_suspension_travel_front_right: f32,
+    normalized_suspension_travel_rear_left: f32,
+    normalized_suspension_travel_rear_right: f32,
+    // Tire normalized slip ratio, = 0 means 100% grip and |ratio| > 1.0 means loss of grip.
+    tire_slip_ratio_front_left: f32,
+    tire_slip_ratio_front_right: f32,
+    tire_slip_ratio_rear_left: f32,
+    tire_slip_ratio_rear_right: f32,
+    // Wheels rotation speed radians/sec. 
+    wheel_rotation_speed_front_left: f32,        
+    wheel_rotation_speed_front_right: f32,        
+    wheel_rotation_speed_rear_left: f32,        
+    wheel_rotation_speed_rear_right: f32,       
+    // = 1 when wheel is on rumble strip, = 0 when off.
+    wheel_on_rumble_strip_front_left: i32, 
+    wheel_on_rumble_strip_front_right: i32, 
+    wheel_on_rumble_strip_rear_left:  i32, 
+    wheel_on_rumble_strip_rear_right: i32, 
+    // = from 0 to 1, where 1 is the deepest puddle
+    wheel_in_puddle_depth_front_left: f32,
+    wheel_in_puddle_depth_front_right: f32,
+    wheel_in_puddle_depth_rear_left: f32,
+    wheel_in_puddle_depth_rear_right: f32,
+    // Non-dimensional surface rumble values passed to controller force feedback
+    surface_rumble_front_left: f32,
+    surface_rumble_front_right: f32,
+    surface_rumble_rear_left: f32,
+    surface_rumble_rear_right: f32,
+    // Tire normalized slip angle, = 0 means 100% grip and |angle| > 1.0 means loss of grip.
+    tire_slip_angle_front_left: f32,
+    tire_slip_angle_front_right: f32,
+    tire_slip_angle_rear_left: f32,
+    tire_slip_angle_rear_right: f32,
+    // Tire normalized combined slip, = 0 means 100% grip and |slip| > 1.0 means loss of grip.
+    tire_combind_slip_front_left: f32,
+    tire_combind_slip_front_right: f32,
+    tire_combind_slip_rear_left: f32,
+    tire_combind_slip_rear_right: f32,
+    // Actual suspension travel in meters
+    suspension_travel_meters_front_left: f32,
+    suspension_travel_meters_front_right: f32,
+    suspension_travel_meters_rear_left: f32,
+    suspension_travel_meters_rear_right: f32,
+    // Unique ID of the car make/model
+    car_ordinal: i32,
+    // Between 0 (D -- worst cars) and 7 (X class -- best cars) inclusive         
+    car_class: i32,
+    // Between 100 (worst car) and 999 (best car) inclusive
+    car_performance_index: i32,
+    // 0 = FWD, 1 = RWD, 2 = AWD
+    drive_train_type: i32,
+    // Number of cylinders in the engine
+    num_cylinders: i32,
+    position_x: f32,
+    position_y: f32,
+    position_z: f32,
+    speed: f32,
+    power: f32,
+    torque: f32,
+    tire_temp_front_left: f32,
+    tire_temp_front_right: f32,
+    tire_temp_rear_left: f32,
+    tire_temp_rear_right: f32,
+    boost: f32,
+    fuel: f32,
+    distance_traveled: f32,
+    best_lap: f32,
+    last_lap: f32,
+    current_lap: f32,
+    current_race_time: f32,
+    
+    lap_number: u16,
+    race_position: u8,
+    accel: u8,
+    
+    brake: u8,
+    clutch: u8,
+    hand_brake: u8,
+    gear: u8,
+    
+    //steer: i8,
+    normalizedf_driving_line: i8,
+    normalized_ai_brake_difference: i8,
+    
+    tire_wear_front_left: f32,
+    tire_wear_front_right: f32,
+    tire_wear_rear_left: f32,
+    //tire_wear_rear_right: f32,
+    
+    //track_ordinal: i32
+}
+
 impl App {
+    pub fn start_imu_forward(&mut self, _cx:&mut Cx){
+        // open up port udp X and forward packets to both wind + platform
+        let imu_recv = UdpSocket::bind("0.0.0.0:44442").unwrap();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8;25];
+            while let Ok((length, _addr)) = imu_recv.recv_from(&mut buffer){
+                 log!("IMU {:x?}",&buffer[0..length]);
+            } 
+        });
+    }
+    
     pub fn start_forza_forward(&mut self, _cx:&mut Cx){
-        // open up port udp X and forward packets
+        let wind_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let wind_send_addr = "10.0.0.202:44443";
+        let platform_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let platform_send_addr = "10.0.0.114:51010";
+                
+        // open up port udp X and forward packets to both wind + platform
+        let forca_recv = UdpSocket::bind("0.0.0.0:51010").unwrap();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8;1024];
+            while let Ok((length, _addr)) = forca_recv.recv_from(&mut buffer){
+                let forza = ForzaTelemetryDash::deserialize_bin(&buffer[0..length]).unwrap();
+                let speed = (forza.velocity_x*forza.velocity_x+forza.velocity_y*forza.velocity_y+forza.velocity_z*forza.velocity_z).sqrt();
+                // ok so speed is 20.0 at 40mph
+                // max fan is 127.0
+                // lets say 100mph = 60 = 127.
+                //log!("{}", speed);
+                let buf = [(speed*2.2).min(255.0) as u8,];
+                let _ = wind_socket.send_to(&buf, wind_send_addr);
+                let _ = platform_socket.send_to(&&buffer[0..length], platform_send_addr);
+            }
+        });
     }
     
     pub fn handle_hue_lights(&mut self, _cx:&mut Cx, res:&HttpResponse){
@@ -286,6 +439,10 @@ impl App {
         // alright the sender thread where we at 44hz poll our midi input and set up a DMX packet
         let mut midi_input = cx.midi_input();
         let mut hue_sender = self.hue_light_change.sender();
+        
+        let rc_car_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let rc_car_send_addr = "10.0.0.201:44441";
+        
         std::thread::spawn(move || {
             let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
                         
@@ -556,7 +713,12 @@ impl App {
                     dmx_f32(0.0, dmx, &[smoke], 1);
                 }
                 // in time modulus 
+                let _smoke2 = 310;
                 
+                let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
+                let _ = rc_car_socket.send_to(&buf, rc_car_send_addr);
+                
+                                
                 //map_wargb(state.dial[7], 1.0, dmx, &[spot + 16 - 1]); // Strobe RGB
                 //dmx_f32(state.fade[7], dmx, &[spot], 6);
                                 
@@ -567,7 +729,7 @@ impl App {
                 // slider 7 = strobe RGB  - slider = mode, dial = color
                 // slider 8 = moving head mode dial + thing
                 
-                // alright lets send out this thing 
+                // alright lets send out this thing \
                 socket.send_to(&universe, broadcast_addr).unwrap();
                 
                 std::fs::write("dmx.ron", state.serialize_ron().as_bytes()).unwrap();
