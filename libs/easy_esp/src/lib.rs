@@ -50,12 +50,12 @@ impl<'a> I2CExt<'a> for I2C<'a, I2C0>{
 }
 
 #[allow(dead_code)]
-pub enum ConfigWifi{
+pub enum WifiConfig{
     StaticIp{
         ssid:&'static str,
         password:&'static str,
-        ip:[u8;4],
-        gateway:[u8;4]
+        ip:IpAddress,
+        gateway:IpAddress
     },
     DynamicIp{
         ssid:&'static str,
@@ -63,24 +63,25 @@ pub enum ConfigWifi{
     }
 }
 
-impl ConfigWifi{
+impl WifiConfig{
     pub fn ssid_password(&self)->(&'static str, &'static str){
         match self{
-            ConfigWifi::StaticIp{ssid, password,..}=>(ssid, password),
-            ConfigWifi::DynamicIp{ssid, password,..}=>(ssid, password)
+            WifiConfig::StaticIp{ssid, password,..}=>(ssid, password),
+            WifiConfig::DynamicIp{ssid, password,..}=>(ssid, password)
         }
     }
 }
 pub type Pwm<'a> = LEDC<'a>;
 pub type Io<'a> = IO;
 pub type UdpSocket<'s, 'a> = UdpSocket2<'s, 'a, WifiStaDevice>;
+pub type I2c0<'a> = I2C<'a, I2C0>;
 
 #[allow(non_snake_case)]
-pub struct Per{
+pub struct Periph{
     pub I2C0:I2C0 
 }
 
-pub  fn wifi_and_udp_socket<F>(config_wifi:ConfigWifi, f:F) where F:FnOnce(&Clocks, Pwm, UdpSocket, Io, Per){
+pub  fn wifi_and_udp_socket<F>(wifi_config:WifiConfig, f:F) where F:FnOnce(&Clocks, Pwm, Io, Periph, UdpSocket){
 
     let peripherals = Peripherals::take();
     let system = peripherals.SYSTEM.split();
@@ -99,7 +100,7 @@ pub  fn wifi_and_udp_socket<F>(config_wifi:ConfigWifi, f:F) where F:FnOnce(&Cloc
         &clocks,
     ).unwrap();
 
-    let (ssid, password) = config_wifi.ssid_password();
+    let (ssid, password) = wifi_config.ssid_password();
 
     let wifi = peripherals.WIFI;
     let mut socket_set_entries: [SocketStorage; 3] = Default::default();
@@ -147,14 +148,21 @@ pub  fn wifi_and_udp_socket<F>(config_wifi:ConfigWifi, f:F) where F:FnOnce(&Cloc
         }
     }
     println!("{:?}", wifi_controller.is_connected());
-
+    
+    fn ip_address_convert(ip:IpAddress)->ipv4_svc::Ipv4Addr{
+        match ip{
+            IpAddress::Ipv4(addr) => ipv4_svc::Ipv4Addr::from(addr.0),
+            _=>{panic!()}
+        }
+    }
+    
     // static IP
-    if let ConfigWifi::StaticIp{ip, gateway, ..} = config_wifi{
+    if let WifiConfig::StaticIp{ip, gateway, ..} = wifi_config{
         wifi_stack.set_iface_configuration(&ipv4_svc::Configuration::Client(
             ipv4_svc::ClientConfiguration::Fixed(ipv4_svc::ClientSettings {
-                ip: ipv4_svc::Ipv4Addr::from(ip),
+                ip: ip_address_convert(ip),
                 subnet: ipv4_svc::Subnet {
-                    gateway: ipv4_svc::Ipv4Addr::from(gateway),
+                    gateway: ip_address_convert(gateway),
                     mask: ipv4_svc::Mask(24),
                 },
                 dns: None,
@@ -181,24 +189,24 @@ pub  fn wifi_and_udp_socket<F>(config_wifi:ConfigWifi, f:F) where F:FnOnce(&Cloc
     let mut socket = wifi_stack.get_udp_socket(&mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
     socket.work();
     
-    f(&clocks, pwm, socket, io, Per{
+    f(&clocks, pwm, io, Periph{
         I2C0: peripherals.I2C0
-    });
+    }, socket);
 }
 
-pub type PwmTimer<'a> = ledc::timer::Timer<'a, ledc::LowSpeed>;
-pub type PwmChannel<'a, O> = ledc::channel::Channel<'a, ledc::LowSpeed, O>;
-pub type PwmChannelNum = ledc::channel::Number;
-pub type PwmTimerNum = ledc::timer::Number;
+pub type PwmTimerLowSpeed<'a> = ledc::timer::Timer<'a, ledc::LowSpeed>;
+pub type PwmChannelLowSpeed<'a, O> = ledc::channel::Channel<'a, ledc::LowSpeed, O>;
+pub type PwmChannel = ledc::channel::Number;
+pub type PwmTimer = ledc::timer::Number;
 pub type PwmDuty = ledc::timer::config::Duty;
 
 pub trait PwmExt<'a>{
-    fn new_timer(&self, number: PwmTimerNum, duty:PwmDuty, freq:HertzU32)->PwmTimer;
-    fn new_channel<O:  OutputPin>(&self, timer:&'a PwmTimer, number: PwmChannelNum,  output_pin: impl Peripheral<P = O> + 'a, init:u32)->PwmChannel<O>;
+    fn timer_low_speed(&self, number: PwmTimer, duty:PwmDuty, freq:HertzU32)->PwmTimerLowSpeed;
+    fn channel_low_speed<O:  OutputPin>(&self, timer:&'a PwmTimerLowSpeed, number: PwmChannel,  output_pin: impl Peripheral<P = O> + 'a, init:u32)->PwmChannelLowSpeed<O>;
 }
 
 impl<'a> PwmExt<'a> for Pwm<'a>{
-    fn new_timer(&self, number: PwmTimerNum, duty:PwmDuty, frequency:HertzU32)->PwmTimer{
+    fn timer_low_speed(&self, number: PwmTimer, duty:PwmDuty, frequency:HertzU32)->PwmTimerLowSpeed{
         let mut lstimer = self.get_timer::<ledc::LowSpeed>(number);
         lstimer.configure(ledc::timer::config::Config {
             duty,
@@ -208,7 +216,7 @@ impl<'a> PwmExt<'a> for Pwm<'a>{
         lstimer
     }
 
-    fn new_channel<O:  OutputPin>(&self, timer:&'a PwmTimer, number: PwmChannelNum, output_pin: impl Peripheral<P = O> + 'a, init:u32)->PwmChannel<O>{
+    fn channel_low_speed<O:  OutputPin>(&self, timer:&'a PwmTimerLowSpeed, number: PwmChannel, output_pin: impl Peripheral<P = O> + 'a, init:u32)->PwmChannelLowSpeed<O>{
         let mut chan = self.get_channel(number, output_pin);
         chan.configure(ledc::channel::config::Config {
             timer: timer,
