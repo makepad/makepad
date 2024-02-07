@@ -100,14 +100,14 @@ impl VideoRef {
     /// Once playback is prepared, [`begin_playback`] can be called to start the actual playback.
     /// 
     /// Alternatively, [`begin_playback`] (which uses [`prepare_playback`]) can be called if you want to start playback as soon as it's prepared.
-    pub fn prepare_playback(&mut self, cx: &mut Cx) {
+    pub fn prepare_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.prepare_playback(cx);
         }
     }
 
     /// Starts the video playback. Calls `prepare_playback(cx)` if the video not already prepared.
-    pub fn begin_playback(&mut self, cx: &mut Cx) {
+    pub fn begin_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.begin_playback(cx);
         }
@@ -152,7 +152,7 @@ impl VideoRef {
     }
 
     /// Updates the source of the video data. Currently it only proceeds if the video is in Unprepared state.
-    pub fn set_source(&mut self, source: VideoDataSource) {
+    pub fn set_source(&self, source: VideoDataSource) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_source(source);
         }
@@ -166,7 +166,7 @@ impl VideoRef {
         }
     }
 
-    pub fn set_thumbnail_texture(&mut self, cx: &mut Cx, texture: Option<Texture>) {
+    pub fn set_thumbnail_texture(&self, cx: &mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.thumbnail_texture = texture;
             inner.load_thumbnail_image(cx);
@@ -514,8 +514,11 @@ impl Video {
             && self.playback_state != PlaybackState::Preparing
             && self.playback_state != PlaybackState::CleaningUp {
             cx.cleanup_video_playback_resources(self.id);
+            
+            self.playback_state = PlaybackState::CleaningUp;
+            self.autoplay = false;
+            self.should_prepare_playback = false;
         }
-        self.playback_state = PlaybackState::CleaningUp;
     }
 
     fn set_source(&mut self, source: VideoDataSource) {
@@ -523,7 +526,8 @@ impl Video {
             self.source = source;
         } else {
             error!(
-                "Attempted to set source while player state is: {:?}",
+                "Attempted to set source while player {} state is: {:?}",
+                self.id.0,
                 self.playback_state
             );
         }
