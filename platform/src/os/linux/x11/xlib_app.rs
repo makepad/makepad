@@ -54,6 +54,7 @@ pub struct XlibApp {
     //pub free_timers: Vec<usize>,
     pub event_flow: EventFlow,
     pub current_cursor: MouseCursor,
+    pub internal_cursor: MouseCursor,
     pub atoms: XlibAtoms,
     pub dnd: Dnd,
 }
@@ -84,6 +85,7 @@ impl XlibApp {
                 event_flow: EventFlow::Poll,
                 //free_timers: Vec::new(),
                 current_cursor: MouseCursor::Default,
+                internal_cursor: MouseCursor::Default,
                 dnd: Dnd::new(display),
             }
         }
@@ -278,35 +280,35 @@ impl XlibApp {
                         let window_size = window.last_window_geom.inner_size;
                         if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= 0.0 && pos.y < 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOPLEFT);
-                            self.set_mouse_cursor(MouseCursor::NwResize);
+                            self.set_internal_mouse_cursor(MouseCursor::NwResize);
                         }
                         else if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= window_size.y - 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT);
-                            self.set_mouse_cursor(MouseCursor::SwResize);
+                            self.set_internal_mouse_cursor(MouseCursor::SwResize);
                         }
                         else if pos.x >= 0.0 && pos.x < 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_LEFT);
-                            self.set_mouse_cursor(MouseCursor::WResize);
+                            self.set_internal_mouse_cursor(MouseCursor::WResize);
                         }
                         else if pos.x >= window_size.x - 10.0 && pos.y >= 0.0 && pos.y < 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOPRIGHT);
-                            self.set_mouse_cursor(MouseCursor::NeResize);
+                            self.set_internal_mouse_cursor(MouseCursor::NeResize);
                         }
                         else if pos.x >= window_size.x - 10.0 && pos.y >= window_size.y - 10.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT);
-                            self.set_mouse_cursor(MouseCursor::SeResize);
+                            self.set_internal_mouse_cursor(MouseCursor::SeResize);
                         }
                         else if pos.x >= window_size.x - 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_RIGHT);
-                            self.set_mouse_cursor(MouseCursor::EResize);
+                            self.set_internal_mouse_cursor(MouseCursor::EResize);
                         }
                         else if pos.y <= 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOP);
-                            self.set_mouse_cursor(MouseCursor::NResize);
+                            self.set_internal_mouse_cursor(MouseCursor::NResize);
                         }
                         else if pos.y > window_size.y - 5.0 {
                             window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOM);
-                            self.set_mouse_cursor(MouseCursor::SResize);
+                            self.set_internal_mouse_cursor(MouseCursor::SResize);
                         }
                         else {
                             match response.get() {
@@ -317,6 +319,7 @@ impl XlibApp {
                                     window.last_nc_mode = None;
                                 }
                             }
+                            self.restore_mouse_cursor(self.current_cursor);
                         }
                     }
                 },
@@ -636,52 +639,67 @@ impl XlibApp {
         }
         return None
     }
-    
+
+    pub fn set_internal_mouse_cursor(&mut self, cursor: MouseCursor) {
+        if self.internal_cursor != cursor {
+            self.internal_cursor = cursor.clone();
+            self.set_mouse_cursor_(cursor);
+        }
+    }
+
+    pub fn restore_mouse_cursor(&mut self, cursor: MouseCursor) {
+        self.set_mouse_cursor_(cursor);
+    }
+
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         if self.current_cursor != cursor {
             self.current_cursor = cursor.clone();
-            let x11_cursor = match cursor {
-                MouseCursor::Hidden => {
-                    return;
-                },
-                MouseCursor::EResize => self.load_first_cursor(&[b"right_side\0"]),
-                MouseCursor::NResize => self.load_first_cursor(&[b"top_side\0"]),
-                MouseCursor::NeResize => self.load_first_cursor(&[b"top_right_corner\0"]),
-                MouseCursor::NwResize => self.load_first_cursor(&[b"top_left_corner\0"]),
-                MouseCursor::SResize => self.load_first_cursor(&[b"bottom_side\0"]),
-                MouseCursor::SeResize => self.load_first_cursor(&[b"bottom_right_corner\0"]),
-                MouseCursor::SwResize => self.load_first_cursor(&[b"bottom_left_corner\0"]),
-                MouseCursor::WResize => self.load_first_cursor(&[b"left_side\0"]),
-                
-                MouseCursor::Default => self.load_first_cursor(&[b"left_ptr\0"]),
-                MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair\0"]),
-                MouseCursor::Hand => self.load_first_cursor(&[b"left_ptr\0", b"hand1\0"]),
-                MouseCursor::Arrow => self.load_first_cursor(&[b"left_ptr\0\0"]),
-                MouseCursor::Move => self.load_first_cursor(&[b"move\0"]),
-                MouseCursor::NotAllowed => self.load_first_cursor(&[b"crossed_circle\0"]),
-                MouseCursor::Text => self.load_first_cursor(&[b"text\0", b"xterm\0"]),
-                MouseCursor::Wait => self.load_first_cursor(&[b"watch\0"]),
-                MouseCursor::Help => self.load_first_cursor(&[b"question_arrow\0"]),
-                MouseCursor::NsResize => self.load_first_cursor(&[b"v_double_arrow\0"]),
-                MouseCursor::NeswResize => self.load_first_cursor(&[b"fd_double_arrow\0", b"size_fdiag\0"]),
-                MouseCursor::EwResize => self.load_first_cursor(&[b"h_double_arrow\0"]),
-                MouseCursor::NwseResize => self.load_first_cursor(&[b"bd_double_arrow\0", b"size_bdiag\0"]),
-                MouseCursor::ColResize => self.load_first_cursor(&[b"split_h\0", b"h_double_arrow\0"]),
-                MouseCursor::RowResize => self.load_first_cursor(&[b"split_v\0", b"v_double_arrow\0"]),
-            };
-            if let Some(x11_cursor) = x11_cursor {
-                unsafe {
-                    for (k, v) in &self.window_map {
-                        if !(**v).window.is_none() {
-                            x11_sys::XDefineCursor(self.display, *k, x11_cursor);
-                        }
+            self.set_mouse_cursor_(cursor);
+        }
+    }
+
+    fn set_mouse_cursor_(&mut self, cursor: MouseCursor) {
+        let x11_cursor = match cursor {
+            MouseCursor::Hidden => {
+                return;
+            },
+            MouseCursor::EResize => self.load_first_cursor(&[b"right_side\0"]),
+            MouseCursor::NResize => self.load_first_cursor(&[b"top_side\0"]),
+            MouseCursor::NeResize => self.load_first_cursor(&[b"top_right_corner\0"]),
+            MouseCursor::NwResize => self.load_first_cursor(&[b"top_left_corner\0"]),
+            MouseCursor::SResize => self.load_first_cursor(&[b"bottom_side\0"]),
+            MouseCursor::SeResize => self.load_first_cursor(&[b"bottom_right_corner\0"]),
+            MouseCursor::SwResize => self.load_first_cursor(&[b"bottom_left_corner\0"]),
+            MouseCursor::WResize => self.load_first_cursor(&[b"left_side\0"]),
+
+            MouseCursor::Default => self.load_first_cursor(&[b"left_ptr\0"]),
+            MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair\0"]),
+            MouseCursor::Hand => self.load_first_cursor(&[b"left_ptr\0", b"hand1\0"]),
+            MouseCursor::Arrow => self.load_first_cursor(&[b"left_ptr\0\0"]),
+            MouseCursor::Move => self.load_first_cursor(&[b"move\0"]),
+            MouseCursor::NotAllowed => self.load_first_cursor(&[b"crossed_circle\0"]),
+            MouseCursor::Text => self.load_first_cursor(&[b"text\0", b"xterm\0"]),
+            MouseCursor::Wait => self.load_first_cursor(&[b"watch\0"]),
+            MouseCursor::Help => self.load_first_cursor(&[b"question_arrow\0"]),
+            MouseCursor::NsResize => self.load_first_cursor(&[b"v_double_arrow\0"]),
+            MouseCursor::NeswResize => self.load_first_cursor(&[b"fd_double_arrow\0", b"size_fdiag\0"]),
+            MouseCursor::EwResize => self.load_first_cursor(&[b"h_double_arrow\0"]),
+            MouseCursor::NwseResize => self.load_first_cursor(&[b"bd_double_arrow\0", b"size_bdiag\0"]),
+            MouseCursor::ColResize => self.load_first_cursor(&[b"split_h\0", b"h_double_arrow\0"]),
+            MouseCursor::RowResize => self.load_first_cursor(&[b"split_v\0", b"v_double_arrow\0"]),
+        };
+        if let Some(x11_cursor) = x11_cursor {
+            unsafe {
+                for (k, v) in &self.window_map {
+                    if !(**v).window.is_none() {
+                        x11_sys::XDefineCursor(self.display, *k, x11_cursor);
                     }
-                    x11_sys::XFreeCursor(self.display, x11_cursor);
                 }
+                x11_sys::XFreeCursor(self.display, x11_cursor);
             }
         }
     }
-    
+
     fn xkeystate_to_modifiers(&self, state: c_uint) -> KeyModifiers {
         KeyModifiers {
             alt: state & x11_sys::Mod1Mask != 0,
