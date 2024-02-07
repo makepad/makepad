@@ -11,9 +11,9 @@ const THROTTLE_CENTER: f32 = 1250.0;
 const THROTTLE_RANGE: f32 = 600.0;
 const IMU_TARGET_IP: IpAddress = IpAddress::v4(10,0,0,109);
 
-fn main_wifi(clocks:&Clocks, pwm:Pwm, mut socket:UdpSocket, io:Io, per:Per){
+fn main_wifi(clocks:&Clocks, pwm:Pwm, io:Io, periph:Periph, mut socket:UdpSocket){
     let mut i2c = I2C::new_with_timeout(
-        per.I2C0,
+        periph.I2C0,
         io.pins.gpio6,
         io.pins.gpio5,
         50u32.kHz(),
@@ -21,11 +21,14 @@ fn main_wifi(clocks:&Clocks, pwm:Pwm, mut socket:UdpSocket, io:Io, per:Per){
         Some(20),
     );
     let mut delay = Delay::new(&clocks);
-    let pwm_timer = pwm.new_timer(PwmTimerNum::Timer0, PwmDuty::Duty14Bit, 50u32.Hz());
-    let front_wheel = pwm.new_channel(&pwm_timer, PwmChannelNum::Channel0, io.pins.gpio3.into_push_pull_output(), 0);
-    let rear_wheel = pwm.new_channel(&pwm_timer, PwmChannelNum::Channel1, io.pins.gpio4.into_push_pull_output(), 0);
-    let throttle = pwm.new_channel(&pwm_timer,PwmChannelNum::Channel2, io.pins.gpio2.into_push_pull_output(), 0);
+    let timer = pwm.timer_low_speed(PwmTimer::Timer0, PwmDuty::Duty14Bit, 50u32.Hz());
+
+    let throttle = pwm.channel_low_speed(&timer, PwmChannel::Channel0, io.pins.gpio2.into_push_pull_output(), 0);
+    let front_wheel = pwm.channel_low_speed(&timer, PwmChannel::Channel1, io.pins.gpio3.into_push_pull_output(), 0);
+    let rear_wheel = pwm.channel_low_speed(&timer, PwmChannel::Channel2, io.pins.gpio4.into_push_pull_output(), 0);
+    
     init_bno055(&mut i2c, &mut delay);
+    
     socket.bind(44441).unwrap();
     let mut wrap_counter = 0;
     loop {
@@ -58,11 +61,11 @@ fn main_wifi(clocks:&Clocks, pwm:Pwm, mut socket:UdpSocket, io:Io, per:Per){
 fn main() -> ! {
     // System inputs/clocks/etc
     wifi_and_udp_socket(
-        ConfigWifi::StaticIp{
+        WifiConfig::StaticIp{
             ssid: "x",
             password: "x",
-            ip: [10,0,0,201],
-            gateway: [10,0,0,1]
+            ip: IpAddress::v4(10,0,0,201),
+            gateway: IpAddress::v4(10,0,0,1)
         },
         main_wifi
     );   
@@ -87,7 +90,7 @@ const BNO055_LINEAR_ACCEL_DATA_X_LSB_ADDR:u8 = 0x28;
 const BNO055_ACCEL_DATA_X_LSB_ADDR:u8 = 0x08;
 const BNO055_GRAVITY_DATA_X_LSB_ADDR:u8 = 0x2E;
 
-fn get_bno055_data(i2c:&mut I2C<'_, I2C0>, order_counter:u8)->[u8;25]{
+fn get_bno055_data(i2c:&mut I2c0, order_counter:u8)->[u8;25]{
     let mut out = [0u8; 25];
     let mut c = 0;
     out[c] = order_counter; c+=1;
@@ -99,13 +102,13 @@ fn get_bno055_data(i2c:&mut I2C<'_, I2C0>, order_counter:u8)->[u8;25]{
     out
 }
 
-fn check_bno055(i2c:&mut I2C<'_, I2C0>)->bool{
+fn check_bno055(i2c:&mut I2c0)->bool{
     let mut data = [0u8; 1];
     i2c.write_read(BNO055_ADDRESS_A, &[BNO055_CHIP_ID_ADDR], &mut data).ok();
     data[0] == BNO055_ID
 }
 
-fn init_bno055(i2c:&mut I2C<'_, I2C0>, delay:&mut Delay){
+fn init_bno055(i2c:&mut I2c0, delay:&mut Delay){
     i2c.write(BNO055_ADDRESS_A, &[BNO055_OPR_MODE_ADDR, BNO055_OPERATION_MODE_CONFIG]).ok();
     i2c.write(BNO055_ADDRESS_A, &[BNO055_SYS_TRIGGER_ADDR, 0x20]).ok();
 

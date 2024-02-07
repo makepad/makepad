@@ -44,9 +44,13 @@ live_design!{
     import crate::expandable_panel::ExpandablePanelBase;
     import crate::keyboard_view::KeyboardViewBase;
     import crate::window_menu::WindowMenuBase;
+    import crate::html::HtmlBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
+    
+    Html = <HtmlBase>{
+    }
     
     SlidePanel = <SlidePanelBase>{
         animator: {

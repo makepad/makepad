@@ -39,11 +39,14 @@ live_design!{
                     },
                     text: "Counter: 0"
                 }
+                <Html>{
+                    body:"this<a href='thing'>is basichtml</a><tag prop/>text<bold/>"
+                }
             }
         }
     }
 }
-
+ 
 app_main!(App);
 
 #[derive(Live, LiveHook)]
