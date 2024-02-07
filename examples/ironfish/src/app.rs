@@ -56,9 +56,6 @@ live_design! {
             {
                 let x = self.blurx;
                 let y = self.blury;
-                let dpi = self.dpi_factor;
-                let ceil_size = ceil(self.rect_size * dpi) / dpi
-                let floor_pos = floor(self.rect_pos * dpi) / dpi
 
                 let offset = 0.003 * self.blursize / max(x,y);
                 let standard_deviation = 0.0001 + self.blurstd *0.003;
@@ -82,7 +79,7 @@ live_design! {
                 self.gaussscale = 1.0/(1.0 +  (self.g1 + self.g2 + self.g3 + self.g4 + self.g5 )*2.0);
 
                 let pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size);
-                self.o0 = self.pos*0.5;
+                self.o0 = self.pos;
 
                 self.o1a = self.o0 + vec2(off1*x,off1*y);
                 self.o2a = self.o0 + vec2(off2*x,off2*y);
