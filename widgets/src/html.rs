@@ -9,25 +9,27 @@ use {
 };
 
 live_design!{
-    HtmlBase = {{Html}} {}
+    HtmlBase = {{Html}} {
+        // ok so we can use one drawtext
+        // change to italic, change bold (SDF), strikethrough
+        
+    }
 }
 
+// this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct Html {
     #[redraw] #[live] draw_text: DrawText,
-    #[live] body: Rc<String>,
     #[walk] walk: Walk,
     #[live] align: Align,
     #[live] padding: Padding,
-    //margin: Margin,
-    #[rust] html: Vec<HtmlNode>,
+    #[live] text: Rc<String>
 } 
 
 // alright lets parse the HTML
 impl LiveHook for Html{
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        self.html = parse_html(&self.body).unwrap();
-        println!("{:?}", self.html);
+        
     }
 }
 
@@ -49,10 +51,57 @@ impl Widget for Html {
 }
 
 impl Html{
+    pub fn push_bold(&mut self){
+    }
+    
+    pub fn pop_bold(&mut self){
+    }
+    
+    pub fn push_italic(&mut self){
+    }
+    
+    pub fn pop_italic(&mut self){
+    }
+    
+    pub fn apply_widget(&mut self, _cx:&mut Cx, _id:&[LiveId;1], _apply:&[LiveNode]){
         
+    }
+    
+    pub fn draw_text(&mut self, _cx:&mut Cx, _text:&str){
+        
+    }
+    
+    // parse it
+    pub fn default_interpreter(&mut self, _cx:&mut Cx, _html:Vec<HtmlNode>){
+        /*
+        let node = html.walker();
+        while let Some(node) = node.next(){
+            match node.open_tag(){
+                some_id!(a)=>{
+                    let href = node.find_attr(id!(href));
+                    self.apply_widget(cx, id!(MyWidget), live!{
+                        label:(node.find_text().unwrap_or(""))
+                    });
+                }
+                some_id!(strong)=>self.push_bold(),
+                some_id!(em)=>self.push_italic(),
+                _=>()
+            }
+            match node.close_tag(){
+                some_id!(strong)=>self.pop_bold(),
+                some_id!(em)=>self.pop_italic(),
+                _=>()
+            }
+            if let Some(text) = node.text(){
+                self.draw_text(cx, text);
+            }
+        }*/
+    }
+    
 }
 
-// string/id wrappers
+
+// Implementing a HTML renderer on top of the RichText widget
 
 pub struct HtmlString(Rc<String>, usize, usize);
 
@@ -71,7 +120,8 @@ impl fmt::Debug for HtmlString{
     }
 }
 
-
+/*
+#[derive(Clone)]
 pub struct HtmlId(pub HtmlString);
 impl HtmlId{
     pub fn new(rc:&Rc<String>, start:usize, end:usize)->Self{
@@ -87,8 +137,9 @@ impl fmt::Debug for HtmlId{
         write!(f, "{}", self.0.as_str())
     }
 }
+*/
 
-/*
+#[derive(Clone)]
 pub struct HtmlId(pub LiveId);
 impl HtmlId{
     fn new(rc:&Rc<String>, start:usize, end:usize)->Self{
@@ -103,19 +154,19 @@ impl fmt::Debug for HtmlId{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
-}*/
+}
 
 // HTML Dom tree-flat vector
 #[derive(Debug)]
 pub enum HtmlNode{
-    BeginElement(HtmlId),
-    EndElement,
+    OpenTag(HtmlId),
+    CloseTag(HtmlId),
     Attribute(HtmlId, HtmlString),
     BoolAttribute(HtmlId),
-    TextNode(HtmlString)
+    Text(HtmlString)
 }
 
-// parse it
+
 
 pub fn parse_html(body:&Rc<String>)->Result<Vec<HtmlNode>,(String,usize)>{
     enum State{
@@ -123,6 +174,7 @@ pub fn parse_html(body:&Rc<String>)->Result<Vec<HtmlNode>,(String,usize)>{
         ElementName(usize),
         ElementClose(usize),
         ElementAttrs,
+        ElementCloseScanSpaces,
         ElementSelfClose,
         AttribName(usize),
         AttribValueEq(HtmlId),
@@ -143,7 +195,7 @@ pub fn parse_html(body:&Rc<String>)->Result<Vec<HtmlNode>,(String,usize)>{
             State::Text(start)=>{ 
                 if c == '<'{
                     if start != i{
-                        nodes.push(HtmlNode::TextNode(HtmlString::new(body, start, i)));
+                        nodes.push(HtmlNode::Text(HtmlString::new(body, start, i)));
                     }
                     State::ElementName(i+1)
                 }
@@ -162,11 +214,11 @@ pub fn parse_html(body:&Rc<String>)->Result<Vec<HtmlNode>,(String,usize)>{
                     if start == i{
                         return Err(("Found whitespace at beginning of tag".into(),start))
                     }
-                    nodes.push(HtmlNode::BeginElement(HtmlId::new(&body, start, i)));
+                    nodes.push(HtmlNode::OpenTag(HtmlId::new(&body, start, i)));
                     State::ElementAttrs
                 }
                 else if c == '/'{
-                    nodes.push(HtmlNode::BeginElement(HtmlId::new(&body, start, i)));
+                    nodes.push(HtmlNode::OpenTag(HtmlId::new(&body, start, i)));
                     State::ElementSelfClose
                 }
                 else if c == '>'{
@@ -178,19 +230,36 @@ pub fn parse_html(body:&Rc<String>)->Result<Vec<HtmlNode>,(String,usize)>{
             }
             State::ElementClose(start)=>{
                 if c == '>'{
-                    // we could error on non matching tag here if we wanted, or just ignore it
-                    nodes.push(HtmlNode::EndElement);
+                    nodes.push(HtmlNode::CloseTag(HtmlId::new(&body, start, i)));
                     State::Text(i+1)
+                }
+                else if c.is_whitespace(){
+                    nodes.push(HtmlNode::CloseTag(HtmlId::new(&body, start, i)));
+                    State::ElementCloseScanSpaces
                 }
                 else{
                     State::ElementClose(start)
+                }
+            }
+            State::ElementCloseScanSpaces=>{
+                if c == '>'{
+                    State::Text(i+1)
+                }
+                else if !c.is_whitespace(){
+                    return Err(("Unexpected character after whitespace whilst looking for closing tag >".into(),i))
+                }
+                else{
+                    State::ElementCloseScanSpaces
                 }
             }
             State::ElementSelfClose=>{
                 if c != '>'{
                     return Err(("Expected > after / self closed tag".into(),i))
                 }
-                nodes.push(HtmlNode::EndElement);
+                // look backwards to the OpenTag
+                let begin = nodes.iter().rev().find_map(|v| if let HtmlNode::OpenTag(tag) = v{Some(tag)}else{None}).unwrap();
+                let tag = begin.clone();
+                nodes.push(HtmlNode::CloseTag(tag));
                 State::Text(i+1)
             }
             State::ElementAttrs=>{
@@ -335,6 +404,14 @@ pub fn parse_html(body:&Rc<String>)->Result<Vec<HtmlNode>,(String,usize)>{
                 }
             }
         }
+    }
+    if let State::Text(start) = state{
+        if start != body.len(){
+            nodes.push(HtmlNode::Text(HtmlString::new(body, start, body.len())));
+        }
+    }
+    else{ // if we didnt end in text state something is wrong
+        return Err(("HTML Parsing endstate is not HtmlNode::Text".into(),body.len()));
     }
     Ok(nodes)
 }
