@@ -1,4 +1,6 @@
 use makepad_widgets::*;
+use makepad_platform::live_atomic::*;
+
 
 live_design!{
     import makepad_widgets::base::*;
@@ -166,12 +168,21 @@ live_design!{
                          <ZooDesc>{text:"This is a view with flow set to Down"}
                          <View>
                           {
+                            show_bg: true,
+                            draw_bg:{ 
+                                
+                                fn pixel(self) -> vec4{
+                                return #bbb
+                            }}         
+                            height: Fit,
                              padding: 10
                              spacing: 10
                              flow: Down,                    
                              <ZooBlock>{draw_bg:{color: #f00}}
                              <ZooBlock>{draw_bg:{color: #ff0}}
                              <ZooBlock>{draw_bg:{color: #00f}}
+                            
+
                           }
 
                           <ZooDesc>{text:"This view is bigger on the inside"}
@@ -189,6 +200,18 @@ live_design!{
                               }
                             }         
                               
+                            <View>{  
+                                show_bg: false,
+                                width: Fit,
+                                height: Fit,
+                                padding: 0
+                                spacing: 10
+                                flow: Down,                    
+                                <ZooBlock>{draw_bg:{color: #f00}}
+                                <ZooBlock>{draw_bg:{color: #ff0}}
+                                <ZooBlock>{draw_bg:{color: #00f}}
+                                <ZooBlock>{draw_bg:{color: #0f0}}
+                              } 
                               <View>{  
                                 show_bg: false,
                                 width: Fit,
@@ -199,6 +222,20 @@ live_design!{
                                 <ZooBlock>{draw_bg:{color: #f00}}
                                 <ZooBlock>{draw_bg:{color: #ff0}}
                                 <ZooBlock>{draw_bg:{color: #00f}}
+                                <ZooBlock>{draw_bg:{color: #0f0}}
+                              } 
+                              <View>{  
+                                show_bg: false,
+                                width: Fit,
+                                height: Fit,
+                                padding: 0
+                                spacing: 10
+                                flow: Down,                    
+                                <ZooBlock>{draw_bg:{color: #f00}}
+                                <ZooBlock>{draw_bg:{color: #ff0}}
+                                <ZooBlock>{draw_bg:{color: #00f}}
+                                <ZooBlock>{draw_bg:{color: #0f0}}
+
                               }
                               
                               <View>{  
@@ -211,6 +248,7 @@ live_design!{
                                 <ZooBlock>{draw_bg:{color: #f00}}
                                 <ZooBlock>{draw_bg:{color: #ff0}}
                                 <ZooBlock>{draw_bg:{color: #00f}}
+                                <ZooBlock>{draw_bg:{color: #0f0}}
                               }
                               <View>{  
                                 show_bg: false,
@@ -385,7 +423,7 @@ live_design!{
                     <ZooHeader>{title = {text:"DesktopButton"} <ZooDesc>{text:"Desktop Button ?"}<ZooGroup> {<DesktopButton>{}}  }              
                     <ZooHeader>{title = {text:"DropDown"} <ZooDesc>{text:"DropDown ?"}<ZooGroup> 
                     {
-                        <DropDown>{
+                        thedrop = <DropDown>{
                         height: 30,
                         width: 200
                         popup_menu: {
@@ -403,8 +441,8 @@ live_design!{
                         }
 
                         dropdown = {
-                            labels: ["These","Drop","Down"]
-                            values: [0, 1, 2]
+                            labels: ["ValueOne", "ValueTwo","Thrice","FourthValue","OptionE","Hexagons"],
+                            values: [  ValueOne,ValueTwo,Thrice,FourthValue,OptionE,Hexagons]
                         }
 
 
@@ -439,10 +477,30 @@ live_design!{
 
 app_main!(App);
 
+
+#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum ADropDownEnum {
+    #[pick]
+    ValueOne,
+    ValueTwo,
+    Thrice,
+    FourthValue,
+    OptionE,
+    Hexagons,
+}
+
+#[derive(Live, LiveHook, LiveRead, LiveRegister)]
+pub struct DataBindingsForApp {
+    #[live] fnumber: f32,
+    #[live] inumber: i32,
+    #[live] dropdown: ADropDownEnum
+}
+
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
+    #[live] bindings: DataBindingsForApp
  }
 
 impl LiveRegister for App {
@@ -461,8 +519,8 @@ impl MatchEvent for App{
             self.counter += 1;
             let lbl = self.ui.label(id!(simpletextinput_outputbox));
             lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, txt));
-
         }
+
         if self.ui.button(id!(basicbutton)).clicked(&actions) {
             log!("BASIC BUTTON CLICKED {}", self.counter); 
             self.counter += 1;
@@ -489,10 +547,20 @@ impl MatchEvent for App{
             log!("CHECK BUTTON CLICKED {} {}", self.counter, check); 
             self.counter += 1;                  
             let lbl = self.ui.label(id!(simplecheckbox_output));
-            lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, check));
-            
-
+            lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, check));            
         }
+
+        let mut db = DataBindingStore::new();
+        db.data_bind(cx, actions, &self.ui, Self::data_bind);        
+        self.bindings.apply_over(cx, &db.nodes);
+
+    }
+
+    fn handle_startup(&mut self, cx: &mut Cx) {
+
+        let ui = self.ui.clone();
+        let db = DataBindingStore::from_nodes(self.bindings.live_read());
+        Self::data_bind(db.data_to_widgets(cx, &ui));     
     }
 }
 
@@ -500,5 +568,15 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+    }
+}
+
+impl App{
+    pub fn data_bind(mut db: DataBindingMap) {
+        // sequencer
+        db.bind(id!(dropdown), ids!(thedrop));
+
+
+
     }
 }
