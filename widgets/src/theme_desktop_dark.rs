@@ -1215,7 +1215,7 @@ live_design! {
 
         draw_text: {
             text_style: <THEME_FONT_DATA> {}
-            
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -1899,7 +1899,6 @@ live_design! {
         }
     }
 
-
     PortalList = <PortalListBase> {
         width: Fill
         height: Fill
@@ -1919,17 +1918,18 @@ live_design! {
     CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
     }
+
     CachedScrollX = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
     }
+
     CachedScrollY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
+
     ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
     ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
-
-
 
     TextInput = <TextInputBase> {
         draw_text: {
@@ -1954,6 +1954,7 @@ live_design! {
                 )
             }
         }
+
         draw_cursor: {
             instance focus: 0.0
             uniform border_radius: 0.5
@@ -1970,7 +1971,6 @@ live_design! {
                 return sdf.result
             }
         }
-
 
         draw_select: {
             instance hover: 0.0
@@ -2081,7 +2081,6 @@ live_design! {
             }
         }
     }
-
 
     Slider = <SliderBase> {
         min: 0.0,

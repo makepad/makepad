@@ -1,4 +1,4 @@
-use makepad_widgets::*;
+use makepad_widgets::{fold_header::FoldHeaderWidgetRefExt, *};
 use makepad_platform::live_atomic::*;
  
 
@@ -419,7 +419,7 @@ live_design!{
                     }
                 }               
                     <ZooHeader>{title = {text:"DesktopButton"} <ZooDesc>{text:"Desktop Button ?"}<ZooGroup> {<DesktopButton>{}}  }              
-                    <ZooHeader>{title = {text:"DropDown"} <ZooDesc>{text:"DropDown ?"}<ZooGroup> 
+                    <ZooHeader>{title = {text:"DropDown"} <ZooDesc>{text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}<ZooGroup> 
                     {
                     dropdown = <DropDown>{
 
@@ -454,11 +454,41 @@ live_design!{
                     
                     <ZooHeader>{title = {text:"DemoFileTree"} <ZooDesc>{text:"DemoFileTree ?"}<ZooGroup> {<DemoFileTree>{width: Fill, height: 100}}  }     
                     <ZooHeader>{title = {text:"StackViewHeader"} <ZooDesc>{text:"StackViewHeader ?"}<ZooGroup> {<StackViewHeader>{}}  }     
-                    <ZooHeader>{title = {text:"FoldHeader"} <ZooDesc>{text:"Fold header ?"}<ZooGroup> {
-                        <FoldButton>{text:"Origami"}
-                        <FoldHeader>{
-                            text:"Origami"
-                        }}  }     
+                    <ZooHeader>{
+                        title = {text:"FoldHeader"} 
+                        <ZooDesc>{text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)"}
+                        <ZooGroup> {
+                            thefoldheader= <FoldHeader>{
+                                header: <View>{
+                                    show_bg: true,
+                                    width: Fill  
+                                    height: Fit                                 
+                                    draw_bg: {                     
+                                        fn pixel(self) -> vec4{
+                                            return vec4(1.0,0.8,0.8,1.0)
+                                        }
+                                    }        
+                                    padding: 5,
+                                    flow: Right, 
+                                    fold_button = <FoldButton>{} <Label>{text: "Fold me!"} 
+                                }
+                                body:<View>{
+                                    show_bg: true,
+                                    width: Fill  
+                                    height: Fit                                 
+                                    draw_bg: {                     
+                                        fn pixel(self) -> vec4{
+                                            return vec4(1.0,1,0.8,1.0)
+                                        }
+                                    }        
+                                    padding: 5,
+                                    <Label>{
+                                        text:"This is the body that can be folded away"
+                                    }
+                                }
+                            }
+                        }  
+                    }     
 
 
                     <ZooHeader>{title = {text:"Image"} <ZooDesc>{text:"A static inline image from a resource."}
@@ -495,7 +525,8 @@ pub enum DropDownEnum {
 pub struct DataBindingsForApp {
     #[live] fnumber: f32,
     #[live] inumber: i32,
-    #[live] dropdown: DropDownEnum
+    #[live] dropdown: DropDownEnum,
+    #[live] openthefoldheader: boola
 }
 
 #[derive(Live, LiveHook)]
@@ -552,6 +583,22 @@ impl MatchEvent for App{
             lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, check));            
         }
 
+        if self.ui.fold_button(id!(folderbutton)).opening(actions) {
+            log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12); 
+//            self.ui.fold_header(id!(thefoldheader)).opened = true;
+            self.ui.fold_header(id!(thefoldheader)).open();
+            self.counter += 1;                  
+        }
+
+        if self.ui.fold_button(id!(folderbutton)).closing(actions) {
+            log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12); 
+
+            self.ui.fold_header(id!(thefoldheader)).close();
+
+            self.counter += 1;                  
+        }
+
+
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &self.ui, Self::data_bind);        
         self.bindings.apply_over(cx, &db.nodes);
@@ -576,5 +623,6 @@ impl AppMain for App {
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         db.bind(id!(dropdown), ids!(dropdown));
+        db.bind(id!(openthefoldheader), ids!(foldheader.opened));
     }
 }
