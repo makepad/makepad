@@ -23,7 +23,8 @@ pub struct Html {
     #[walk] walk: Walk,
     #[live] align: Align,
     #[live] padding: Padding,
-    #[live] text: Rc<String>
+    #[live] text: Rc<String>,
+    #[rust] html: HtmlDoc
 } 
 
 // alright lets parse the HTML
@@ -64,11 +65,9 @@ impl Html{
     }
     
     pub fn apply_widget(&mut self, _cx:&mut Cx, _id:&[LiveId;1], _apply:&[LiveNode]){
-        
     }
     
     pub fn draw_text(&mut self, _cx:&mut Cx, _text:&str){
-        
     }
     
     // parse it
