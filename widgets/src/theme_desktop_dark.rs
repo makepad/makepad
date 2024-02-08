@@ -1210,7 +1210,12 @@ live_design! {
 
 
     DropDown = <DropDownBase> {
+
+       
+
         draw_text: {
+            text_style: <THEME_FONT_DATA> {}
+            
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
