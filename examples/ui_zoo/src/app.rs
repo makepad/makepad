@@ -1,12 +1,12 @@
 use makepad_widgets::*;
 use makepad_platform::live_atomic::*;
-
+ 
 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
     import makepad_draw::shader::std::*;
-    import makepad_ui_zoo::demofiletree::*;
+    import makepad_example_ui_zoo::demofiletree::*;
 
     ZooHeader = <View> {
         show_bg: true
@@ -71,7 +71,6 @@ live_design!{
     ZooDesc = <Label> {
         margin: {top: 10},
         padding: 0,
-        spacing: 0,
         draw_text: {
             color: #3
             text_style: {
@@ -390,7 +389,6 @@ live_design!{
                         <ZooGroup> {
                             <Slider> 
                             {
-                                value: 0.0
                                 width: 100,
                                 height: 30, 
                                 draw_slider:{
@@ -423,28 +421,11 @@ live_design!{
                     <ZooHeader>{title = {text:"DesktopButton"} <ZooDesc>{text:"Desktop Button ?"}<ZooGroup> {<DesktopButton>{}}  }              
                     <ZooHeader>{title = {text:"DropDown"} <ZooDesc>{text:"DropDown ?"}<ZooGroup> 
                     {
-                        thedrop = <DropDown>{
+                    dropdown = <DropDown>{
                         height: 30,
                         width: 200
-                        popup_menu: {
-                            menu_item: {
-                                indent_width: 10.0
-                                width: Fill,
-                                height: Fit
-                                padding: 3
-                
-                                draw_bg: {
-                                    color: #x48,
-                                    color_selected: #x6
-                                }
-                            }
-                        }
-
-                        dropdown = {
-                            labels: ["ValueOne", "ValueTwo","Thrice","FourthValue","OptionE","Hexagons"],
-                            values: [  ValueOne,ValueTwo,Thrice,FourthValue,OptionE,Hexagons]
-                        }
-
+                        labels: ["ValueOne", "ValueTwo","Thrice","FourthValue","OptionE","Hexagons"],
+                        values: [  ValueOne,ValueTwo,Thrice,FourthValue,OptionE,Hexagons]
 
                     }}  }              
                        
@@ -479,7 +460,7 @@ app_main!(App);
 
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
-pub enum ADropDownEnum {
+pub enum DropDownEnum {
     #[pick]
     ValueOne,
     ValueTwo,
@@ -493,14 +474,14 @@ pub enum ADropDownEnum {
 pub struct DataBindingsForApp {
     #[live] fnumber: f32,
     #[live] inumber: i32,
-    #[live] dropdown: ADropDownEnum
+    #[live] dropdown: DropDownEnum
 }
 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
-    #[live] bindings: DataBindingsForApp
+    #[rust(DataBindingsForApp::new(cx))] bindings: DataBindingsForApp
  }
 
 impl LiveRegister for App {
@@ -574,7 +555,7 @@ impl AppMain for App {
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         // sequencer
-        db.bind(id!(dropdown), ids!(thedrop));
+        db.bind(id!(dropdown), ids!(dropdown));
 
 
 

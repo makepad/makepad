@@ -5,6 +5,7 @@ pub struct HtmlError{
     pub position:usize,
 }
 
+#[derive(Default)]
 pub struct HtmlDoc{
     pub decoded: String,
     pub nodes: Vec<HtmlNode>,
@@ -15,7 +16,6 @@ pub struct HtmlDoc{
      OpenTag(LiveId),
      CloseTag(LiveId),
      Attribute(LiveId, usize, usize),
-     BoolAttribute(LiveId),
      Text(usize, usize)
  }
  
@@ -173,11 +173,11 @@ pub struct HtmlDoc{
                      State::AttribValueStart(LiveId::from_str_lc(&body[start..i]))
                  }
                  else if c == '/'{
-                     nodes.push(HtmlNode::BoolAttribute(LiveId::from_str_lc(&body[start..i])));
+                     nodes.push(HtmlNode::Attribute(LiveId::from_str_lc(&body[start..i]),0,0));
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::BoolAttribute(LiveId::from_str_lc(&body[start..i])));
+                     nodes.push(HtmlNode::Attribute(LiveId::from_str_lc(&body[start..i]),0,0));
                      State::Text(decoded.len())
                  }
                  else{
@@ -186,18 +186,18 @@ pub struct HtmlDoc{
              }
              State::AttribValueEq(id)=>{
                  if c == '/'{
-                     nodes.push(HtmlNode::BoolAttribute(id));
+                     nodes.push(HtmlNode::Attribute(id,0,0));
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::BoolAttribute(id));
+                     nodes.push(HtmlNode::Attribute(id,0,0));
                      State::Text(i+1)
                  }
                  else if c == '='{
                      State::AttribValueStart(id)
                  }
                  else if !c.is_whitespace(){
-                     nodes.push(HtmlNode::BoolAttribute(id));
+                     nodes.push(HtmlNode::Attribute(id,0,0));
                      State::AttribName(i)
                  }
                  else{
