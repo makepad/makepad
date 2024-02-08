@@ -422,6 +422,28 @@ live_design!{
                     <ZooHeader>{title = {text:"DropDown"} <ZooDesc>{text:"DropDown ?"}<ZooGroup> 
                     {
                     dropdown = <DropDown>{
+
+                        draw_text: {
+                            
+
+                            fn get_color(self) -> vec4 {
+                                return mix(
+                                    mix(
+                                        mix(
+                                            (#xFFF8),
+                                            (#xFFF8),
+                                            self.focus
+                                        ),
+                                        (#xFFFF),
+                                        self.hover
+                                    ),
+                                    (#x000A),
+                                    self.pressed
+                                )
+                            }
+                        }
+
+                        
                         height: 30,
                         width: 200
                         labels: ["ValueOne", "ValueTwo","Thrice","FourthValue","OptionE","Hexagons"],
@@ -457,7 +479,6 @@ live_design!{
 }
 
 app_main!(App);
-
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum DropDownEnum {
@@ -554,10 +575,6 @@ impl AppMain for App {
 
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
-        // sequencer
         db.bind(id!(dropdown), ids!(dropdown));
-
-
-
     }
 }
