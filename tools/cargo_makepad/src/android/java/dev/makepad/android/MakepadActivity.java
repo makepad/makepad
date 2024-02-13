@@ -280,6 +280,12 @@ MidiManager.OnDeviceOpenedListener{
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        MakepadNative.activityOnStart();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         MakepadNative.activityOnResume();
@@ -293,8 +299,15 @@ MidiManager.OnDeviceOpenedListener{
         Log.w("SAPP", "onBackPressed");
 
         // TODO: here is the place to handle request_quit/order_quit/cancel_quit
-
         super.onBackPressed();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        MakepadNative.activityOnPause();
+
+        //% MAIN_ACTIVITY_ON_PAUSE
     }
 
     @Override
@@ -306,16 +319,13 @@ MidiManager.OnDeviceOpenedListener{
     @Override
     protected void onDestroy() {
         super.onDestroy();
-
         MakepadNative.activityOnDestroy();
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
-        MakepadNative.activityOnPause();
-
-        //% MAIN_ACTIVITY_ON_PAUSE
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        MakepadNative.activityOnWindowFocusChanged(hasFocus);
     }
 
     @Override

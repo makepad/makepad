@@ -109,8 +109,12 @@ pub enum FromJavaMessage {
     },
     Pause,
     Resume,
+    Start,
     Stop,
     Destroy,
+    WindowFocusChanged {
+        has_focus: bool,
+    },
 }
 unsafe impl Send for FromJavaMessage {}
 
@@ -180,6 +184,14 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
 }
 
 #[no_mangle]
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnStart(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+) {
+    send_from_java_message(FromJavaMessage::Start);
+}
+
+#[no_mangle]
 unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnResume(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
@@ -203,13 +215,23 @@ unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnStop(
     send_from_java_message(FromJavaMessage::Stop);
 }
 
-
 #[no_mangle]
 unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnDestroy(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
 ) {
     send_from_java_message(FromJavaMessage::Destroy);
+}
+
+#[no_mangle]
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnWindowFocusChanged(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    has_focus: jni_sys::jboolean,
+) {
+    send_from_java_message(FromJavaMessage::WindowFocusChanged {
+        has_focus: has_focus != 0,
+    });
 }
 
 #[no_mangle]
