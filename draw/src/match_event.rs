@@ -4,6 +4,8 @@ use crate::Cx2d;
 pub trait MatchEvent{
     fn handle_startup(&mut self, _cx: &mut Cx){}
     fn handle_shutdown(&mut self, _cx: &mut Cx){}
+    fn handle_foreground(&mut self, _cx: &mut Cx){}
+    fn handle_background(&mut self, _cx: &mut Cx){}
     fn handle_pause(&mut self, _cx: &mut Cx){}
     fn handle_resume(&mut self, _cx: &mut Cx){}
     fn handle_app_got_focus(&mut self, _cx: &mut Cx){}
@@ -50,6 +52,8 @@ pub trait MatchEvent{
         match event{
             Event::Startup=>self.handle_startup(cx),
             Event::Shutdown=>self.handle_shutdown(cx),
+            Event::Foreground=>self.handle_foreground(cx),
+            Event::Background=>self.handle_background(cx),
             Event::Pause=>self.handle_pause(cx),
             Event::Resume=>self.handle_resume(cx),
             Event::Signal=>self.handle_signal(cx),
