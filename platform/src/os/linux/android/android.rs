@@ -339,8 +339,6 @@ impl Cx {
                     FromJavaMessage::Pause => {
                         self.call_event_handler(&Event::Pause);
                     }
-                    FromJavaMessage::Stop => {
-                    }
                     FromJavaMessage::Resume => {
                         if self.os.fullscreen {
                             unsafe {
@@ -352,9 +350,22 @@ impl Cx {
                         self.reinitialise_media();
                         self.call_event_handler(&Event::Resume);
                     }
+                    FromJavaMessage::Start => {
+                        self.call_event_handler(&Event::Foreground);
+                    }
+                    FromJavaMessage::Stop => {
+                        self.call_event_handler(&Event::Background);
+                    }
                     FromJavaMessage::Destroy => {
                         self.call_event_handler(&Event::Shutdown);
                         self.os.quit = true;
+                    }
+                    FromJavaMessage::WindowFocusChanged { has_focus } => {
+                        if has_focus {
+                            self.call_event_handler(&Event::AppGotFocus);
+                        } else {
+                            self.call_event_handler(&Event::AppLostFocus);
+                        }
                     }
                     FromJavaMessage::Init(_) => {
                         panic!()
