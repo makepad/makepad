@@ -435,14 +435,45 @@ impl PortalList {
         None
     }
     
+    /// Creates a new widget from the given `template` or returns an existing widget,
+    /// if one already exists with the same `entry_id` and `template`.
+    ///
+    /// If you care whether the widget already existed or not, use [`PortalList::item_with_existed()`] instead.
+    ///
+    /// ## Return
+    /// * If a widget already existed for the given `entry_id`, this returns a reference to that widget.
+    /// * If a new widget was created successfully, this returns a reference to that new widget.
+    /// * If a widget didn't exist for the given `entry_id` but the `template` could not be found, this returns `None`.
     pub fn item(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
+        self.item_with_existed(cx, entry_id, template)
+            .map(|(item, _)| item)
+    }
+
+    /// Creates a new widget from the given `template` or returns an existing widget,
+    /// if one already exists with the same `entry_id` and `template`.
+    ///
+    /// If you don't care whether the widget already existed or not, use [`PortalList::item()`] instead.
+    ///
+    /// ## Return
+    /// * If a widget already existed for the given `entry_id`, this returns a tuple of that widget and `true`.
+    /// * If a new widget was created successfully, this returns a tuple of that widget and `false`.
+    /// * If the given `template` wasn't found, this returns `None`.
+    pub fn item_with_existed(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
         if let Some(ptr) = self.templates.get(&template) {
+            let mut already_existed = true;
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+                already_existed = false;
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
-            return Some(entry.clone())
+            Some((entry.clone(), already_existed))
+        } else {
+            None
         }
-        None
+    }
+
+    /// Returns `true` if a widget already exists for the given `entry_id` and `template`.
+    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
+        self.items.contains_key(&(entry_id, template))
     }
     
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
@@ -745,13 +776,22 @@ impl PortalListRef {
         }
     }
     
+    /// A convenience wrapper around [`PortalList::item()`].
     pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.item(cx, entry_id, template)
-        }
-        else {
-            None
-        }
+        let mut inner = self.borrow_mut()?;
+        inner.item(cx, entry_id, template)
+    }
+
+    /// A convenience wrapper around [`PortalList::item_with_existed()`].
+    pub fn item_with_existed(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
+        let mut inner = self.borrow_mut()?;
+        inner.item_with_existed(cx, entry_id, template)
+    }
+
+    /// A convenience wrapper around [`PortalList::contains_item()`].
+    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
+        let Some(inner) = self.borrow() else { return false };
+        inner.contains_item(entry_id, template)
     }
     
     pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
