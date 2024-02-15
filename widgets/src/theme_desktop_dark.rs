@@ -1899,11 +1899,7 @@ live_design! {
         }
     }
     
-    RadioButtonGroup = <RadioButtonGroupBase> {
-        width: Fit,
-        height: Fit,
-    }
-
+    
 
     PortalList = <PortalListBase> {
         width: Fill
