@@ -1,7 +1,7 @@
 
 use {
     crate::{
-        app::{AppData},
+        app::AppData,
         makepad_widgets::*,
     },
     std::{
@@ -96,10 +96,10 @@ impl ProfilerEventChart{
         self.draw_item.draw_abs(cx, rect);
         self.tmp_label.clear();
         if sample_end - sample_start > 0.001{
-            write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0);                        
+            write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
         }
         else{
-            write!(&mut self.tmp_label, "{} {:.0} ns", label, (sample_end-sample_start)*1000000.0);
+            write!(&mut self.tmp_label, "{} {:.0} ns", label, (sample_end-sample_start)*1000000.0).unwrap();
         }
         
         // if xsize > 10.0 lets draw a clipped piece of text 
@@ -136,7 +136,7 @@ impl Widget for ProfilerEventChart {
                 let pos = dvec2(xpos,0.0)+rect.pos;
                 self.draw_line.draw_abs(cx, Rect{pos, size:dvec2(3.0, rect.size.y)});
                 label.clear();
-                write!(&mut label, "{:.3}s", (iter+self.time_range.start));       
+                write!(&mut label, "{:.3}s", (iter+self.time_range.start)).unwrap();       
                 self.draw_time.draw_abs(cx, pos+dvec2(2.0,2.0), &label);
                 iter += step_size; 
             }
