@@ -78,7 +78,6 @@ impl RadioButton {
 
 }
 
-
 impl Widget for RadioButtonGroup {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
@@ -92,9 +91,6 @@ impl Widget for RadioButtonGroup {
         DrawStep::done()
     }
 }
-
-
-
 
 impl Widget for RadioButton {
     
