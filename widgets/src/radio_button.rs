@@ -9,6 +9,12 @@ use {
 live_design!{
     DrawRadioButton = {{DrawRadioButton}} {}
     RadioButtonBase = {{RadioButton}} {}
+    RadioButtonGroupBase = <View> 
+    {
+            width: Fit, 
+            height: Fit,
+            flow: Down
+    }
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -29,6 +35,7 @@ pub enum RadioType {
     #[pick] Round = shader_enum(1),
     Tab = shader_enum(2),
 }
+
 
 #[derive(Live, LiveHook, Widget)]
 pub struct RadioButton {
