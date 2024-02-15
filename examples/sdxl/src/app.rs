@@ -1,4 +1,4 @@
-use crate::{makepad_live_id::*};
+use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
@@ -833,7 +833,7 @@ impl MatchEvent for App {
     
     fn handle_key_down(&mut self, cx:&mut Cx, event:&KeyEvent){
         match event{
-            KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..}=>{
+            KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers: _, ..}=>{
                 return
                 /*
                 self.clear_todo(cx);
