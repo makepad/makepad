@@ -454,7 +454,16 @@ live_design!{
                     }              
                        
                     
-                    <ZooHeader>{title = {text:"DemoFileTree"} <ZooDesc>{text:"DemoFileTree ?"}<ZooGroup> {<DemoFileTree>{width: Fill, height: 100}}  }     
+                    <ZooHeader>{title = {text:"DemoFileTree"} <ZooDesc>{text:"DemoFileTree ?"}<ZooGroup> 
+                        {
+                            <DemoFileTree>{
+                                width: Fill,                               
+                                file_tree:{
+                                    height: 400
+                                }
+                            }
+                        }  
+                    }     
                     <ZooHeader>{title = {text:"StackViewHeader"} <ZooDesc>{text:"StackViewHeader ?"}<ZooGroup> {<StackViewHeader>{}}  }     
                     <ZooHeader>{
                         title = {text:"FoldHeader"} 
@@ -504,6 +513,31 @@ live_design!{
 
                         }  
                     }     
+
+                    <ZooHeader>{title = {text:"SlidePanel"} <ZooDesc>{text:"Slide panel?"}
+                    <ZooGroup> {
+                        <SlidePanel> {
+                            side: Right,
+                            width: (1000 * 0.175),
+                            height: (1000 * 0.175),
+                            margin: 0
+                            <ZooHeader>{title = {text:"Image"} <ZooDesc>{text:"A static inline image from a resource."}
+                            <ZooGroup> {
+                                <Image> {
+                                    source: dep("crate://self/resources/ducky.png" ),
+                                    width: (1000 * 0.175),
+                                    height: (1000 * 0.175),
+                                    margin: 0
+                                }
+    
+                            }  
+                        }      
+                        }
+
+                    }  
+                }     
+
+
                 }
             }
         }
