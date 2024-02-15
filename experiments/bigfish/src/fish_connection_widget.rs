@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 use crate::{makepad_draw::*, makepad_widgets::widget::*, makepad_widgets::*};
 
 live_design! {
