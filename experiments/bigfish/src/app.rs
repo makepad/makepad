@@ -24,7 +24,7 @@ live_design! {
                 fn pixel(self) -> vec4 {
                     let Pos = floor(self.pos*self.rect_size *0.10);
                     let PatternMask = mod(Pos.x + mod(Pos.y, 2.0), 2.0);
-                    return mix( vec4(0,0.15*self.pos.y,0.1,1), vec4(.05, 0.03, .23*self.pos.y, 1.0), PatternMask);
+                    return vec4(0.03,0.03,0.03,1);
                 }
             }
 

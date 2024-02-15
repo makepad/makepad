@@ -47,6 +47,7 @@ pub struct FishPatch {
     pub creationid: u64,
     pub undo: UndoState,
 }
+
 pub trait FindBlock {
     fn find_mut(&mut self, id: u64) -> Option<&mut FishBlock>;
     fn find(&self, id: u64) -> Option<&FishBlock>;
@@ -79,9 +80,9 @@ impl FishPatch {
     pub fn connect(&mut self, blockfrom: u64, outputfrom: u64, blockto: u64, intputto: u64) {
         // todo: check if connection exists
         self.undo_checkpoint_start();
-
+        let id = self.get_new_id();
         self.connections.push(FishConnection {
-            id: 0,
+            id: id,
             from_block: blockfrom,
             to_block: blockto,
             from_port: outputfrom,
@@ -89,7 +90,10 @@ impl FishPatch {
         });
         self.undo_checkpoint_end();
     }
-
+    pub fn get_new_id(&mut self) -> u64{
+        self.creationid = self.creationid + 1;
+        self.creationid
+    }
     pub fn undo_checkpoint_start(&mut self) -> usize {
         self.undo.redo_things.clear();
 
@@ -270,6 +274,8 @@ impl FishPatch {
 
         let c = self.get_connection(id).expect("find block");
         let cstring = c.serialize_ron();
+
+        println!("deleting connection {}", id);
 
         let index = self.connections.iter().position(|x| x.id == id).unwrap();
         self.connections.remove(index);
