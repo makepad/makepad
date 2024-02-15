@@ -51,6 +51,7 @@ live_design! {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, DefaultNone)]
 pub enum FishConnectionWidgetAction {
     None,
@@ -101,12 +102,12 @@ pub struct FishConnectionWidget {
 }
 
 impl Widget for FishConnectionWidget {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let uid = self.widget_uid();
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        //let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
 
         return;
-
+/*
         match event.hits(cx, self.draw_line.area()) {
             Hit::FingerDown(_fe) => {
                 if self.grab_key_focus {
@@ -136,7 +137,7 @@ impl Widget for FishConnectionWidget {
                 }
             }
             _ => (),
-        }
+        }*/
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -169,8 +170,8 @@ impl FishConnectionWidget {
                 }
             }
 
-            let deltatomid = midpoint - self.start_pos;
-            let delta = self.end_pos - self.start_pos;
+            //let _deltatomid = midpoint - self.start_pos;
+            //let _delta = self.end_pos - self.start_pos;
 
             let overshoot = 40.;
 
