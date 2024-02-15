@@ -1,20 +1,15 @@
-use {
-    crate::{
+use crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
-        widget::*,
-    }
-};
+        widget::*, View,
+    };
 
 live_design!{
+    //import crate::base::View;
+
     DrawRadioButton = {{DrawRadioButton}} {}
     RadioButtonBase = {{RadioButton}} {}
-    RadioButtonGroupBase = <View> 
-    {
-            width: Fit, 
-            height: Fit,
-            flow: Down
-    }
+    RadioButtonGroupBase = {{RadioButtonGroup }} {}
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -36,6 +31,10 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
+#[derive(Live, LiveHook, Widget)]
+pub struct RadioButtonGroup {
+    #[deref] frame: View
+}
 
 #[derive(Live, LiveHook, Widget)]
 pub struct RadioButton {
@@ -65,6 +64,10 @@ pub enum RadioButtonAction {
 }
 
 
+impl RadioButtonGroup {
+    pub fn draw_walk(&mut self, _cx: &mut Cx2d, _walk: Walk) {}
+}
+
 impl RadioButton {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
@@ -72,7 +75,26 @@ impl RadioButton {
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
         self.draw_radio.end(cx);
     }
+
 }
+
+
+impl Widget for RadioButtonGroup {
+    
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        //let uid = self.widget_uid();
+        self.animator_handle_event(cx, event);
+              
+    }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+        self.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+}
+
+
+
 
 impl Widget for RadioButton {
     
