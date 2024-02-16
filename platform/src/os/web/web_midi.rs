@@ -8,7 +8,7 @@ use {
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasmMsg},
         midi::*,
-        thread::Signal,
+        thread::SignalToUI,
         os::web::CxOs,
     }
 };
@@ -30,7 +30,7 @@ impl OsMidiInput {
 impl OsMidiOutput {
     pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         let _ = self.sender.send((port_id, d));
-        Signal::set_ui_signal();
+        SignalToUI::set_ui_signal();
     }
 }
 
@@ -38,7 +38,7 @@ impl OsMidiOutput {
 pub struct WebMidiAccess {
     output_receivers: Vec<mpsc::Receiver<(Option<MidiPortId>, MidiData) >>,
     input_senders: Vec<mpsc::Sender<(MidiPortId, MidiData) >>,
-    change_signal: Signal,
+    change_signal: SignalToUI,
     ports: Vec<WebMidiPort>,
 }
 
@@ -48,7 +48,7 @@ struct WebMidiPort {
 }
 
 impl WebMidiAccess {
-    pub fn new(os: &mut CxOs, change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(os: &mut CxOs, change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         os.from_wasm(FromWasmQueryMidiPorts {});
         
         Arc::new(Mutex::new(Self {

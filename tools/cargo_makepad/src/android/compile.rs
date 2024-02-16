@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use crate::android::{HostOs, AndroidTarget};
 use crate::utils::*;
 use crate::makepad_shell::*;
+use super::sdk::NDK_VERSION_FULL;
 
 struct BuildPaths {
     tmp_dir: PathBuf,
@@ -33,7 +34,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
             tools:targetApi="33">
             <meta-data android:name="android.max_aspect" android:value="2.1" />
             <activity
-                android:name="{class_name}"
+                android:name=".{class_name}"
                 android:configChanges="orientation|screenSize|keyboardHidden"
                 android:exported="true">
                 <intent-filter>
@@ -74,13 +75,14 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
     for android_target in android_targets {
         let clang_filename = format!("{}33-clang", android_target.clang());
         
-        let linker = match host_os{
-            HostOs::MacosX64=>format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/{clang_filename}"),
-            HostOs::MacosAarch64=>format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/{clang_filename}"),
-            HostOs::WindowsX64=>format!("NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/{clang_filename}.cmd"),
-            HostOs::LinuxX64=>format!("NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/{clang_filename}"),
-            _=>panic!()
+        let bin_path = |bin_filename: &str| match host_os {
+            HostOs::MacosX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
+            HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
+            HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.cmd"),
+            HostOs::LinuxX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/bin/{bin_filename}"),
+            _ => panic!()
         };
+        let full_clang_path = sdk_dir.join(bin_path(&clang_filename));
 
         let toolchain = android_target.toolchain();
         let target_opt = format!("--target={toolchain}");
@@ -100,12 +102,20 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
             args_out.push(arg);
         }
 
-        let target_str = android_target.to_str();
-        let cfg_flag = format!("--cfg android_target=\"{}\"", target_str);
+        let target_arch_str = android_target.to_str();
+        let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
          
         shell_env(
-            &[ 
-                (&android_target.linker_env_var(), (sdk_dir.join(linker).to_str().unwrap())),
+            &[
+                // Set the linker env var to the path of the target-specific `clang` binary.
+                (&android_target.linker_env_var(), full_clang_path.to_str().unwrap()),
+
+                // We set these three env vars to allow native library C/C++ builds to succeed with no additional app-side config.
+                // The naming conventions of these env variable keys are established by the `cc` Rust crate.
+                (&format!("CC_{toolchain}"),     full_clang_path.to_str().unwrap()),
+                (&format!("AR_{toolchain}"),     sdk_dir.join(bin_path("llvm-ar")).to_str().unwrap()),
+                (&format!("RANLIB_{toolchain}"), sdk_dir.join(bin_path("llvm-ranlib")).to_str().unwrap()),
+
                 ("RUSTFLAGS", &cfg_flag),
                 ("MAKEPAD", "lines"),
             ],
@@ -321,13 +331,14 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
 
 fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
-
+    
     let build_crate_dir = get_crate_dir(build_crate) ?;
     let local_resources_path = build_crate_dir.join("resources");
     if local_resources_path.is_dir() {
         let underscore_build_crate = build_crate.replace('-', "_");
         let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{underscore_build_crate}/resources"));
         mkdir(&dst_dir) ?;
+        
         cp_all(&local_resources_path, &dst_dir, false) ?;
 
         let assets = ls(&dst_dir) ?;
@@ -354,7 +365,7 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
         "add",
         build_paths.dst_unaligned_apk.to_str().unwrap(),
     ];
-    for asset in &assets_to_add {
+    for asset in &assets_to_add {  
         aapt_args.push(asset);
     }
 

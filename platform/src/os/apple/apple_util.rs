@@ -406,6 +406,19 @@ pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
     height as f64 - (rect.origin.y + rect.size.height)
 }
 
+/// Retrieves the mouse button number for the given `event.
+///
+/// Button numbers are as follows:
+/// * 0: Main (left) mouse button
+/// * 1: Secondary (right) mouse button
+/// * 2: Middle mouse button (clicking the scroll wheel)
+/// * 3: Fourth mouse button, commonly the "back" button
+/// * 4: Fifth mouse button, commonly the "forward" button
+pub fn get_event_mouse_button(event: ObjcId) -> usize {
+    let button_number: usize = unsafe {msg_send![event, buttonNumber]};
+    button_number
+}
+
 pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
     match cursor {
         MouseCursor::Arrow | MouseCursor::Default | MouseCursor::Hidden => load_native_cursor("arrowCursor"),

@@ -44,7 +44,8 @@ impl Drop for PoolId {
 
 impl<T> IdPool<T> where T: Default {
     pub fn alloc(&mut self) -> PoolId {
-        if let Some(id) = self.free.0.borrow_mut().pop() {
+        let last_from_free_pool = self.free.0.borrow_mut().pop();
+        if let Some(id) = last_from_free_pool {
             self.pool[id].generation += 1;
             PoolId {
                 id,
@@ -53,17 +54,49 @@ impl<T> IdPool<T> where T: Default {
             }
         }
         else {
-            let id = self.pool.len();
-            self.pool.push(IdPoolItem {
-                generation: 0,
-                item: T::default()
+            self.alloc_new(None)
+        }
+    }
+
+    pub fn alloc_new(&mut self, item: Option<T>) -> PoolId {
+        let id = self.pool.len();
+        self.pool.push(IdPoolItem {
+            generation: 0,
+            item: item.unwrap_or_else(|| T::default())
+        });
+        PoolId {
+            id,
+            generation: 0,
+            free: self.free.clone()
+        }
+    }
+
+    pub fn alloc_with_reuse_filter<F>(&mut self, mut filter: F, item: T) -> PoolId 
+    where F: FnMut(&IdPoolItem<T>) -> bool {
+        let maybe_free_id = self.free.0.borrow_mut()
+            .iter()
+            .enumerate()
+            .find_map(|(index, &id)| {
+                if filter(&self.pool[id]) {
+                    Some((index, id))
+                } else {
+                    None
+                }
             });
-            PoolId {
+    
+        if let Some((index, id)) = maybe_free_id {
+            self.free.0.borrow_mut().remove(index);
+            self.pool[id].generation += 1;
+            self.pool[id].item = item;
+    
+            let pool_id = PoolId {
                 id,
-                generation: 0,
+                generation: self.pool[id].generation,
                 free: self.free.clone()
-            }
-            
+            };
+            pool_id
+        } else {
+            self.alloc_new(Some(item))
         }
     }
 }

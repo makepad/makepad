@@ -9,7 +9,7 @@ use {
             HostToStdin,
             StdinToHost,
         },
-        makepad_platform::studio::{AppToStudioVec,AppToStudio,ProfileSampleEvent},
+        makepad_platform::studio::{AppToStudioVec,AppToStudio,EventSample, GPUSample},
         makepad_platform::log::LogLevel,
         build_manager::{
             build_protocol::*,
@@ -73,7 +73,8 @@ impl ActiveBuilds {
 
 #[derive(Default)]
 pub struct ProfileSampleStore{
-    pub events: Vec<ProfileSampleEvent>
+    pub event: Vec<EventSample>,
+    pub gpu: Vec<GPUSample>,
 }
 
 #[derive(Default)]
@@ -267,10 +268,16 @@ impl BuildManager {
                             })));
                             cx.action(AppAction::RedrawLog)
                         }
-                        AppToStudio::ProfileEvent(sample)=>{  
+                        AppToStudio::EventSample(sample)=>{  
                             // ok lets push this profile sample into the profiles
                             let values = self.profile.entry(build_id).or_default();
-                            values.events.push(sample);
+                            values.event.push(sample);
+                            cx.action(AppAction::RedrawProfiler)
+                        }
+                        AppToStudio::GPUSample(sample)=>{  
+                            // ok lets push this profile sample into the profiles
+                            let values = self.profile.entry(build_id).or_default();
+                            values.gpu.push(sample);
                             cx.action(AppAction::RedrawProfiler)
                         }
                     }

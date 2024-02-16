@@ -45,7 +45,7 @@ live_design!{
         margin: {left: 1},
         label_walk: {margin: {top: 7}}
         draw_check: {
-            uniform size: 4.0;
+            uniform size: 3.5;
             instance open: 0.0
             uniform length: 3.0
             uniform width: 1.0
@@ -101,10 +101,10 @@ live_design!{
                 fold = <FoldButton> {
                     animator: {open = {default: no}}, height: 25, width: 15 margin: {left: 5}
                     draw_bg: {
-                        uniform size: 4.0;
+                        uniform size: 3.75;
                         instance open: 0.0
-                        uniform length: 3.0
-                        uniform width: 1.0
+                        // uniform length: 3.0
+                        // uniform width: 1.0
                         
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -113,10 +113,10 @@ live_design!{
                             let c = vec2(left + sz, self.rect_size.y * 0.5);
                             
                             // PLUS
-                            sdf.box(0, sz * 3.0, sz * 2.5, sz * 0.5, 1.0); // rounding = 3rd value
+                            sdf.box(0.5, sz * 3.0, sz * 2.5, sz * 0.7, 1.0); // rounding = 3rd value
                             // vertical
                             sdf.fill_keep(mix(#8F, #FF, self.hover));
-                            sdf.box(sz, sz * 2.0, sz * 0.5, sz * 2.5, 1.0); // rounding = 3rd value
+                            sdf.box(sz * 1.0, sz * 2.125, sz * 0.7, sz * 2.5, 1.0); // rounding = 3rd value
     
                             sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.open))
     

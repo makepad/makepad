@@ -21,11 +21,11 @@ pub struct CollabClient {
     #[live] path: String,
     #[rust] web_socket: Option<WebSocket>,
     #[rust] requests: Rc<RefCell<Vec<CollabRequest >> >,
-    #[rust(LiveId::unique())] signal: Signal
+    #[rust(LiveId::unique())] signal: SignalToUI
 }
 
 impl LiveHook for CollabClient {
-    fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         if self.web_socket.is_none() {
             // connect websocket
             let (host, protocol) = if let OsType::WebBrowser{host,protocol,..} = &cx.platform_type(){(host,protocol)}else{panic!()};

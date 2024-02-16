@@ -39,7 +39,7 @@ impl LiveNew for Overlay {
 }
 
 impl LiveApply for Overlay {
-    fn apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         nodes.skip_node(index)
     }
 }

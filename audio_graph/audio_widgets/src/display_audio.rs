@@ -94,7 +94,7 @@ const WAVE_SIZE_Y: usize = 16;
 impl LiveHook for DisplayAudio {
 
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.wave_texture.set_format(cx, TextureFormat::VecBGRAu8_32 {
+        self.wave_texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
             data: {
                 let mut data = Vec::new();
                 data.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);

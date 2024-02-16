@@ -1,4 +1,4 @@
-use crate::{makepad_live_id::*};
+use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
@@ -12,7 +12,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import crate::app_ui::AppUI;
     import crate::app_ui::AppWindow;
-    App = {{App}} {
+    App = {{App}} { 
         ui: <MultiWindow> {
             <Window> {
                 window: {inner_size: vec2(2000, 1024)},
@@ -75,7 +75,7 @@ struct Workflow {
 impl Workflow {
     fn new(name: &str) -> Self {Self {name: name.to_string()}}
 }
-
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
@@ -84,12 +84,12 @@ pub struct App {
         Machine::new("DESKTOP-2:8188", id_lut!(m2)),
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
         Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
-        Machine::new("DESKTOP-7:8188", id_lut!(m1)),
+        Machine::new("192.168.1.78:8188", id_lut!(m1)),
        /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
-        Workflow::new("lcm")
+        Workflow::new("turbo")
     ])] workflows: Vec<Workflow>,
     
     #[rust] todo: Vec<(bool, PromptState)>,
@@ -105,6 +105,8 @@ pub struct App {
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust(true)] take_photo:bool,
+    #[rust(0.5)] dial1: f32,
+    #[rust(0.5)] dial2: f32
     //#[rust(Instant::now())] last_flip: Instant
 }
 
@@ -140,6 +142,34 @@ impl App {
             width,
             height
         );
+        // lets fix the pixels
+        for y in 0..height{
+            for x in 0..width{
+                // lets grab rgb into a Vec4
+                let r = out[y*width*3 + x*3 + 0];
+                let g = out[y*width*3 + x*3 + 1];
+                let b = out[y*width*3 + x*3 + 2];
+                let c = Vec4{x:r as f32 / 255.0, y:g as f32 / 255.0,z:b as f32 / 255.0,w:1.0};
+                let d1 = (self.dial1-0.5)*2.0;
+                let d2 = (self.dial2*5.0).powf(2.0);
+                let shift = vec4(d1,d1,d1,0.0);
+                let scale = vec4(d2,d2,d2,1.0);
+                let c = (c - shift)*scale + shift;
+                //let c = Vec4::from_lerp(vec4(c.x,c.x,c.x,1.0), c, 1.0 - self.dial2);
+                out[y*width*3 + x*3 + 0] = (c.x * 255.0).min(255.0).max(0.0) as u8;
+                out[y*width*3 + x*3 + 1] = (c.y * 255.0).min(255.0).max(0.0) as u8;
+                out[y*width*3 + x*3 + 2] = (c.z * 255.0).min(255.0).max(0.0) as u8;
+            }
+        }
+        /*
+        let d1 = (self.dial1-0.5)*2.0;
+        let d2 = pow(self.dial2*10.0,2.0);
+        let shift = vec4(d1,d1,d1,0.0)
+        let scale = vec4(d2,d2,d2,1.0)
+        let c = (self.get_video_pixel(self.pos)-shift)*scale + shift;
+        return mix(vec4(c.x, c.x,c.x, 1.0), c, 1.0-self.dial2)
+        */
+        
         self.video_input[0].swap_vec_u32(cx, &mut buf);
         // lets encode it
         let mut jpeg = Vec::new();
@@ -158,11 +188,11 @@ impl App {
         None
     }
     
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     fn send_camera_to_machine(&mut self, _cx: &mut Cx, _machine_id: LiveId, _prompt_state: PromptState){
     }
         
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "windows"))]
     fn send_camera_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, prompt_state: PromptState){
         let jpeg = self.get_camera_frame_jpeg(cx, prompt_state.prompt.preset.width as usize,prompt_state.prompt.preset.height as usize);
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
@@ -209,10 +239,11 @@ impl App {
         let ws = ws.replace("POSITIVE_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
         let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
         let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
-        let ws = ws.replace("1344x768_gray.png", &format!("{}.jpg",photo_name));
-        let ws = ws.replace("\"steps\": 4", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
-        let ws = ws.replace("\"cfg\": 1.7", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
-            let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
+        let ws = ws.replace("example.png", &format!("{}.jpg",photo_name));
+        let ws = ws.replace("\"steps\": 10", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
+        let ws = ws.replace("\"cfg\": 3", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
+        let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
+        
         request.set_metadata_id(machine.id);
         request.set_body(ws.as_bytes().to_vec());
         Self::update_progress(cx, &self.ui, machine.id, true, 0, 1);
@@ -342,7 +373,7 @@ impl App {
         }
     }
     
-    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
+    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: usize, row: usize) {
         self.ui.redraw(cx);
         if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
             self.set_current_image(cx, image_files[row.min(*image_count)].clone());
@@ -436,6 +467,10 @@ impl App {
 }
 
 impl MatchEvent for App {
+    fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
+        cx.use_midi_inputs(&ports.all_inputs());
+    }
+    
     fn handle_startup(&mut self, cx:&mut Cx){
         self.open_web_socket();
         let _ = self.db.load_database();
@@ -453,6 +488,7 @@ impl MatchEvent for App {
             if let Some(socket) = self.machines[m].web_socket.as_mut(){
                 match socket.try_recv(){
                     Ok(WebSocketMessage::String(s))=>{
+
                         if s.contains("execution_interrupted") {
                                                                                      
                         }
@@ -510,26 +546,178 @@ impl MatchEvent for App {
         
         while let Some((_, data)) = self.midi_input.receive() {
             match data.decode() {
+                MidiEvent::Note(n) if n.is_on=>{
+                    fn toggle_block(inp:&str, what:&str)->String{
+                        let mut out = inp.to_string();
+                        if let Some(start) = inp.find(&format!(" ({}",what)){
+                            if let Some(stop) = inp[start..].find(")"){
+                                out.replace_range(start..(stop+start+1),""); 
+                                return out;
+                            }
+                        }
+                        format!("{} ({}:1.0)", out, what)
+                    }
+                    let pad_table = [
+                        "esoteric", //1
+                        "hermetism",
+                        "ecological",
+                        "color explosions",
+                        "psychedelic colours",
+                        "parametric",
+                        "nature",
+                        "fractals",
+                    ];
+                    let note_table = [
+                        "mushrooms",
+                        "slime mold",
+                        "jewelry",
+                        "ouroboros",
+                        "space chicken",
+                        "books",
+                        "architecture",
+                        "underwater creatures",
+                        "consciousness",
+                        "amsterdam",
+                        "robert fludd",
+                        "dante's inferno",
+                        "western esotericism",
+                        "rembrandt",
+                        "rome",
+                        "sacred geometry",
+                        "athens",
+                        "classical egypt",
+                        "classical greece",
+                        "pythagoras",
+                        "cornelius drebbel",
+                        "cymatics",
+                        "spider web",
+                    ];
+                    let pads = [
+                        43,48,50,49,36,38,42,46
+                    ];
+                    let notes = [
+                        48,50,52,53,55,57,59,60,62,64,65,67,69,71,
+                        49,51,54,56,58,61,63,66,68,70,
+                    ];
+                    let shift = 48;
+                    
+                    if let Some(pos) = notes.iter().position(|v| *v- shift == n.note_number ){
+                        if pos < note_table.len(){
+                            let text = self.ui.text_input(id!(positive)).text();
+                            let text = toggle_block(&text, note_table[pos]);
+                            self.ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
+                        }
+                    }
+                    if let Some(pos) = pads.iter().position(|v| *v == n.note_number ){
+                        if pos < pad_table.len(){
+                            let text = self.ui.text_input(id!(positive)).text();
+                            let text = toggle_block(&text, pad_table[pos]);
+                            self.ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
+                        }
+                    }
+                    if n.note_number == 72 - shift{
+                       self.ui.widget(id!(positive)).set_text_and_redraw(cx, "");
+                    }
+                }
                 MidiEvent::ControlChange(cc) => {
+                    fn replace_number(inp:&str, id:usize, repl:&str)->String{
+                        let mut in_num = false;
+                        let mut found = None;
+                        let mut out = String::new();
+                        for c in inp.chars(){
+                            if c.is_numeric() || in_num && c == '.'{
+                                if !in_num{
+                                    if let Some(v) = found{
+                                        found = Some(v+1);
+                                    }
+                                    else{
+                                        found = Some(0);
+                                    }
+                                }
+                                in_num = true;
+                                if found.unwrap() != id{
+                                    out.push(c);
+                                }
+                            }
+                            else{
+                                if in_num{ // end of the number
+                                    if found.unwrap() == id{
+                                        for c in repl.chars(){
+                                            out.push(c);
+                                        }
+                                    }
+                                }
+                                out.push(c);
+                                in_num = false;
+                            }
+                        }
+                        if in_num{ // end of the number
+                            if found.unwrap() == id{
+                                for c in repl.chars(){
+                                    out.push(c);
+                                }
+                            }
+                        }
+                        out
+                    }
+                    
+                    fn weight(ui:&WidgetRef, id:usize, value:u8, cx:&mut Cx){
+                        let text = ui.text_input(id!(positive)).text();
+                        let number = format!("{:.2}", ((value as f32 / 127.0)*2.0));
+                        let text = replace_number(&text, id, &number);
+                        ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
+                    }
+                    
                     match cc.param{
                         20=>{
-                            self.ui.widget(id!(todo_label)).set_text_and_redraw(cx, &format!("Todo {}", cc.value as f32 / 127.0));
+                            self.ui.widget(id!(settings_denoise.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*0.8+0.2));
+                        }
+                        21=>{
+                            self.ui.widget(id!(settings_cfg.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*7.0+1.0));
+                        }
+                        22=>{
+                            self.ui.widget(id!(settings_steps.input)).set_text_and_redraw(cx, &format!("{}", ((cc.value as f32 / 127.0)*9.0+1.0).floor()));
+                        }
+                        24=>{
+                            weight(&self.ui, 0, cc.value, cx);
+                        }
+                        25=>{
+                            weight(&self.ui, 1, cc.value, cx);
+                        }
+                        26=>{
+                            weight(&self.ui, 2, cc.value, cx);
+                        }
+                        27=>{
+                            let val = cc.value as f32 / 127.0;
+                            self.dial2 = val;
+                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+                                draw_bg:{dial2:(val)}
+                            });
+                            //weight(&self.ui, 3, cc.value, cx);
+                        }
+                        23=>{
+                            let val = cc.value as f32 / 127.0;
+                            self.dial1 = val;
+                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+                                draw_bg:{dial1:(val)}
+                            });
+                            //weight(&self.ui, 4, cc.value, cx);
                         }
                         _=>()
                     }
-                    log!("{:?}", cc)
                 }
-                e=>{
-                    log!("{:?}", e);
-                }
+                _=>()
             }
         }
         while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
-            self.video_input[id].set_format(cx, TextureFormat::VecBGRAu8_32{
-                data: vec![],
-                width: vfb.format.width/2,
-                height: vfb.format.height
-            });
+            let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
+            if img_width != vfb.format.width / 2 || img_height != vfb.format.height {
+                self.video_input[id] = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32{
+                    data: vec![],
+                    width: vfb.format.width/2,
+                    height: vfb.format.height
+                });
+            }
             if let Some(buf) = vfb.as_vec_u32() {
                 self.video_input[id].swap_vec_u32(cx, buf);
             }
@@ -613,7 +801,7 @@ impl MatchEvent for App {
         while let Some(next) = self.ui.draw(cx, &mut Scope::empty()).step() {
             if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                 // alright now we draw the items
-                image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
+                image_list.set_item_range(cx, 0, self.filtered.list.len());
                                     
                 while let Some(item_id) = image_list.next_visible_item(cx) {
                                             
@@ -645,7 +833,9 @@ impl MatchEvent for App {
     
     fn handle_key_down(&mut self, cx:&mut Cx, event:&KeyEvent){
         match event{
-            KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..}=>{
+            KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers: _, ..}=>{
+                return
+                /*
                 self.clear_todo(cx);
                 if modifiers.logo || modifiers.control {
                     self.render(cx, true);
@@ -655,7 +845,7 @@ impl MatchEvent for App {
                 }
                 else {
                     self.render(cx, false);
-                }
+                }*/
             }
             KeyEvent {is_repeat: false, key_code: KeyCode::Backspace, modifiers, ..}=>{
                 if modifiers.logo {
@@ -714,10 +904,6 @@ impl MatchEvent for App {
     fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
         let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 30.0);
         cx.use_video_input(&input);
-    }
-    
-    fn handle_midi_ports(&mut self, cx: &mut Cx, ports:&MidiPortsEvent){
-        cx.use_midi_inputs(&ports.all_inputs());
     }
     
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){

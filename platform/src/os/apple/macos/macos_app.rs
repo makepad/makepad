@@ -1,3 +1,5 @@
+use crate::file_dialogs::FileDialog;
+
 use {
     std::{
         rc::Rc,
@@ -342,7 +344,7 @@ impl MacosApp {
     
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+        (time_now.duration_since(self.time_start)).as_secs_f64() 
     }
     
     unsafe fn process_ns_event(ns_event: ObjcId) {
@@ -743,4 +745,26 @@ impl MacosApp {
             cocoa_window.start_dragging(ns_event, items);
         };
     }*/
+
+
+    pub fn open_save_file_dialog(&mut self, _settings: FileDialog)
+    {
+        println!("open save file dialog!");
+    }
+
+    pub fn open_select_file_dialog(&mut self, _settings: FileDialog )
+    {
+        println!("open select file dialog!");
+    }
+
+    pub fn open_save_folder_dialog(&mut self,  _settings: FileDialog)
+    {
+        println!("open save folder dialog!");
+    }
+
+    pub fn open_select_folder_dialog(&mut self, _settings: FileDialog)
+    {
+        println!("open select folder dialog!");
+    }
+
 }

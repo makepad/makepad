@@ -107,10 +107,10 @@ pub struct FileTree {
 }
 
 impl LiveHook for FileTree {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
             if let Some(index) = nodes.child_by_name(index, id.as_field()) {
-                tree_node.apply(cx, from, index, nodes);
+                tree_node.apply(cx, apply, index, nodes);
             }
         }
         self.scroll_bars.redraw(cx);
@@ -234,7 +234,6 @@ impl FileTreeNode {
     }
 }
 
-
 impl FileTree {
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -303,7 +302,7 @@ impl FileTree {
             
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
             self.stack.push(tree_node.opened as f64 * scale);
-            if tree_node.opened == 0.0 {
+            if tree_node.opened <= 0.001 {
                 self.end_folder();
                 return Err(());
             }

@@ -286,14 +286,14 @@ pub enum DockItemStore{
 }
 
 impl LiveHook for Dock {
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     if nodes[index].value.is_enum() {
                         let mut dock_item = DockItem::new(cx);
-                        let index = dock_item.apply(cx, from, index, nodes);
+                        let index = dock_item.apply(cx, apply, index, nodes);
                         self.dock_items.insert(id, dock_item);
                         
                         return index;
@@ -304,7 +304,7 @@ impl LiveHook for Dock {
                         // lets apply this thing over all our childnodes with that template
                         for (kind, node) in self.items.values_mut() {
                             if *kind == id {
-                                node.apply(cx, from, index, nodes);
+                                node.apply(cx, apply, index, nodes);
                             }
                         }
                     }
@@ -319,15 +319,15 @@ impl LiveHook for Dock {
     }
     
     // alright lets update our tabs and splitters as well
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab_bar).as_field()) {
             for tab_bar in self.tab_bars.values_mut() {
-                tab_bar.tab_bar.apply(cx, from, index, nodes);
+                tab_bar.tab_bar.apply(cx, apply, index, nodes);
             }
         }
         if let Some(index) = nodes.child_by_name(index, live_id!(splitter).as_field()) {
             for splitter in self.splitters.values_mut() {
-                splitter.apply(cx, from, index, nodes);
+                splitter.apply(cx, apply, index, nodes);
             }
         }
     }
