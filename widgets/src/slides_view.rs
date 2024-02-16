@@ -48,19 +48,19 @@ enum DrawState {
 }
 
 impl LiveHook for SlidesView {
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             //self.children.clear();
             self.draw_order.clear();
         }
     }
     
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
-            ApplyFrom::Animate | ApplyFrom::ApplyOver => {
+        match apply.from {
+            ApplyFrom::Animate | ApplyFrom::Over => {
                 if let Some(component) = self.children.get_mut(&nodes[index].id) {
-                    component.apply(cx, from, index, nodes)
+                    component.apply(cx, apply, index, nodes)
                 }
                 else {
                     nodes.skip_node(index)
@@ -71,7 +71,7 @@ impl LiveHook for SlidesView {
                     self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {
                         WidgetRef::new(cx)
-                    }).apply(cx, from, index, nodes);
+                    }).apply(cx, apply, index, nodes);
                 }
                 else {cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     nodes.skip_node(index)

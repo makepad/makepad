@@ -27,9 +27,17 @@ pub fn get_crate_dir(build_crate: &str) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
     if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid", "-p", build_crate]) {
         #[cfg(target_os="windows")]
-        return Ok(output.trim_start_matches("file:///").split('#').next().unwrap().into());
+        {
+            let output = output.strip_prefix("file:///").unwrap_or(&output);
+            let output = output.strip_prefix("path+file:///").unwrap_or(output);
+            return Ok(output.split('#').next().unwrap().into());
+        }
         #[cfg(not(target_os="windows"))]
-        return Ok(output.trim_start_matches("file://").split('#').next().unwrap().into());
+        {  
+            let output = output.strip_prefix("file://").unwrap_or(&output);
+            let output = output.strip_prefix("path+file://").unwrap_or(output);
+            return Ok(output.split('#').next().unwrap().into());
+        }
     } else {
         Err(format!("Failed to get crate dir for: {}", build_crate))
     }

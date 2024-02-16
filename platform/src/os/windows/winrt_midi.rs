@@ -3,7 +3,7 @@ use {
     std::sync::mpsc,
     makepad_futures_legacy::executor,
     crate::{
-        thread::Signal,
+        thread::SignalToUI,
         makepad_live_id::{LiveId},
         midi::*,
         windows::{
@@ -127,7 +127,7 @@ impl WinRTMidiAccess {
         Ok(ports)
     }
     
-    pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal:SignalToUI) -> Arc<Mutex<Self >> {
         
         let (watch_sender, watch_receiver) = mpsc::channel();
         let input_senders = InputSenders::default();
@@ -251,7 +251,7 @@ impl WinRTMidiAccess {
                                             });
                                             if senders.len()>0 {
                                                 // make sure our eventloop runs
-                                                Signal::set_ui_signal();
+                                                SignalToUI::set_ui_signal();
                                             }
                                         }
                                         Ok(())

@@ -163,6 +163,34 @@ impl LiveId {
         Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
     }
     
+    pub const fn from_bytes_lc(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> Self {
+        let mut x = seed;
+        let mut i = start;
+        while i < end {
+            let byte = id_bytes[i];
+            let byte = if byte >= 65 && byte <=90{
+                byte + 32
+            }
+            else{
+                byte
+            };
+            x = x.overflowing_add(byte as u64).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            i += 1;
+        }
+        // mark high bit as meaning that this is a hash id
+        Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
+    }
+        
+    pub const fn from_str_lc(id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        Self::from_bytes_lc(LIVE_ID_SEED, bytes, 0, bytes.len())
+    }
+    
     pub const fn str_append(self, id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes(self.0, bytes, 0, bytes.len())

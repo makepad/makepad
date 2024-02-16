@@ -343,7 +343,7 @@ impl AppMain for App {
                     }
                 }
                 true 
-            });
+            }); 
             let state = PersistentState{
                 dock_items
             };

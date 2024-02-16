@@ -7,7 +7,7 @@ use {
         makepad_live_id::*,
         os::windows::win32_app::FALSE,
         audio::*,
-        thread::Signal,
+        thread::SignalToUI,
         windows::{
             core::PCWSTR,
             Win32::Foundation::{
@@ -68,7 +68,7 @@ use {
 
 
 pub struct WasapiAccess {
-    change_signal: Signal,
+    change_signal: SignalToUI,
     pub change_listener: IMMNotificationClient,
     pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
@@ -80,7 +80,7 @@ pub struct WasapiAccess {
 }
 
 impl WasapiAccess {
-    pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal:SignalToUI) -> Arc<Mutex<Self >> {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
             let change_listener: IMMNotificationClient = WasapiChangeListener {change_signal:change_signal.clone()}.into();
@@ -517,7 +517,7 @@ impl WasapiInput {
 }
 
 struct WasapiChangeListener {
-    change_signal:Signal
+    change_signal:SignalToUI
 }
 
 implement_com!{

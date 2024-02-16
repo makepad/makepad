@@ -154,7 +154,7 @@ pub struct AudioTime {
     pub rate_scalar: f64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct AudioBuffer {
     pub data: Vec<f32>,
     pub final_size: bool,

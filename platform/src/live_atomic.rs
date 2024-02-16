@@ -4,7 +4,7 @@ use {
     std::marker::PhantomData,
     std::{
         sync::Arc,
-        sync::atomic::{AtomicU32, AtomicI32, AtomicI64,  Ordering, AtomicBool},
+        sync::atomic::{AtomicU32, AtomicI32, AtomicI64,  AtomicU64, Ordering, AtomicBool},
     },
     crate::{
         live_traits::*,
@@ -14,11 +14,11 @@ use {
 };
 
 pub trait LiveAtomicValue {
-    fn apply_value_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_value_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
 pub trait LiveAtomic {
-    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
 pub trait LiveAtomicU32Enum {
@@ -56,9 +56,9 @@ impl<T> Debug for U32A<T> where T: LiveAtomicU32Enum + Debug{
 }
 
 impl<T> LiveAtomic for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum {
-    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut value = T::new(cx);
-        let index = value.apply(cx, apply_from, index, nodes);
+        let index = value.apply(cx, apply, index, nodes);
         self.set(value);
         index
     }
@@ -66,8 +66,8 @@ impl<T> LiveAtomic for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtom
 
 impl<T> LiveHook for U32A<T> where T: LiveApply + LiveNew + 'static +  LiveAtomicU32Enum {}
 impl<T> LiveApply for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        self.apply_atomic(cx, from, index, nodes)
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
@@ -100,8 +100,8 @@ impl Into<U32A<T>> for T where T: LiveApply + LiveNew + 'static + LiveAtomic + L
 
 impl<T> LiveHook for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {}
 impl<T> LiveApply for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        self.apply_atomic(cx, from, index, nodes)
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
@@ -149,9 +149,9 @@ impl AtomicGetSet<f32> for f32a {
 }
 
 impl LiveAtomic for f32a {
-    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut val = 0.0f32;
-        let index = val.apply(cx, apply_from, index, nodes);
+        let index = val.apply(cx, apply, index, nodes);
         self.set(val);
         index
     }
@@ -159,8 +159,8 @@ impl LiveAtomic for f32a {
 
 impl LiveHook for f32a {}
 impl LiveApply for f32a {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        self.apply_atomic(cx, from, index, nodes)
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
@@ -193,6 +193,71 @@ impl LiveNew for f32a {
 }
 
 
+// atomic f32
+
+
+pub struct f64a(AtomicU64);
+
+impl Clone for f64a {
+    fn clone(&self)->Self{ 
+        f64a(AtomicU64::new(self.get().to_bits()))
+    }
+}
+
+impl AtomicGetSet<f64> for f64a {
+    fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+    fn set(&self, val: f64) {
+        self.0.store(val.to_bits(), Ordering::Relaxed);
+    }
+}
+
+impl LiveAtomic for f64a {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        let mut val = 0.0f64;
+        let index = val.apply(cx, apply, index, nodes);
+        self.set(val);
+        index
+    }
+}
+
+impl LiveHook for f64a {}
+impl LiveApply for f64a {
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
+    }
+}
+
+impl Debug for f64a{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
+    }
+}
+
+impl LiveRead for f64a{
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
+    }
+}
+
+impl Into<f64a> for f64 {
+    fn into(self) -> f64a {
+        f64a(AtomicU64::new(self.to_bits()))
+    }
+}
+
+impl LiveNew for f64a {
+    fn new(_cx: &mut Cx) -> Self {
+        Self (AtomicU64::new(0.0f64.to_bits()))
+    }
+        
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        f32::live_type_info(_cx)
+    }
+}
+
+
 
 // atomic u32
 
@@ -216,9 +281,9 @@ impl AtomicGetSet<u32> for u32a {
 }
 
 impl LiveAtomic for u32a {
-    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut val = 0u32;
-        let index = val.apply(cx, apply_from, index, nodes);
+        let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
         index
     }
@@ -226,8 +291,8 @@ impl LiveAtomic for u32a {
 
 impl LiveHook for u32a {}
 impl LiveApply for u32a {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        self.apply_atomic(cx, from, index, nodes)
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
@@ -281,16 +346,16 @@ impl AtomicGetSet<i64> for i64a {
 }
 
 impl LiveAtomic for i64a {
-    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut val = 0i64;
-        let index = val.apply(cx, apply_from, index, nodes);
+        let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
         index
     }
 }
 
 impl<T, const N:usize> LiveAtomic for [T;N]  where T: LiveAtomic {
-    fn apply_atomic(&self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         // we can only apply from an Array
         if nodes[index].is_array(){
             let mut index = index + 1;
@@ -301,7 +366,7 @@ impl<T, const N:usize> LiveAtomic for [T;N]  where T: LiveAtomic {
                     break;
                 }
                 if count < self.len(){
-                    index = self[count].apply_atomic(cx, from, index, nodes);
+                    index = self[count].apply_atomic(cx, apply, index, nodes);
                     count += 1;
                 }
                 else{
@@ -320,8 +385,8 @@ impl<T, const N:usize> LiveAtomic for [T;N]  where T: LiveAtomic {
 
 impl LiveHook for i64a {}
 impl LiveApply for i64a {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        self.apply_atomic(cx, from, index, nodes)
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
@@ -378,9 +443,9 @@ impl AtomicGetSet<i32> for i32a {
 }
 
 impl LiveAtomic for i32a {
-    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut val = 0i32;
-        let index = val.apply(cx, apply_from, index, nodes);
+        let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
         index
     }
@@ -388,8 +453,8 @@ impl LiveAtomic for i32a {
 
 impl LiveHook for i32a {}
 impl LiveApply for i32a {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        self.apply_atomic(cx, from, index, nodes)
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
     }
 }
 
@@ -448,9 +513,9 @@ impl AtomicGetSet<bool> for boola {
 }
 
 impl LiveAtomic for boola {
-    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_atomic(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut val = false;
-        let index = val.apply(cx, apply_from, index, nodes);
+        let index = val.apply(cx, apply, index, nodes);
         self.0.store(val, Ordering::Relaxed);
         index
     }
@@ -458,8 +523,8 @@ impl LiveAtomic for boola {
 
 impl LiveHook for boola {}
 impl LiveApply for boola {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        self.apply_atomic(cx, from, index, nodes)
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, apply, index, nodes)
     }
 }
 

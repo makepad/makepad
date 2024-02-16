@@ -2,7 +2,7 @@ use {
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         video::*,
         apple_classes::get_apple_class_global,
         os::apple::apple_util::*,
@@ -135,7 +135,7 @@ impl AvCaptureSession {
 }
 
 impl AvCaptureAccess {
-    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         
         Self::observe_device_changes(change_signal.clone());
         
@@ -297,7 +297,7 @@ impl AvCaptureAccess {
         out
     }
     
-    pub fn observe_device_changes(change_signal: Signal) {
+    pub fn observe_device_changes(change_signal: SignalToUI) {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
         let block = objc_block!(move | _note: ObjcId | {
             change_signal.set();

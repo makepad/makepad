@@ -118,10 +118,12 @@ pub struct Cx {
     pub(crate) studio_web_socket: Option<WebSocket>,
     
     pub performance_stats: PerformanceStats,
+
+
 }
 
 #[derive(Clone)]
-pub struct CxRef(pub Rc<RefCell<Cx>>); //TODO: I probably shouldn't remove the (crate)
+pub struct CxRef(pub Rc<RefCell<Cx>>);
 
 pub struct CxDependency {
     pub data: Option<Result<Rc<Vec<u8>>, String >>
@@ -129,7 +131,8 @@ pub struct CxDependency {
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,
-    pub density: f64
+    pub density: f64,
+    pub is_emulator: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -199,13 +202,11 @@ impl Cx {
         //crate::makepad_error_log::set_panic_hook();
         // the null texture
         let mut textures = CxTexturePool::default();
-        let null_texture = textures.alloc();
-        let texture = &mut textures[null_texture.texture_id()];
-        texture.format = TextureFormat::VecBGRAu8_32 {
+        let null_texture = textures.alloc(TextureFormat::VecBGRAu8_32 {
             width: 4,
             height: 4,
             data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        };
+        });
         
         let (executor, spawner) = executor::new_executor_and_spawner();
         let (send, recv) = std::sync::mpsc::channel();

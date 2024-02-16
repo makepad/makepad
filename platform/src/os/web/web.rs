@@ -11,7 +11,7 @@ use {
         makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
-        thread::Signal,
+        thread::SignalToUI,
         window::{
             CxWindowPool
         },
@@ -245,7 +245,7 @@ impl Cx {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
+                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
                     });
                 }
 
@@ -253,7 +253,7 @@ impl Cx {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
+                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
                     });
                 }
                 /*
@@ -428,7 +428,7 @@ impl Cx {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 },
                 CxOsOp::ShowTextIME(area, pos) => {
-                    let pos = area.get_clipped_rect(self).pos + pos;
+                    let pos = area.clipped_rect(self).pos + pos;
                     self.os.from_wasm(FromWasmShowTextIME {x: pos.x, y: pos.y});
                 },
                 CxOsOp::HideTextIME => {
@@ -495,12 +495,17 @@ impl Cx {
                     });
                 },*/
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
                 CxOsOp::MuteVideoPlayback(_) => todo!(),
                 CxOsOp::UnmuteVideoPlayback(_) => todo!(),
                 CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
                 CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
+                CxOsOp::SaveFileDialog(_) => todo!(),
+                CxOsOp::SelectFileDialog(_) => todo!(),
+                CxOsOp::SaveFolderDialog(_) => todo!(),
+                CxOsOp::SelectFolderDialog(_) => todo!(),    
             }
         }
     }
@@ -690,7 +695,7 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
 #[export_name = "wasm_check_signal"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_check_signal() -> u32 {
-    if Signal::check_and_clear_ui_signal(){
+    if SignalToUI::check_and_clear_ui_signal(){
         1
     }
     else{

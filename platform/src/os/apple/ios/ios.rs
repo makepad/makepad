@@ -25,7 +25,7 @@ use {
             metal::{MetalCx, DrawPassMode},
         },
         pass::{CxPassParent},
-        thread::Signal,
+        thread::SignalToUI,
         window::CxWindowPool,
         event::{
             Event,
@@ -146,7 +146,7 @@ impl Cx {
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
                     // check signals
-                    if Signal::check_and_clear_ui_signal(){
+                    if SignalToUI::check_and_clear_ui_signal(){
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
@@ -312,12 +312,19 @@ impl Cx {
                     crate::log!("Show clipboard actions not supported yet");
                 }
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
                 CxOsOp::ResumeVideoPlayback(_) => todo!(),
                 CxOsOp::MuteVideoPlayback(_) => todo!(),
                 CxOsOp::UnmuteVideoPlayback(_) => todo!(),
                 CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
                 CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
+
+                CxOsOp::SaveFileDialog(_) => todo!(),
+                CxOsOp::SelectFileDialog(_) => todo!(),
+                CxOsOp::SaveFolderDialog(_) => todo!(),
+                CxOsOp::SelectFolderDialog(_) => todo!(),
+                
             }
         }
     }

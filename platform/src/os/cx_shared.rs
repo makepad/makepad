@@ -15,7 +15,7 @@ use {
             KeyFocusEvent,
             NextFrameEvent,
         },
-        studio::{AppToStudio,ProfileSampleEvent},
+        studio::{AppToStudio,EventSample},
     }
 };
 
@@ -117,7 +117,7 @@ impl Cx {
             event_handler(self, event);
             self.event_handler = Some(event_handler);
             let end = Instant::now().duration_since(self.start_time);
-            Cx::send_studio_message(AppToStudio::ProfileEvent(ProfileSampleEvent{
+            Cx::send_studio_message(AppToStudio::EventSample(EventSample{
                 event_u32: event.to_u32(),
                 start: start.as_secs_f64(),
                 end: end.as_secs_f64()

@@ -9,7 +9,7 @@ use {
     crate::{
         makepad_live_id::*,
         midi::*,
-        thread::Signal,
+        thread::SignalToUI,
     }
 };
 
@@ -108,7 +108,7 @@ enum AndroidMidiState{
 
 pub struct AndroidMidiAccess {
     state: AndroidMidiState,
-    change_signal: Signal,
+    change_signal: SignalToUI,
     devices: Vec<AndroidMidiDevicePtr>,
     senders: Vec<mpsc::Sender<(MidiPortId, MidiData) >>,
     outputs: Vec<AndroidMidiOutput>,
@@ -116,7 +116,7 @@ pub struct AndroidMidiAccess {
 }
 
 impl AndroidMidiAccess {
-    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         // lets request to open midi devices
         // for each device we get
         // we should fire a change event

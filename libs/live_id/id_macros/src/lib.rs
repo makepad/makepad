@@ -58,6 +58,35 @@ pub fn live_id(item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro] 
+pub fn some_id(item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+    
+    let mut parser = TokenParser::new(item);
+    if let Some(name) = parser.eat_any_ident() {
+        let id = from_str_unchecked(&name);
+        tb.add("Some(LiveId (").suf_u64(id).add("))");
+        tb.end()
+    }
+    else if let Some(punct) = parser.eat_any_punct(){
+        let id = from_str_unchecked(&punct);
+        tb.add("Some(LiveId (").suf_u64(id).add("))");
+        tb.end()
+    }
+    else if let Some(v) = parser.eat_literal(){
+        if let Ok(v) = v.to_string().parse::<u64>(){
+            tb.add("Some(LiveId (").suf_u64(v).add("))");
+            return tb.end()
+        }
+        else{
+            parser.unexpected()
+        }
+    }
+    else{
+        parser.unexpected()
+    }
+}
+
+#[proc_macro] 
 pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let mut parser = TokenParser::new(item);
