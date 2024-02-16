@@ -8,7 +8,7 @@ use {
     },
     crate::{
         event::*,
-        thread::Signal,
+        thread::SignalToUI,
         cx::Cx,
         audio::*,
         midi::*,
@@ -41,9 +41,9 @@ impl Cx {
 #[derive(Default)]
 pub struct CxWebMedia {
     pub (crate) web_audio: Option<Arc<Mutex<WebAudioAccess >> >,
-    pub (crate) web_audio_change: Signal,
+    pub (crate) web_audio_change: SignalToUI,
     pub (crate) web_midi: Option<Arc<Mutex<WebMidiAccess >> >,
-    pub (crate) web_midi_change: Signal,
+    pub (crate) web_midi_change: SignalToUI,
 }
 
 impl CxOs {

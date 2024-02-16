@@ -25,7 +25,7 @@ use {
         makepad_math::*,
         makepad_live_id::*,
         makepad_live_compiler::LiveFileChange,
-        thread::Signal,
+        thread::SignalToUI,
         event::{
             VirtualKeyboardEvent,
             NetworkResponseItem,
@@ -313,7 +313,13 @@ impl Cx {
                         self.call_event_handler(&e);
                     },
                     FromJavaMessage::VideoPlayerReleased {video_id} => {
-                        self.os.video_surfaces.remove(&LiveId(video_id));
+                        if let Some(decoder_ref) = self.os.video_surfaces.remove(&LiveId(video_id)) {
+                            unsafe {
+                                let env = attach_jni_env();
+                                android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
+                            }
+                        }
+                        
                         let e = Event::VideoPlaybackResourcesReleased(
                             VideoPlaybackResourcesReleasedEvent {
                                 video_id: LiveId(video_id)
@@ -333,8 +339,6 @@ impl Cx {
                     FromJavaMessage::Pause => {
                         self.call_event_handler(&Event::Pause);
                     }
-                    FromJavaMessage::Stop => {
-                    }
                     FromJavaMessage::Resume => {
                         if self.os.fullscreen {
                             unsafe {
@@ -346,9 +350,22 @@ impl Cx {
                         self.reinitialise_media();
                         self.call_event_handler(&Event::Resume);
                     }
+                    FromJavaMessage::Start => {
+                        self.call_event_handler(&Event::Foreground);
+                    }
+                    FromJavaMessage::Stop => {
+                        self.call_event_handler(&Event::Background);
+                    }
                     FromJavaMessage::Destroy => {
                         self.call_event_handler(&Event::Shutdown);
                         self.os.quit = true;
+                    }
+                    FromJavaMessage::WindowFocusChanged { has_focus } => {
+                        if has_focus {
+                            self.call_event_handler(&Event::AppGotFocus);
+                        } else {
+                            self.call_event_handler(&Event::AppLostFocus);
+                        }
                     }
                     FromJavaMessage::Init(_) => {
                         panic!()
@@ -356,7 +373,7 @@ impl Cx {
                 }
             }
             
-            if Signal::check_and_clear_ui_signal() {
+            if SignalToUI::check_and_clear_ui_signal() {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
             }
@@ -467,6 +484,8 @@ impl Cx {
             if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
+            cx.maybe_warn_hardware_support();
+
             cx.os.display = Some(CxAndroidDisplay {
                 libegl,
                 egl_display,
@@ -673,6 +692,14 @@ impl Cx {
                         outer_size: size,
                     };
                     window.is_created = true;
+
+                    let new_geom = window.window_geom.clone();
+                    let old_geom = window.window_geom.clone();
+                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                        window_id,
+                        new_geom,
+                        old_geom
+                    }));
                 },
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
@@ -703,6 +730,12 @@ impl Cx {
                         android_jni::to_java_prepare_video_playback(env, video_id, source, external_texture_id, autoplay, should_loop);
                     }
                 },
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_begin_video_playback(env, video_id);
+                    }
+                }
                 CxOsOp::PauseVideoPlayback(video_id) => {
                     unsafe {
                         let env = attach_jni_env();

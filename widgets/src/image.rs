@@ -4,6 +4,7 @@ use crate::{
     makepad_draw::*,
     widget::*
 };
+use std::fmt;
 
 live_design!{
     ImageBase = {{Image}} {}
@@ -32,11 +33,11 @@ impl ImageCacheImpl for Image {
 }
 
 impl LiveHook for Image{
-    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         self.lazy_create_image_cache(cx);
         let source = self.source.clone();
         if source.as_str().len()>0 {
-            self.load_image_dep_by_path(cx, source.as_str())
+            let _ = self.load_image_dep_by_path(cx, source.as_str());
         }
     }
 }
@@ -66,13 +67,14 @@ impl Image {
         
         let aspect = width / height;
         match self.fit {
-            ImageFit::Stretch => {},
+            ImageFit::Stretch => {
+            }
             ImageFit::Horizontal => {
                 walk.height = Size::Fixed(rect.size.x / aspect);
-            },
+            }
             ImageFit::Vertical => {
                 walk.width = Size::Fixed(rect.size.y * aspect);
-            },
+            }
             ImageFit::Smallest => {
                 let walk_height = rect.size.x / aspect;
                 if walk_height > rect.size.y {
@@ -93,8 +95,6 @@ impl Image {
             }
         }
         
-        // lets start a turtle and center horizontally
-        
         self.draw_bg.draw_walk(cx, walk);
         
         DrawStep::done()
@@ -102,21 +102,30 @@ impl Image {
 }
 
 impl ImageRef {
-    pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) {
+    /// Loads the image at the given `image_path` into this `ImageRef`.
+    pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.load_image_dep_by_path(cx, image_path)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
         }
     }
     
-    pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) {
+    /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
+    pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.load_jpg_from_data(cx, data)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
         }
     }
     
-    pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) {
+    /// Loads a PNG into this `ImageRef` by decoding the given encoded PNG `data`.
+    pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.load_png_from_data(cx, data)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
         }
     }
     
@@ -131,4 +140,29 @@ impl ImageRef {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }
     }    
+}
+
+
+/// The possible errors that can occur when loading or creating an image texture.
+#[derive(Debug)]
+pub enum ImageError {
+    /// The image data buffer was empty.
+    EmptyData,
+    /// The image's pixel data was not aligned to 3-byte or 4-byte pixels.
+    /// The unsupported alignment value (in bytes) is included.
+    InvalidPixelAlignment(usize),
+    /// The image data could not be decoded as a JPEG.
+    JpgDecode(JpgDecodeErrors),
+    /// The image file at the given resource path could not be found.
+    PathNotFound(String),
+    /// The image data could not be decoded as a PNG.
+    PngDecode(PngDecodeErrors),
+    /// The image data was in an unsupported format.
+    /// Currently, only JPEG and PNG are supported.
+    UnsupportedFormat,
+}
+impl fmt::Display for ImageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
 }

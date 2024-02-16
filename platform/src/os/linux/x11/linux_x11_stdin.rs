@@ -13,7 +13,7 @@ use {
         window::CxWindowPool,
         event::WindowGeom,
         texture::{Texture, TextureFormat},
-        thread::Signal,
+        thread::SignalToUI,
         os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain, PollTimer},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
@@ -162,7 +162,7 @@ impl Cx {
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     let new_swapchain = new_swapchain.images_map(|pi| {
-                        let new_texture = Texture::new(self);
+                        let mut new_texture = Texture::new(self);
                         match pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
                             Ok(pi) => {
                                 // update texture
@@ -171,7 +171,7 @@ impl Cx {
                                     width: new_swapchain.alloc_width as usize,
                                     height: new_swapchain.alloc_height as usize,
                                 };
-                                new_texture.set_format(self, desc);
+                                new_texture = Texture::new_with_format(self, desc);
                                 self.textures[new_texture.texture_id()]
                                 .update_from_shared_dma_buf_image(
                                     self.os.opengl_cx.as_ref().unwrap(),
@@ -197,7 +197,7 @@ impl Cx {
 
                     // poll the service for updates
                     // check signals
-                    if Signal::check_and_clear_ui_signal(){
+                    if SignalToUI::check_and_clear_ui_signal(){
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }

@@ -19,16 +19,16 @@ pub struct MultiWindow {
 }
 
 impl LiveHook for MultiWindow {
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     if cx.os_type().is_single_window() && id != live_id!(mobile){
                         return nodes.skip_node(index);
                     }
                     return self.windows.get_or_insert(cx, id, | cx | {Window::new(cx)})
-                        .apply(cx, from, index, nodes);
+                        .apply(cx, apply, index, nodes);
                 }
                 else {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);

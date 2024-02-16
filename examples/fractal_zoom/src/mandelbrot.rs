@@ -28,7 +28,7 @@ live_design!{
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq2(index - self.color_cycle*-1.0),1);
+            return vec4(Pal::iq2(index - self.color_cycle*-10.0),1);
         }
     }
     
@@ -147,8 +147,7 @@ impl TileCache {
         for i in 0..TILE_CACHE_SIZE {
             empty.push(Tile::new(i));
             
-            let texture = Texture::new(cx);
-            texture.set_format(cx, TextureFormat::VecBGRAu8_32 {
+            let texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
                 data: vec![],
                 width: TILE_SIZE_X,
                 height: TILE_SIZE_Y,

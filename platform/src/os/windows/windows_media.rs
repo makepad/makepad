@@ -11,7 +11,7 @@ use {
         audio::*,
         midi::*,
         video::*,
-        thread::Signal,
+        thread::SignalToUI,
         event::Event,
         media_api::CxMediaApi,
 
@@ -23,9 +23,9 @@ pub struct CxWindowsMedia{
     pub (crate) winrt_midi: Option<Arc<Mutex<WinRTMidiAccess >> >,
     pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
     pub (crate) media_foundation: Option<Arc<Mutex<MediaFoundationAccess >> >,
-    pub (crate) wasapi_change: Signal,
-    pub (crate) media_foundation_change: Signal,
-    pub (crate) winrt_midi_change: Signal,
+    pub (crate) wasapi_change: SignalToUI,
+    pub (crate) media_foundation_change: SignalToUI,
+    pub (crate) winrt_midi_change: SignalToUI,
 }
 
 impl Cx {

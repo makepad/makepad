@@ -1210,7 +1210,12 @@ live_design! {
 
 
     DropDown = <DropDownBase> {
+
+       
+
         draw_text: {
+            text_style: <THEME_FONT_DATA> {}
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -1893,7 +1898,8 @@ live_design! {
             }
         }
     }
-
+    
+    
 
     PortalList = <PortalListBase> {
         width: Fill
@@ -1914,17 +1920,18 @@ live_design! {
     CachedScrollXY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
     }
+
     CachedScrollX = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
     }
+
     CachedScrollY = <CachedView> {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
+
     ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
     ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
-
-
 
     TextInput = <TextInputBase> {
         draw_text: {
@@ -1949,6 +1956,7 @@ live_design! {
                 )
             }
         }
+
         draw_cursor: {
             instance focus: 0.0
             uniform border_radius: 0.5
@@ -1965,7 +1973,6 @@ live_design! {
                 return sdf.result
             }
         }
-
 
         draw_select: {
             instance hover: 0.0
@@ -2076,7 +2083,6 @@ live_design! {
             }
         }
     }
-
 
     Slider = <SliderBase> {
         min: 0.0,
@@ -2284,4 +2290,114 @@ live_design! {
             return Pal::premul(mix(vec4(#000.xyz, is_viz), vec4(base, 0.), alpha));
         }
     }
+
+    // StackView DSL begin
+
+    HEADER_HEIGHT = 80.0
+
+    StackViewHeader = <View> {
+        width: Fill, height: (HEADER_HEIGHT),
+        padding: {bottom: 10., top: 50.}
+        show_bg: true
+        draw_bg: {
+            color: #EDEDED
+        }
+
+        content = <View> {
+            width: Fill, height: Fit
+            flow: Overlay,
+        
+            title_container = <View> {
+                width: Fill, height: Fit
+                align: {x: 0.5, y: 0.5}
+    
+                title = <Label> {
+                    width: Fit, height: Fit
+                    draw_text: {
+                        text_style: { font_size: 12. },
+                        color: #000,
+                    },
+                    text: "Stack View Title"
+                }
+            }
+
+            button_container = <View> {
+                left_button = <Button> {
+                    width: Fit, height: 68
+                    icon_walk: {width: 10, height: 68}
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            return sdf.result
+                        }
+                    }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/back.svg"),
+                        color: #000;
+                        brightness: 0.8;
+                    }
+                }
+            }
+        }
+    }
+
+    StackNavigationView = <StackNavigationViewBase> {
+        visible: false
+        width: Fill, height: Fill
+        flow: Overlay
+
+        show_bg: true
+        draw_bg: {
+            color: #fff
+        }
+
+        // Empty slot to place a generic full-screen background
+        background = <View> {
+            width: Fill, height: Fill
+            visible: false
+        }
+
+        body = <View> {
+            width: Fill,
+            height: Fill,
+            flow: Down,
+
+            // Space between body and header can be adjusted overriding this margin
+            margin: {top: (HEADER_HEIGHT)},
+        }
+
+        header = <StackViewHeader> {}
+
+        offset: 4000.0
+
+        animator: {
+            slide = {
+                default: hide,
+                hide = {
+                    redraw: true
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    from: {all: Forward {duration: 5.0}}
+                    // Large enough number to cover several screens,
+                    // but we need a way to parametrize it
+                    apply: {offset: 4000.0}
+                }
+
+                show = {
+                    redraw: true
+                    ease: ExpDecay {d1: 0.82, d2: 0.95}
+                    from: {all: Forward {duration: 0.5}}
+                    apply: {offset: 0.0}
+                }
+            }
+        }
+    }
+
+    StackNavigation = <StackNavigationBase> {
+        width: Fill, height: Fill
+        flow: Overlay
+
+        root_view = <View> {}
+    }
+
+    // StackView DSL end
 }

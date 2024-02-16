@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap};
 use std::hash::Hash;
 use std::str::Chars;
 
@@ -92,8 +92,6 @@ pub enum DeJsonTok {
     Eof
 }
 
-
-
 #[derive(Default)]
 pub struct DeJsonState {
     pub cur: char,
@@ -136,6 +134,10 @@ impl DeJsonState {
     
     pub fn err_exp(&self, name: &str) -> DeJsonErr {
         DeJsonErr{msg:format!("Unexpected key {}", name), line:self.line, col:self.col}
+    }
+    
+    pub fn err_msg(&self, msg: &str) -> DeJsonErr {
+        DeJsonErr{msg:format!("{}",msg), line:self.line, col:self.col}
     }
     
     pub fn err_nf(&self, name: &str) -> DeJsonErr {
@@ -321,6 +323,15 @@ impl DeJsonState {
             return Ok(val)
         }
         Err(self.err_token("string"))
+    }
+    
+    pub fn as_ident(&mut self) -> Result<String, DeJsonErr> {
+        if let DeJsonTok::BareIdent = &mut self.tok {
+            let mut val = String::new();
+            std::mem::swap(&mut val, &mut self.identbuf);
+            return Ok(val)
+        }
+        Err(self.err_token("ident"))
     }
     
     pub fn next_tok(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
@@ -640,6 +651,127 @@ impl<T> DeJson for Vec<T> where T: DeJson {
         Ok(out)
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum JsonValue{
+    String(String),
+    Char(char),
+    U64(u64),
+    I64(i64),
+    F64(f64),
+    Bool(bool),
+    BareIdent(String),
+    Null,
+    Undefined,
+    Object(HashMap<String, JsonValue>),
+    Array(Vec<JsonValue>)
+}
+
+impl JsonValue{
+    pub fn object(&self)->&HashMap<String, JsonValue>{
+        if let JsonValue::Object(obj) = self{
+            return obj
+        }
+        panic!()
+    }
+    pub fn string(&self)->&String{
+        if let JsonValue::String(obj) = self{
+            return obj
+        }
+        panic!()
+    }
+    pub fn key(&self, key:&str)->&JsonValue{
+        if let JsonValue::Object(obj) = self{
+            return obj.get(key).unwrap()
+        }
+        panic!()
+    }
+}
+
+impl DeJson for JsonValue{
+    fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<JsonValue, DeJsonErr> {
+        // lets check what tokenm we have
+        match s.tok{
+            DeJsonTok::Str=>{
+                let v = s.as_string() ?;
+                s.next_tok(i) ?;
+                Ok(JsonValue::String(v))
+            }
+            DeJsonTok::Char(c)=>{
+                s.next_tok(i) ?;
+                Ok(JsonValue::Char(c))
+            }
+            DeJsonTok::U64(v)=>{
+                s.next_tok(i) ?;
+                Ok(JsonValue::U64(v))
+            }
+            DeJsonTok::I64(v)=>{
+                s.next_tok(i) ?;
+                Ok(JsonValue::I64(v))
+            }
+            DeJsonTok::F64(v)=>{
+                s.next_tok(i) ?;
+                Ok(JsonValue::F64(v))
+            }
+            DeJsonTok::Bool(v)=>{
+                s.next_tok(i) ?;
+                Ok(JsonValue::Bool(v))
+            }
+            DeJsonTok::BareIdent=>{
+                let v = s.as_ident() ?;
+                s.next_tok(i) ?;
+                Ok(JsonValue::BareIdent(v))
+            }
+            DeJsonTok::Null=>{
+                s.next_tok(i) ?;
+                Ok(JsonValue::Null)
+            }
+            DeJsonTok::Colon=>{
+                return Err(s.err_msg("Unexpected :"))
+            }
+            DeJsonTok::CurlyOpen=>{
+                let mut h = HashMap::new();
+                s.curly_open(i) ?;
+                while s.tok != DeJsonTok::CurlyClose {
+                    let k = String::de_json(s, i) ?;
+                    s.colon(i) ?;
+                    let v = JsonValue::de_json(s, i) ?;
+                    s.eat_comma_curly(i) ?;
+                    h.insert(k, v);
+                }
+                s.curly_close(i) ?;
+                Ok(JsonValue::Object(h))
+            }
+            DeJsonTok::CurlyClose=>{
+                return Err(s.err_msg("Unexpected }"))
+            }
+            DeJsonTok::BlockOpen=>{
+                let mut out = Vec::new();
+                s.block_open(i) ?;
+                        
+                while s.tok != DeJsonTok::BlockClose {
+                    out.push(JsonValue::de_json(s, i) ?);
+                    s.eat_comma_block(i) ?;
+                }
+                s.block_close(i) ?;
+                Ok(JsonValue::Array(out))
+            }
+            DeJsonTok::BlockClose=>{
+               return Err(s.err_msg("Unexpected ]"))
+            }
+            DeJsonTok::Comma=>{
+                return Err(s.err_msg("Unexpected ,"))
+            }
+            DeJsonTok::Bof=>{
+                return Err(s.err_msg("Unexpected Bof"))
+            }
+            DeJsonTok::Eof=>{
+                return Err(s.err_msg("Unexpected Eof"))
+            }
+        }
+    }
+}
+
 
 impl<T> SerJson for [T] where T: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {

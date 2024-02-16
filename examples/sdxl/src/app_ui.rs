@@ -526,6 +526,8 @@ live_design!{
         draw_bg: {
             uniform image_size: vec2
             uniform is_rgb: 0.0
+            uniform dial1: 0.0,
+            uniform dial2: 0.0,
             fn yuv_to_rgb(y: float, u: float, v: float) -> vec4 {
                 return vec4(
                     y + 1.14075 * (v - 0.5),
@@ -550,7 +552,12 @@ live_design!{
             }
                         
             fn pixel(self) -> vec4 {
-                return self.get_video_pixel(self.pos);
+                let d1 = (self.dial1-0.5)*2.0;
+                let d2 = pow(self.dial2*5.0,2.0);
+                let shift = vec4(d1,d1,d1,0.0)
+                let scale = vec4(d2,d2,d2,1.0)
+                let c = (self.get_video_pixel(self.pos)-shift)*scale + shift;
+                return c;// mix(vec4(c.x, c.x,c.x, 1.0), c, 1.0-self.dial2)
             }
         }
     }
@@ -704,8 +711,8 @@ live_design!{
                             flow: Down
                             settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
                             settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
-                            settings_steps = <SettingsSlider> {label = {text: "steps:"}, input = {text: "4", min:4, max: 8, step:1}}
-                            settings_cfg = <SettingsSlider> {label = {text: "cfg:"}, input = {text: "1.8", min:1.0, max:8.0, step:0.01}}
+                            settings_steps = <SettingsSlider> {label = {text: "steps:"}, input = {text: "10", min:1, max: 10, step:1}}
+                            settings_cfg = <SettingsSlider> {label = {text: "cfg:"}, input = {text: "2.0", min:1.0, max:8.0, step:0.01}}
                             settings_denoise = <SettingsSlider> {label = {text: "denoise:"}, input = {text: "0.85", min:0.2, max:1.0, step:0.01}}
                         }
                         <View>{ 

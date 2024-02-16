@@ -269,13 +269,20 @@ MidiManager.OnDeviceOpenedListener{
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
+        boolean isEmulator = this.isEmulator();
 
-        MakepadNative.onAndroidParams(cache_path, density);
+        MakepadNative.onAndroidParams(cache_path, density, isEmulator);
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         //% MAIN_ACTIVITY_ON_CREATE
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        MakepadNative.activityOnStart();
     }
 
     @Override
@@ -292,8 +299,15 @@ MidiManager.OnDeviceOpenedListener{
         Log.w("SAPP", "onBackPressed");
 
         // TODO: here is the place to handle request_quit/order_quit/cancel_quit
-
         super.onBackPressed();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        MakepadNative.activityOnPause();
+
+        //% MAIN_ACTIVITY_ON_PAUSE
     }
 
     @Override
@@ -305,16 +319,13 @@ MidiManager.OnDeviceOpenedListener{
     @Override
     protected void onDestroy() {
         super.onDestroy();
-
         MakepadNative.activityOnDestroy();
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
-        MakepadNative.activityOnPause();
-
-        //% MAIN_ACTIVITY_ON_PAUSE
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        MakepadNative.activityOnWindowFocusChanged(hasFocus);
     }
 
     @Override
@@ -516,6 +527,13 @@ MidiManager.OnDeviceOpenedListener{
         mVideoPlaybackHandler.post(runnable);
     }
 
+    public void beginVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.beginPlayback();
+        }
+    }
+
     public void pauseVideoPlayback(long videoId) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
@@ -548,6 +566,20 @@ MidiManager.OnDeviceOpenedListener{
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {
             runnable.cleanupVideoPlaybackResources();
+            runnable = null;
         }
+    }
+
+    public boolean isEmulator() {
+        // hints that the app is running on emulator
+        return Build.MODEL.startsWith("sdk")
+            || "google_sdk".equals(Build.MODEL)
+            || Build.MODEL.contains("Emulator")
+            || Build.MODEL.contains("Android SDK")
+            || Build.MODEL.toLowerCase().contains("droid4x")
+            || Build.FINGERPRINT.startsWith("generic")
+            || Build.PRODUCT == "sdk"
+            || Build.PRODUCT == "google_sdk"
+            || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
     }
 }

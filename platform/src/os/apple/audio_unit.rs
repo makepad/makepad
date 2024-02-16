@@ -93,7 +93,7 @@ pub fn define_key_value_observing_delegate() -> *const Class {
 
 #[derive(Default)]
 pub struct AudioUnitAccess {
-    pub change_signal: Signal,
+    pub change_signal: SignalToUI,
     pub device_descs: Vec<CoreAudioDeviceDesc>,
     pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >;MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >;MAX_AUDIO_DEVICE_INDEX],
@@ -119,7 +119,7 @@ pub struct RunningAudioUnit {
 }
 
 impl AudioUnitAccess {
-    pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
+    pub fn new(change_signal:SignalToUI) -> Arc<Mutex<Self>> {
         Self::observe_route_changes(change_signal.clone());
         
         #[cfg(target_os = "ios")]
@@ -313,7 +313,7 @@ impl AudioUnitAccess {
     }
     
     
-    pub fn observe_route_changes(device_change:Signal) {
+    pub fn observe_route_changes(device_change:SignalToUI) {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
         unsafe {
             let mut err: ObjcId = nil;
@@ -333,7 +333,7 @@ impl AudioUnitAccess {
         ]};
     }
     
-    pub fn observe_audio_unit_termination(change_signal:Signal, core_device_id: AudioDeviceID) {
+    pub fn observe_audio_unit_termination(change_signal:SignalToUI, core_device_id: AudioDeviceID) {
         
         #[allow(non_snake_case)]
         unsafe extern "system" fn listener_fn(
@@ -342,7 +342,7 @@ impl AudioUnitAccess {
             _inAddresses: *const AudioObjectPropertyAddress,
             inClientData: *mut ()
         ) -> OSStatus {
-            let x: *const Signal = inClientData as *const _;
+            let x: *const SignalToUI = inClientData as *const _;
             (*x).set();
             0
         }
@@ -597,7 +597,7 @@ impl AudioUnitAccess {
     
     pub fn new_audio_io<F: Fn(Result<AudioUnit, AudioError>) + Send + 'static>(
         &self,
-        change_signal: Signal,
+        change_signal: SignalToUI,
         unit_info: &AudioUnitInfo,
         device_id: AudioDeviceId,
         unit_callback: F,
@@ -608,7 +608,7 @@ impl AudioUnitAccess {
         
         let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             let () = unsafe {msg_send![av_audio_unit, retain]};
-            unsafe fn inner(_change_signal: Signal, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
+            unsafe fn inner(_change_signal: SignalToUI, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
                 OSError::from_nserror(error) ?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
                 let () = msg_send![av_audio_unit, retain];

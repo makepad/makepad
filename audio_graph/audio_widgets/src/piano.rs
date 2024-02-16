@@ -154,10 +154,10 @@ pub struct Piano {
 }
 
 impl LiveHook for Piano {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
             if let Some(index) = nodes.child_by_name(index, live_id!(piano_key).as_field()) {
-                piano_key.apply(cx, from, index, nodes);
+                piano_key.apply(cx, apply, index, nodes);
             }
         }
         self.area.redraw(cx);
