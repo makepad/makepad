@@ -1,7 +1,7 @@
 use crate::{
     makepad_widgets::*,
 }; 
-
+ 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -13,7 +13,43 @@ live_design!{
             height: Fill
             body = {
                 <SlidesView> {
+                    <SlideChapter> {
+                        title = {text: "Realtime generation\nWith Stable diffusion"},
+                        <SlideBody> {text: "Rik Arends\n"}
+                    }
                     <Slide> {
+                        title = {text: "Who am i"},
+                        <SlideBody> {text: "Cloud9 IDE\nMakepad\nCreative tools"}
+                    }
+                    <Slide> {
+                        title = {text: "Makepad: Creative IDE"},
+                        <SlideBody> {text: "GPU accelerated\nFun examples"}
+                    }
+                    <Slide> {
+                        title = {text: "Generative AI"},
+                        <SlideBody> {text: "Moving very fast\nOne week is one year"}
+                    }
+                    <Slide> {
+                        title = {text: "AI"},
+                        <SlideBody> {text: "Not the industrial revolution\nAI commoditises intelligence\nJust the beginning"}
+                    } 
+                    <Slide> {
+                        title = {text: "Model types"},
+                        <SlideBody> {text: "Diffusion models\nLarge language models"}
+                    }
+                    <Slide> {
+                        title = {text: "Faster and faster"},
+                        <SlideBody> {text: "SDXL: 30 steps\nSDXL turbo: 5-10 steps"}
+                    }
+                    <Slide> {
+                        title = {text: "Demo"},
+                        <SlideBody> {text: "AI Image surfing"}
+                    }
+                    <Slide> {
+                        title = {text: "Thank you"},
+                        <SlideBody> {text: "twitter: @rikarends\ngithub.com/makepad/makepad"}
+                    }
+                    /*<Slide> {
                         title = {text: "Hello conference"},
                         <SlideBody> {text: ""}
                     }
@@ -125,7 +161,7 @@ live_design!{
                     <Slide> {
                         title = {text: "Links"}, 
                         <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl"}
-                    }
+                    }*/
                 }
             }
         }

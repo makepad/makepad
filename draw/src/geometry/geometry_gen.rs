@@ -15,7 +15,7 @@ live_design!{
 }
 
 impl LiveHook for GeometryQuad2D {
-    fn after_apply(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index:usize, _nodes:&[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _apply:&mut Apply, _index:usize, _nodes:&[LiveNode]) {
         let mut fp = GeometryFingerprint::new(LiveType::of::<Self>());
         fp.push(self.x1);
         fp.push(self.y1);

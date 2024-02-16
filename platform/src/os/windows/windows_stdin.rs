@@ -13,7 +13,7 @@ use {
         window::CxWindowPool,
         event::WindowGeom,
         texture::{Texture,  TextureFormat},
-        thread::Signal,
+        thread::SignalToUI,
         os::{
             d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
@@ -171,13 +171,12 @@ impl Cx {
                     let new_swapchain = new_swapchain.images_map(|pi| {
                         let handle = HANDLE(pi.image as isize);
                         
-                        let texture = Texture::new(self);
                         let format = TextureFormat::SharedBGRAu8 {
                             id: pi.id,
                             width: new_swapchain.alloc_width as usize,
                             height: new_swapchain.alloc_height as usize,
                         };
-                        texture.set_format(self, format);
+                        let texture = Texture::new_with_format(self, format);
                         self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);
                         texture
                     });
@@ -196,7 +195,7 @@ impl Cx {
 
                     // poll the service for updates
                     // check signals
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }

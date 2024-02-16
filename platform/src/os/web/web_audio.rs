@@ -7,7 +7,7 @@ use {
     },
     crate::{
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         audio::*,
     }
 };
@@ -28,14 +28,14 @@ pub struct WebAudioAccess {
     pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     pub devices: Vec<WebAudioDevice>,
-    change_signal: Signal,
+    change_signal: SignalToUI,
     self_arc: *const Mutex<WebAudioAccess>,
     output_device_id: AudioDeviceId,
     output_buffer: Option<AudioBuffer>,
 }
 
 impl WebAudioAccess {
-    pub fn new(os: &mut CxOs, change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(os: &mut CxOs, change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         // ok lets request audio inputs and outputs
         os.from_wasm(FromWasmQueryAudioDevices {});
         let ret = Arc::new(Mutex::new(Self {

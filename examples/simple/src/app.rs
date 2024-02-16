@@ -1,5 +1,5 @@
 use makepad_widgets::*;
-
+ 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
@@ -39,11 +39,14 @@ live_design!{
                     },
                     text: "Counter: 0"
                 }
+                <Html>{
+                    text:"this<a href='thing'>is basichtml</a><tag prop/>text<bold/>"
+                }
             }
         }
     }
 }
-
+ 
 app_main!(App);
 
 #[derive(Live, LiveHook)]

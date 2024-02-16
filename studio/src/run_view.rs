@@ -18,8 +18,8 @@ live_design!{
             instance tex_size: vec2(0.0, 0.0),
             fn pixel(self) -> vec4 {
                 //return sample2d_rt(self.tex, self.pos * self.tex_scale);
-                let tp1 = sample2d_rt(self.tex, vec2(0.0,0.0))
-                let tp2 = sample2d_rt(self.tex, vec2(1.0/self.tex_size.x,0.0));
+                let tp1 = sample2d_rt(self.tex, vec2(0.5/self.tex_size.x,0.5/self.tex_size.y))
+                let tp2 = sample2d_rt(self.tex, vec2(1.5/self.tex_size.x,0.5/self.tex_size.y));
                 let tp = vec2(tp1.r*65280.0 + tp1.b*255.0,tp2.r*65280.0 + tp2.b*255.0);
 
                 let tex_scale = tp / self.tex_size;
@@ -80,8 +80,8 @@ impl LiveHook for RunView {
         self.draw_app.set_texture(0, &cx.null_texture());
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc{..} = from{
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc{..} = apply.from{
             self.last_size = dvec2(0.0,0.0);
             self.animator_cut(cx, id!(started.on));
         }
@@ -234,22 +234,24 @@ impl RunView {
                         pi.id = cx_stdin::PresentableImageId::alloc();
                     }
                 }
-                let swapchain = v.swapchain.get_or_insert_with(|| {
-                    Swapchain::new(0, 0).images_map(|_| Texture::new(cx))
-                });
 
                 // Update the swapchain allocated size, rounding it up to
                 // reduce the need for further swapchain recreation.
-                swapchain.alloc_width = min_width.max(64).next_power_of_two();
-                swapchain.alloc_height = min_height.max(64).next_power_of_two();
+                let alloc_width = min_width.max(64).next_power_of_two();
+                let alloc_height = min_height.max(64).next_power_of_two();
+                
+                let swapchain = v.swapchain.get_or_insert_with(|| {
+                    Swapchain::new(alloc_width, alloc_height).images_map(|pi| {
+                        // Prepare a version of the swapchain for cross-process sharing.
+                        Texture::new_with_format(cx, TextureFormat::SharedBGRAu8 {
+                            id: pi.id,
+                            width: alloc_width as usize,
+                            height: alloc_height as usize,
+                        })
+                    })
+                });
 
-                // Prepare a version of the swapchain for cross-process sharing.
                 let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
-                    pi.image.set_format(cx, TextureFormat::SharedBGRAu8 {
-                        id: pi.id,
-                        width: swapchain.alloc_width as usize,
-                        height: swapchain.alloc_height as usize,
-                    });
                     cx.share_texture_for_presentable_image(&pi.image)
                 });
 

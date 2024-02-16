@@ -184,7 +184,6 @@ live_design!{
         list = <PortalList> {
             grab_key_focus: true
             auto_tail: true
-            allow_empty: true
             drag_scrolling: false
             height: Fill,
             width: Fill
@@ -222,13 +221,13 @@ pub struct JumpTo{
 }
 
 #[derive(Live, LiveHook, Widget)]
-struct LogList{
+pub struct LogList{
     #[deref] view:View
 }
 
 impl LogList{
     fn draw_log(&mut self, cx: &mut Cx2d, list:&mut PortalList, build_manager:&mut BuildManager){
-        list.set_item_range(cx, 0, build_manager.log.len() as u64);
+        list.set_item_range(cx, 0, build_manager.log.len());
                                 
         while let Some(item_id) = list.next_visible_item(cx) {
             let is_even = item_id & 1 == 0;
@@ -296,7 +295,7 @@ impl Widget for LogList {
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>();
-        if let Event::Actions(actions) = event{    
+        if let Event::Actions(actions) = event{
             for (item_id, item) in log_list.items_with_actions(&actions) {
                 if item.link_label(id!(location)).pressed(&actions) {
                     if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {

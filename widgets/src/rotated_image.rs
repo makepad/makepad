@@ -28,11 +28,11 @@ impl ImageCacheImpl for RotatedImage {
 
 impl LiveHook for RotatedImage {
 
-    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         self.lazy_create_image_cache(cx);
         let source = self.source.clone();
         if source.as_str().len()>0{
-            self.load_image_dep_by_path(cx, source.as_str())
+            let _ = self.load_image_dep_by_path(cx, source.as_str());
         }
     }
 }

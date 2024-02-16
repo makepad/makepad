@@ -9,7 +9,7 @@ use {
     crate::{
         cx::Cx,
         event::Event,
-        thread::Signal,
+        thread::SignalToUI,
         audio::*,
         midi::*,
         video::*,
@@ -42,9 +42,9 @@ impl Cx {
 pub struct CxLinuxMedia {
     pub (crate) pulse_audio: Option<Arc<Mutex<PulseAudioAccess >> >,
     pub (crate) alsa_audio: Option<Arc<Mutex<AlsaAudioAccess >> >,
-    pub (crate) audio_change: Signal,
+    pub (crate) audio_change: SignalToUI,
     pub (crate) alsa_midi: Option<Arc<Mutex<AlsaMidiAccess >> >,
-    pub (crate) alsa_midi_change: Signal,
+    pub (crate) alsa_midi_change: SignalToUI,
 }
 
 impl CxLinuxMedia {

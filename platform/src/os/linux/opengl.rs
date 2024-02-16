@@ -4,13 +4,13 @@ use {
         io::prelude::*,
         mem,
         ptr,
-        ffi::CStr,
+        ffi::{c_char, CStr},
     },
     self::super::gl_sys,
     crate::{
         makepad_live_id::*,
         makepad_shader_compiler::generate_glsl,
-        cx::Cx,
+        cx::{Cx, OsType, OsType::Android},
         texture::{Texture, TextureFormat, TexturePixel, CxTexture},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
@@ -481,13 +481,23 @@ impl Cx {
                 }
                 
                 if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(&vertex, &pixel);
+                    let shp = CxOsDrawShader::new(&vertex, &pixel, &self.os_type);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
             }
         }
         self.draw_shaders.compile_set.clear();
+    }
+
+    pub fn maybe_warn_hardware_support(&self) {
+        // Temporary warning for Adreno failing at compiling shaders that use samplerExternalOES.
+        let gpu_renderer = get_gl_string(gl_sys::RENDERER);
+        if gpu_renderer.contains("Adreno") {
+            crate::log!("WARNING: This device is using {gpu_renderer} renderer.
+            OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
+            This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
+        }
     }
 }
 
@@ -736,11 +746,33 @@ impl GlShader{
 }
 
 impl CxOsDrawShader {
-    pub fn new(vertex: &str, pixel: &str) -> Self {
+    pub fn new(vertex: &str, pixel: &str, os_type: &OsType) -> Self {
+        // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
+        let available_extensions = get_gl_string(gl_sys::EXTENSIONS);
+        let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
+
+        let mut maybe_ext_tex_extension_import = String::new();
+        let mut maybe_ext_tex_extension_sampler = String::new();
+
+        // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
+        // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
+        let is_emulator = match os_type {
+            Android(params) => params.is_emulator,
+            _ => false,
+        };
+
+        // Some Android devices running Adreno GPUs suddenly stopped compiling shaders when passing the samplerExternalOES sampler to texture2D functions. 
+        // This seems like a driver bug (no confirmation from Qualcomm yet).
+        // Therefore we're disabling the external texture support for Adreno until this is fixed.
+        let is_vendor_adreno = get_gl_string(gl_sys::RENDERER).contains("Adreno"); 
+        if is_external_texture_supported && !is_vendor_adreno && !is_emulator {
+            maybe_ext_tex_extension_import = "#extension GL_OES_EGL_image_external : require\n".to_string();
+            maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
+        }
         
         let vertex = format!("
             #version 100
-            #extension GL_OES_EGL_image_external : require
+            {}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
@@ -748,21 +780,21 @@ impl CxOsDrawShader {
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", vertex);
+            {}\0", maybe_ext_tex_extension_import, vertex);
 
         let pixel = format!("
             #version 100
             #extension GL_OES_standard_derivatives : enable
-            #extension GL_OES_EGL_image_external : require
+            {}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}
+            {}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", pixel);
+            {}\0", maybe_ext_tex_extension_import, maybe_ext_tex_extension_sampler, pixel);
         
             // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
@@ -776,6 +808,14 @@ impl CxOsDrawShader {
         if let Some(gl_shader) = self.gl_shader.take(){
             gl_shader.free_resources();
         }
+    }
+}
+
+
+fn get_gl_string(key: gl_sys::types::GLenum) -> String {
+    unsafe {
+        let string_ptr = gl_sys::GetString(key) as *const c_char;
+        CStr::from_ptr(string_ptr).to_string_lossy().into_owned()
     }
 }
 
@@ -860,8 +900,8 @@ pub struct CxOsTexture {
 impl CxTexture {
     
     pub fn update_vec_texture(&mut self) {
-        if self.alloc_vec(){
-            //let alloc = self.alloc.as_ref().unwrap();
+        if self.alloc_vec() {
+            self.free_resources();
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -878,8 +918,8 @@ impl CxTexture {
             }                       
             match &self.format{
                 TextureFormat::VecBGRAu8_32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -894,7 +934,7 @@ impl CxTexture {
                 }
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level}=>unsafe{
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -911,8 +951,8 @@ impl CxTexture {
                     gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
                 },
                 TextureFormat::VecRGBAf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -926,8 +966,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
@@ -935,7 +975,7 @@ impl CxTexture {
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
-                        gl_sys::RED as i32,
+                        gl_sys::R8 as i32,
                         *width as i32,
                         *height as i32,
                         0,
@@ -945,8 +985,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRGu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
@@ -964,8 +1004,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -989,7 +1029,8 @@ impl CxTexture {
     pub fn setup_video_texture(&mut self) -> bool {
         while unsafe { gl_sys::GetError() } != 0 {}
 
-        if self.alloc_video(){
+        if self.alloc_video() {
+            self.free_resources();
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();

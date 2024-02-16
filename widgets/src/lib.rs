@@ -1,6 +1,6 @@
 pub use makepad_draw::makepad_platform;
 pub use makepad_draw;
-
+pub use makepad_html;
 pub use makepad_derive_widget;
 pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
@@ -28,10 +28,13 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod portal_list;
+pub mod stack_navigation;
+pub mod expandable_panel;
 pub mod desktop_button;
 pub mod window;
 pub mod scroll_shadow;
 pub mod window_menu;
+pub mod html;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -52,6 +55,8 @@ pub mod nav_control;
 pub mod view;
 pub mod widget;
 pub mod widget_match_event;
+
+pub mod touch_gesture;
 
 #[macro_use]
 pub mod data_binding;
@@ -79,6 +84,8 @@ pub use crate::{
     slide_panel::*,
     fold_button::*,
     dock::*,
+    stack_navigation::*,
+    expandable_panel::*,
     window::*,
     tab::TabClosable,
     scroll_bars::{ScrollBars},
@@ -87,11 +94,9 @@ pub use crate::{
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
     widget::{
-        Scope,
         WidgetSet,
         WidgetSetIterator,
         WidgetUid,
-        WidgetPath,
         DrawStep,
         DrawStepApi,
         CreateAt,
@@ -156,4 +161,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::tab_close_button::live_design(cx);
     crate::keyboard_view::live_design(cx);
     crate::vectorline::live_design(cx);
+    crate::stack_navigation::live_design(cx);
+    crate::expandable_panel::live_design(cx);
+    crate::html::live_design(cx);
 }

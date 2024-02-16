@@ -18,3 +18,5 @@ makepad-vector = { path = "./vector", version = "0.4.0" }
 rustybuzz = { version = "0.8.0", git = "https://github.com/RazrFalcon/rustybuzz", rev = "a0b8aa3" }
 unicode-bidi = "0.3"
 
+ab_glyph_rasterizer = "0.1.8"
+sdfer = "0.2.1"

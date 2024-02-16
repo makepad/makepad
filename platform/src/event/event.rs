@@ -26,18 +26,106 @@ use {
     },
 };
 
-
+/// Events that can be sent between the Makepad framework and the application.
 #[derive(Debug)]
 pub enum Event {
+    /// The application has just been created.
+    ///
+    /// * This event is always sent exactly once (before any other event)
+    ///   at the very beginning of the application lifecycle.
+    /// * This is a good point for one-time initialization of application state, resources, tasks, etc.
+    ///
+    /// | Platform | Lifecycle Function/Callback |
+    /// |----------|-----------------------------|
+    /// | Android  | [`onCreate`]                |
+    /// | others   | coming soon...              |
+    ///
+    /// [`onCreate`]: https://developer.android.com/reference/android/app/Activity#onCreate(android.os.Bundle)
     Startup,
+    /// The application is being shut down is about to close and be destroyed.
+    ///
+    /// * This event may not be sent at all, so you should not rely on it.
+    ///   * For example, some mobile platforms do not always send this event when closing the app.
+    ///   * Desktop platforms do typically send this event when the user closes the application.
+    /// * If it is sent, it will be sent only once at the end of the application lifecycle.
+    ///
+    /// | Platform | Lifecycle Function/Callback |
+    /// |----------|-----------------------------|
+    /// | Android  | [`onDestroy`]               |
+    /// | others   | coming soon...              |
+    ///
+    /// [`onDestroy`]: https://developer.android.com/reference/android/app/Activity#onDestroy()
     Shutdown,
-    
-    Pause,
+
+    /// The application has been started in the foreground and is now visible to the user,
+    /// but is not yet actively receiving user input.
+    ///
+    /// * This event can be sent multiple times over the course of the application's lifecycle.
+    ///   * For example, it will be sent right after `Startup` has been sent
+    ///     at the beginning of the application.
+    ///   * It can also be sent after `Stop` if the user starts the application again
+    ///     by navigating back to the application.
+    ///   * It will be sent when the application was re-opened and shown again
+    ///     after being previously hidden in the background.
+    ///
+    /// | Platform | Lifecycle Function/Callback |
+    /// |----------|-----------------------------|
+    /// | Android  | [`onStart`]                 |
+    /// | others   | coming soon...              |
+    ///
+    /// [`onStart`]: https://developer.android.com/reference/android/app/Activity#onStart(
+    #[doc(alias("start, restart, show"))]
+    Foreground,
+    /// The application has been hidden in the background and is no longer visible to the user.
+    ///
+    /// * This event may be sent multiple times over the course of the application's lifecycle.
+    ///   * For example, it can be sent after `Pause` has been sent, i.e., when the user
+    ///     navigates away from the application, causing it to be no longer visible.
+    /// * This is a good point to stop updating the UI/animations and other visual elements.
+    ///
+    /// | Platform | Lifecycle Function/Callback |
+    /// |----------|-----------------------------|
+    /// | Android  | [`onStop`]                  |
+    /// | others   | coming soon...              |
+    ///
+    /// [`onStop`]: https://developer.android.com/reference/android/app/Activity#onStop()
+    #[doc(alias("stop, hide")) ]
+    Background,
+
+    /// The application is now in the foreground and being actively used,
+    /// i.e., it is receiving input from the user.
+    ///
+    /// * This event may be sent multiple times over the course of the application's lifecycle.
+    ///   * For example, it will be sent after `Start` once the application is fully in the foreground.
+    ///     It can also be sent after `Pause`, once the user navigates back to the application.
+    ///
+    /// | Platform | Lifecycle Function/Callback |
+    /// |----------|-----------------------------|
+    /// | Android  | [`onResume`]                |
+    /// | others   | coming soon...              |
+    ///
+    /// [`onResume`]: https://developer.android.com/reference/android/app/Activity#onResume()
     Resume,
+    /// The application has been temporarily paused and is still visible in the foregound,
+    /// but is not actively receiving input from the user.
+    ///
+    /// * This event may be sent multiple times over the course of the application's lifecycle.
+    /// * This is a good point to save temporary application states in case the application
+    ///   is about to be stopped or destroyed. 
+    ///
+    /// | Platform | Lifecycle Function/Callback |
+    /// |----------|-----------------------------|
+    /// | Android  | [`onPause`]                 |
+    /// | others   | coming soon...              |
+    ///
+    /// [`onPause`]: https://developer.android.com/reference/android/app/Activity#onPause()
+    Pause,
 
     Draw(DrawEvent),
     LiveEdit,
+    /// The application has gained focus and is now the active window receiving user input.
     AppGotFocus,
+    /// The application has lost focus and is no longer the active window receiving user input.
     AppLostFocus,
     NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
@@ -99,63 +187,66 @@ impl Event{
         match v{
             1=>"Startup",
             2=>"Shutdown",
-                
-            3=>"Pause",
-            4=>"Resume",
-            
-            5=>"Draw",
-            6=>"LiveEdit",
-            7=>"AppGotFocus",
-            8=>"AppLostFocus",
-            9=>"NextFrame",
-            10=>"XRUpdate",
-                
-            11=>"WindowDragQuery",
-            12=>"WindowCloseRequested",
-            13=>"WindowClosed",
-            14=>"WindowGeomChange",
-            15=>"VirtualKeyboard",
-            16=>"ClearAtlasses",
-                
-            17=>"MouseDown",
-            18=>"MouseMove",
-            19=>"MouseUp",
-            20=>"TouchUpdate",
-            21=>"Scroll",
-                
-            22=>"Timer",
-                
-            23=>"Signal",
-            24=>"Trigger",
-            25=>"MacosMenuCommand",
-            26=>"KeyFocus",
-            27=>"KeyFocusLost",
-            28=>"KeyDown",
-            29=>"KeyUp",
-            30=>"TextInput",
-            31=>"TextCopy",
-            32=>"TextCut",
-                
-            33=>"Drag",
-            34=>"Drop",
-            35=>"DragEnd",
-                
-            36=>"AudioDevices",
-            37=>"MidiPorts",
-            38=>"VideoInputs",
-            39=>"NetworkResponses",
 
-            40=>"VideoPlaybackPrepared",
-            41=>"VideoTextureUpdated",
-            42=>"VideoPlaybackCompleted",
-            43=>"VideoDecodingError",
-            44=>"VideoPlaybackResourcesReleased",
-            45=>"TextureHandleReady",
-            46=>"MouseLeave",
-            47=>"Actions",
+            3=>"Foreground",
+            4=>"Background",
+
+            5=>"Resume",
+            6=>"Pause",
+            
+            7=>"Draw",
+            8=>"LiveEdit",
+            9=>"AppGotFocus",
+            10=>"AppLostFocus",
+            11=>"NextFrame",
+            12=>"XRUpdate",
+                
+            13=>"WindowDragQuery",
+            14=>"WindowCloseRequested",
+            15=>"WindowClosed",
+            16=>"WindowGeomChange",
+            17=>"VirtualKeyboard",
+            18=>"ClearAtlasses",
+                
+            19=>"MouseDown",
+            20=>"MouseMove",
+            21=>"MouseUp",
+            22=>"TouchUpdate",
+            23=>"Scroll",
+                
+            24=>"Timer",
+                
+            25=>"Signal",
+            26=>"Trigger",
+            27=>"MacosMenuCommand",
+            28=>"KeyFocus",
+            29=>"KeyFocusLost",
+            30=>"KeyDown",
+            31=>"KeyUp",
+            32=>"TextInput",
+            33=>"TextCopy",
+            34=>"TextCut",
+                
+            35=>"Drag",
+            36=>"Drop",
+            37=>"DragEnd",
+                
+            38=>"AudioDevices",
+            39=>"MidiPorts",
+            40=>"VideoInputs",
+            41=>"NetworkResponses",
+
+            42=>"VideoPlaybackPrepared",
+            43=>"VideoTextureUpdated",
+            44=>"VideoPlaybackCompleted",
+            45=>"VideoDecodingError",
+            46=>"VideoPlaybackResourcesReleased",
+            47=>"TextureHandleReady",
+            48=>"MouseLeave",
+            49=>"Actions",
                                                  
             #[cfg(target_arch = "wasm32")]
-            48=>"ToWasmMsg",
+            50=>"ToWasmMsg",
             _=>panic!()
         }
     }
@@ -164,63 +255,66 @@ impl Event{
         match self{
             Self::Startup=>1,
             Self::Shutdown=>2,
-                            
-            Self::Pause=>3,
-            Self::Resume=>4,
-                        
-            Self::Draw(_)=>5,
-            Self::LiveEdit=>6,
-            Self::AppGotFocus=>7,
-            Self::AppLostFocus=>8,
-            Self::NextFrame(_)=>9,
-            Self::XRUpdate(_)=>10,
-                            
-            Self::WindowDragQuery(_)=>11,
-            Self::WindowCloseRequested(_)=>12,
-            Self::WindowClosed(_)=>13,
-            Self::WindowGeomChange(_)=>14,
-            Self::VirtualKeyboard(_)=>15,
-            Self::ClearAtlasses=>16,
-                            
-            Self::MouseDown(_)=>17,
-            Self::MouseMove(_)=>18,
-            Self::MouseUp(_)=>19,
-            Self::TouchUpdate(_)=>20,
-            Self::Scroll(_)=>21,
-                            
-            Self::Timer(_)=>22,
-                            
-            Self::Signal=>23,
-            Self::Trigger(_)=>24,
-            Self::MacosMenuCommand(_)=>25,
-            Self::KeyFocus(_)=>26,
-            Self::KeyFocusLost(_)=>27,
-            Self::KeyDown(_)=>28,
-            Self::KeyUp(_)=>29,
-            Self::TextInput(_)=>30,
-            Self::TextCopy(_)=>31,
-            Self::TextCut(_)=>32,
-                            
-            Self::Drag(_)=>33,
-            Self::Drop(_)=>34,
-            Self::DragEnd=>35,
-                            
-            Self::AudioDevices(_)=>36,
-            Self::MidiPorts(_)=>37,
-            Self::VideoInputs(_)=>38,
-            Self::NetworkResponses(_)=>39,
 
-            Self::VideoPlaybackPrepared(_)=>40,
-            Self::VideoTextureUpdated(_)=>41,
-            Self::VideoPlaybackCompleted(_)=>42,
-            Self::VideoDecodingError(_)=>43,
-            Self::VideoPlaybackResourcesReleased(_)=>44,
-            Self::TextureHandleReady(_)=>45,
-            Self::MouseLeave(_)=>46,
-            Self::Actions(_)=>47,
+            Self::Foreground=>3,
+            Self::Background=>4,
+
+            Self::Resume=>5,
+            Self::Pause=>6,
+                        
+            Self::Draw(_)=>7,
+            Self::LiveEdit=>8,
+            Self::AppGotFocus=>9,
+            Self::AppLostFocus=>10,
+            Self::NextFrame(_)=>11,
+            Self::XRUpdate(_)=>12,
+                            
+            Self::WindowDragQuery(_)=>13,
+            Self::WindowCloseRequested(_)=>14,
+            Self::WindowClosed(_)=>15,
+            Self::WindowGeomChange(_)=>16,
+            Self::VirtualKeyboard(_)=>17,
+            Self::ClearAtlasses=>18,
+                            
+            Self::MouseDown(_)=>19,
+            Self::MouseMove(_)=>20,
+            Self::MouseUp(_)=>21,
+            Self::TouchUpdate(_)=>22,
+            Self::Scroll(_)=>23,
+                            
+            Self::Timer(_)=>24,
+                            
+            Self::Signal=>25,
+            Self::Trigger(_)=>26,
+            Self::MacosMenuCommand(_)=>27,
+            Self::KeyFocus(_)=>28,
+            Self::KeyFocusLost(_)=>29,
+            Self::KeyDown(_)=>30,
+            Self::KeyUp(_)=>31,
+            Self::TextInput(_)=>32,
+            Self::TextCopy(_)=>33,
+            Self::TextCut(_)=>34,
+                            
+            Self::Drag(_)=>35,
+            Self::Drop(_)=>36,
+            Self::DragEnd=>37,
+                            
+            Self::AudioDevices(_)=>38,
+            Self::MidiPorts(_)=>39,
+            Self::VideoInputs(_)=>40,
+            Self::NetworkResponses(_)=>41,
+
+            Self::VideoPlaybackPrepared(_)=>42,
+            Self::VideoTextureUpdated(_)=>43,
+            Self::VideoPlaybackCompleted(_)=>44,
+            Self::VideoDecodingError(_)=>45,
+            Self::VideoPlaybackResourcesReleased(_)=>46,
+            Self::TextureHandleReady(_)=>47,
+            Self::MouseLeave(_)=>48,
+            Self::Actions(_)=>49,
                                      
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>48,
+            Self::ToWasmMsg(_)=>50,
         }
     }
 }
@@ -387,6 +481,13 @@ impl Timer {
             if te.timer_id == self.0{
                 return Some(te.clone())
             }
+        }
+        None
+    }
+    
+    pub fn is_timer(&self, event:&TimerEvent)->Option<TimerEvent>{
+        if event.timer_id == self.0{
+            return Some(event.clone())
         }
         None
     }

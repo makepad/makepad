@@ -19,11 +19,11 @@ use {
 };
 
 #[derive(Clone, Debug, Default)]
-pub struct Signal(Arc<AtomicBool>);
+pub struct SignalToUI(Arc<AtomicBool>);
 
 pub (crate) static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
 
-impl Signal {
+impl SignalToUI {
     pub fn set_ui_signal() {
         UI_SIGNAL.store(true, Ordering::SeqCst)
     }
@@ -43,6 +43,24 @@ impl Signal {
     pub fn set(&self) {
         self.0.store(true, Ordering::SeqCst);
         Self::set_ui_signal();
+    }
+}
+
+
+#[derive(Clone, Debug, Default)]
+pub struct SignalFromUI(Arc<AtomicBool>);
+
+impl SignalFromUI {
+    pub fn new() -> Self {
+        Self (Arc::new(AtomicBool::new(false)))
+    }
+        
+    pub fn check_and_clear(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+        
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -110,7 +128,7 @@ impl<T> ToUIReceiver<T> {
 impl<T> ToUISender<T> {
     pub fn send(&self, t: T) -> Result<(), SendError<T >> {
         let res = self.sender.send(t);
-        Signal::set_ui_signal();
+        SignalToUI::set_ui_signal();
         res
     }
 }

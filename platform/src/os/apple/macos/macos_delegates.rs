@@ -1,3 +1,5 @@
+use crate::apple_util::get_event_mouse_button;
+
 use {
     std::{
         rc::Rc,
@@ -387,13 +389,15 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn other_mouse_down(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
-        cw.send_mouse_down(2, modifiers);
+        let button = get_event_mouse_button(event);
+        cw.send_mouse_down(button, modifiers);
     }
     
     extern fn other_mouse_up(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
-        cw.send_mouse_up(2, modifiers);
+        let button = get_event_mouse_button(event);
+        cw.send_mouse_up(button, modifiers);
     }
     
     fn mouse_pos_from_event(view: &Object, event: ObjcId) -> DVec2 {
