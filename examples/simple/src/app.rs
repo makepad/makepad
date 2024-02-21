@@ -47,7 +47,7 @@ live_design!{
                     Button = <Button> {
                         text: "Hello world"
                     }
-                    html:"this is <b>BOLD text</b> <i>italic</i> <Button>Hi</Button><b><i>Bold italic</i></b>"
+                    html:"this is <b>BOLD text</b><i>italic</i> <Button>Hi</Button><b><i>Bold italic</i></b>"
                 }
             }
         }

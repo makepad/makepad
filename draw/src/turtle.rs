@@ -499,19 +499,20 @@ impl<'a> Cx2d<'a> {
                 },
                 Flow::RightWrap => {
                     if turtle.pos.x - turtle.origin.x + size.x > turtle.width - turtle.layout.padding.right - turtle.layout.padding.left{
-                        // lets check if we have to move inner itemsthings
+                        
                         pos.x =  turtle.origin.x + turtle.layout.padding.left;
                         let dx = pos.x - turtle.pos.x;                        
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
-                        pos.y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;                        
+                        
+                        pos.y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;
                         let dy = pos.y - turtle.pos.y;
                         turtle.pos.y = pos.y;
+                        
                         turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
                                                 
                         if align_start != self.align_list.len(){
                             self.move_align_list(dx, dy, align_start, self.align_list.len(), false, dvec2(0.0,0.0));
                         }
-                        // we went over the edge, so we need to move our align list to account for this wrapping
                     }
                     else{
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
@@ -752,6 +753,16 @@ impl Turtle {
         self.height_used = height_used;
     }
     
+    pub fn new_line(&mut self){
+        self.pos.x = self.origin.x + self.layout.padding.left;
+        let next_y = self.height_used + self.origin.y + self.layout.line_spacing;
+        if self.pos.y == next_y{
+            self.pos.y += self.layout.line_spacing;
+        }
+        else{
+            self.pos.y = next_y;
+        }
+    }
     
     /*
     pub fn move_pos(&mut self, dx: f64, dy: f64) {
