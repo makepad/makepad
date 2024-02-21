@@ -3,7 +3,8 @@ use {
         makepad_html::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        widget::*
+        widget::*,
+        text_flow::TextFlow,
     },
     std::rc::Rc,
 };
@@ -12,111 +13,87 @@ live_design!{
     HtmlBase = {{Html}} {
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
-        
     }
 }
 
-// this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
-pub struct Html {
-    #[redraw] #[live] draw_text: DrawText,
-    #[walk] walk: Walk,
-    #[live] align: Align,
-    #[live] padding: Padding,
-    #[live] text: Rc<String>,
-    #[rust] html: HtmlDoc
-} 
+pub struct Html{
+    #[deref] text_flow: TextFlow,
+    #[live] html: Rc<String>,
+    #[rust] doc: HtmlDoc
+}
 
 // alright lets parse the HTML
 impl LiveHook for Html{
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        
+    fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
+        let mut errors = Some(Vec::new());
+        self.doc = parse_html(&*self.html, &mut errors);
+        if errors.as_ref().unwrap().len()>0{
+            log!("HTML parser returned errors {:?}", errors)
+        }
     }
 }
-
+ 
 impl Widget for Html {
-
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk:Walk)->DrawStep{
-        //self.draw_text.draw_walk(cx, walk.with_add_padding(self.padding), self.align, self.text.as_ref());
-        DrawStep::done()
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.text_flow.handle_event(cx, event, scope);
     }
     
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk:Walk)->DrawStep{
+        let tf = &mut self.text_flow;
+        tf.begin(cx, walk);
+        let mut auto_id = 0;
+        // alright lets iterate the html doc and draw it
+        let mut node = self.doc.walk();
+        while !node.empty(){
+            
+            match node.open_tag_lc(){
+                some_id!(a)=>{
+                    node = node.jump_to_close();
+                }
+                some_id!(h1)=>{
+                    tf.push_scale(1.5)
+                },
+                some_id!(b)=>tf.push_bold(),
+                some_id!(i)=>tf.push_italic(),
+                Some(_)=>{ // custom widget
+                    let id = if let Some(id) = node.find_attr_lc(live_id!(id)){
+                        LiveId::from_str(id).0
+                    }
+                    else{
+                        auto_id += 1;
+                        auto_id
+                    };
+                    let template = node.open_tag_nc().unwrap();
+                    if let Some(item) = tf.item(cx, id, template){
+                        item.draw_all(cx, scope);
+                    }
+                    node = node.jump_to_close();
+                }
+                _=>()
+            } 
+            match node.close_tag_lc(){
+                some_id!(h1)=>tf.pop_size(),
+                some_id!(b)=>tf.pop_bold(),
+                some_id!(i)=>tf.pop_italic(),
+                _=>()
+            }
+            if let Some(text) = node.text(){
+                tf.draw_text(cx, text);
+            }
+            node = node.walk();
+        }
+        tf.end(cx);
+        DrawStep::done()
+    }  
+     
     fn text(&self)->String{
         "".into()
         //self.text.as_ref().to_string()
-    }
+    } 
     
     fn set_text(&mut self, _v:&str){
         //self.text.as_mut_empty().push_str(v);
     }
-}
-
-impl Html{
-    pub fn push_bold(&mut self){
-    }
-    
-    pub fn pop_bold(&mut self){
-    }
-    
-    pub fn push_italic(&mut self){
-    }
-    
-    pub fn pop_italic(&mut self){
-    }
-    
-    pub fn apply_widget(&mut self, _cx:&mut Cx, _id:&[LiveId;1], _apply:&[LiveNode]){
-    }
-    
-    pub fn draw_text(&mut self, _cx:&mut Cx, _text:&str){
-    }
-    
-    // parse it
-    pub fn default_interpreter(&mut self, _cx:&mut Cx, _html:Vec<HtmlNode>){
-        /*
-        let node = html.walker();
-        while let Some(node) = node.next(){
-            match node.open_tag(){
-                some_id!(a)=>{
-                    let href = node.find_attr(id!(href));
-                    self.apply_widget(cx, id!(MyWidget), live!{
-                        label:(node.find_text().unwrap_or(""))
-                    });
-                }
-                some_id!(strong)=>self.push_bold(),
-                some_id!(em)=>self.push_italic(),
-                _=>()
-            }
-            match node.close_tag(){
-                some_id!(strong)=>self.pop_bold(),
-                some_id!(em)=>self.pop_italic(),
-                _=>()
-            }
-            if let Some(text) = node.text(){
-                self.draw_text(cx, text);
-            }
-        }*/
-    }
-    
-}
-
-
-/*
-#[derive(Clone)]
-pub struct HtmlId(pub HtmlString);
-impl HtmlId{
-    pub fn new(rc:&Rc<String>, start:usize, end:usize)->Self{
-        Self(HtmlString(rc.clone(), start, end))
-    }
-    pub fn as_id(&self)->LiveId{
-        LiveId::from_str(&self.0.0[self.0.1..self.0.2])
-    }
-}
-
-impl fmt::Debug for HtmlId{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0.as_str())
-    }
-}
-*/
-
-// HTML Dom tree-flat vector
+} 
+ 

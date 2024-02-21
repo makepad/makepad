@@ -7,7 +7,7 @@
  */
 
 //! Decoding results for images
-use alloc::vec::Vec;
+
 
 /// A simple enum that can hold decode
 /// results of most images

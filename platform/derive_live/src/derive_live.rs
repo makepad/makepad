@@ -186,6 +186,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                       field.name == "clip_y" ||
                       field.name == "padding" ||
                       field.name == "align" ||
+                      field.name == "line_spacing" ||
                       field.name == "flow" ||
                       field.name == "spacing"{
                           return error_result(&format!("Name collision between layout splat and {}", field.name));
@@ -198,6 +199,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("        live_id!(align)=>self.").ident(&field.name).add(".align.apply(cx, apply, index, nodes),");
                 tb.add("        live_id!(flow)=>self.").ident(&field.name).add(".flow.apply(cx, apply, index, nodes),");
                 tb.add("        live_id!(spacing)=>self.").ident(&field.name).add(".spacing.apply(cx, apply, index, nodes),");
+                tb.add("        live_id!(line_spacing)=>self.").ident(&field.name).add(".line_spacing.apply(cx, apply, index, nodes),");
             }
         }
         // Unknown value handling

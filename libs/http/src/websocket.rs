@@ -1,4 +1,4 @@
-use std::convert::TryInto;
+
 use crate::digest::{Sha1, base64_encode};
 use std::time::{SystemTime, UNIX_EPOCH};
 

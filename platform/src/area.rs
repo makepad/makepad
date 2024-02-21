@@ -8,9 +8,6 @@ use {
             LiveId,
         },
         draw_list::DrawListId,
-        makepad_math::{
-            Rect
-        },
         cx::Cx
     }
 };
