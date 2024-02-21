@@ -6,8 +6,6 @@
  * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
-use core::convert::TryInto;
-
 /// Limit values to 0 and 255
 #[inline]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, dead_code)]

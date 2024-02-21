@@ -7,7 +7,6 @@
  */
 
 use alloc::format;
-use core::convert::TryInto;
 
 use makepad_zune_core::colorspace::ColorSpace;
 

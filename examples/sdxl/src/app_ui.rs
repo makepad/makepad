@@ -880,6 +880,7 @@ live_design!{
     }
     
     AppWindow = <View>{
+        
         second_image = <RectView> {
             draw_bg: {color: #0}
             height: Fill,

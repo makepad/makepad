@@ -35,6 +35,7 @@ pub mod window;
 pub mod scroll_shadow;
 pub mod window_menu;
 pub mod html;
+pub mod text_flow;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -164,4 +165,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::stack_navigation::live_design(cx);
     crate::expandable_panel::live_design(cx);
     crate::html::live_design(cx);
+    crate::text_flow::live_design(cx);
 }
