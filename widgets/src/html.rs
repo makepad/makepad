@@ -88,12 +88,11 @@ impl Widget for Html {
     }  
      
     fn text(&self)->String{
-        "".into()
-        //self.text.as_ref().to_string()
+        self.html.as_ref().to_string()
     } 
     
-    fn set_text(&mut self, _v:&str){
-        //self.text.as_mut_empty().push_str(v);
+    fn set_text(&mut self, v:&str){
+        self.html = Rc::new(v.to_string())
     }
 } 
  
