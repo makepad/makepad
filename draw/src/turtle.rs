@@ -572,6 +572,18 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn turtle_new_line(&mut self){
+        let turtle = self.turtles.last_mut().unwrap();
+        turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
+        let next_y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;
+        if turtle.pos.y == next_y{
+            turtle.pos.y += turtle.layout.line_spacing;
+        }
+        else{
+            turtle.pos.y = next_y;
+        }
+    }
+    
     fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
         //let current_dpi_factor = self.current_dpi_factor();
         let dx = if dx.is_nan() {0.0}else {dx} + turtle_shift.x;
@@ -753,16 +765,6 @@ impl Turtle {
         self.height_used = height_used;
     }
     
-    pub fn new_line(&mut self){
-        self.pos.x = self.origin.x + self.layout.padding.left;
-        let next_y = self.height_used + self.origin.y + self.layout.line_spacing;
-        if self.pos.y == next_y{
-            self.pos.y += self.layout.line_spacing;
-        }
-        else{
-            self.pos.y = next_y;
-        }
-    }
     
     /*
     pub fn move_pos(&mut self, dx: f64, dy: f64) {
