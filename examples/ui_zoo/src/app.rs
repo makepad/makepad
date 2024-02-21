@@ -1,4 +1,4 @@
-use makepad_widgets::{fold_header::FoldHeaderWidgetRefExt, *};
+use makepad_widgets::*;
 use makepad_platform::live_atomic::*;
  
 
@@ -14,9 +14,9 @@ live_design!{
         width: Fill,
         height: Fit
         flow: Down
-         spacing: 10, padding: 15, margin:{bottom:10}
-         divider = <View>
-         {
+        spacing: 10, padding: 15, margin:{bottom:10}
+        divider = <View>
+        {
             width: Fill, height: 2
             show_bg: true
             draw_bg: {color: #ccc}
@@ -86,22 +86,22 @@ live_design!{
     ZooBlock = 
         <RoundedView> {
             
-        show_bg: true;
-        width: 50
-        height: 50
-        margin: 0,
-        padding: 0,
-        spacing: 0,
+            show_bg: true;
+            width: 50
+            height: 50
+            margin: 0,
+            padding: 0,
+            spacing: 0,
 
-        draw_bg: {
-          color: #ff0
-             fn get_color(self) -> vec4 {
-                //return #000
-                return mix(self.color, self.color*0.7, self.pos.y);
+            draw_bg: {
+                color: #ff0
+                    fn get_color(self) -> vec4 {
+                        //return #000
+                        return mix(self.color, self.color*0.7, self.pos.y);
+                    }
+                    radius: 5.0
+                }
             }
-            radius: 5.0
-        }
-    }
 
     App = {{App}} {
         ui: <Window>{
@@ -401,58 +401,69 @@ live_design!{
                     }              
 
                     <ZooHeader>{title = {text:"KeyboardView"} <ZooDesc>{text:"KeyboardView ?"}<ZooGroup> {<KeyboardView>{}}  }              
-                    <ZooHeader>{title = {text:"CheckBox"} <ZooDesc>{text:"Checkbox ?"}<ZooGroup> 
-                    {
-                        flow: Down
-                        simplecheckbox = <CheckBox>{text:"Check me out!"}
-                        simplecheckbox_output = <Label>{text:"hmm"}
-                }  
-            }              
-                    <ZooHeader>{title = {text:"RadioButton"} <ZooDesc>{text:"RadioButton ?"}<ZooGroup>
-                     {
-                        <RadioButtonSet>{
-                        <RadioButton>{text:"Option 1: yey"}
-                        <RadioButton>{text:"Option 2: hah"}
-                        <RadioButton>{text:"Option 3: hmm"}
-                        <RadioButton>{text:"Option 4: all of the above"}
-                        }
-                    }
-                }               
-                    <ZooHeader>{title = {text:"DesktopButton"} <ZooDesc>{text:"Desktop Button ?"}<ZooGroup> {<DesktopButton>{}}  }              
-                    <ZooHeader>{title = {text:"DropDown"} <ZooDesc>{text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}<ZooGroup> 
-                    {
-                    dropdown = <DropDown>{
-
-                        draw_text: {
-                            
-
-                            fn get_color(self) -> vec4 {
-                                return mix(
-                                    mix(
-                                        mix(
-                                            (#xFFF8),
-                                            (#xFFF8),
-                                            self.focus
-                                        ),
-                                        (#xFFFF),
-                                        self.hover
-                                    ),
-                                    (#x000A),
-                                    self.pressed
-                                )
+                    <ZooHeader>{
+                        title = {text:"CheckBox"} <ZooDesc>{text:"Checkbox ?"}<ZooGroup> 
+                        {
+                            flow: Down
+                            simplecheckbox = <CheckBox>{text:"Check me out!"}
+                            simplecheckbox_output = <Label>{text:"hmm"}
+                        }  
+                    }              
+                    <ZooHeader>{
+                        title = {text:"RadioButton"} <ZooDesc>{text:"RadioButton ?"}<ZooGroup>
+                        {
+                            <View>{
+                                width: Fit,
+                                height: Fit,
+                                <RadioButton>{label:"Option 1: yey"}
+                                <RadioButton>{label:"Option 2: hah"}
+                                <RadioButton>{label:"Option 3: hmm"}
+                                <RadioButton>{label:"Option 4: all of the above"}
                             }
                         }
+                    }               
+                    <ZooHeader>{title = {text:"DesktopButton"} <ZooDesc>{text:"Desktop Button ?"}<ZooGroup> {<DesktopButton>{}}  }              
+                    <ZooHeader>{
+                        title = {text:"DropDown"} <ZooDesc>{text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}<ZooGroup> 
+                        {
+                            dropdown = <DropDown>{
 
-                        
-                        height: 30,
-                        width: 200
-                        labels: ["ValueOne", "ValueTwo","Thrice","FourthValue","OptionE","Hexagons"],
-                        values: [  ValueOne,ValueTwo,Thrice,FourthValue,OptionE,Hexagons]
-
-                    }}  }              
+                                draw_text: {
+                                    fn get_color(self) -> vec4 {
+                                        return mix(
+                                            mix(
+                                                mix(
+                                                    (#xFFF8),
+                                                    (#xFFF8),
+                                                    self.focus
+                                                ),
+                                                (#xFFFF),
+                                                self.hover
+                                            ),
+                                            (#x000A),
+                                            self.pressed
+                                        )
+                                    }
+                                }
+                                height: 30,
+                                width: 200
+                                labels: ["ValueOne", "ValueTwo","Thrice","FourthValue","OptionE","Hexagons"],
+                                values: [  ValueOne,ValueTwo,Thrice,FourthValue,OptionE,Hexagons]
+                            }
+                        }  
+                    }              
                        
                     
-                    <ZooHeader>{title = {text:"DemoFileTree"} <ZooDesc>{text:"DemoFileTree ?"}<ZooGroup> {<DemoFileTree>{width: Fill, height: 100}}  }     
+                    <ZooHeader>{title = {text:"DemoFileTree"} <ZooDesc>{text:"DemoFileTree ?"}<ZooGroup> 
+                        {
+                            <DemoFileTree>{
+                                width: Fill,                               
+                                file_tree:{
+                                    height: 400
+                                }
+                            }
+                        }  
+                    }     
                     <ZooHeader>{title = {text:"StackViewHeader"} <ZooDesc>{text:"StackViewHeader ?"}<ZooGroup> {<StackViewHeader>{}}  }     
                     <ZooHeader>{
                         title = {text:"FoldHeader"} 
@@ -502,6 +513,31 @@ live_design!{
 
                         }  
                     }     
+
+                    <ZooHeader>{title = {text:"SlidePanel"} <ZooDesc>{text:"Slide panel?"}
+                    <ZooGroup> {
+                        <SlidePanel> {
+                            side: Right,
+                            width: (1000 * 0.175),
+                            height: (1000 * 0.175),
+                            margin: 0
+                            <ZooHeader>{title = {text:"Image"} <ZooDesc>{text:"A static inline image from a resource."}
+                            <ZooGroup> {
+                                <Image> {
+                                    source: dep("crate://self/resources/ducky.png" ),
+                                    width: (1000 * 0.175),
+                                    height: (1000 * 0.175),
+                                    margin: 0
+                                }
+    
+                            }  
+                        }      
+                        }
+
+                    }  
+                }     
+
+
                 }
             }
         }
@@ -526,7 +562,6 @@ pub struct DataBindingsForApp {
     #[live] fnumber: f32,
     #[live] inumber: i32,
     #[live] dropdown: DropDownEnum,
-    #[live] openthefoldheader: boola
 }
 
 #[derive(Live, LiveHook)]
@@ -586,14 +621,14 @@ impl MatchEvent for App{
         if self.ui.fold_button(id!(folderbutton)).opening(actions) {
             log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12); 
 //            self.ui.fold_header(id!(thefoldheader)).opened = true;
-            self.ui.fold_header(id!(thefoldheader)).open();
+           
             self.counter += 1;                  
         }
 
         if self.ui.fold_button(id!(folderbutton)).closing(actions) {
             log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12); 
 
-            self.ui.fold_header(id!(thefoldheader)).close();
+       
 
             self.counter += 1;                  
         }
@@ -622,7 +657,6 @@ impl AppMain for App {
 
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
-        db.bind(id!(dropdown), ids!(dropdown));
-        db.bind(id!(openthefoldheader), ids!(foldheader.opened));
+        db.bind(id!(dropdown), ids!(dropdown));        
     }
 }
