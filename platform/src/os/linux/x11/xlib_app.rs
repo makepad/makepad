@@ -654,7 +654,7 @@ impl XlibApp {
                 MouseCursor::WResize => self.load_first_cursor(&[b"left_side\0"]),
                 
                 MouseCursor::Default => self.load_first_cursor(&[b"left_ptr\0"]),
-                MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair"]),
+                MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair\0"]),
                 MouseCursor::Hand => self.load_first_cursor(&[b"left_ptr\0", b"hand1\0"]),
                 MouseCursor::Arrow => self.load_first_cursor(&[b"left_ptr\0\0"]),
                 MouseCursor::Move => self.load_first_cursor(&[b"move\0"]),
