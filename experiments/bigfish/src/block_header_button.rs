@@ -105,6 +105,7 @@ live_design! {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, DefaultNone)]
 pub enum BlockHeaderButtonAction {
     None,
@@ -234,6 +235,7 @@ impl Widget for BlockHeaderButton {
 }
 
 impl BlockHeaderButtonRef {
+    #[allow(dead_code)]
     pub fn clicked(&self, actions: &Actions) -> bool {
         if let BlockHeaderButtonAction::Clicked =
             actions.find_widget_action(self.widget_uid()).cast()
@@ -243,6 +245,7 @@ impl BlockHeaderButtonRef {
         false
     }
 
+    #[allow(dead_code)]
     pub fn pressed(&self, actions: &Actions) -> bool {
         if let BlockHeaderButtonAction::Pressed =
             actions.find_widget_action(self.widget_uid()).cast()
@@ -254,9 +257,11 @@ impl BlockHeaderButtonRef {
 }
 
 impl BlockHeaderButtonSet {
+    #[allow(dead_code)]
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.clicked(actions))
     }
+    #[allow(dead_code)]
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.pressed(actions))
     }

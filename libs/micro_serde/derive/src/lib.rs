@@ -1,5 +1,5 @@
 extern crate proc_macro;
-use proc_macro::{TokenStream};
+use proc_macro::TokenStream;
 
 mod derive_bin;
 use crate::derive_bin::*;
