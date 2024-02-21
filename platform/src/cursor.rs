@@ -11,7 +11,6 @@ use {
             LiveNode,
             LiveNodeSliceApi
         },
-        live_traits::{LiveNew},
         makepad_derive_live::*,
         live_traits::*,
         cx::Cx,

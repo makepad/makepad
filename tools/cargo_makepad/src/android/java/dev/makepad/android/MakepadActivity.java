@@ -129,7 +129,7 @@ class MakepadSurface
     @Override
     public boolean onTouch(View view, MotionEvent event) {
         MakepadNative.surfaceOnTouch(event);
-        return true;    
+        return true;
     }
 
      @Override
@@ -163,7 +163,7 @@ class MakepadSurface
             int metaState = event.getMetaState();
             MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
-        
+
         if (event.getAction() == KeyEvent.ACTION_UP || event.getAction() == KeyEvent.ACTION_MULTIPLE) {
             int character = event.getUnicodeChar();
             if (character == 0) {
@@ -177,6 +177,10 @@ class MakepadSurface
                 MakepadNative.surfaceOnCharacter(character);
             }
         }
+
+        // if ((keyCode == KeyEvent.KEYCODE_BACK)) {
+        //     Log.d("Makepad", "KEYCODE_BACK");
+        // }
 
         if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP) || (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
             return super.onKeyUp(keyCode, event);
@@ -224,7 +228,7 @@ class ResizingLayout
     }
 }
 
-public class MakepadActivity extends Activity implements 
+public class MakepadActivity extends Activity implements
 MidiManager.OnDeviceOpenedListener{
     //% MAIN_ACTIVITY_BODY
 
@@ -292,16 +296,6 @@ MidiManager.OnDeviceOpenedListener{
 
         //% MAIN_ACTIVITY_ON_RESUME
     }
-
-    @Override
-    @SuppressWarnings("deprecation")
-    public void onBackPressed() {
-        Log.w("SAPP", "onBackPressed");
-
-        // TODO: here is the place to handle request_quit/order_quit/cancel_quit
-        super.onBackPressed();
-    }
-
     @Override
     protected void onPause() {
         super.onPause();
@@ -320,6 +314,15 @@ MidiManager.OnDeviceOpenedListener{
     protected void onDestroy() {
         super.onDestroy();
         MakepadNative.activityOnDestroy();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        Log.w("SAPP", "onBackPressed");
+        super.onBackPressed();
+        // TODO: here is the place to handle request_quit/order_quit/cancel_quit
+        MakepadNative.onBackPressed();
     }
 
     @Override
@@ -371,7 +374,7 @@ MidiManager.OnDeviceOpenedListener{
                     imm.showSoftInput(view, 0);
                 } else {
                     InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-                    imm.hideSoftInputFromWindow(view.getWindowToken(),0); 
+                    imm.hideSoftInputFromWindow(view.getWindowToken(),0);
                 }
             }
         });
@@ -398,7 +401,7 @@ MidiManager.OnDeviceOpenedListener{
         MakepadWebSocket webSocket = new MakepadWebSocket(id, url, callback);
         mActiveWebsockets.put(id, webSocket);
         webSocket.connect();
-    
+
         if (webSocket.isConnected()) {
             MakepadWebSocketReader reader = new MakepadWebSocketReader(this, webSocket);
             mWebSocketsHandler.post(reader);
@@ -429,7 +432,7 @@ MidiManager.OnDeviceOpenedListener{
 
     public String[] getAudioDevices(long flag){
         try{
-          
+
             AudioManager am = (AudioManager)this.getSystemService(Context.AUDIO_SERVICE);
             AudioDeviceInfo[] devices = null;
             ArrayList<String> out = new ArrayList<String>();
@@ -443,9 +446,9 @@ MidiManager.OnDeviceOpenedListener{
                 int[] channel_counts = device.getChannelCounts();
                 for(int cc: channel_counts){
                     out.add(String.format(
-                        "%d$$%d$$%d$$%s", 
-                        device.getId(), 
-                        device.getType(), 
+                        "%d$$%d$$%d$$%s",
+                        device.getId(),
+                        device.getType(),
                         cc,
                         device.getProductName().toString()
                     ));
@@ -454,7 +457,7 @@ MidiManager.OnDeviceOpenedListener{
             return out.toArray(new String[0]);
         }
         catch(Exception e){
-            Log.e("Makepad", "exception: " + e.getMessage());             
+            Log.e("Makepad", "exception: " + e.getMessage());
             Log.e("Makepad", "exception: " + e.toString());
             return null;
         }
@@ -463,9 +466,9 @@ MidiManager.OnDeviceOpenedListener{
     @SuppressWarnings("deprecation")
     public void openAllMidiDevices(long delay){
         Runnable runnable = () -> {
-            try{                                
+            try{
                 BluetoothManager bm = (BluetoothManager) this.getSystemService(Context.BLUETOOTH_SERVICE);
-                BluetoothAdapter ba = bm.getAdapter();   
+                BluetoothAdapter ba = bm.getAdapter();
                 Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
                 ArrayList<String> bt_names = new ArrayList<String>();
                 MidiManager mm = (MidiManager)this.getSystemService(Context.MIDI_SERVICE);
@@ -492,7 +495,7 @@ MidiManager.OnDeviceOpenedListener{
                 }
             }
             catch(Exception e){
-                Log.e("Makepad", "exception: " + e.getMessage());             
+                Log.e("Makepad", "exception: " + e.getMessage());
                 Log.e("Makepad", "exception: " + e.toString());
             }
         };

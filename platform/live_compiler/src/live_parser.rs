@@ -5,7 +5,7 @@ use {
         slice::Iter
     },
     crate::{
-        makepad_live_tokenizer::{LiveId, Delim},
+        makepad_live_tokenizer::{Delim},
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_id::*,
         makepad_math::{

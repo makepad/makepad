@@ -84,7 +84,7 @@ pub struct App {
         Machine::new("DESKTOP-2:8188", id_lut!(m2)),
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
         Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
-        Machine::new("192.168.1.78:8188", id_lut!(m1)),
+        Machine::new("10.0.0.125:8188", id_lut!(m1)),
        /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
     ])] machines: Vec<Machine>,
     
@@ -105,8 +105,8 @@ pub struct App {
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust(true)] take_photo:bool,
-    #[rust(0.5)] dial1: f32,
-    #[rust(0.5)] dial2: f32
+    #[rust(0.85)] dial1: f32,
+    #[rust(0.85)] dial2: f32
     //#[rust(Instant::now())] last_flip: Instant
 }
 
@@ -902,6 +902,7 @@ impl MatchEvent for App {
     }
     
     fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
+        log!("HERE {:?}", devices);
         let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 30.0);
         cx.use_video_input(&input);
     }

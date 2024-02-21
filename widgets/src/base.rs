@@ -48,10 +48,7 @@ live_design!{
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
-    
-    Html = <HtmlBase>{
-    }
-    
+
     SlidePanel = <SlidePanelBase>{
         animator: {
             closed = {
@@ -663,12 +660,13 @@ live_design!{
             }
         }
     }
-
+    
     MultiWindow = <MultiWindowBase>{}
     PageFlip = <PageFlipBase>{}
     KeyboardView = <KeyboardViewBase>{}
     // todo fix this by allowing reexporting imports
     // for now this works too
+    HtmlBase = <HtmlBase>{}
     KeyboardViewBase = <KeyboardViewBase>{}
     PageFlipBase = <PageFlipBase>{}
     ViewBase = <ViewBase>{}
