@@ -1,5 +1,6 @@
 use makepad_live_id::*;
 
+#[derive(Debug)]
 pub struct HtmlError{
     pub message:String,
     pub position:usize,
@@ -9,17 +10,188 @@ pub struct HtmlError{
 pub struct HtmlDoc{
     pub decoded: String,
     pub nodes: Vec<HtmlNode>,
-    pub errors: Vec<HtmlError>
 }
 
  pub enum HtmlNode{
-     OpenTag(LiveId),
-     CloseTag(LiveId),
-     Attribute(LiveId, usize, usize),
-     Text(usize, usize)
+     OpenTag{lc:LiveId, nc:LiveId},
+     CloseTag{lc:LiveId, nc:LiveId},
+     Attribute{lc:LiveId, nc:LiveId, start:usize, end:usize},
+     Text{start: usize, end:usize}
  }
  
- pub fn parse_html(body:&str)->HtmlDoc{
+ pub struct HtmlWalker<'a>{
+    decoded: &'a str,
+    nodes: &'a [HtmlNode],
+ }
+ 
+ impl<'a> HtmlWalker<'a>{
+    pub fn walk(&self)->Self{
+        if self.nodes.len()>1{
+            for i in 1..self.nodes.len(){
+                // we skip attributes
+                if let HtmlNode::Attribute{..} = &self.nodes[i]{
+                    
+                }
+                else{
+                    return Self{
+                        decoded:self.decoded,
+                        nodes: &self.nodes[i..]
+                    }
+                }
+            }
+        } 
+        Self{
+            decoded:self.decoded,
+            nodes: &self.nodes[0..0]
+        }
+    }
+    
+    pub fn jump_to_close(&self)->Self{
+        if self.nodes.len()>1{
+            let mut depth = 0;
+            for i in 1..self.nodes.len(){
+                match &self.nodes[i]{
+                    HtmlNode::OpenTag{..}=>{
+                        depth +=1;
+                    }
+                    HtmlNode::CloseTag{..}=>{
+                        if depth == 0{
+                            return Self{
+                                decoded:self.decoded,
+                                nodes: &self.nodes[i..]
+                            }
+                        }
+                        depth -= 1;
+                    }
+                    _=>()
+                }
+            }
+        } 
+        Self{
+            decoded:self.decoded,
+            nodes: &self.nodes[0..0]
+        }
+    }
+    
+    pub fn empty(&self)->bool{
+        self.nodes.len()==0
+    }
+    
+    pub fn find_attr_lc(&self, flc:LiveId)->Option<&'a str>{
+        for node in self.nodes{
+            match node{
+                HtmlNode::CloseTag{..}=>{
+                    return None
+                }
+                HtmlNode::Attribute{lc, nc:_, start, end} if *lc == flc=>{
+                    return Some(&self.decoded[*start..*end])
+                }
+                _=>()
+            }
+        }
+        None
+    }
+    
+    pub fn find_attr_nc(&self, fnc:LiveId)->Option<&'a str>{
+        for node in self.nodes{
+            match node{
+                HtmlNode::CloseTag{..}=>{
+                    return None
+                }
+                HtmlNode::Attribute{lc:_, nc, start, end} if *nc == fnc=>{
+                    return Some(&self.decoded[*start..*end])
+                }
+                _=>()
+            }
+        }
+        None
+    }
+    
+    pub fn find_text(&self)->Option<&'a str>{
+        for node in self.nodes{
+            match node{
+                HtmlNode::CloseTag{..}=>{
+                    return None
+                }
+                HtmlNode::Text{start, end} =>{
+                    return Some(&self.decoded[*start..*end])
+                }
+                _=>()
+            }
+        }
+        None
+    }
+        
+    pub fn text(&self)->Option<&'a str>{
+        match &self.nodes[0]{
+            HtmlNode::Text{start,end}=>{
+                Some(&self.decoded[*start..*end])
+            }
+            _=> None
+        }
+    }
+    
+    pub fn open_tag_lc(&self)->Option<LiveId>{
+        match &self.nodes[0]{
+            HtmlNode::OpenTag{lc,nc:_}=>{
+                Some(*lc)
+            }
+            _=> None
+        }
+    }
+    pub fn open_tag_nc(&self)->Option<LiveId>{
+        match &self.nodes[0]{
+            HtmlNode::OpenTag{lc:_,nc}=>{
+                Some(*nc)
+            }
+            _=> None
+        }
+    }
+    pub fn open_tag(&self)->Option<(LiveId,LiveId)>{
+        match &self.nodes[0]{
+            HtmlNode::OpenTag{lc,nc}=>{
+                Some((*lc, *nc))
+            }
+            _=> None
+        }
+    }
+    
+    pub fn close_tag_lc(&self)->Option<LiveId>{
+        match &self.nodes[0]{
+            HtmlNode::CloseTag{lc,nc:_}=>{
+                Some(*lc)
+            }
+            _=> None
+        }
+    }
+    pub fn close_tag_nc(&self)->Option<LiveId>{
+        match &self.nodes[0]{
+            HtmlNode::CloseTag{lc:_,nc}=>{
+                Some(*nc)
+            }
+            _=> None
+        }
+    }
+    pub fn close_tag(&self)->Option<(LiveId,LiveId)>{
+        match &self.nodes[0]{
+            HtmlNode::CloseTag{lc,nc}=>{
+                Some((*lc, *nc))
+            }
+            _=> None
+        }
+    }
+ }
+ 
+ impl HtmlDoc{
+     pub fn walk(&self)->HtmlWalker{
+         HtmlWalker{
+             decoded:&self.decoded,
+             nodes:&self.nodes,
+         }
+     }
+ }
+ 
+ pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>)->HtmlDoc{
      enum State{
          Text(usize),
          ElementName(usize),
@@ -28,11 +200,11 @@ pub struct HtmlDoc{
          ElementCloseScanSpaces,
          ElementSelfClose,
          AttribName(usize),
-         AttribValueEq(LiveId),
-         AttribValueStart(LiveId),
-         AttribValueSq(LiveId, usize),
-         AttribValueDq(LiveId, usize),
-         AttribValueBare(LiveId, usize),
+         AttribValueEq(LiveId,LiveId),
+         AttribValueStart(LiveId,LiveId),
+         AttribValueSq(LiveId, LiveId, usize),
+         AttribValueDq(LiveId, LiveId, usize),
+         AttribValueBare(LiveId, LiveId, usize),
          CommentStartDash1,
          CommentStartDash2,
          CommentEndDash,
@@ -40,18 +212,18 @@ pub struct HtmlDoc{
          CommentBody
      }
              
-     fn process_entity(c:char, body:&str, in_entity:&mut Option<usize>, i:usize, decoded:&mut String, errors:&mut Vec<HtmlError>){
+     fn process_entity(c:char, body:&str, in_entity:&mut Option<usize>, i:usize, decoded:&mut String, last_was_ws:&mut bool, errors:&mut Option<Vec<HtmlError>>){
          if c=='&'{
              if in_entity.is_some(){
-                 errors.push(HtmlError{message:"Unexpected & inside entity".into(), position:i});
+                 if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected & inside entity".into(), position:i})};
              }
              *in_entity = Some(i+1);
          }
-         else if let Some(start) = in_entity{ 
+         else if let Some(start) = in_entity{
              if c == ';'{
                  match match_entity(&body[*start..i-1]){
                      Err(e)=>{
-                         errors.push(HtmlError{message:e, position:i});
+                         if let Some(errors) = errors{errors.push(HtmlError{message:e, position:i})};
                          decoded.push_str(&body[*start..i-1]);
                      }
                      Ok(entity)=>{
@@ -61,29 +233,38 @@ pub struct HtmlDoc{
              }
          }
          else{
-             decoded.push(c);
+             if c.is_whitespace(){
+                 if !*last_was_ws{
+                     decoded.push(c);
+                 }
+                 *last_was_ws = true;
+             }
+             else{
+                 *last_was_ws = false;
+                 decoded.push(c);
+             }
          }
      }
      
-     let mut errors = Vec::new();        
      let mut nodes = Vec::new();
      let mut state = State::Text(0);
      let mut decoded = String::new();
      let mut in_entity = None;
+     let mut last_was_ws = false;
      for (i, c) in body.char_indices(){
          state = match state{
              State::Text(start)=>{ 
                  if c == '<'{
                      if start != i{
                          if let Some(start) = in_entity{
-                             errors.push(HtmlError{message:"Unterminated entity".into(), position:start});
+                              if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
                          }
-                         nodes.push(HtmlNode::Text(start, decoded.len()));
+                         nodes.push(HtmlNode::Text{start, end:decoded.len()});
                      }
                      State::ElementName(i+1)
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut errors);
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors);
                      State::Text(start)
                  }
              }
@@ -96,19 +277,20 @@ pub struct HtmlDoc{
                  }
                  else if c.is_whitespace(){
                      if start == i{
-                         errors.push(HtmlError{message:"Found whitespace at beginning of tag".into(), position:i});
+                          if let Some(errors) = errors{errors.push(HtmlError{message:"Found whitespace at beginning of tag".into(), position:i})};
                          State::Text(i+1)
                      }
                      else{
-                        nodes.push(HtmlNode::OpenTag(LiveId::from_str_lc(&body[start..i])));
+                        nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
                         State::ElementAttrs
                     }
                 }
                  else if c == '/'{
-                     nodes.push(HtmlNode::OpenTag(LiveId::from_str_lc(&body[start..i])));
+                     nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
                      State::ElementSelfClose
                  }
                  else if c == '>'{
+                     nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
                      State::Text(decoded.len())
                  }
                  else{
@@ -117,11 +299,11 @@ pub struct HtmlDoc{
              }
              State::ElementClose(start)=>{
                  if c == '>'{
-                     nodes.push(HtmlNode::CloseTag(LiveId::from_str_lc(&body[start..i])));
+                     nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
                      State::Text(decoded.len())
                  }
                  else if c.is_whitespace(){
-                     nodes.push(HtmlNode::CloseTag(LiveId::from_str_lc(&body[start..i])));
+                     nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
                      State::ElementCloseScanSpaces
                  }
                  else{
@@ -133,7 +315,7 @@ pub struct HtmlDoc{
                      State::Text(i+1)
                  }
                  else if !c.is_whitespace(){
-                     errors.push(HtmlError{message:"Unexpected character after whitespace whilst looking for closing tag >".into(), position:i});
+                      if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected character after whitespace whilst looking for closing tag >".into(), position:i})};
                      State::Text(i+1)
                  }
                  else{
@@ -142,12 +324,11 @@ pub struct HtmlDoc{
              }
              State::ElementSelfClose=>{
                  if c != '>'{
-                     errors.push(HtmlError{message:"Expected > after / self closed tag".into(), position:i});
+                      if let Some(errors) = errors{errors.push(HtmlError{message:"Expected > after / self closed tag".into(), position:i})};
                  }
                  // look backwards to the OpenTag
-                 let begin = nodes.iter().rev().find_map(|v| if let HtmlNode::OpenTag(tag) = v{Some(tag)}else{None}).unwrap();
-                 let tag = begin.clone();
-                 nodes.push(HtmlNode::CloseTag(tag));
+                 let begin = nodes.iter().rev().find_map(|v| if let HtmlNode::OpenTag{lc,nc} = v{Some((lc,nc))}else{None}).unwrap();
+                 nodes.push(HtmlNode::CloseTag{lc:*begin.0,nc:*begin.1});
                  State::Text(decoded.len())
              }
              State::ElementAttrs=>{
@@ -167,113 +348,113 @@ pub struct HtmlDoc{
              }
              State::AttribName(start)=>{
                  if c.is_whitespace() {
-                     State::AttribValueEq(LiveId::from_str_lc(&body[start..i]))
+                     State::AttribValueEq(LiveId::from_str_lc(&body[start..i]),LiveId::from_str(&body[start..i]))
                  }
                  else if c == '='{
-                     State::AttribValueStart(LiveId::from_str_lc(&body[start..i]))
+                     State::AttribValueStart(LiveId::from_str_lc(&body[start..i]),LiveId::from_str_lc(&body[start..i]))
                  }
                  else if c == '/'{
-                     nodes.push(HtmlNode::Attribute(LiveId::from_str_lc(&body[start..i]),0,0));
+                     nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_lc(&body[start..i]),start:0,end:0});
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::Attribute(LiveId::from_str_lc(&body[start..i]),0,0));
+                     nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_lc(&body[start..i]),start:0,end:0});
                      State::Text(decoded.len())
                  }
                  else{
                      State::AttribName(start)
                  }
              }
-             State::AttribValueEq(id)=>{
+             State::AttribValueEq(lc,nc)=>{
                  if c == '/'{
-                     nodes.push(HtmlNode::Attribute(id,0,0));
+                     nodes.push(HtmlNode::Attribute{lc,nc,start:0,end:0});
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::Attribute(id,0,0));
+                     nodes.push(HtmlNode::Attribute{lc,nc,start:0,end:0});
                      State::Text(i+1)
                  }
                  else if c == '='{
-                     State::AttribValueStart(id)
+                     State::AttribValueStart(lc,nc)
                  }
                  else if !c.is_whitespace(){
-                     nodes.push(HtmlNode::Attribute(id,0,0));
+                     nodes.push(HtmlNode::Attribute{lc,nc,start:0,end:0});
                      State::AttribName(i)
                  }
                  else{
-                     State::AttribValueEq(id)
+                     State::AttribValueEq(lc,nc)
                  }
              }
-             State::AttribValueStart(id)=>{
+             State::AttribValueStart(lc,nc)=>{
                  if c == '\"'{
                      // double quoted attrib
-                     State::AttribValueDq(id, decoded.len())
+                     State::AttribValueDq(lc,nc, decoded.len())
                  }
                  else if c == '\''{
                      // single quoted attrib
-                     State::AttribValueSq(id, decoded.len())
+                     State::AttribValueSq(lc,nc, decoded.len())
                  }
                  else if !c.is_whitespace(){
                      decoded.push(c);
-                     State::AttribValueBare(id, decoded.len()-1)
+                     State::AttribValueBare(lc,nc, decoded.len()-1)
                  }
                  else{
-                     State::AttribValueStart(id)
+                     State::AttribValueStart(lc,nc)
                  }
              }
-             State::AttribValueSq(id, start)=>{
+             State::AttribValueSq(lc,nc, start)=>{
                  if c == '\''{
                      if let Some(start) = in_entity{
-                         errors.push(HtmlError{message:"Unterminated entity".into(), position:start});
+                          if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
                      }
-                     nodes.push(HtmlNode::Attribute(id, start, decoded.len()));
+                     nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut errors);
-                     State::AttribValueSq(id, start)
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors);
+                     State::AttribValueSq(lc,nc, start)
                  }
              }
-             State::AttribValueDq(id, start)=>{
+             State::AttribValueDq(lc,nc, start)=>{
                  if c == '\"'{
                      if let Some(start) = in_entity{
-                         errors.push(HtmlError{message:"Unterminated entity".into(), position:start});
+                          if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
                      }
-                     nodes.push(HtmlNode::Attribute(id, start, decoded.len()));
+                     nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut errors);
-                     State::AttribValueDq(id, start)
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors);
+                     State::AttribValueDq(lc,nc, start)
                  }
              }
-             State::AttribValueBare(id, start)=>{
+             State::AttribValueBare(lc,nc, start)=>{
                  if c == '/'{
-                     nodes.push(HtmlNode::Attribute(id, start, decoded.len()));
+                     nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::Attribute(id, start, decoded.len()));
+                     nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
                      State::Text(i+1)
                  }
                  else if c.is_whitespace(){
-                     nodes.push(HtmlNode::Attribute(id, start, decoded.len()));
+                     nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
                      State::ElementAttrs
                  }
                  else{
                      decoded.push(c);
-                     State::AttribValueBare(id, start)
+                     State::AttribValueBare(lc,nc, start)
                  }
              }
              State::CommentStartDash1=>{
                  if c != '-'{
-                     errors.push(HtmlError{message:"Unexpected character looking for - after <!".into(), position:i});
+                      if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected character looking for - after <!".into(), position:i})};
                  }
                  State::CommentStartDash2
              }
              State::CommentStartDash2=>{
                  if c != '-'{
-                     errors.push(HtmlError{message:"Unexpected character looking for - after <!-".into(), position:i});
+                      if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected character looking for - after <!-".into(), position:i})};
                  }
                  State::CommentBody
              }
@@ -304,20 +485,19 @@ pub struct HtmlDoc{
          }
      }
      if let Some(start) = in_entity{
-         errors.push(HtmlError{message:"Unterminated entity".into(), position:start});
+          if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
      }
      if let State::Text(start) = state{
          if start != body.len(){
-             nodes.push(HtmlNode::Text(start, decoded.len()));
+             nodes.push(HtmlNode::Text{start, end:decoded.len()});
          }
      }
      else{ // if we didnt end in text state something is wrong
-         errors.push(HtmlError{message:"HTML Parsing endstate is not HtmlNode::Text".into(), position:body.len()});
+          if let Some(errors) = errors{errors.push(HtmlError{message:"HTML Parsing endstate is not HtmlNode::Text".into(), position:body.len()})};
      }
      HtmlDoc{
          nodes,
          decoded,
-         errors
      }
  }
  
