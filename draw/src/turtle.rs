@@ -499,19 +499,20 @@ impl<'a> Cx2d<'a> {
                 },
                 Flow::RightWrap => {
                     if turtle.pos.x - turtle.origin.x + size.x > turtle.width - turtle.layout.padding.right - turtle.layout.padding.left{
-                        // lets check if we have to move inner itemsthings
+                        
                         pos.x =  turtle.origin.x + turtle.layout.padding.left;
                         let dx = pos.x - turtle.pos.x;                        
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
-                        pos.y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;                        
+                        
+                        pos.y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;
                         let dy = pos.y - turtle.pos.y;
                         turtle.pos.y = pos.y;
+                        
                         turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
                                                 
                         if align_start != self.align_list.len(){
                             self.move_align_list(dx, dy, align_start, self.align_list.len(), false, dvec2(0.0,0.0));
                         }
-                        // we went over the edge, so we need to move our align list to account for this wrapping
                     }
                     else{
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
@@ -568,6 +569,18 @@ impl<'a> Cx2d<'a> {
             let spacing = turtle.child_spacing(self.turtle_walks.len());
             let pos = turtle.pos;
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
+        }
+    }
+    
+    pub fn turtle_new_line(&mut self){
+        let turtle = self.turtles.last_mut().unwrap();
+        turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
+        let next_y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;
+        if turtle.pos.y == next_y{
+            turtle.pos.y += turtle.layout.line_spacing;
+        }
+        else{
+            turtle.pos.y = next_y;
         }
     }
     

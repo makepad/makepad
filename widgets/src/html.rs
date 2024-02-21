@@ -54,17 +54,18 @@ impl Widget for Html {
                 some_id!(h1)=>{
                     tf.push_scale(1.5)
                 },
+                some_id!(br)=>cx.turtle_new_line(),
                 some_id!(b)=>tf.push_bold(),
                 some_id!(strong)=>tf.push_strong(),
                 some_id!(i)=>tf.push_italic(),
                 some_id!(em)=>tf.push_emphasis(),
                 Some(_)=>{ // custom widget
                     let id = if let Some(id) = node.find_attr_lc(live_id!(id)){
-                        LiveId::from_str(id).0
+                        LiveId::from_str(id)
                     }
                     else{
                         auto_id += 1;
-                        auto_id
+                        LiveId(auto_id)
                     };
                     let template = node.open_tag_nc().unwrap();
                     if let Some(item) = tf.item(cx, id, template){

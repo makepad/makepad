@@ -32,7 +32,7 @@ pub struct TextFlow {
     #[layout] layout: Layout,
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] items: ComponentMap<(u64,LiveId), WidgetRef>,
+    #[rust] items: ComponentMap<(LiveId,LiveId), WidgetRef>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
 }
 
@@ -132,7 +132,7 @@ impl Widget for TextFlow {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for ((id,_),entry) in self.items.iter_mut(){
-            scope.with_id(LiveId(*id), |scope| {
+            scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
             entry.handle_event(cx, event, scope);
@@ -210,7 +210,7 @@ impl TextFlow{
     }
     
     
-    pub fn item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
