@@ -117,6 +117,13 @@ impl SlidePanelRef {
             }
         }
     }
+    pub fn is_animating(&self, cx: &mut Cx) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.animator.is_track_animating(cx, id!(closed))
+        } else {
+            false
+        }
+    }
 }
 
 impl SlidePanelSet {
