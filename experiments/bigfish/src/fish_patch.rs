@@ -47,6 +47,7 @@ pub struct FishPatch {
     pub creationid: u64,
     pub undo: UndoState,
 }
+
 pub trait FindBlock {
     fn find_mut(&mut self, id: u64) -> Option<&mut FishBlock>;
     fn find(&self, id: u64) -> Option<&FishBlock>;
@@ -79,9 +80,9 @@ impl FishPatch {
     pub fn connect(&mut self, blockfrom: u64, outputfrom: u64, blockto: u64, intputto: u64) {
         // todo: check if connection exists
         self.undo_checkpoint_start();
-
+        let id = self.get_new_id();
         self.connections.push(FishConnection {
-            id: 0,
+            id: id,
             from_block: blockfrom,
             to_block: blockto,
             from_port: outputfrom,
@@ -89,7 +90,10 @@ impl FishPatch {
         });
         self.undo_checkpoint_end();
     }
-
+    pub fn get_new_id(&mut self) -> u64{
+        self.creationid = self.creationid + 1;
+        self.creationid
+    }
     pub fn undo_checkpoint_start(&mut self) -> usize {
         self.undo.redo_things.clear();
 
@@ -126,14 +130,14 @@ impl FishPatch {
         &mut Vec<(UndoableThing, IdAction, String)>,
         &mut Vec<(UndoableThing, IdAction, String)>,
     ) {
-        match (undo) {
+        match undo {
             true => (&mut self.undo.undo_things, &mut self.undo.redo_things),
             false => (&mut self.undo.redo_things, &mut self.undo.undo_things),
         }
     }
 
     /// pub fn push_action_on_stack(&mut self, bool undo )
-    pub fn action_stack_pump(&mut self, lib: &FishBlockLibrary, undo: bool) {
+    pub fn action_stack_pump(&mut self, _lib: &FishBlockLibrary, undo: bool) {
         if self.get_undo_pair(undo).0.len() == 0 {
             return;
         }
@@ -168,7 +172,7 @@ impl FishPatch {
                     IdAction::Create { id } => {
                         // undo of create = delete
                         let b = self.get_block(id).expect("find block");
-                        let bstring = b.serialize_ron();
+                        let b_string = b.serialize_ron();
 
                         let index = self.blocks.iter().position(|x| x.id == id).unwrap();
                         self.blocks.remove(index);
@@ -176,25 +180,21 @@ impl FishPatch {
                         self.get_undo_pair(undo).1.push((
                             UndoableThing::Block,
                             IdAction::Delete { id: id },
-                            bstring,
+                            b_string,
                         ));
                     }
                     IdAction::Modify { id } => {
                         // deserialize old state in to existing block
-                        let mut Bstring = String::new();
-                        {
-                            let B = self.get_block(id).expect("find block");
-                            Bstring = B.serialize_ron();
-                        }
+                        let b = self.get_block(id).expect("find block");
+                        let b_string = b.serialize_ron();
                         self.get_undo_pair(undo).1.push((
                             UndoableThing::Block,
                             IdAction::Modify { id: id },
-                            Bstring,
-                        ));
-                        {
-                            let mut B = self.blocks.find_mut(id).expect("find block");
-                            B.reload_from_string(&item.2);
-                        }
+                            b_string,
+                        ));                    
+                        let b = self.blocks.find_mut(id).expect("find block");
+                        b.reload_from_string(&item.2);
+                    
                     }
                     IdAction::Delete { id } => {
                         // undo of delete = create
@@ -213,7 +213,7 @@ impl FishPatch {
                     IdAction::Create { id } => {
                         // undo of create = delete
                         let c = self.get_connection(id).expect("find connection");
-                        let cstring = c.serialize_ron();
+                        let c_string = c.serialize_ron();
 
                         let index = self.connections.iter().position(|x| x.id == id).unwrap();
                         self.connections.remove(index);
@@ -221,26 +221,21 @@ impl FishPatch {
                         self.get_undo_pair(undo).1.push((
                             UndoableThing::Connection,
                             IdAction::Delete { id: id },
-                            cstring,
+                            c_string,
                         ));
                     }
 
                     IdAction::Modify { id } => {
                         // deserialize old state in to existing block
-                        let mut cstring = String::new();
-                        {
-                            let c = self.get_connection(id).expect("find connection");
-                            cstring = c.serialize_ron();
-                        }
+                        let c = self.get_connection(id).expect("find connection");
+                        let c_string = c.serialize_ron();
                         self.get_undo_pair(undo).1.push((
                             UndoableThing::Connection,
                             IdAction::Modify { id: id },
-                            cstring,
+                            c_string,
                         ));
-                        {
-                            let mut c = self.connections.find_mut(id).expect("find connection");
-                            c.reload_from_string(&item.2);
-                        }
+                        let c = self.connections.find_mut(id).expect("find connection");
+                        c.reload_from_string(&item.2);
                     }
 
                     IdAction::Delete { id } => {
@@ -279,6 +274,8 @@ impl FishPatch {
 
         let c = self.get_connection(id).expect("find block");
         let cstring = c.serialize_ron();
+
+        println!("deleting connection {}", id);
 
         let index = self.connections.iter().position(|x| x.id == id).unwrap();
         self.connections.remove(index);
@@ -366,13 +363,13 @@ impl FishPatch {
         b.y = y;
         b.id = LiveId::unique().0;
         let id = b.id;
-        let Bstring = b.serialize_ron();
+        let b_string = b.serialize_ron();
 
         self.blocks.push(b);
 
         self.undo
             .undo_things
-            .push((UndoableThing::Block, IdAction::Create { id: id }, Bstring));
+            .push((UndoableThing::Block, IdAction::Create { id: id }, b_string));
 
         self.undo_checkpoint_end();
     }

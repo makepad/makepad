@@ -1,3 +1,5 @@
+
+
 use crate::makepad_widgets::*;
 
 live_design! {
@@ -246,6 +248,8 @@ impl Widget for BlockConnectorButton {
 }
 
 impl BlockConnectorButtonRef {
+
+    #[allow(dead_code)]
     pub fn clicked(&self, actions: &Actions) -> bool {
         if let BlockConnectorButtonAction::Clicked =
             actions.find_widget_action(self.widget_uid()).cast()
@@ -255,6 +259,7 @@ impl BlockConnectorButtonRef {
         false
     }
 
+    #[allow(dead_code)]
     pub fn pressed(&self, actions: &Actions) -> bool {
         if let BlockConnectorButtonAction::Pressed =
             actions.find_widget_action(self.widget_uid()).cast()
@@ -266,9 +271,11 @@ impl BlockConnectorButtonRef {
 }
 
 impl BlockConnectorButtonSet {
+    #[allow(dead_code)]
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.clicked(actions))
     }
+    #[allow(dead_code)]
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.pressed(actions))
     }
