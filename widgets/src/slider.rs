@@ -21,7 +21,6 @@ pub enum SliderType {
     Rotary = shader_enum(3),
 }
 
-
 #[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawSlider {
@@ -57,7 +56,6 @@ pub struct Slider {
     #[rust] pub value: f64,
     #[rust] pub dragging: Option<f64>,
 }
-
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum SliderAction {

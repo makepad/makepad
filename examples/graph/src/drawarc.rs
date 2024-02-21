@@ -130,7 +130,7 @@ pub enum QuadCorner
 }
 
 impl QuadCorner {
-    fn from_u32(value: u32) -> QuadCorner {
+    fn _from_u32(value: u32) -> QuadCorner {
         match value {
             0 => QuadCorner::TopLeft,
             1 => QuadCorner::TopRight,
@@ -142,7 +142,7 @@ impl QuadCorner {
     }
 }
 
-fn get_rect_corner( input:Rect, corner:QuadCorner) -> DVec2{
+fn _get_rect_corner( input:Rect, corner:QuadCorner) -> DVec2{
     match corner{
         QuadCorner::TopLeft => input.pos,
         QuadCorner::TopRight => dvec2(input.pos.x + input.size.x, input.pos.y),
@@ -152,7 +152,7 @@ fn get_rect_corner( input:Rect, corner:QuadCorner) -> DVec2{
     }
 }
 
-fn get_rect_corner_i32( input:Rect, corner:i32) -> DVec2{
+fn _get_rect_corner_i32( input:Rect, corner:i32) -> DVec2{
     match corner{
         0 /*topleft  */  => input.pos,
         1 /*topright */  => dvec2(input.pos.x + input.size.x, input.pos.y),
@@ -217,7 +217,7 @@ impl Widget for VectorCornerArc {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let mut fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
                     
@@ -237,18 +237,18 @@ impl Widget for VectorCornerArc {
             fullrect.pos.y -= hw;
         }
                           
-        let maxpixels = 300. as f64;
+        let _maxpixels = 300. as f64;
                            
-        let mut usecomputedcenter = true;
+        let mut _usecomputedcenter = true;
                     
         let cmid = get_rect_corner_u32(rect, (self.corner as u32 + 2)%4);
         let copp = get_rect_corner_u32(rect, (self.corner as u32 )%4);
                     
-        let mut center = cmid + (cmid-copp);
+        let center = cmid + (cmid-copp);
                             
                     
         let shortedge = min(rect.size.x, rect.size.y);
-        let mut computedradius = shortedge;
+        let computedradius = shortedge;
                           
                     
                                
@@ -287,7 +287,7 @@ impl Widget for VectorArc {
             fullrect.pos.y -= hw;
         }
               
-        let maxpixels = 300. as f64;
+        let _maxpixels = 300. as f64;
         let mut arc_start = self.arc_start;
         let mut arc_end = self.arc_end;
         let mut usecomputedcenter = true;
@@ -318,7 +318,7 @@ impl Widget for VectorArc {
         
         if usecomputedcenter
         {
-            let endcornerid = self.arc_end_corner as u32;
+            let _endcornerid = self.arc_end_corner as u32;
             let startcornerid = self.arc_start_corner as u32;
                                 
             let cornerdelta = ((self.arc_end_corner as i32 - self.arc_start_corner as i32 + 4) as u32)%4;
@@ -330,8 +330,7 @@ impl Widget for VectorArc {
                     match self.arc_winding
                     { 
                         Winding::ClockWise => get_rect_corner_u32(rect, (startcornerid+3)%4), 
-                        Winding::CounterClockWise => get_rect_corner_u32(rect, (startcornerid+1)%4)  
-                                                        
+                        Winding::CounterClockWise => get_rect_corner_u32(rect, (startcornerid+1)%4)                                                          
                     }
                 }
                 3 => {computedradius*=0.5;arc_center = (get_rect_corner_u32(rect, startcornerid) +  get_rect_corner_u32(rect, (startcornerid+3)%4)) /2.}

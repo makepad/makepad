@@ -154,7 +154,7 @@ impl Widget for BlockDeleteButton {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerMove(fe) => if self.dragging {},
+            Hit::FingerMove(_fe) => if self.dragging {},
             Hit::FingerDown(_fe) => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
@@ -215,6 +215,7 @@ impl Widget for BlockDeleteButton {
 }
 
 impl BlockDeleteButtonRef {
+    #[allow(dead_code)]
     pub fn clicked(&self, actions: &Actions) -> bool {
         if let BlockDeleteButtonAction::Clicked =
             actions.find_widget_action(self.widget_uid()).cast()
@@ -224,6 +225,7 @@ impl BlockDeleteButtonRef {
         false
     }
 
+    #[allow(dead_code)]
     pub fn pressed(&self, actions: &Actions) -> bool {
         if let BlockDeleteButtonAction::Pressed =
             actions.find_widget_action(self.widget_uid()).cast()
@@ -235,9 +237,11 @@ impl BlockDeleteButtonRef {
 }
 
 impl BlockDeleteButtonSet {
+    #[allow(dead_code)]
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.clicked(actions))
     }
+    #[allow(dead_code)]
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.pressed(actions))
     }

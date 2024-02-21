@@ -3,6 +3,8 @@ use crate::{
     makepad_draw::*,
     view::*,
     widget::*,
+    WidgetMatchEvent,
+    WindowAction,
 };
 
 live_design!{
@@ -15,6 +17,7 @@ pub struct SlidePanel {
     #[animator] animator: Animator,
     #[live] closed: f64,
     #[live] side: SlideSide,
+    #[rust] screen_width: f64,
     #[rust] next_frame: NextFrame
 }
 
@@ -27,6 +30,7 @@ impl Widget for SlidePanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         //let uid = self.widget_uid();
         self.frame.handle_event(cx, event, scope);
+        self.widget_match_event(cx, event, scope);
         // lets handle mousedown, setfocus
         if self.animator_handle_event(cx, event).must_redraw() {
             self.frame.redraw(cx);
@@ -50,8 +54,22 @@ impl Widget for SlidePanel {
             SlideSide::Left=>{
                 walk.abs_pos = Some(dvec2(-rect.size.x * self.closed, 0.0));
             }
+            SlideSide::Right => {
+                walk.abs_pos = Some(dvec2(self.screen_width - rect.size.x + rect.size.x * self.closed, 0.0));
+            }
         }
         self.frame.draw_walk(cx, scope, walk)
+    }
+}
+
+impl WidgetMatchEvent for SlidePanel {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
+        for action in actions {
+            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
+                self.screen_width = ce.new_geom.inner_size.x;
+                self.redraw(cx);
+            }
+        }
     }
 }
 
@@ -59,6 +77,7 @@ impl Widget for SlidePanel {
 #[live_ignore]
 pub enum SlideSide{
     #[pick] Left,
+    Right,
     Top
 }
 
@@ -96,6 +115,13 @@ impl SlidePanelRef {
             else{
                 inner.animator_play(cx, id!(closed.on))
             }
+        }
+    }
+    pub fn is_animating(&self, cx: &mut Cx) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.animator.is_track_animating(cx, id!(closed))
+        } else {
+            false
         }
     }
 }
