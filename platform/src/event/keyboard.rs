@@ -6,7 +6,7 @@ use {
         live_traits::*,
         makepad_derive_live::*,
         makepad_micro_serde::*,
-        cx::Cx, 
+        cx::Cx,
         event::{
             finger::KeyModifiers,
         },
@@ -34,16 +34,16 @@ impl CxKeyboard {
             Default::default()
         }
     }
-    
+
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.text_ime_dismissed = false;
         self.next_key_focus = focus_area;
     }
-    
+
     pub fn revert_key_focus(&mut self) {
         self.next_key_focus = self.prev_key_focus;
     }
-    
+
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
         self.key_focus == focus_area
     }
@@ -55,7 +55,7 @@ impl CxKeyboard {
     pub fn reset_text_ime_dismissed(&mut self) {
         self.text_ime_dismissed = false;
     }
-    
+
     pub (crate) fn update_area(&mut self, old_area: Area, new_area: Area) {
         if self.key_focus == old_area {
             self.key_focus = new_area
@@ -73,7 +73,7 @@ impl CxKeyboard {
         std::mem::swap(&mut keys_down, &mut self.keys_down);
         keys_down
     }*/
-    
+
     pub (crate) fn cycle_key_focus_changed(&mut self) -> Option<(Area, Area)> {
         if self.next_key_focus != self.key_focus {
             self.prev_key_focus = self.key_focus;
@@ -82,7 +82,7 @@ impl CxKeyboard {
         }
         None
     }
-    
+
     #[allow(dead_code)]
     pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
         if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
@@ -90,7 +90,7 @@ impl CxKeyboard {
         }
         self.keys_down.push(key_event);
     }
-    
+
     #[allow(dead_code)]
     pub (crate) fn process_key_up(&mut self, key_event: KeyEvent) {
         if let Some(pos) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
@@ -134,7 +134,9 @@ impl Default for KeyCode {
 #[derive(Live, LiveHook, Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub enum KeyCode {
     #[pick] Escape,
-    
+
+    Back,
+
     Backtick,
     Key0,
     Key1,
@@ -148,10 +150,10 @@ pub enum KeyCode {
     Key9,
     Minus,
     Equals,
-    
+
     Backspace,
     Tab,
-    
+
     KeyQ,
     KeyW,
     KeyE,
@@ -165,7 +167,7 @@ pub enum KeyCode {
     LBracket,
     RBracket,
     ReturnKey,
-    
+
     KeyA,
     KeyS,
     KeyD,
@@ -178,7 +180,7 @@ pub enum KeyCode {
     Semicolon,
     Quote,
     Backslash,
-    
+
     KeyZ,
     KeyX,
     KeyC,
@@ -189,12 +191,12 @@ pub enum KeyCode {
     Comma,
     Period,
     Slash,
-    
+
     Control,
     Alt,
     Shift,
     Logo,
-    
+
     Space,
     Capslock,
     F1,
@@ -209,18 +211,18 @@ pub enum KeyCode {
     F10,
     F11,
     F12,
-    
+
     PrintScreen,
     ScrollLock,
     Pause,
-    
+
     Insert,
     Delete,
     Home,
     End,
     PageUp,
     PageDown,
-    
+
     Numpad0,
     Numpad1,
     Numpad2,
@@ -231,7 +233,7 @@ pub enum KeyCode {
     Numpad7,
     Numpad8,
     Numpad9,
-    
+
     NumpadEquals,
     NumpadSubtract,
     NumpadAdd,
@@ -240,12 +242,12 @@ pub enum KeyCode {
     NumpadDivide,
     Numlock,
     NumpadEnter,
-    
+
     ArrowUp,
     ArrowDown,
     ArrowLeft,
     ArrowRight,
-    
+
     Unknown,
 }
 

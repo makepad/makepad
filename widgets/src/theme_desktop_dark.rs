@@ -10,7 +10,28 @@ live_design! {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
-
+    
+    THEME_FONT_BOLD = {
+        font_size: 9.4,
+        font: {
+            path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf")
+        }
+    }
+    
+    THEME_FONT_ITALIC = {
+        font_size: 9.4,
+        font: {
+            path: dep("crate://self/resources/IBMPlexSans-Italic.ttf")
+        }
+    }
+    
+    THEME_FONT_BOLD_ITALIC = {
+        font_size: 9.4,
+        font: {
+            path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
+        }
+    }
+    
     THEME_FONT_DATA = {
         font_size: 9.4,
         font: {
@@ -140,8 +161,13 @@ live_design! {
     const THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
     const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
     const THEME_SPLITTER_SIZE = 5.0
-
-
+ 
+    Html = <HtmlBase>{
+        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
+        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
+        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
+        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
+    }
 
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,

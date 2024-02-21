@@ -9,8 +9,6 @@
 //! Main image logic.
 #![allow(clippy::doc_markdown)]
 
-use alloc::string::ToString;
-use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use makepad_zune_core::bytestream::{ZByteReader, ZReaderTrait};

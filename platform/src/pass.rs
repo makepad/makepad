@@ -2,12 +2,10 @@ use crate::{
     makepad_live_compiler::{
         LiveType,
         LiveNode,
-        LiveId,
         LiveModuleId,
         LiveTypeInfo,
         LiveNodeSliceApi
     },
-    live_traits::{LiveNew, LiveApply},
     makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
     makepad_live_id::*,
     makepad_math::*,
