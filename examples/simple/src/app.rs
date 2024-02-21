@@ -46,8 +46,8 @@ live_design!{
                     line_spacing: 10,
                     Button = <Button> {
                         text: "Hello world"
-                    }
-                    html:"this is <b>BOLD text</b><i>italic</i> <Button>Hi</Button><b><i>Bold italic</i></b>"
+                    } 
+                    html:"this is <b>BOLD text</b>&nbsp;<br/><i>italic</i>  <Button>Hi</Button><br/><b><i>Bold italic</i></b>"
                 }
             }
         }
@@ -55,7 +55,7 @@ live_design!{
 }
   
 app_main!(App);
-
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,

@@ -219,14 +219,16 @@ pub struct HtmlDoc{
              }
              *in_entity = Some(i+1);
          }
-         else if let Some(start) = in_entity{
+         else if let Some(start) = *in_entity{
              if c == ';'{
-                 match match_entity(&body[*start..i-1]){
+                 match match_entity(&body[start..i]){
                      Err(e)=>{
+                         *in_entity = None;
                          if let Some(errors) = errors{errors.push(HtmlError{message:e, position:i})};
-                         decoded.push_str(&body[*start..i-1]);
+                         decoded.push_str(&body[start..i]);
                      }
                      Ok(entity)=>{
+                         *in_entity = None;
                          decoded.push(std::char::from_u32(entity).unwrap());
                      }
                  }
