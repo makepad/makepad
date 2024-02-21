@@ -25,7 +25,9 @@ pub struct TextFlow {
     #[live] font_size: f64,
     #[walk] walk: Walk,
     #[rust] bold_counter: usize,
+    #[rust] strong_counter: usize,
     #[rust] italic_counter: usize,
+    #[rust] emphasis_counter: usize,
     #[rust] font_size_stack: FontSizeStack,
     #[layout] layout: Layout,
     #[redraw] #[rust] area:Area,
@@ -161,7 +163,17 @@ impl TextFlow{
         if self.bold_counter>0{
             self.bold_counter -= 1;
         }
-    } 
+    }
+
+    pub fn push_strong(&mut self){
+        self.strong_counter += 1;
+    }
+    
+    pub fn pop_strong(&mut self){
+        if self.strong_counter>0{
+            self.strong_counter -= 1;
+        }
+    }
     
     pub fn push_italic(&mut self){
         self.italic_counter += 1;
@@ -170,6 +182,16 @@ impl TextFlow{
     pub fn pop_italic(&mut self){
         if self.italic_counter>0{
             self.italic_counter -= 1;
+        }
+    }
+
+    pub fn push_emphasis(&mut self){
+        self.emphasis_counter += 1;
+    }
+    
+    pub fn pop_emphasis(&mut self){
+        if self.emphasis_counter>0{
+            self.emphasis_counter -= 1;
         }
     }
     
@@ -200,19 +222,19 @@ impl TextFlow{
     
     pub fn draw_text(&mut self, cx:&mut Cx2d, text:&str){
         if let Some(DrawState::Drawing) = self.draw_state.get(){
-            let dt = if self.bold_counter > 0{
-                if self.italic_counter > 0{
+            let dt = if self.bold_counter > 0 || self.strong_counter > 0 {
+                if self.italic_counter > 0 || self.emphasis_counter > 0 {
                     &mut self.draw_bold_italic
                 }
-                else{
+                else {
                     &mut self.draw_bold
                 }
             }
-            else{
-                if self.italic_counter>0{
+            else {
+                if self.italic_counter > 0 || self.emphasis_counter > 0 {
                     &mut self.draw_italic
                 }
-                else{
+                else {
                     &mut self.draw_normal
                 }
             };

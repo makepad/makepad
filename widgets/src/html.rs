@@ -55,7 +55,9 @@ impl Widget for Html {
                     tf.push_scale(1.5)
                 },
                 some_id!(b)=>tf.push_bold(),
+                some_id!(strong)=>tf.push_strong(),
                 some_id!(i)=>tf.push_italic(),
+                some_id!(em)=>tf.push_emphasis(),
                 Some(_)=>{ // custom widget
                     let id = if let Some(id) = node.find_attr_lc(live_id!(id)){
                         LiveId::from_str(id).0
@@ -76,7 +78,9 @@ impl Widget for Html {
             match node.close_tag_lc(){
                 some_id!(h1)=>tf.pop_size(),
                 some_id!(b)=>tf.pop_bold(),
+                some_id!(strong)=>tf.pop_strong(),
                 some_id!(i)=>tf.pop_italic(),
+                some_id!(em)=>tf.pop_emphasis(),
                 _=>()
             }
             if let Some(text) = node.text(){
