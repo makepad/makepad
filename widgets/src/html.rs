@@ -66,6 +66,7 @@ impl Widget for Html {
                     };
                     let template = node.open_tag_nc().unwrap();
                     if let Some(item) = tf.item(cx, id, template){
+                        item.set_text(node.find_text().unwrap_or(""));
                         item.draw_all(cx, scope);
                     }
                     node = node.jump_to_close();
