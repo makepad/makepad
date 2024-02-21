@@ -309,6 +309,8 @@ use crate::event::KeyCode;
 
 pub(crate) fn android_to_makepad_key_code(key_code: u32) -> KeyCode {
     match key_code {
+        4 => KeyCode::Back,
+
         7 => KeyCode::Key0,
         8 => KeyCode::Key1,
         9 => KeyCode::Key2,
@@ -324,7 +326,7 @@ pub(crate) fn android_to_makepad_key_code(key_code: u32) -> KeyCode {
         20 => KeyCode::ArrowDown,
         21 => KeyCode::ArrowLeft,
         22 => KeyCode::ArrowRight,
-        
+
         29 => KeyCode::KeyA,
         30 => KeyCode::KeyB,
         31 => KeyCode::KeyC,
