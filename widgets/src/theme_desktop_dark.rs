@@ -1898,6 +1898,8 @@ live_design! {
             }
         }
     }
+    
+    
 
     PortalList = <PortalListBase> {
         width: Fill

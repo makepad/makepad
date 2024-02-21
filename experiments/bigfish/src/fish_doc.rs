@@ -13,12 +13,12 @@ pub struct FishDoc {
 }
 impl Default for FishDoc {
     fn default() -> Self {
-        let mut M = FishDoc {
+        let m = FishDoc {
             name: String::new(),
             patches: vec![],
             lib: FishBlockLibrary::default(),
         };
-        M
+        m
     }
 }
 
