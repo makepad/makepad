@@ -211,7 +211,7 @@ impl<'a> WordIterator<'a> {
                 }
                 if c == '\n' {
                     self.last_is_whitespace = false;
-                    self.word_start = i;
+                    self.word_start = i + 1;
                     self.word_width = 0.0;
                     return Some(WordIteratorItem {with_newline: true, end: i, ..ret})
                 }

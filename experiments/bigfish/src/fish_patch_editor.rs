@@ -35,10 +35,8 @@ live_design! {
         draw_bg: {
             fn pixel(self) -> vec4 {
 
-                let Pos = floor(self.pos*self.rect_size *0.10);
-                let PatternMask = mod(Pos.x + mod(Pos.y, 2.0), 2.0);
-                let s  = 0.74 - self.pos.y * 0.03;
-                return mix( vec4(0.7,0.7,0.7,1), vec4(s,s,s, 1.0), PatternMask);
+              
+                return vec4(0.03,0.03,0.03,1);
             }
         }
     }
