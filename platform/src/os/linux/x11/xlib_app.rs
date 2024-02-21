@@ -600,9 +600,14 @@ impl XlibApp {
     
     pub fn terminate_event_loop(&mut self) {
         self.event_loop_running = false;
-        unsafe {x11_sys::XCloseIM(self.xim)};
-        unsafe {x11_sys::XCloseDisplay(self.display)};
-        self.display = ptr::null_mut();
+        if !self.xim.is_null() {
+            unsafe {x11_sys::XCloseIM(self.xim)};
+            self.xim = ptr::null_mut();
+        }
+        if !self.display.is_null() {
+            unsafe {x11_sys::XCloseDisplay(self.display)};
+            self.display = ptr::null_mut();
+        }
     }
     
     pub fn start_timer(&mut self, id: u64, timeout: f64, repeats: bool) {
@@ -649,7 +654,7 @@ impl XlibApp {
                 MouseCursor::WResize => self.load_first_cursor(&[b"left_side\0"]),
                 
                 MouseCursor::Default => self.load_first_cursor(&[b"left_ptr\0"]),
-                MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair"]),
+                MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair\0"]),
                 MouseCursor::Hand => self.load_first_cursor(&[b"left_ptr\0", b"hand1\0"]),
                 MouseCursor::Arrow => self.load_first_cursor(&[b"left_ptr\0\0"]),
                 MouseCursor::Move => self.load_first_cursor(&[b"move\0"]),
