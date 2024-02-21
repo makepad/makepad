@@ -111,7 +111,7 @@ pub enum Event {
     ///
     /// * This event may be sent multiple times over the course of the application's lifecycle.
     /// * This is a good point to save temporary application states in case the application
-    ///   is about to be stopped or destroyed. 
+    ///   is about to be stopped or destroyed.
     ///
     /// | Platform | Lifecycle Function/Callback |
     /// |----------|-----------------------------|
@@ -129,23 +129,23 @@ pub enum Event {
     AppLostFocus,
     NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
-    
+
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
-    
+
     MouseDown(MouseDownEvent),
     MouseMove(MouseMoveEvent),
     MouseUp(MouseUpEvent),
     MouseLeave(MouseLeaveEvent),
     TouchUpdate(TouchUpdateEvent),
     Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
-    
+
     Timer(TimerEvent),
-    
+
     Signal,
     Trigger(TriggerEvent),
     MacosMenuCommand(LiveId),
@@ -156,11 +156,11 @@ pub enum Event {
     TextInput(TextInputEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
-    
+
     Drag(DragEvent),
     Drop(DropEvent),
     DragEnd,
-    
+
     Actions(ActionsBuf),
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
@@ -173,7 +173,8 @@ pub enum Event {
     VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
- 
+
+    BackPressed,
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
@@ -182,7 +183,7 @@ impl Event{
     pub fn name(&self)->&'static str{
         Self::name_from_u32(self.to_u32())
     }
-    
+
     pub fn name_from_u32(v:u32)->&'static str{
         match v{
             1=>"Startup",
@@ -193,29 +194,29 @@ impl Event{
 
             5=>"Resume",
             6=>"Pause",
-            
+
             7=>"Draw",
             8=>"LiveEdit",
             9=>"AppGotFocus",
             10=>"AppLostFocus",
             11=>"NextFrame",
             12=>"XRUpdate",
-                
+
             13=>"WindowDragQuery",
             14=>"WindowCloseRequested",
             15=>"WindowClosed",
             16=>"WindowGeomChange",
             17=>"VirtualKeyboard",
             18=>"ClearAtlasses",
-                
+
             19=>"MouseDown",
             20=>"MouseMove",
             21=>"MouseUp",
             22=>"TouchUpdate",
             23=>"Scroll",
-                
+
             24=>"Timer",
-                
+
             25=>"Signal",
             26=>"Trigger",
             27=>"MacosMenuCommand",
@@ -226,11 +227,11 @@ impl Event{
             32=>"TextInput",
             33=>"TextCopy",
             34=>"TextCut",
-                
+
             35=>"Drag",
             36=>"Drop",
             37=>"DragEnd",
-                
+
             38=>"AudioDevices",
             39=>"MidiPorts",
             40=>"VideoInputs",
@@ -244,13 +245,14 @@ impl Event{
             47=>"TextureHandleReady",
             48=>"MouseLeave",
             49=>"Actions",
-                                                 
+            50=>"BackPressed",
+
             #[cfg(target_arch = "wasm32")]
-            50=>"ToWasmMsg",
+            51=>"ToWasmMsg",
             _=>panic!()
         }
     }
-    
+
     pub fn to_u32(&self)->u32{
         match self{
             Self::Startup=>1,
@@ -261,29 +263,29 @@ impl Event{
 
             Self::Resume=>5,
             Self::Pause=>6,
-                        
+
             Self::Draw(_)=>7,
             Self::LiveEdit=>8,
             Self::AppGotFocus=>9,
             Self::AppLostFocus=>10,
             Self::NextFrame(_)=>11,
             Self::XRUpdate(_)=>12,
-                            
+
             Self::WindowDragQuery(_)=>13,
             Self::WindowCloseRequested(_)=>14,
             Self::WindowClosed(_)=>15,
             Self::WindowGeomChange(_)=>16,
             Self::VirtualKeyboard(_)=>17,
             Self::ClearAtlasses=>18,
-                            
+
             Self::MouseDown(_)=>19,
             Self::MouseMove(_)=>20,
             Self::MouseUp(_)=>21,
             Self::TouchUpdate(_)=>22,
             Self::Scroll(_)=>23,
-                            
+
             Self::Timer(_)=>24,
-                            
+
             Self::Signal=>25,
             Self::Trigger(_)=>26,
             Self::MacosMenuCommand(_)=>27,
@@ -294,11 +296,11 @@ impl Event{
             Self::TextInput(_)=>32,
             Self::TextCopy(_)=>33,
             Self::TextCut(_)=>34,
-                            
+
             Self::Drag(_)=>35,
             Self::Drop(_)=>36,
             Self::DragEnd=>37,
-                            
+
             Self::AudioDevices(_)=>38,
             Self::MidiPorts(_)=>39,
             Self::VideoInputs(_)=>40,
@@ -312,9 +314,10 @@ impl Event{
             Self::TextureHandleReady(_)=>47,
             Self::MouseLeave(_)=>48,
             Self::Actions(_)=>49,
-                                     
+            Self::BackPressed=>50,
+
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>50,
+            Self::ToWasmMsg(_)=>51,
         }
     }
 }
@@ -329,7 +332,7 @@ pub enum Hit{
     TextInput(TextInputEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
-    
+
     FingerScroll(FingerScrollEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
@@ -337,7 +340,9 @@ pub enum Hit{
     FingerHoverOver(FingerHoverEvent),
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
-    
+
+    BackPressed,
+
     Nothing
 }
 
@@ -386,7 +391,7 @@ impl DrawEvent{
             || self.draw_lists.len() != 0
             || self.draw_lists_and_children.len() != 0
     }
-    
+
     pub fn draw_list_will_redraw(&self, cx:&Cx, draw_list_id:DrawListId)->bool{
          if self.redraw_all {
             return true;
@@ -484,18 +489,18 @@ impl Timer {
         }
         None
     }
-    
+
     pub fn is_timer(&self, event:&TimerEvent)->Option<TimerEvent>{
         if event.timer_id == self.0{
             return Some(event.clone())
         }
         None
     }
-    
+
     pub fn empty() -> Timer {
         Timer(0)
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
