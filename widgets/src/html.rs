@@ -59,11 +59,11 @@ impl Widget for Html {
                 some_id!(i)=>tf.push_italic(),
                 Some(_)=>{ // custom widget
                     let id = if let Some(id) = node.find_attr_lc(live_id!(id)){
-                        LiveId::from_str(id).0
+                        LiveId::from_str(id)
                     }
                     else{
                         auto_id += 1;
-                        auto_id
+                        LiveId(auto_id)
                     };
                     let template = node.open_tag_nc().unwrap();
                     if let Some(item) = tf.item(cx, id, template){
