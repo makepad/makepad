@@ -19,8 +19,6 @@ Half of the complexity comes from the jpeg spec, because progressive decoding,
 is one hell of a ride.
 
 */
-use alloc::string::ToString;
-use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::cmp::min;
 

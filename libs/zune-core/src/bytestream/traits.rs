@@ -11,7 +11,6 @@
 //! This exposes the traits and implementations for readers
 //! and writers in the zune family of decoders and encoders.
 
-use alloc::vec::Vec;
 use core::ops::Range;
 
 /// The underlying reader trait

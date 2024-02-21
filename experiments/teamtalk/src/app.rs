@@ -345,11 +345,13 @@ impl App {
         let wind_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let wind_send_addr = "10.0.0.202:44443";
         let platform_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let platform_send_addr = "10.0.0.114:51010";
+        let platform_send_addr = "10.0.0.126:51010";
                 
         // open up port udp X and forward packets to both wind + platform
         let forca_recv = UdpSocket::bind("0.0.0.0:51010").unwrap();
+        
         std::thread::spawn(move || {
+            
             let mut buffer = [0u8;1024];
             while let Ok((length, _addr)) = forca_recv.recv_from(&mut buffer){
                 let forza = ForzaTelemetryDash::deserialize_bin(&buffer[0..length]).unwrap();
@@ -357,10 +359,10 @@ impl App {
                 // ok so speed is 20.0 at 40mph
                 // max fan is 127.0
                 // lets say 100mph = 60 = 127.
-                //log!("{}", speed);
+                log!("{}", speed);
                 let buf = [(speed*2.2).min(255.0) as u8,];
                 let _ = wind_socket.send_to(&buf, wind_send_addr);
-                let _ = platform_socket.send_to(&&buffer[0..length], platform_send_addr);
+                let _ = platform_socket.send_to(&buffer[0..length], platform_send_addr);
             }
         });
     }
@@ -713,10 +715,11 @@ impl App {
                     dmx_f32(0.0, dmx, &[smoke], 1);
                 }
                 // in time modulus 
-                let _smoke2 = 310;
-                
-                let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
-                let _ = rc_car_socket.send_to(&buf, rc_car_send_addr);
+                let smoke2 = 310;
+                dmx_f32(state.dial_b[7], dmx, &[smoke2], 1);
+                dmx_f32(state.dial_b[6], dmx, &[smoke2], 2);
+                //let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
+                //let _ = rc_car_socket.send_to(&buf, rc_car_send_addr);
                 
                                 
                 //map_wargb(state.dial[7], 1.0, dmx, &[spot + 16 - 1]); // Strobe RGB
