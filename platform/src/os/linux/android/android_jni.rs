@@ -38,6 +38,7 @@ pub enum TouchPhase{
 #[derive(Debug)]
 pub enum FromJavaMessage {
     Init(AndroidParams),
+    BackPressed,
     SurfaceChanged {
         window: *mut ndk_sys::ANativeWindow,
         width: i32,
@@ -109,8 +110,12 @@ pub enum FromJavaMessage {
     },
     Pause,
     Resume,
+    Start,
     Stop,
     Destroy,
+    WindowFocusChanged {
+        has_focus: bool,
+    },
 }
 unsafe impl Send for FromJavaMessage {}
 
@@ -164,7 +169,7 @@ unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANati
     ndk_sys::ANativeWindow_fromSurface(env, surface)
 }
 
-#[no_mangle] 
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
@@ -177,6 +182,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
         density: density as f64,
         is_emulator: is_emulator != 0,
     }));
+}
+
+
+#[no_mangle]
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onBackPressed(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+) {
+    // crate::log!("Java_dev_makepad_android_MakepadNative_onBackPressed");
+    send_from_java_message(FromJavaMessage::BackPressed);
+}
+
+#[no_mangle]
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnStart(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+) {
+    send_from_java_message(FromJavaMessage::Start);
 }
 
 #[no_mangle]
@@ -203,13 +226,23 @@ unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnStop(
     send_from_java_message(FromJavaMessage::Stop);
 }
 
-
 #[no_mangle]
 unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnDestroy(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
 ) {
     send_from_java_message(FromJavaMessage::Destroy);
+}
+
+#[no_mangle]
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnWindowFocusChanged(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    has_focus: jni_sys::jboolean,
+) {
+    send_from_java_message(FromJavaMessage::WindowFocusChanged {
+        has_focus: has_focus != 0,
+    });
 }
 
 #[no_mangle]
@@ -259,7 +292,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
     let touch_count = unsafe {ndk_utils::call_int_method!(env, event, "getPointerCount", "()I")};
 
     let time = unsafe {ndk_utils::call_long_method!(env, event, "getEventTime", "()J")} as i64;
-    
+
     let mut touches = Vec::with_capacity(touch_count as usize);
     for touch_index in 0..touch_count {
         let id = unsafe {ndk_utils::call_int_method!(env, event, "getPointerId", "(I)I", touch_index)};
@@ -267,7 +300,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
         let y = unsafe {ndk_utils::call_float_method!(env, event, "getY", "(I)F", touch_index)};
         let rotation_angle = unsafe {ndk_utils::call_float_method!(env, event, "getOrientation", "(I)F", touch_index)} as f64;
         let force = unsafe {ndk_utils::call_float_method!(env, event, "getPressure", "(I)F", touch_index)} as f64;
-        
+
         touches.push(TouchPoint {
             state: {
                 if action_index == touch_index {
@@ -439,7 +472,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoPlaybackP
     duration: jni_sys::jlong,
     surface_texture: jni_sys::jobject
 ) {
-    let env = attach_jni_env();    
+    let env = attach_jni_env();
 
     let global_ref = (**env).NewGlobalRef.unwrap()(env, surface_texture);
 
@@ -557,7 +590,7 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
         return None;
     }
     let length = ndk_sys::AAsset_getLength64(asset);
-    
+
     let mut buffer = Vec::new();
     buffer.resize(length as usize, 0u8);
     if ndk_sys::AAsset_read(asset, buffer.as_ptr() as *mut _, length as _) > 0 {
@@ -674,12 +707,12 @@ pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
         return java_string_array_to_vec(env, string_array);
     }
 }
-  
+
 pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     unsafe {
         let env = attach_jni_env();
         ndk_utils::call_void_method!(env, ACTIVITY, "openAllMidiDevices", "(J)V", delay);
-    }  
+    }
 }
 
 pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, source: VideoSource, external_texture_handle: u32, autoplay: bool, should_loop: bool) {
@@ -695,7 +728,7 @@ pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id
                 source.len() as i32,
                 source.as_ptr() as *const jni_sys::jbyte,
             );
-        
+
             java_body as jni_sys::jobject
         },
         VideoSource::Network(url) | VideoSource::Filesystem(url) => {
@@ -725,9 +758,9 @@ pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_
     let update_tex_image_cstring = CString::new("maybeUpdateTexImage").unwrap();
     let signature_cstring = CString::new("()Z").unwrap();
     let mid_update_tex_image = (**env).GetMethodID.unwrap()(
-        env, 
-        class, 
-        update_tex_image_cstring.as_ptr(), 
+        env,
+        class,
+        update_tex_image_cstring.as_ptr(),
         signature_cstring.as_ptr()
     );
 
