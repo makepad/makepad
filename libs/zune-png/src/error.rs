@@ -7,7 +7,7 @@
  */
 
 //! Errors possible during png operations
-use alloc::string::String;
+
 use core::fmt::{Debug, Formatter};
 
 /// Errors possible during decoding

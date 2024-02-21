@@ -13,13 +13,11 @@ use {
             LiveFieldKind,
             LiveModuleId,
             LiveType,
-            LiveId,
             LiveNode,
             LiveIdAsProp,
             LiveNodeSliceApi,  
             LiveNodeVecApi
          },
-        live_traits::{LiveNew},
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_id::*,
         makepad_derive_live::*,

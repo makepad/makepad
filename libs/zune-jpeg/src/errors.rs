@@ -9,7 +9,6 @@
 //! Contains most common errors that may be encountered in decoding a Decoder
 //! image
 
-use alloc::string::String;
 use core::fmt::{Debug, Display, Formatter};
 
 use crate::misc::{

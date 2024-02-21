@@ -47,7 +47,6 @@
 //!
 //! Knock yourself out.
 use alloc::format;
-use alloc::string::ToString;
 use core::cmp::min;
 
 use makepad_zune_core::bytestream::{ZByteReader, ZReaderTrait};

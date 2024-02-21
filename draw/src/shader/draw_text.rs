@@ -189,6 +189,7 @@ impl<'a> WordIterator<'a> {
             font_size_total
         }
     }
+    
     fn next_word(&mut self, font: &mut CxFont) -> Option<WordIteratorItem> {
         if let Some(char_iter) = &mut self.char_iter {
             while let Some((i, c)) = char_iter.next() {
@@ -210,7 +211,7 @@ impl<'a> WordIterator<'a> {
                 }
                 if c == '\n' {
                     self.last_is_whitespace = false;
-                    self.word_start = i;
+                    self.word_start = i + 1;
                     self.word_width = 0.0;
                     return Some(WordIteratorItem {with_newline: true, end: i, ..ret})
                 }
@@ -285,7 +286,7 @@ pub struct DrawText {
     #[calc] pub draw_clip: Vec4,
     #[calc] pub char_depth: f32,
     #[calc] pub delta: Vec2,
-    #[calc] pub font_size: f32,
+    #[calc] pub shader_font_size: f32,
     #[calc] pub advance: f32,
 }
 
@@ -473,7 +474,7 @@ impl DrawText {
                     self.char_depth = char_depth;
                     self.delta.x = delta_x as f32;
                     self.delta.y = delta_y as f32;
-                    self.font_size = self.text_style.font_size as f32;
+                    self.shader_font_size = self.text_style.font_size as f32;
                     self.advance = advance as f32; //char_offset as f32;
                     char_depth += zbias_step;
                     mi.instances.extend_from_slice(self.draw_vars.as_slice());
@@ -605,8 +606,52 @@ impl DrawText {
         }
     }
     
+    pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str) {
+        
+        // this walks the turtle per word
+        if text.len() == 0 {
+            return
+        }        
+        let font_id = if let Some(font_id) = self.text_style.font.font_id{font_id}else{
+            //log!("Draw text without font");
+            return
+        };
+        let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
+        let fonts_atlas = &mut*fonts_atlas;
+                
+        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
+        let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+        
+        // lets get the width of the current turtle
+        // we need it for the next_word item to properly break off
+        let padded_rect = cx.turtle().padded_rect();
+        
+        let mut iter = WordIterator::new(
+            text.char_indices(),
+            padded_rect.size.x,
+            font_size_logical * self.font_scale, 
+        );
+        
+        while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
+            let walk_rect = cx.walk_turtle(Walk {
+                abs_pos: None,
+                margin: Margin::default(),
+                width: Size::Fixed(word.width),
+                height: Size::Fixed(line_height)
+            });
+            // make sure our iterator uses the xpos from the turtle
+            self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
+        }
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
+    }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) {
+        if text.len() == 0 {
+            return
+        }        
         let font_id = if let Some(font_id) = self.text_style.font.font_id{font_id}else{
             //log!("Draw text without font");
             return
@@ -615,11 +660,12 @@ impl DrawText {
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
         
+        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
+        let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+                
         //let in_many = self.many_instances.is_some();
         // lets compute the geom
-        if text.len() == 0 {
-            return
-        }
+
         //if !in_many {
         //    self.begin_many_instances_internal(cx, fonts_atlas);
         //}
@@ -664,9 +710,6 @@ impl DrawText {
                     }
                 }
                 TextWrap::Word => {
-                    let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
-                    let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
-                    
                     let rect = cx.walk_turtle(Walk {
                         abs_pos: walk.abs_pos,
                         margin: walk.margin,
@@ -691,7 +734,6 @@ impl DrawText {
                     }
                 }
                 TextWrap::Line => {
-                    let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
                     // lets just output it and walk it
                     let rect = cx.walk_turtle(Walk {
                         abs_pos: walk.abs_pos,
@@ -709,6 +751,7 @@ impl DrawText {
                 }
             }
         }
+        
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
         }
