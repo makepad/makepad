@@ -11,7 +11,6 @@
 //!
 //! The data is extracted from a SOF header.
 
-use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use crate::decoder::MAX_COMPONENTS;

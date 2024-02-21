@@ -14,7 +14,8 @@ pub struct Layout {
     #[live] pub padding: Padding,
     #[live] pub align: Align,
     #[live] pub flow: Flow,
-    #[live] pub spacing: f64
+    #[live] pub spacing: f64,
+    #[live] pub line_spacing: f64
 }
 
 impl Default for Layout{
@@ -26,7 +27,8 @@ impl Default for Layout{
             padding: Padding::default(),
             align: Align{x:0.0,y:0.0},
             flow: Flow::Right,
-            spacing: 0.0
+            spacing: 0.0,
+            line_spacing: 0.0
         }
     }
 }
@@ -76,7 +78,8 @@ pub enum Flow {
     Down,
     //Left,
     //Up,
-    Overlay
+    Overlay, 
+    RightWrap
 }
 
 #[derive(Copy, Clone, Debug, Live)]
@@ -184,6 +187,10 @@ impl<'a> Cx2d<'a> {
                     other_axis: walk.width,
                     pos: pos + spacing
                 })
+            },
+            Flow::RightWrap if walk.width.is_fill() => {
+                error!("flow RightWrap does not support fill childnodes");
+                None
             },
             _ => {
                 None
@@ -320,7 +327,7 @@ impl<'a> Cx2d<'a> {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard_area, guard_area)
         }
         
-        // computed height
+        // computed width / height
         let w = if turtle.width.is_nan() {
             Size::Fixed(turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x)
         }
@@ -360,6 +367,10 @@ impl<'a> Cx2d<'a> {
                     }
                 }
             },
+            Flow::RightWrap=>{
+                if turtle.defer_count > 0{panic!()}
+                // for now we only support align:0,0
+            }
             Flow::Down => {
                 if turtle.defer_count > 0 {
                     let left = turtle.height_left();
@@ -463,14 +474,17 @@ impl<'a> Cx2d<'a> {
                     turtle.update_width_max(pos.x, size.x);
                     turtle.update_height_max(pos.y,size.y);
                 }
+                Flow::RightWrap=>{
+                    panic!("Cannot use abs_pos in a flow::Rightwrap");
+                }
             }
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
             let spacing = turtle.child_spacing(self.turtle_walks.len());
-            let pos = turtle.pos;
-        
+            let mut pos = turtle.pos;
             let margin_size = walk.margin.size();
+            let defer_index = turtle.defer_count;
             match turtle.layout.flow {
                 Flow::Right => {
                     turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
@@ -481,6 +495,34 @@ impl<'a> Cx2d<'a> {
                     else {
                         turtle.update_width_max(turtle.pos.x, 0.0);
                         turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
+                    }
+                },
+                Flow::RightWrap => {
+                    if turtle.pos.x - turtle.origin.x + size.x > turtle.width - turtle.layout.padding.right - turtle.layout.padding.left{
+                        // lets check if we have to move inner itemsthings
+                        pos.x =  turtle.origin.x + turtle.layout.padding.left;
+                        let dx = pos.x - turtle.pos.x;                        
+                        turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
+                        pos.y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;                        
+                        let dy = pos.y - turtle.pos.y;
+                        turtle.pos.y = pos.y;
+                        turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
+                                                
+                        if align_start != self.align_list.len(){
+                            self.move_align_list(dx, dy, align_start, self.align_list.len(), false, dvec2(0.0,0.0));
+                        }
+                        // we went over the edge, so we need to move our align list to account for this wrapping
+                    }
+                    else{
+                        turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
+                        if size.x < 0.0 {
+                            turtle.update_width_min(turtle.pos.x, 0.0);
+                            turtle.update_height_max(turtle.pos.y,size.y + margin_size.y); 
+                        }
+                        else {
+                            turtle.update_width_max(turtle.pos.x, 0.0);
+                            turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
+                        }
                     }
                 },
                 Flow::Down => {
@@ -502,7 +544,7 @@ impl<'a> Cx2d<'a> {
             
             self.turtle_walks.push(TurtleWalk {
                 align_start,
-                defer_index: turtle.defer_count,
+                defer_index,
                 rect: Rect {pos, size: size + margin_size}
             });
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
@@ -735,6 +777,9 @@ impl Turtle {
                 Flow::Overlay => {
                     dvec2(0.0, 0.0)
                 }
+                Flow::RightWrap=>{
+                    dvec2(self.layout.spacing, 0.0)
+                }
             }
         }
         else {
@@ -758,6 +803,13 @@ impl Turtle {
         }
     }
     
+    pub fn rel_pos_padded(&self) -> DVec2 {
+        DVec2 {
+            x: self.pos.x - self.origin.x - self.layout.padding.left,
+            y: self.pos.y - self.origin.y - self.layout.padding.right
+        }
+    }
+    
     pub fn pos(&self) -> DVec2 {
         self.pos
     }
@@ -772,7 +824,7 @@ impl Turtle {
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
-                    Flow::Right => {
+                    Flow::Right | Flow::RightWrap=> {
                         max_zero_keep_nan(self.width_left() - margin.width())
                     },
                     Flow::Down | Flow::Overlay => {
@@ -794,7 +846,7 @@ impl Turtle {
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
-                    Flow::Right | Flow::Overlay => {
+                    Flow::RightWrap | Flow::Right | Flow::Overlay => {
                         let r = max_zero_keep_nan(self.height - self.layout.padding.height() - margin.height());
                         if r.is_nan() {
                             return self.height_used - margin.height() - self.layout.padding.bottom
@@ -895,7 +947,10 @@ impl DeferWalk {
                             height: *other_axis
                         }
                     },
-                    Flow::Down => {
+                    Flow::RightWrap => {
+                        panic!()
+                    }
+                    Flow::Down => { 
                         let left = turtle.height_left();
                         let part = left / turtle.defer_count as f64;
                         Walk {

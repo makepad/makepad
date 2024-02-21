@@ -11,8 +11,6 @@
 //! This file deals with decoding header information in a jpeg file
 //!
 use alloc::format;
-use alloc::string::ToString;
-use alloc::vec::Vec;
 
 use makepad_zune_core::bytestream::ZReaderTrait;
 use makepad_zune_core::colorspace::ColorSpace;
