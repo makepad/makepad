@@ -66,19 +66,24 @@ use {
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
-        
+
         self.call_event_handler(&Event::Startup);
         self.redraw_all();
-        
+
         self.start_network_live_file_watcher();
-        
+
         while !self.os.quit {
             for event in self.os.timers.get_dispatch() {
                 self.call_event_handler(&event);
-            }                    
-            
+            }
+
             while let Ok(msg) = from_java_rx.try_recv() {
+                // crate::log!("log main_loop: {:?}", msg);
                 match msg {
+                    FromJavaMessage::BackPressed => {
+                        crate::log!("FromJava: onBackPressed");
+                        self.call_event_handler(&Event::BackPressed);
+                    }
                     FromJavaMessage::SurfaceCreated {window} => unsafe {
                         self.os.display.as_mut().unwrap().update_surface(window);
                     },
@@ -90,7 +95,7 @@ impl Cx {
                         width,
                         height,
                     } => {
-                        
+
                         unsafe {
                             self.os.display.as_mut().unwrap().update_surface(window);
                         }
@@ -192,6 +197,11 @@ impl Cx {
                                     //to_java.paste_from_clipboard();
                                 }
                             } else {
+                                if makepad_keycode == KeyCode::Back {
+                                    crate::log!("FromJava: KeyCode BackPressed");
+                                    self.call_event_handler(&Event::BackPressed);
+                                }
+
                                 e = Event::KeyDown(
                                     KeyEvent {
                                         key_code: makepad_keycode,
@@ -209,7 +219,7 @@ impl Cx {
                         let control = meta_state & ANDROID_META_CTRL_MASK != 0;
                         let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                         let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
-                        
+
                         let e = Event::KeyUp(
                             KeyEvent {
                                 key_code: makepad_keycode,
@@ -319,7 +329,7 @@ impl Cx {
                                 android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
                             }
                         }
-                        
+
                         let e = Event::VideoPlaybackResourcesReleased(
                             VideoPlaybackResourcesReleasedEvent {
                                 video_id: LiveId(video_id)
@@ -372,7 +382,7 @@ impl Cx {
                     }
                 }
             }
-            
+
             if SignalToUI::check_and_clear_ui_signal() {
                 self.handle_media_signals();
                 self.call_event_handler(&Event::Signal);
@@ -388,13 +398,13 @@ impl Cx {
                 self.call_event_handler(&e);
             }
 
-            
+
             if self.handle_live_edit() {
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
             }
             self.handle_platform_ops();
-            
+
             if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(self.os.timers.time_now());
@@ -403,12 +413,12 @@ impl Cx {
                     self.call_draw_event();
                     self.opengl_compile_shaders();
                 }
-                
+
                 if self.os.first_after_resize {
                     self.os.first_after_resize = false;
                     self.redraw_all();
                 }
-                
+
                 self.handle_repaint();
             }
             else {
@@ -423,30 +433,30 @@ impl Cx {
                 unsafe {
                     let env = attach_jni_env();
                     let updated = android_jni::to_java_update_tex_image(env, *surface_texture);
-                    if updated { 
+                    if updated {
                         videos_to_update.push(*live_id);
                     }
-                }    
+                }
         }
         videos_to_update
     }
-    
+
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
         let (from_java_tx, from_java_rx) = mpsc::channel();
 
         std::panic::set_hook(Box::new(|info| {
             crate::log!("Custom panic hook: {}", info);
         }));
-        
+
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
-        
+
         // lets start a thread
         std::thread::spawn(move || {
             unsafe {attach_jni_env()};
             let mut cx = startup();
             cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
-            
+
             let window = loop {
                 match from_java_rx.try_recv() {
                     Ok(FromJavaMessage::Init(params)) => {
@@ -473,17 +483,18 @@ impl Cx {
                 let s = CString::new(s).unwrap();
                 libegl.eglGetProcAddress.unwrap()(s.as_ptr())
             })};
-            
+
             let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
                 egl_display,
                 egl_config,
                 window as _,
                 std::ptr::null_mut(),
             )};
-            
+
             if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
+
             cx.maybe_warn_hardware_support();
 
             cx.os.display = Some(CxAndroidDisplay {
@@ -495,9 +506,9 @@ impl Cx {
                 window
             });
             cx.main_loop(from_java_rx);
-            
+
             let display = cx.os.display.take().unwrap();
-            
+
             unsafe {
                 (display.libegl.eglMakeCurrent.unwrap())(
                     display.egl_display,
@@ -511,7 +522,7 @@ impl Cx {
             }
         });
     }
-    
+
     pub fn start_network_live_file_watcher(&mut self) {
 
         /*
@@ -525,7 +536,7 @@ impl Cx {
             let discovery = UdpSocket::bind("0.0.0.0:41533").unwrap();
             discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
             discovery.set_broadcast(true).unwrap();
-            
+
             let mut other_uid = [0u8; 8];
             let mut host_addr = None;
             // nonblockingly (timeout=1ns) check our discovery socket for peers
@@ -546,8 +557,8 @@ impl Cx {
             log!("WE CAN CONNECT {:?}", host_addr);
         });*/
     }
-    
-    /*    
+
+    /*
     pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
         if let Some(text) = content {
             let e = Event::TextInput(
@@ -561,7 +572,7 @@ impl Cx {
             self.after_every_event(&to_java);
         }
     }
-    
+
     pub fn from_java_on_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
         let e = Event::TextCut(
             TextClipboardEvent {
@@ -572,8 +583,8 @@ impl Cx {
         self.after_every_event(&to_java);
     }
    */
-    
-    
+
+
     pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
             if let Some(data) = unsafe {to_java_load_asset(path)} {
@@ -586,23 +597,23 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
+
         self.setup_render_pass(pass_id);
-        
+
         // keep repainting in a loop
         self.passes[pass_id].paint_dirty = false;
         //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
-        
+
         unsafe {
             gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
-        
+
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
             self.passes[pass_id].clear_color
         }
@@ -616,7 +627,7 @@ impl Cx {
             PassClearDepth::InitWith(depth) => depth,
             PassClearDepth::ClearWith(depth) => depth
         };
-        
+
         if !self.passes[pass_id].dont_clear {
             unsafe {
                 //gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
@@ -626,23 +637,23 @@ impl Cx {
             }
         }
         Self::set_default_depth_and_blend_mode();
-        
+
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-        
+
         self.render_view(
             pass_id,
             draw_list_id,
             &mut zbias,
             zbias_step,
         );
-        
+
         //to_java.swap_buffers();
         //unsafe {
         //direct_app.drm.swap_buffers_and_wait(&direct_app.egl);
         //}
     }
-    
+
     pub (crate) fn handle_repaint(&mut self) {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
@@ -657,7 +668,7 @@ impl Cx {
                     unsafe {
                         if let Some(display) = &mut self.os.display {
                             (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
-                            
+
                         }
                     }
                 }
@@ -670,10 +681,10 @@ impl Cx {
                 }
             }
         }
-        
-        
+
+
     }
-    
+
     fn handle_platform_ops(&mut self) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -779,7 +790,7 @@ impl CxOsApi for Cx {
         self.live_expand();
         self.live_scan_dependencies();
     }
-    
+
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
@@ -818,7 +829,7 @@ pub struct CxOs {
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub keyboard_closed: f64,
-    
+
     pub quit: bool,
     pub fullscreen: bool,
     pub (crate) timers: PollTimers,
@@ -838,7 +849,7 @@ impl CxAndroidDisplay {
         (self.libegl.eglDestroySurface.unwrap())(self.egl_display, self.surface);
         self.surface = std::ptr::null_mut();
     }
-    
+
     unsafe fn update_surface(&mut self, window: *mut ndk_sys::ANativeWindow) {
         if !self.window.is_null() {
             ndk_sys::ANativeWindow_release(self.window);
@@ -847,23 +858,23 @@ impl CxAndroidDisplay {
         if self.surface.is_null() == false {
             self.destroy_surface();
         }
-        
+
         self.surface = (self.libegl.eglCreateWindowSurface.unwrap())(
             self.egl_display,
             self.egl_config,
             window as _,
             std::ptr::null_mut(),
         );
-        
+
         assert!(!self.surface.is_null());
-        
+
         let res = (self.libegl.eglMakeCurrent.unwrap())(
             self.egl_display,
             self.surface,
             self.surface,
             self.egl_context,
         );
-        
+
         assert!(res != 0);
     }
 }
