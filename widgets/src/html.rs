@@ -54,6 +54,7 @@ impl Widget for Html {
                 some_id!(h1)=>{
                     tf.push_scale(1.5)
                 },
+                some_id!(br)=>cx.turtle_mut().new_line(),
                 some_id!(b)=>tf.push_bold(),
                 some_id!(i)=>tf.push_italic(),
                 Some(_)=>{ // custom widget
