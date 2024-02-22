@@ -28,7 +28,6 @@ pub struct TextFlow {
     #[rust] strong_counter: usize,
     #[rust] italic_counter: usize,
     #[rust] emphasis_counter: usize,
-    #[rust] blockquote_counter: usize,
     #[rust] font_size_stack: FontSizeStack,
     #[layout] layout: Layout,
     #[redraw] #[rust] area:Area,
