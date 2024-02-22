@@ -12,6 +12,7 @@ pub struct HtmlDoc{
     pub nodes: Vec<HtmlNode>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
  pub enum HtmlNode{
      OpenTag{lc:LiveId, nc:LiveId},
      CloseTag{lc:LiveId, nc:LiveId},
@@ -123,8 +124,8 @@ pub struct HtmlDoc{
     }
         
     pub fn text(&self)->Option<&'a str>{
-        match &self.nodes[0]{
-            HtmlNode::Text{start,end}=>{
+        match &self.nodes.first(){
+            Some(HtmlNode::Text{start,end})=>{
                 Some(&self.decoded[*start..*end])
             }
             _=> None
@@ -132,24 +133,24 @@ pub struct HtmlDoc{
     }
     
     pub fn open_tag_lc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
-            HtmlNode::OpenTag{lc,nc:_}=>{
+        match self.nodes.first() {
+            Some(HtmlNode::OpenTag{lc,nc:_})=>{
                 Some(*lc)
             }
             _=> None
         }
     }
     pub fn open_tag_nc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
-            HtmlNode::OpenTag{lc:_,nc}=>{
+        match self.nodes.first() {
+            Some(HtmlNode::OpenTag{lc:_,nc})=>{
                 Some(*nc)
             }
             _=> None
         }
     }
     pub fn open_tag(&self)->Option<(LiveId,LiveId)>{
-        match &self.nodes[0]{
-            HtmlNode::OpenTag{lc,nc}=>{
+        match self.nodes.first() {
+            Some(HtmlNode::OpenTag{lc,nc})=>{
                 Some((*lc, *nc))
             }
             _=> None
@@ -157,24 +158,24 @@ pub struct HtmlDoc{
     }
     
     pub fn close_tag_lc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
-            HtmlNode::CloseTag{lc,nc:_}=>{
+        match &self.nodes.first() {
+            Some(HtmlNode::CloseTag{lc,nc:_})=>{
                 Some(*lc)
             }
             _=> None
         }
     }
     pub fn close_tag_nc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
-            HtmlNode::CloseTag{lc:_,nc}=>{
+        match self.nodes.first() {
+            Some(HtmlNode::CloseTag{lc:_,nc})=>{
                 Some(*nc)
             }
             _=> None
         }
     }
     pub fn close_tag(&self)->Option<(LiveId,LiveId)>{
-        match &self.nodes[0]{
-            HtmlNode::CloseTag{lc,nc}=>{
+        match self.nodes.first() {
+            Some(HtmlNode::CloseTag{lc,nc})=>{
                 Some((*lc, *nc))
             }
             _=> None

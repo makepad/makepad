@@ -572,14 +572,17 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    pub fn turtle_new_line(&mut self){
+    /// Advance the turtle vertically downwards to the next line.
+    ///
+    /// A `line_spacing_scale` value of `1.0` results in default line spacing.
+    pub fn turtle_new_line(&mut self, line_spacing_scale: f64) {
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;
-        if turtle.pos.y == next_y{
-            turtle.pos.y += turtle.layout.line_spacing;
+        let next_y = turtle.height_used + turtle.origin.y + (turtle.layout.line_spacing * line_spacing_scale);
+        if turtle.pos.y == next_y {
+            turtle.pos.y += turtle.layout.line_spacing * line_spacing_scale;
         }
-        else{
+        else {
             turtle.pos.y = next_y;
         }
     }

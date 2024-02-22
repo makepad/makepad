@@ -28,6 +28,7 @@ pub struct TextFlow {
     #[rust] strong_counter: usize,
     #[rust] italic_counter: usize,
     #[rust] emphasis_counter: usize,
+    #[rust] blockquote_counter: usize,
     #[rust] font_size_stack: FontSizeStack,
     #[layout] layout: Layout,
     #[redraw] #[rust] area:Area,
@@ -160,9 +161,7 @@ impl TextFlow{
     }
     
     pub fn pop_bold(&mut self){
-        if self.bold_counter>0{
-            self.bold_counter -= 1;
-        }
+        self.bold_counter = self.bold_counter.saturating_sub(1);
     }
 
     pub fn push_strong(&mut self){
@@ -170,9 +169,7 @@ impl TextFlow{
     }
     
     pub fn pop_strong(&mut self){
-        if self.strong_counter>0{
-            self.strong_counter -= 1;
-        }
+        self.strong_counter = self.strong_counter.saturating_sub(1);
     }
     
     pub fn push_italic(&mut self){
@@ -180,9 +177,7 @@ impl TextFlow{
     }
     
     pub fn pop_italic(&mut self){
-        if self.italic_counter>0{
-            self.italic_counter -= 1;
-        }
+        self.italic_counter = self.italic_counter.saturating_sub(1);
     }
 
     pub fn push_emphasis(&mut self){
@@ -190,11 +185,9 @@ impl TextFlow{
     }
     
     pub fn pop_emphasis(&mut self){
-        if self.emphasis_counter>0{
-            self.emphasis_counter -= 1;
-        }
+        self.emphasis_counter = self.emphasis_counter.saturating_sub(1);
     }
-    
+
     pub fn push_size(&mut self, size: f64){
         self.font_size_stack.push(size);
     }
