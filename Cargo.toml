@@ -1,5 +1,6 @@
 workspace.members = [
 #    "code_editor",
+    "experiments/websocket-windows",
     "examples/fractal_zoom", 
     "examples/ui_zoo", 
     "examples/news_feed", 
@@ -13,7 +14,7 @@ workspace.members = [
     "examples/sdxl",
     "examples/slides",
     "examples/graph",
-    #    "libs/futures",
+#    "libs/futures",
 #    "libs/wasm_bridge/test",
     "studio",
 #    "tools/video_mixer",
