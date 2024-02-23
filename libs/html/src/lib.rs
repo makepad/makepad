@@ -20,6 +20,7 @@ pub struct HtmlDoc{
      Text{start: usize, end:usize}
  }
  
+ #[derive(Debug, Clone)]
  pub struct HtmlWalker<'a>{
     decoded: &'a str,
     nodes: &'a [HtmlNode],

@@ -10,9 +10,18 @@ use {
 };
 
 live_design!{
+    import makepad_widgets::label::LabelBase;
+    
     HtmlBase = {{Html}} {
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
+
+        Unsupported = <LabelBase> {
+            draw_text: {
+                color: #f00
+            }
+            text = "<Unsupported HTML tag>"
+        }
     }
 }
 
@@ -31,6 +40,10 @@ impl LiveHook for Html{
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
+    }
+    // hook the apply flow to add `Unsupported` to the templates in this Html `TextFlow`.
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        self.text_flow.apply_value_instance(cx, apply, index, nodes)
     }
 }
  
@@ -66,18 +79,33 @@ impl Widget for Html {
                     // there's probably a better way to do this by setting margins...
                     cx.turtle_new_line(2.0);
                 }
-                Some(_)=>{ // custom widget
+                Some(_custom)=>{ // custom widget
+                    let mut id_str = None;
                     let id = if let Some(id) = node.find_attr_lc(live_id!(id)){
+                        id_str = Some(id.to_owned());
                         LiveId::from_str(id)
                     }
                     else{
                         auto_id += 1;
+                        log!("Using auto_id {auto_id}");
                         LiveId(auto_id)
                     };
-                    let template = node.open_tag_nc().unwrap();
+                    log!("_custom widget {_custom:?}, id_str {id_str:?}");
+                    let template = node.open_tag_nc()
+                        .expect(&format!("Failed to find template for HTML node {id_str:?}"));
                     if let Some(item) = tf.item(cx, id, template){
                         item.set_text(node.find_text().unwrap_or(""));
                         item.draw_all(cx, scope);
+                    } else {
+                        log!("Failed to create item for HTML node {id_str:?}, id {id:?}, template {template:?}");
+                        let item = tf.item(cx, id, live_id!(Unsupported))
+                            .expect("Failed to create Unsupported Html item");
+                        item.set_text(node.find_text().unwrap_or(""));
+                        let text = item.text();
+                        log!("Unsupported item text: {:?}", text);
+                        item.draw_all(cx, scope);
+                        tf.draw_text(cx, text.trim());
+
                     }
                     node = node.jump_to_close();
                 }
@@ -104,6 +132,7 @@ impl Widget for Html {
                 _=>()
             }
             if let Some(text) = node.text(){
+                log!("Node text: {text}");
                 tf.draw_text(cx, text.trim());
             }
             node = node.walk();

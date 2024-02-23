@@ -44,6 +44,7 @@ impl LiveHook for TextFlow{
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+                    log!("Adding template to TextFlow: id {id:?}, live_ptr: {live_ptr:?}");
                     self.templates.insert(id, live_ptr);
                     // lets apply this thing over all our childnodes with that template
                     for ((_, templ_id), node) in self.items.iter_mut() {

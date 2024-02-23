@@ -23,6 +23,7 @@ pub struct Label {
 impl Widget for Label {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
+        log!("Drawing label {}, align: {:?}, walk {:?}", self.text.as_ref(), self.align, self.walk);
         self.draw_text.draw_walk(cx, walk.with_add_padding(self.padding), self.align, self.text.as_ref());
         DrawStep::done()
     }
