@@ -689,7 +689,18 @@ impl DrawText {
                             height: Size::Fixed(height)
                         });
                         
-                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip], fonts_atlas);
+                        // Ensure the chunk before the ellipsis is aligned down to a char boundary
+                        let chunk = text.get(0..ellip).unwrap_or_else(|| {
+                            let mut new_ellip = ellip.saturating_sub(1);
+                            while new_ellip > 0 {
+                                if let Some(s) = text.get(0..new_ellip) {
+                                    return s;
+                                }
+                                new_ellip -= 1;
+                            }
+                            ""
+                        });
+                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), chunk, fonts_atlas);
                         self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots], fonts_atlas);
                     }
                     else { // we might have space to h-align
