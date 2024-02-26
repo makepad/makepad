@@ -25,6 +25,7 @@ pub struct TextFlow {
     #[live] draw_fixed: DrawText,
     #[live] draw_quote: DrawQuad,
     #[live] draw_block: DrawQuad,
+    #[live] draw_sep: DrawQuad,
     #[live] font_size: f64,
     #[walk] walk: Walk,
     #[rust] bold_counter: usize,
@@ -35,6 +36,7 @@ pub struct TextFlow {
     #[layout] layout: Layout,
     #[live] quote_layout: Layout,
     #[live] quote_walk: Walk,
+    #[live] sep_walk: Walk,
     #[live] block_layout: Layout,
     #[live] block_walk: Walk,
     #[redraw] #[rust] area:Area,
@@ -248,6 +250,10 @@ impl TextFlow{
     pub fn pop_block(&mut self, cx:&mut Cx2d){
         self.draw_block.draw_vars.area = self.area_stack.pop();
         self.draw_block.end(cx);
+    }
+    
+    pub fn sep(&mut self, cx:&mut Cx2d){
+        self.draw_sep.draw_walk(cx, self.sep_walk);
     }
     
     pub fn push_quote(&mut self, cx:&mut Cx2d){

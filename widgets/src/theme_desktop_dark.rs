@@ -174,6 +174,20 @@ live_design! {
         quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
         
         quote_walk:{height:Fit,width:Fill}
+        sep_walk:{height:4, width: Fill},
+        draw_sep:{
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    1.,
+                    self.rect_size.x-1,
+                    self.rect_size.y-2.,
+                    2.
+                );
+                return sdf.fill(#6)
+            }
+        }
         draw_block:{
             fn pixel(self) -> vec4 {
                 return #7

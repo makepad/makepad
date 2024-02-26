@@ -60,6 +60,7 @@ impl Widget for Html {
                 } 
                 some_id!(block_quote)=>tf.push_quote(cx),
                 some_id!(br)=>cx.turtle_new_line(),
+                some_id!(sep)=>tf.sep(cx),
                 some_id!(b)=>tf.push_bold(),
                 some_id!(i)=>tf.push_italic(),
                 Some(_)=>{ // custom widget
