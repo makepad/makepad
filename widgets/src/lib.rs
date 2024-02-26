@@ -165,7 +165,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::vectorline::live_design(cx);
     crate::stack_navigation::live_design(cx);
     crate::expandable_panel::live_design(cx);
-    crate::html::live_design(cx);
-    crate::markdown::live_design(cx);
     crate::text_flow::live_design(cx);
+    crate::markdown::live_design(cx);
+    crate::html::live_design(cx);
 }
