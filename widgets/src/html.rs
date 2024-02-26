@@ -54,7 +54,11 @@ impl Widget for Html {
                 some_id!(h1)=>{
                     tf.push_scale(1.5)
                 },
-                some_id!(block_quote)=>tf.push_block(cx),
+                some_id!(code)=>{
+                    tf.push_fixed();
+                    tf.push_block(cx);
+                } 
+                some_id!(block_quote)=>tf.push_quote(cx),
                 some_id!(br)=>cx.turtle_new_line(),
                 some_id!(b)=>tf.push_bold(),
                 some_id!(i)=>tf.push_italic(),
@@ -65,7 +69,7 @@ impl Widget for Html {
                     else{
                         auto_id += 1;
                         LiveId(auto_id)
-                    };
+                    }; 
                     let template = node.open_tag_nc().unwrap();
                     if let Some(item) = tf.item(cx, id, template){
                         item.set_text(node.find_text().unwrap_or(""));
@@ -76,7 +80,11 @@ impl Widget for Html {
                 _=>()
             } 
             match node.close_tag_lc(){
-                some_id!(block_quote)=>tf.pop_block(cx),
+                some_id!(block_quote)=>tf.pop_quote(cx),
+                some_id!(code)=>{
+                    tf.pop_fixed();
+                    tf.pop_block(cx);
+                }
                 some_id!(h1)=>tf.pop_size(),
                 some_id!(b)=>tf.pop_bold(),
                 some_id!(i)=>tf.pop_italic(),

@@ -167,9 +167,19 @@ live_design! {
         draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
         draw_bold: {text_style:<THEME_FONT_BOLD>{}}
         draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
-        block_layout:{padding:{left:15,top:10,right:10,bottom:10}},
-        block_walk:{width:Fill}
+        draw_fixed: {text_style:<THEME_FONT_CODE>{}}
+        
+        block_layout:{padding:{left:10,top:10,right:10,bottom:14}},
+        block_walk:{height:Fit,width:Fill}
+        quote_layout:{padding:{left:15,top:10,right:10,bottom:10}},
+        
+        quote_walk:{height:Fit,width:Fill}
         draw_block:{
+            fn pixel(self) -> vec4 {
+                return #7
+            }
+        }
+        draw_quote:{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
