@@ -30,14 +30,19 @@ pub struct TextFlow {
     #[live] draw_italic: DrawText,
     #[live] draw_bold: DrawText,
     #[live] draw_bold_italic: DrawText,
+    #[live] draw_fixed: DrawText,
+    #[live] draw_quote: DrawQuad,
     #[live] draw_block: DrawQuad,
     #[live] font_size: f64,
     #[walk] walk: Walk,
     #[rust] bold_counter: usize,
     #[rust] italic_counter: usize,
+    #[rust] fixed_counter: usize,
     #[rust] font_size_stack: FontSizeStack,
     #[rust] area_stack: AreaStack,
     #[layout] layout: Layout,
+    #[live] quote_layout: Layout,
+    #[live] quote_walk: Walk,
     #[live] block_layout: Layout,
     #[live] block_walk: Walk,
     #[redraw] #[rust] area:Area,
@@ -188,6 +193,7 @@ impl TextFlow{
         // if we dont we just dont wrap
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
+        self.draw_quote.append_to_draw_call(cx);
         self.draw_block.append_to_draw_call(cx);
     }
     
@@ -195,7 +201,7 @@ impl TextFlow{
         // lets end the turtle with how far we walked
         cx.end_turtle_with_area(&mut self.area);
         self.items.retain_visible();
-    }
+    } 
     
     pub fn push_bold(&mut self){
         self.bold_counter += 1;
@@ -204,6 +210,16 @@ impl TextFlow{
     pub fn pop_bold(&mut self){
         if self.bold_counter>0{
             self.bold_counter -= 1;
+        }
+    } 
+    
+    pub fn push_fixed(&mut self){
+        self.fixed_counter += 1;
+    }
+        
+    pub fn pop_fixed(&mut self){
+        if self.fixed_counter>0{
+            self.fixed_counter -= 1;
         }
     } 
     
@@ -242,6 +258,17 @@ impl TextFlow{
         self.draw_block.end(cx);
     }
     
+    pub fn push_quote(&mut self, cx:&mut Cx2d){
+        // alright we are going to push a block with a layout and a walk
+        self.draw_quote.begin(cx, self.quote_walk, self.quote_layout);
+        self.area_stack.push(self.draw_quote.draw_vars.area);
+    }
+        
+    pub fn pop_quote(&mut self, cx:&mut Cx2d){
+        self.draw_quote.draw_vars.area = self.area_stack.pop();
+        self.draw_quote.end(cx);
+    }
+    
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
@@ -254,20 +281,26 @@ impl TextFlow{
     
     pub fn draw_text(&mut self, cx:&mut Cx2d, text:&str){
         if let Some(DrawState::Drawing) = self.draw_state.get(){
-            let dt = if self.bold_counter > 0{
-                if self.italic_counter > 0{
-                    &mut self.draw_bold_italic
-                }
-                else{
-                    &mut self.draw_bold
-                }
+            
+            let dt = if self.fixed_counter > 0{
+                &mut self.draw_fixed
             }
-            else{
-                if self.italic_counter>0{
-                    &mut self.draw_italic
+            else {
+                if self.bold_counter > 0{
+                    if self.italic_counter > 0{
+                        &mut self.draw_bold_italic
+                    }
+                    else{
+                        &mut self.draw_bold
+                    }
                 }
                 else{
-                    &mut self.draw_normal
+                    if self.italic_counter>0{
+                        &mut self.draw_italic
+                    }
+                    else{
+                        &mut self.draw_normal
+                    }
                 }
             };
             let fs = self.font_size_stack.value(self.font_size);
