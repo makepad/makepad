@@ -738,7 +738,6 @@ impl LiveRegistry {
             if !self.live_files[file_id.to_index()].reexpand {
                 continue;
             }
-            
             let mut out_doc = LiveExpanded::new();
             std::mem::swap(&mut out_doc, &mut self.live_files[file_id.to_index()].expanded);
             

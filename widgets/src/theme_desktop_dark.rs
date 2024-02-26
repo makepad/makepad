@@ -169,50 +169,76 @@ live_design! {
         draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
         draw_fixed: {text_style:<THEME_FONT_CODE>{}}
         
-        block_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
-        block_walk:{height:Fit,width:Fill}
-        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
+        code_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
+        code_walk:{height:Fit,width:Fill}
         
+        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
         quote_walk:{height:Fit,width:Fill}
+        
+        list_item_layout:{flow: RightWrap, padding:{left:15,top:0,right:10,bottom:0}},
+        list_item_walk:{height:Fit,width:Fill}
+        
         sep_walk:{height:4, width: Fill},
-        draw_sep:{
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    0.,
-                    1.,
-                    self.rect_size.x-1,
-                    self.rect_size.y-2.,
-                    2.
-                );
-                return sdf.fill(#6)
-            }
-        }
+        
         draw_block:{
             fn pixel(self) -> vec4 {
-                return #7
-            }
-        }
-        draw_quote:{
-            fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x-2.,
-                    self.rect_size.y-2.,
-                    2.
-                );
-                sdf.fill(#6)
-                sdf.box(
-                    4.,
-                    3.,
-                    4.,
-                    self.rect_size.y-6,
-                    1.
-                );
-                return sdf.fill(#8);
-            }
+                match self.block_type {
+                    FlowBlockType::Quote => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#6)
+                        sdf.box(
+                            4.,
+                            3.,
+                            4.,
+                            self.rect_size.y-6, 
+                            1.
+                        );
+                        sdf.fill(#8);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#6);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Code => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#7);
+                        return sdf.result;
+                    }
+                    FlowBlockType::ListItem => {
+                        sdf.box(
+                            4.,
+                            6.,
+                            4.,
+                            4.,
+                            1.
+                        );
+                        sdf.fill(#f);
+                        return sdf.result;
+                    }
+                }
+                return #f00
+            } 
         }
     }
 

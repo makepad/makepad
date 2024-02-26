@@ -7,13 +7,32 @@ use {
 }; 
     
 live_design!{
+    DrawFlowBlock = {{DrawFlowBlock}} {}
     TextFlowBase = {{TextFlow}} {
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
         font_size: 8,
         flow: RightWrap,
     }
+}  
+
+#[derive(Live, LiveHook)]
+#[live_ignore]
+#[repr(u32)]
+pub enum FlowBlockType {
+    #[pick] Quote = shader_enum(1),
+    Sep = shader_enum(2),
+    Code = shader_enum(3),
+    ListItem = shader_enum(4),
 }
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawFlowBlock {
+    #[deref] draw_super: DrawQuad,
+    #[live] block_type: FlowBlockType
+} 
+
      
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
@@ -23,22 +42,28 @@ pub struct TextFlow {
     #[live] draw_bold: DrawText,
     #[live] draw_bold_italic: DrawText,
     #[live] draw_fixed: DrawText,
-    #[live] draw_quote: DrawQuad,
-    #[live] draw_block: DrawQuad,
-    #[live] draw_sep: DrawQuad,
+    
+    #[live] draw_block: DrawFlowBlock,
+    
     #[live] font_size: f64,
     #[walk] walk: Walk,
+    
     #[rust] bold_counter: usize,
     #[rust] italic_counter: usize,
     #[rust] fixed_counter: usize,
+    
     #[rust] font_size_stack: FontSizeStack,
     #[rust] area_stack: AreaStack,
     #[layout] layout: Layout,
+    
     #[live] quote_layout: Layout,
     #[live] quote_walk: Walk,
-    #[live] sep_walk: Walk,
-    #[live] block_layout: Layout,
-    #[live] block_walk: Walk,
+    #[live] code_layout: Layout,
+    #[live] code_walk: Walk,
+    #[live] sep_walk: Walk, 
+    #[live] list_item_layout: Layout,
+    #[live] list_item_walk: Walk,
+    
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] items: ComponentMap<(LiveId,LiveId), WidgetRef>,
@@ -187,7 +212,6 @@ impl TextFlow{
         // if we dont we just dont wrap
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
-        self.draw_quote.append_to_draw_call(cx);
         self.draw_block.append_to_draw_call(cx);
     }
     
@@ -241,30 +265,45 @@ impl TextFlow{
         self.font_size_stack.pop();
     }
     
-    pub fn push_block(&mut self, cx:&mut Cx2d){
+    pub fn begin_code(&mut self, cx:&mut Cx2d){
         // alright we are going to push a block with a layout and a walk
-        self.draw_block.begin(cx, self.block_walk, self.block_layout);
+        self.draw_block.block_type = FlowBlockType::Code;
+        self.draw_block.begin(cx, self.code_walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
     }
     
-    pub fn pop_block(&mut self, cx:&mut Cx2d){
+    pub fn end_code(&mut self, cx:&mut Cx2d){
         self.draw_block.draw_vars.area = self.area_stack.pop();
         self.draw_block.end(cx);
     }
     
-    pub fn sep(&mut self, cx:&mut Cx2d){
-        self.draw_sep.draw_walk(cx, self.sep_walk);
+    pub fn begin_list_item(&mut self, cx:&mut Cx2d){
+        // alright we are going to push a block with a layout and a walk
+        self.draw_block.block_type = FlowBlockType::ListItem;
+        self.draw_block.begin(cx, self.list_item_walk, self.list_item_layout);
+        self.area_stack.push(self.draw_block.draw_vars.area);
     }
     
-    pub fn push_quote(&mut self, cx:&mut Cx2d){
+    pub fn end_list_item(&mut self, cx:&mut Cx2d){
+        self.draw_block.draw_vars.area = self.area_stack.pop();
+        self.draw_block.end(cx);        
+    }
+    
+    pub fn sep(&mut self, cx:&mut Cx2d){
+        self.draw_block.block_type = FlowBlockType::Sep;
+        self.draw_block.draw_walk(cx, self.sep_walk);
+    }
+    
+    pub fn begin_quote(&mut self, cx:&mut Cx2d){
         // alright we are going to push a block with a layout and a walk
-        self.draw_quote.begin(cx, self.quote_walk, self.quote_layout);
-        self.area_stack.push(self.draw_quote.draw_vars.area);
+        self.draw_block.block_type = FlowBlockType::Quote;
+        self.draw_block.begin(cx, self.quote_walk, self.quote_layout);
+        self.area_stack.push(self.draw_block.draw_vars.area);
     }
         
-    pub fn pop_quote(&mut self, cx:&mut Cx2d){
-        self.draw_quote.draw_vars.area = self.area_stack.pop();
-        self.draw_quote.end(cx);
+    pub fn end_quote(&mut self, cx:&mut Cx2d){
+        self.draw_block.draw_vars.area = self.area_stack.pop();
+        self.draw_block.end(cx);
     }
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
@@ -276,7 +315,7 @@ impl TextFlow{
         }
         None
     }
-    
+     
     pub fn draw_text(&mut self, cx:&mut Cx2d, text:&str){
         if let Some(DrawState::Drawing) = self.draw_state.get(){
             
