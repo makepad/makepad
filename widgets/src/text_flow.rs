@@ -12,17 +12,9 @@ live_design!{
         // change to italic, change bold (SDF), strikethrough
         font_size: 8,
         flow: RightWrap,
-        block_walk: {
-            width: 200,
-            height: Fit
-        },
-        block_layout: {
-            flow: RightWrap,
-            padding:{left:10}
-        }
     }
 }
-    
+     
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
