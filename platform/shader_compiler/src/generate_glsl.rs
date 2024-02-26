@@ -84,9 +84,11 @@ impl<'a> DrawShaderGenerator<'a> {
         let packed_instances_slots = self.compute_packed_instances_slots();
         let packed_varyings_slots = self.compute_packed_varyings_slots();
         self.generate_decls(
-            Some(packed_geometries_slots),
-            Some(packed_instances_slots),
-            packed_varyings_slots,
+            &[
+                ("packed_geometry", packed_geometries_slots),
+                ("packed_instance", packed_instances_slots),
+            ],
+            &[("packed_varying", packed_varyings_slots)],
         );
         for field in &self.draw_shader_def.fields {
             match field.kind {
@@ -247,7 +249,7 @@ impl<'a> DrawShaderGenerator<'a> {
     
     pub fn generate_pixel_shader(&mut self) {
         let packed_varyings_slots = self.compute_packed_varyings_slots();
-        self.generate_decls(None, None, packed_varyings_slots);
+        self.generate_decls(&[("packed_varying", packed_varyings_slots)], &[("packed_frag_color", 4)]);
         for field in &self.draw_shader_def.fields {
             match &field.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
@@ -314,7 +316,7 @@ impl<'a> DrawShaderGenerator<'a> {
         // we need to collect all consts
         let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         write!(self.string, "\n").unwrap();
-        writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+        writeln!(self.string, "    packed_frag_color_0 = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
         writeln!(self.string, "}}").unwrap();
     }
     
@@ -357,9 +359,8 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_decls(
         &mut self,
-        packed_attributes_size: Option<usize>,
-        packed_instances_size: Option<usize>,
-        packed_varyings_size: usize,
+        packed_inputs_name_and_size: &[(&str, usize)],
+        packed_outputs_name_and_size: &[(&str, usize)],
     ) {
         let decl_uniform_table = |this: &mut Self, name: &str, slots| {
             writeln!(this.string, "uniform vec4 {name}_table[{}];", (slots + 3) / 4).unwrap();
@@ -412,24 +413,12 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         write!(self.string, "\n").unwrap();
         
-        if let Some(packed_attributes_size) = packed_attributes_size {
-            self.generate_packed_var_decls(
-                "attribute",
-                "packed_geometry",
-                packed_attributes_size,
-            );
+        for &(name, size) in packed_inputs_name_and_size {
+            self.generate_packed_var_decls("in", name, size);
         }
-        write!(self.string, "\n").unwrap();
-        if let Some(packed_instances_size) = packed_instances_size {
-            self.generate_packed_var_decls(
-                "attribute",
-                "packed_instance",
-                packed_instances_size,
-            );
+        for &(name, size) in packed_outputs_name_and_size {
+            self.generate_packed_var_decls("out", name, size);
         }
-        write!(self.string, "\n").unwrap();
-        self.generate_packed_var_decls("varying", "packed_varying", packed_varyings_size);
-        write!(self.string, "\n").unwrap();
     }
     
     fn generate_struct_def(&mut self, struct_ptr: StructPtr, struct_def: &StructDef) {
@@ -518,8 +507,8 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_packed_var_decls(
         &mut self,
-        packed_var_qualifier: &'a str,
-        packed_var_name: &'a str,
+        packed_var_qualifier: &str,
+        packed_var_name: &str,
         mut packed_vars_size: usize,
     ) {
         let mut packed_var_index = 0;
