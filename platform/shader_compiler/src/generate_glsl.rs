@@ -362,18 +362,20 @@ impl<'a> DrawShaderGenerator<'a> {
         packed_inputs_name_and_size: &[(&str, usize)],
         packed_outputs_name_and_size: &[(&str, usize)],
     ) {
-        let decl_uniform_table = |this: &mut Self, name: &str, slots| {
-            writeln!(this.string, "uniform vec4 {name}_table[{}];", (slots + 3) / 4).unwrap();
+        let decl_uniform_block = |this: &mut Self, name: &str, slots| {
+            writeln!(this.string, "layout(std140) uniform UniformBlock_{name} {{").unwrap();
+            writeln!(this.string, "    vec4 {name}_table[{}];", (slots + 3) / 4).unwrap();
+            writeln!(this.string, "}};").unwrap();
         };
         
         if self.const_table.table.len()>0 {
-            decl_uniform_table(self, "const", self.const_table.table.len());
+            decl_uniform_block(self, "const", self.const_table.table.len());
         }
         write!(self.string, "\n").unwrap();
         
         let live_slots = self.calc_live_slots();
         if live_slots >0 {
-            decl_uniform_table(self, "live", live_slots);
+            decl_uniform_block(self, "live", live_slots);
         }
         
         for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
@@ -391,7 +393,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 slots += field.ty_expr.ty.borrow().as_ref().unwrap().slots();
             }
 
-            ident.to_id().as_string(|name| decl_uniform_table(self, name.unwrap(), slots));
+            ident.to_id().as_string(|name| decl_uniform_block(self, name.unwrap(), slots));
             
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[index];
