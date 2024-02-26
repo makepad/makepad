@@ -46,15 +46,15 @@ live_design!{
                     line_spacing: 10,
                     Button = <Button> {
                         text: "Hello world"
-                    } 
-                    body:"this is <br/><code>let x = 1.0;</code><b>BOLD text</b>&nbsp;italic<br/><sep/>Next line normal text button: <Button>Hi</Button><br/><block_quote>blockquote<br/><block_quote>blockquote</block_quote></block_quote><i>Bold italic</i>"
+                    }  
+                    body:"this is <br/><li>one</li><br/><li>two</li><br/><code>let x = 1.0;</code><b>BOLD text</b>&nbsp;italic<br/><sep/>Next line normal text button: <Button>Hi</Button><br/><block_quote>blockquote<br/><block_quote>blockquote</block_quote></block_quote><i>Bold italic</i>"
                 }
             }
         }
     }
 } 
      
-app_main!(App);
+app_main!(App); 
  
 #[derive(Live, LiveHook)]
 pub struct App {

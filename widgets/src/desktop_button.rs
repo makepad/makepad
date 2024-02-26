@@ -12,7 +12,7 @@ live_design!{
     
     DrawDesktopButton = {{DrawDesktopButton}} {}
     DesktopButtonBase = {{DesktopButton}} {}
-}
+} 
 
 #[derive(Live, Widget)]
 pub struct DesktopButton {

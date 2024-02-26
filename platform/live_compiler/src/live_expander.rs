@@ -45,7 +45,7 @@ impl<'a> LiveExpander<'a> {
     }
     
     pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation: LiveFileGeneration) {
-        
+         
         //out_doc.nodes.push(in_doc.nodes[0].clone());
         out_doc.nodes.push(LiveNode {
             origin: in_doc.nodes[0].origin,
@@ -56,6 +56,7 @@ impl<'a> LiveExpander<'a> {
         let mut in_index = 1;
         let mut lazy_define_value = None;
         loop {
+            
             if let Some((node_id, ptr)) = lazy_define_value.take() {
                 if let LiveValue::Root {id_resolve} = &mut out_doc.nodes[0].value {
                     id_resolve.insert(node_id, ptr);
@@ -286,6 +287,7 @@ impl<'a> LiveExpander<'a> {
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
                 },
                 LiveValue::Class {live_type, ..} => {
+                    
                     // store the class context
                     if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                         *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
@@ -309,7 +311,7 @@ impl<'a> LiveExpander<'a> {
                                             break
                                         }
                                     }
-                                    index = out_doc.nodes.skip_node(index);
+                                    index = doc.nodes.skip_node(index);
                                 }
                                 if let Some(index) = found {
                                     let old_len = out_doc.nodes.len();
@@ -407,6 +409,7 @@ impl<'a> LiveExpander<'a> {
                         }
                     }
                     //}
+                    
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
                 }
                 LiveValue::Expr {..} => {panic!()},
@@ -425,7 +428,6 @@ impl<'a> LiveExpander<'a> {
             in_index += 1;
         }
         out_doc.nodes.push(in_doc.nodes.last().unwrap().clone());
-        
         // this stores the node index on nodes that don't have a node index
         for i in 1..out_doc.nodes.len() {
             if out_doc.nodes[i].value.is_dsl() {
