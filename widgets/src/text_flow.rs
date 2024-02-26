@@ -5,16 +5,24 @@ use {
         widget::*
     },
 }; 
-   
+    
 live_design!{
     TextFlowBase = {{TextFlow}} {
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
         font_size: 8,
-        flow: RightWrap
+        flow: RightWrap,
+        block_walk: {
+            width: 200,
+            height: Fit
+        },
+        block_layout: {
+            flow: RightWrap,
+            padding:{left:10}
+        }
     }
 }
-   
+    
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
@@ -22,12 +30,16 @@ pub struct TextFlow {
     #[live] draw_italic: DrawText,
     #[live] draw_bold: DrawText,
     #[live] draw_bold_italic: DrawText,
+    #[live] draw_block: DrawQuad,
     #[live] font_size: f64,
     #[walk] walk: Walk,
     #[rust] bold_counter: usize,
     #[rust] italic_counter: usize,
     #[rust] font_size_stack: FontSizeStack,
+    #[rust] area_stack: AreaStack,
     #[layout] layout: Layout,
+    #[live] block_layout: Layout,
+    #[live] block_walk: Walk,
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] items: ComponentMap<(LiveId,LiveId), WidgetRef>,
@@ -57,6 +69,37 @@ impl LiveHook for TextFlow{
             _ => ()
         }
         nodes.skip_node(index)
+    }
+}
+
+#[derive(Default)]
+struct AreaStack{
+    pub array_len: usize,
+    pub stack_array: [Area;2],
+    pub stack_vec: Vec<Area>
+}
+
+impl AreaStack{
+    fn push(&mut self, v:Area){
+        if self.array_len < self.stack_array.len(){
+            self.stack_array[self.array_len] = v;
+            self.array_len += 1;
+        }
+        else{
+            self.stack_vec.push(v);
+        }
+    }
+    fn pop(&mut self)->Area{
+        if self.stack_vec.len()>0{
+            self.stack_vec.pop().unwrap()
+        }
+        else if self.array_len > 0{
+            self.array_len -=1;
+            self.stack_array[self.array_len]
+        }
+        else{
+            panic!()
+        }
     }
 }
 
@@ -145,6 +188,7 @@ impl TextFlow{
         // if we dont we just dont wrap
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
+        self.draw_block.append_to_draw_call(cx);
     }
     
     pub fn end(&mut self, cx: &mut Cx2d){
@@ -187,6 +231,16 @@ impl TextFlow{
         self.font_size_stack.pop();
     }
     
+    pub fn push_block(&mut self, cx:&mut Cx2d){
+        // alright we are going to push a block with a layout and a walk
+        self.draw_block.begin(cx, self.block_walk, self.block_layout);
+        self.area_stack.push(self.draw_block.draw_vars.area);
+    }
+    
+    pub fn pop_block(&mut self, cx:&mut Cx2d){
+        self.draw_block.draw_vars.area = self.area_stack.pop();
+        self.draw_block.end(cx);
+    }
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {

@@ -211,10 +211,10 @@ impl<'a> Cx2d<'a> {
                 x: layout.padding.left,
                 y: layout.padding.top
             },
-            origin: dvec2(0.0,0.0),
+            origin: dvec2(0.0, 0.0),
             width: pass_size.x,
             height: pass_size.y,
-            shift: dvec2(0.0,0.0),
+            shift: dvec2(0.0, 0.0),
             width_used: layout.padding.left,
             height_used: layout.padding.top,
             guard_area: Area::Empty,
@@ -250,7 +250,7 @@ impl<'a> Cx2d<'a> {
         let (origin, width, height, draw_clip) = if let Some(parent) = self.turtles.last() {
             
             let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos {pos} else {
-                parent.pos + parent.child_spacing(self.turtle_walks.len()) 
+                parent.pos + parent.child_spacing(self.turtle_walks.len())
             };
             
             let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
@@ -498,7 +498,7 @@ impl<'a> Cx2d<'a> {
                     }
                 },
                 Flow::RightWrap => {
-                    if turtle.pos.x - turtle.origin.x + size.x > turtle.width - turtle.layout.padding.right - turtle.layout.padding.left{
+                    if turtle.pos.x - turtle.origin.x + size.x > turtle.width - turtle.layout.padding.right{
                         
                         pos.x =  turtle.origin.x + turtle.layout.padding.left;
                         let dx = pos.x - turtle.pos.x;                        
@@ -837,7 +837,10 @@ impl Turtle {
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
-                    Flow::Right | Flow::RightWrap=> {
+                    Flow::RightWrap=> {
+                        max_zero_keep_nan(self.width - (self.pos.x - self.origin.x) - margin.width() -self.layout.padding.right)
+                    }
+                    Flow::Right => {
                         max_zero_keep_nan(self.width_left() - margin.width())
                     },
                     Flow::Down | Flow::Overlay => {

@@ -130,7 +130,7 @@ impl DrawQuad {
     }
     
     pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
-        cx.new_draw_call(&self.draw_vars);
+        cx.append_to_draw_call(&self.draw_vars);
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
