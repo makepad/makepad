@@ -614,8 +614,19 @@ impl GlShader{
 
     
     pub fn set_uniform_array(loc: &OpenglUniform, array: &[f32]) {
+        let complete_vec4_count = array.len() / 4;
         unsafe {
-            gl_sys::Uniform1fv(loc.loc as i32, array.len() as i32, array.as_ptr());
+            gl_sys::Uniform4fv(loc.loc as i32, complete_vec4_count as i32, array.as_ptr());
+        }
+
+        let incomplete_tail = &array[complete_vec4_count * 4..];
+        if !incomplete_tail.is_empty() {
+            let mut last_vec4 = [0.0; 4];
+            last_vec4[..incomplete_tail.len()].copy_from_slice(incomplete_tail);
+            let [x, y, z, w] = last_vec4;
+            unsafe {
+                gl_sys::Uniform4f(loc.loc as i32 + complete_vec4_count as i32, x, y, z, w);
+            }
         }
     }
     

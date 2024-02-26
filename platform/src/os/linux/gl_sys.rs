@@ -114,7 +114,7 @@ pub const RENDERER: types::GLenum = 0x1F01;
 #[inline] pub unsafe fn AttachShader(program: types::GLuint, shader: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLuint) -> ()>(storage::AttachShader.f)(program, shader) }
 #[inline] pub unsafe fn LinkProgram(program: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::LinkProgram.f)(program) }
 #[inline] pub unsafe fn DeleteShader(shader: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::DeleteShader.f)(shader) }
-#[inline] pub unsafe fn Uniform1fv(location: types::GLint, count: types::GLsizei, value: *const types::GLfloat) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLsizei, *const types::GLfloat) -> ()>(storage::Uniform1fv.f)(location, count, value) }
+#[inline] pub unsafe fn Uniform4fv(location: types::GLint, count: types::GLsizei, value: *const types::GLfloat) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLsizei, *const types::GLfloat) -> ()>(storage::Uniform4fv.f)(location, count, value) }
 #[inline] pub unsafe fn GenTextures(n: types::GLsizei, textures: *mut types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenTextures.f)(n, textures) }
 #[inline] pub unsafe fn TexParameteri(target: types::GLenum, pname: types::GLenum, param: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLenum, types::GLint) -> ()>(storage::TexParameteri.f)(target, pname, param) }
 #[inline] pub unsafe fn TexImage2D(target: types::GLenum, level: types::GLint, internalformat: types::GLint, width: types::GLsizei, height: types::GLsizei, border: types::GLint, format: types::GLenum, type_: types::GLenum, pixels: *const raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLint, types::GLint, types::GLsizei, types::GLsizei, types::GLint, types::GLenum, types::GLenum, *const raw::c_void) -> ()>(storage::TexImage2D.f)(target, level, internalformat, width, height, border, format, type_, pixels) }
@@ -122,6 +122,7 @@ pub const RENDERER: types::GLenum = 0x1F01;
 #[inline] pub unsafe fn GenBuffers(n: types::GLsizei, buffers: *mut types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenBuffers.f)(n, buffers) }
 #[inline] pub unsafe fn BufferData(target: types::GLenum, size: types::GLsizeiptr, data: *const raw::c_void, usage: types::GLenum) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLsizeiptr, *const raw::c_void, types::GLenum) -> ()>(storage::BufferData.f)(target, size, data, usage) }
 #[inline] pub unsafe fn Uniform1i(location: types::GLint, v0: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLint) -> ()>(storage::Uniform1i.f)(location, v0) }
+#[inline] pub unsafe fn Uniform4f(location: types::GLint, v0: types::GLfloat, v1: types::GLfloat, v2: types::GLfloat, v3: types::GLfloat) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLfloat, types::GLfloat, types::GLfloat, types::GLfloat) -> ()>(storage::Uniform4f.f)(location, v0, v1, v2, v3) }
 #[inline] pub unsafe fn GetError() -> types::GLenum { mem::transmute::<_, extern "system" fn() -> types::GLenum>(storage::GetError.f)() }
 #[inline] pub unsafe fn Finish() -> () { mem::transmute::<_, extern "system" fn() -> ()>(storage::Finish.f)() }
 #[inline] pub unsafe fn GetProgramBinary(program: types::GLuint, bufSize: types::GLsizei, length: *mut types::GLsizei, binaryFormat: *mut types::GLenum, binary: *mut raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLsizei, *mut types::GLsizei, *mut types::GLenum, *mut raw::c_void) -> ()>(storage::GetProgramBinary.f)(program, bufSize, length, binaryFormat, binary) }
@@ -176,7 +177,7 @@ mod storage {
     pub static mut AttachShader: FnPtr = FnPtr::default();
     pub static mut LinkProgram: FnPtr = FnPtr::default();
     pub static mut DeleteShader: FnPtr = FnPtr::default();
-    pub static mut Uniform1fv: FnPtr = FnPtr::default();
+    pub static mut Uniform4fv: FnPtr = FnPtr::default();
     pub static mut GenTextures: FnPtr = FnPtr::default();
     pub static mut TexParameteri: FnPtr = FnPtr::default();
     pub static mut TexImage2D: FnPtr = FnPtr::default();
@@ -184,6 +185,7 @@ mod storage {
     pub static mut GenBuffers: FnPtr = FnPtr::default();
     pub static mut BufferData: FnPtr = FnPtr::default();
     pub static mut Uniform1i: FnPtr = FnPtr::default();
+    pub static mut Uniform4f: FnPtr = FnPtr::default();
     pub static mut GetError: FnPtr = FnPtr::default();
     pub static mut Finish: FnPtr = FnPtr::default();
     pub static mut GetProgramBinary: FnPtr = FnPtr::default();
@@ -237,7 +239,7 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::AttachShader = FnPtr::new(metaloadfn(&mut loadfn, "glAttachShader", &["glAttachObjectARB"]));
     storage::LinkProgram = FnPtr::new(metaloadfn(&mut loadfn, "glLinkProgram", &["glLinkProgramARB"]));
     storage::DeleteShader = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteShader", &[]));
-    storage::Uniform1fv = FnPtr::new(metaloadfn(&mut loadfn, "glUniform1fv", &["glUniform1fvARB"]));
+    storage::Uniform4fv = FnPtr::new(metaloadfn(&mut loadfn, "glUniform4fv", &["glUniform4fvARB"]));
     storage::GenTextures = FnPtr::new(metaloadfn(&mut loadfn, "glGenTextures", &[]));
     storage::TexParameteri = FnPtr::new(metaloadfn(&mut loadfn, "glTexParameteri", &[]));
     storage::TexImage2D = FnPtr::new(metaloadfn(&mut loadfn, "glTexImage2D", &[]));
@@ -245,6 +247,7 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::GenBuffers = FnPtr::new(metaloadfn(&mut loadfn, "glGenBuffers", &["glGenBuffersARB"]));
     storage::BufferData = FnPtr::new(metaloadfn(&mut loadfn, "glBufferData", &["glBufferDataARB"]));
     storage::Uniform1i = FnPtr::new(metaloadfn(&mut loadfn, "glUniform1i", &["glUniform1iARB"]));
+    storage::Uniform4f = FnPtr::new(metaloadfn(&mut loadfn, "glUniform4f", &["glUniform4fARB"]));
     storage::GetError = FnPtr::new(metaloadfn(&mut loadfn, "glGetError", &[]));
     storage::Finish = FnPtr::new(metaloadfn(&mut loadfn, "glFinish", &[]));
     storage::ClearDepthf = FnPtr::new(metaloadfn(&mut loadfn, "glClearDepthf", &["glClearDepthfOES"]));

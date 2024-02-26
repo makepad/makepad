@@ -362,7 +362,7 @@ impl<'a> DrawShaderGenerator<'a> {
         packed_varyings_size: usize,
     ) {
         let decl_uniform_table = |this: &mut Self, name: &str, slots| {
-            writeln!(this.string, "uniform float {name}_table[{}];", slots).unwrap();
+            writeln!(this.string, "uniform vec4 {name}_table[{}];", (slots + 3) / 4).unwrap();
         };
         
         if self.const_table.table.len()>0 {
@@ -565,8 +565,9 @@ impl<'a> DrawShaderGenerator<'a> {
             }
             write!(
                 self.string,
-                "{conv_prefix}{uniform_array}[{}]{conv_suffix}",
-                s + i,
+                "{conv_prefix}{uniform_array}[{}].{}{conv_suffix}",
+                (s + i) / 4,
+                b"xyzw"[(s + i) % 4] as char,
             ).unwrap();
         }
         if components > 1 {
@@ -798,7 +799,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     }
     
     fn const_table_is_vec4(&self) -> bool {
-        false
+        true
     }
     
     fn use_cons_fn(&self, _what: &str) -> bool {
