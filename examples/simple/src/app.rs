@@ -38,7 +38,7 @@ live_design!{
                     text: "Counter: 0"
                 }
                 <Html>{
-                    font_size: 13,
+                    font_size: 12,
                     flow: RightWrap,
                     width:Fill,
                     height:Fit,
@@ -47,7 +47,7 @@ live_design!{
                     Button = <Button> {
                         text: "Hello world"
                     } 
-                    body:"this is <br/><code>let x = 1.0;</code> <b>BOLD text</b>&nbsp;italic<Button>Hi</Button><br/><block_quote>blockquote<br/><block_quote>blockquote</block_quote></block_quote><i>Bold italic</i>"
+                    body:"this is <br/><code>let x = 1.0;</code> <b>BOLD text</b>&nbsp;italic<br/>Next line normal text button: <Button>Hi</Button><br/><block_quote>blockquote<br/><block_quote>blockquote</block_quote></block_quote><i>Bold italic</i>"
                 }
             }
         }
