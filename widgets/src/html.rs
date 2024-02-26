@@ -19,7 +19,7 @@ live_design!{
 #[derive(Live, Widget)]
 pub struct Html{
     #[deref] text_flow: TextFlow,
-    #[live] html: Rc<String>,
+    #[live] body: Rc<String>,
     #[rust] doc: HtmlDoc
 }
 
@@ -27,7 +27,7 @@ pub struct Html{
 impl LiveHook for Html{
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(&*self.html, &mut errors);
+        self.doc = parse_html(&*self.body, &mut errors);
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
@@ -54,6 +54,7 @@ impl Widget for Html {
                 some_id!(h1)=>{
                     tf.push_scale(1.5)
                 },
+                some_id!(block_quote)=>tf.push_block(cx),
                 some_id!(br)=>cx.turtle_new_line(),
                 some_id!(b)=>tf.push_bold(),
                 some_id!(i)=>tf.push_italic(),
@@ -75,6 +76,7 @@ impl Widget for Html {
                 _=>()
             } 
             match node.close_tag_lc(){
+                some_id!(block_quote)=>tf.pop_block(cx),
                 some_id!(h1)=>tf.pop_size(),
                 some_id!(b)=>tf.pop_bold(),
                 some_id!(i)=>tf.pop_italic(),
@@ -90,11 +92,11 @@ impl Widget for Html {
     }  
      
     fn text(&self)->String{
-        self.html.as_ref().to_string()
+        self.body.as_ref().to_string()
     } 
     
     fn set_text(&mut self, v:&str){
-        self.html = Rc::new(v.to_string())
+        self.body = Rc::new(v.to_string())
     }
 } 
  

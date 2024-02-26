@@ -349,7 +349,8 @@ impl App {
                 
         // open up port udp X and forward packets to both wind + platform
         let forca_recv = UdpSocket::bind("0.0.0.0:51010").unwrap();
-        
+        let buf = [0 as u8,]; 
+        let _ = wind_socket.send_to(&buf, wind_send_addr);
         std::thread::spawn(move || {
             
             let mut buffer = [0u8;1024];
@@ -515,6 +516,7 @@ impl App {
                 } 
                 // lets poll midi
                 while let Some((_port,data)) = midi_input.receive(){
+                    log!("{:?}", data);   
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => {
                             let v = cc.value as f32 / 127.0;
