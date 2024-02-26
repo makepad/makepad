@@ -45,6 +45,7 @@ impl Widget for Html {
         let mut auto_id = 0;
         // alright lets iterate the html doc and draw it
         let mut node = self.doc.walk();
+         
         while !node.empty(){
             
             match node.open_tag_lc(){
@@ -56,20 +57,21 @@ impl Widget for Html {
                 },
                 some_id!(code)=>{
                     tf.push_fixed();
-                    tf.push_block(cx);
+                    tf.begin_code(cx);
                 } 
-                some_id!(block_quote)=>tf.push_quote(cx),
+                some_id!(block_quote)=>tf.begin_quote(cx),
                 some_id!(br)=>cx.turtle_new_line(),
                 some_id!(sep)=>tf.sep(cx),
                 some_id!(b)=>tf.push_bold(),
                 some_id!(i)=>tf.push_italic(),
+                some_id!(li)=>tf.begin_list_item(cx),
                 Some(_)=>{ // custom widget
                     let id = if let Some(id) = node.find_attr_lc(live_id!(id)){
                         LiveId::from_str(id)
-                    }
+                    } 
                     else{
                         auto_id += 1;
-                        LiveId(auto_id)
+                        LiveId(auto_id) 
                     }; 
                     let template = node.open_tag_nc().unwrap();
                     if let Some(item) = tf.item(cx, id, template){
@@ -81,11 +83,12 @@ impl Widget for Html {
                 _=>()
             } 
             match node.close_tag_lc(){
-                some_id!(block_quote)=>tf.pop_quote(cx),
+                some_id!(block_quote)=>tf.end_quote(cx),
                 some_id!(code)=>{
                     tf.pop_fixed();
-                    tf.pop_block(cx);
+                    tf.end_code(cx); 
                 }
+                some_id!(li)=>tf.end_list_item(cx),
                 some_id!(h1)=>tf.pop_size(),
                 some_id!(b)=>tf.pop_bold(),
                 some_id!(i)=>tf.pop_italic(),
