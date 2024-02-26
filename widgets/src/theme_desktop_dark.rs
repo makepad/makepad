@@ -169,9 +169,9 @@ live_design! {
         draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
         draw_fixed: {text_style:<THEME_FONT_CODE>{}}
         
-        block_layout:{padding:{left:10,top:10,right:10,bottom:10}},
+        block_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
         block_walk:{height:Fit,width:Fill}
-        quote_layout:{padding:{left:15,top:10,right:10,bottom:10}},
+        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
         
         quote_walk:{height:Fit,width:Fill}
         draw_block:{
