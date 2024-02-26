@@ -47,13 +47,13 @@ live_design!{
                     Button = <Button> {
                         text: "Hello world"
                     } 
-                    html:"this is <b>BOLD text</b>&nbsp;<br/><i>italic</i>  <Button>Hi</Button><br/><b><i>Bold italic</i></b>"
+                    body:"this is <b>BOLD text</b>&nbsp;italic<Button>Hi</Button><br/><block_quote>blockquote<br/><block_quote>blockquote</block_quote></block_quote><i>Bold italic</i>"
                 }
             }
         }
     }
-}
-  
+} 
+    
 app_main!(App);
  
 #[derive(Live, LiveHook)]

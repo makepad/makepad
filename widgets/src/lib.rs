@@ -4,6 +4,7 @@ pub use makepad_html;
 pub use makepad_derive_widget;
 pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
+pub use makepad_markdown;
 
 pub mod button;
 pub mod label;
@@ -35,6 +36,7 @@ pub mod window;
 pub mod scroll_shadow;
 pub mod window_menu;
 pub mod html;
+pub mod markdown;
 pub mod text_flow;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
@@ -44,7 +46,6 @@ pub mod slide_panel;
 pub mod page_flip;
 pub mod keyboard_view;
 pub mod flat_list;
-
 pub mod file_tree;
 pub mod slides_view;
 pub mod color_picker;
@@ -165,5 +166,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::stack_navigation::live_design(cx);
     crate::expandable_panel::live_design(cx);
     crate::html::live_design(cx);
+    crate::markdown::live_design(cx);
     crate::text_flow::live_design(cx);
 }
