@@ -621,7 +621,7 @@ impl DrawText {
         let fonts_atlas = &mut*fonts_atlas;
                 
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
-        let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+        let line_drop = self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.top_drop;
         
         // lets get the width of the current turtle
         // we need it for the next_word item to properly break off
@@ -638,7 +638,7 @@ impl DrawText {
                 abs_pos: None,
                 margin: Margin::default(),
                 width: Size::Fixed(word.width),
-                height: Size::Fixed(line_height)
+                height: Size::Fixed(line_drop)
             });
             // make sure our iterator uses the xpos from the turtle
             self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
