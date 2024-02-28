@@ -627,6 +627,15 @@ impl LiveRegistry {
                         entry.get_module_set(&mut deps);
                     }
                 }, */
+                LiveValue::Deref {live_type, ..} => { // hold up. this is always own_module_path
+                    let infos = self.live_type_infos.get(live_type).unwrap();
+                    for sub_type in infos.fields.clone() {
+                        let sub_module_id = sub_type.live_type_info.module_id;
+                        if sub_module_id != own_module_id {
+                            deps.insert(sub_module_id);
+                        }
+                    }
+                }
                 LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
                     let infos = self.live_type_infos.get(live_type).unwrap();
                     for sub_type in infos.fields.clone() {

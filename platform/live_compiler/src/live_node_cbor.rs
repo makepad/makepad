@@ -375,6 +375,9 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::Class {..} => {
                     return Err("Cannot serialise LiveValue::Class".into())
                 }, // subnodes including this one
+                LiveValue::Deref {..} => {
+                    return Err("Cannot serialise LiveValue::Deref".into())
+                }, // subnodes including this one
                 LiveValue::DSL {..} => {
                     return Err("Cannot serialise LiveValue::DSL".into())
                 },

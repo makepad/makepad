@@ -232,7 +232,7 @@ impl<'a> LiveExpander<'a> {
                         }
                     }
                 },
-                LiveValue::Clone(clone) => {
+                LiveValue::Clone(clone) | LiveValue::Deref{clone,..}=> {
                     if let Some(target) = self.live_registry.find_scope_target(*clone, &out_doc.nodes) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
@@ -242,20 +242,28 @@ impl<'a> LiveExpander<'a> {
                                 out_doc.nodes.insert_children_from_self(local_ptr, out_index + 1);
                                 self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
                                 
-                                // clone the value and store a parent pointer
-                                if let LiveValue::Class {live_type: old_live_type, ..} = &out_doc.nodes[out_index].value {
-                                    if let LiveValue::Class {live_type, ..} = &out_doc.nodes[local_ptr].value {
-                                        if live_type != old_live_type {
-                                            self.errors.push(LiveError {
-                                                origin: live_error_origin!(),
-                                                span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
-                                                message: format!("Class override with wrong type {}", in_node.id)
-                                            });
-                                        }
+                                // we should overwrite our class live_type
+                                if let LiveValue::Deref{live_type:new_live_type,..} = in_value{
+                                    out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
+                                    if let LiveValue::Class {live_type, ..} = &mut out_doc.nodes[out_index].value {
+                                        *live_type = *new_live_type
                                     }
                                 }
+                                else{
+                                    if let LiveValue::Class {live_type: old_live_type, ..} = &out_doc.nodes[out_index].value {
+                                        if let LiveValue::Class {live_type, ..} = &out_doc.nodes[local_ptr].value {
+                                            if live_type != old_live_type {
+                                                self.errors.push(LiveError {
+                                                    origin: live_error_origin!(),
+                                                    span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
+                                                    message: format!("Class override with wrong type {}", in_node.id)
+                                                });
+                                            }
+                                        }
+                                    }
+                                    out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
+                                }
                                 
-                                out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                                     //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                     *class_parent = Some(LivePtr {file_id: self.in_file_id, index: local_ptr as u32, generation});
@@ -269,8 +277,14 @@ impl<'a> LiveExpander<'a> {
                                 self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
                                 
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
-                                if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                                    *class_parent = Some(live_ptr);
+                                
+                                if let LiveValue::Class {class_parent,live_type, ..} = &mut out_doc.nodes[out_index].value {
+                                    if let LiveValue::Deref{live_type:new_live_type,..} = in_value{
+                                        *live_type = *new_live_type;
+                                    }
+                                    else{
+                                        *class_parent = Some(live_ptr);
+                                    }
                                     //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                 }
                             }
