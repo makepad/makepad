@@ -161,7 +161,7 @@ live_design! {
     const THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
     const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
     const THEME_SPLITTER_SIZE = 5.0
- 
+    
     Html = <HtmlBase>{
         draw_normal: {text_style:<THEME_FONT_LABEL>{}}
         draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
