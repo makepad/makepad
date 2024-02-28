@@ -74,6 +74,8 @@ pub use crate::{
     image::*,
     label::*,
     slider::*,
+    text_flow::*,
+    html::*,
     check_box::*,
     drop_down::*,
     video::*,

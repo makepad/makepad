@@ -60,6 +60,7 @@ pub enum LiveValue {
     NamedEnum (LiveId),
     Object,
     Clone(LiveId),
+    Deref{live_type: LiveType, clone:LiveId},
     Class {live_type: LiveType, class_parent: Option<LivePtr>},
     Close,
     
@@ -459,6 +460,7 @@ impl LiveValue {
             Self::Object | // subnodes including this one
             Self::Clone {..} | // subnodes including this one
             Self::Class {..} | 
+            Self::Deref {..} | 
             Self::Root {..} => true, // subnodes including this one
             _ => false
         }
@@ -686,11 +688,12 @@ impl LiveValue {
             Self::Object => 25,
             Self::Clone {..} => 26,
             Self::Class {..} => 27,
-            Self::Root{..}=>28,
-            Self::Close => 29,
+            Self::Deref {..} => 28,
+            Self::Root{..}=>29,
+            Self::Close => 30,
             
-            Self::DSL {..} => 30,
-            Self::Import {..} => 31,
+            Self::DSL {..} => 31,
+            Self::Import {..} => 32,
             //Self::Registry {..} => 30,
         }
     }
