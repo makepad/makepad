@@ -239,6 +239,7 @@ pub use {
             LiveApply,
             LiveHook,
             LiveApplyValue,
+            LiveApplyUpdate,
             LiveRead,
             ToLiveValue,
             Apply,
