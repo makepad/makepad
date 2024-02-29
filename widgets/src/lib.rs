@@ -9,6 +9,7 @@ pub use makepad_markdown;
 pub mod button;
 pub mod label;
 pub mod image;
+pub mod icon;
 pub mod link_label;
 pub mod drop_down;
 pub mod popup_menu;
@@ -72,6 +73,7 @@ pub use crate::{
     button::*,
     view::*,
     image::*,
+    icon::*,
     label::*,
     slider::*,
     text_flow::*,
@@ -134,6 +136,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
+    crate::icon::live_design(cx);
     crate::rotated_image::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
