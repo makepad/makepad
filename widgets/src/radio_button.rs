@@ -1,7 +1,9 @@
 use crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
-        widget::*, View,
+        widget::*,
+        View,
+        Image,
     };
 
 live_design!{
@@ -31,6 +33,13 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
+#[derive(Live, LiveHook)]
+pub enum MediaType {
+    Image,
+    #[pick] Icon,
+    None,
+}
+
 #[derive(Live, LiveHook, Widget)]
 pub struct RadioButtonGroup {
     #[deref] frame: View
@@ -41,12 +50,16 @@ pub struct RadioButton {
     #[redraw] #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
     #[live] draw_text: DrawText,
+
+    #[live] value: LiveValue,
+
+    #[live] media: MediaType,
     
     #[live] icon_walk: Walk,
     #[walk] walk: Walk,
-    
-    #[live] value: LiveValue,
-    
+
+    #[live] image: Image,
+
     #[layout] layout: Layout,
     #[animator] animator: Animator,
     
@@ -71,7 +84,16 @@ impl RadioButtonGroup {
 impl RadioButton {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
-        self.draw_icon.draw_walk(cx, self.icon_walk);
+        match self.media {
+            MediaType::Image => {
+                let image_walk = self.image.walk(cx);
+                let _ = self.image.draw_walk(cx, image_walk);
+            }
+            MediaType::Icon => {
+                self.draw_icon.draw_walk(cx, self.icon_walk);
+            }
+            MediaType::None => {}
+        }
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
         self.draw_radio.end(cx);
     }
