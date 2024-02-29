@@ -141,6 +141,10 @@ pub trait LiveApplyValue {
     fn apply_value(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
+pub trait LiveApplyUpdate { 
+    fn apply_update(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
+}
+
 pub trait LiveApply {
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
     
@@ -220,6 +224,14 @@ impl ApplyFrom {
         }
     }
     
+        
+    pub fn is_update_from_doc(&self) -> bool {
+        match self {
+            Self::UpdateFromDoc {..} => true,
+            _ => false
+        }
+    }
+        
     pub fn file_id(&self) -> Option<LiveFileId> {
         match self {
             Self::NewFromDoc {file_id} => Some(*file_id),

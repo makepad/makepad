@@ -16,7 +16,7 @@ use {
             LiveTypeInfo,
             LiveNodeSliceApi
         },
-        live_traits::{LiveNew, LiveHook, LiveRegister, LiveHookDeref, LiveApplyValue, LiveApply, Apply},
+        live_traits::{LiveNew, LiveHook, LiveRegister, LiveHookDeref, LiveApplyValue, LiveApply,LiveApplyUpdate, Apply},
         makepad_derive_live::*,
         makepad_math::*,
         makepad_live_id::{FromLiveId, live_id, live_id_num},
