@@ -14,6 +14,7 @@ live_design!{
     import crate::fold_button::FoldButtonBase;
     import crate::fold_header::FoldHeaderBase;
     import crate::image::ImageBase;
+    import crate::icon::IconBase;
     import crate::rotated_image::RotatedImageBase;
     import crate::video::VideoBase;
     import crate::popup_menu::PopupMenuBase;
@@ -75,6 +76,24 @@ live_design!{
                         closed: 0.0
                     }
                 }
+            }
+        }
+    }
+
+    Icon = <IconBase> {
+        width: Fit,
+        height: Fit,
+
+        icon_walk: {
+            margin: {left: 5.0},
+            width: Fit,
+            height: Fit,
+        }
+
+        draw_bg: {
+            instance color: #0000,
+            fn pixel(self) -> vec4 {
+                return self.color;
             }
         }
     }
@@ -684,6 +703,7 @@ live_design!{
     FoldButtonBase = <FoldButtonBase> {}
     FoldHeaderBase = <FoldHeaderBase> {}
     ImageBase = <ImageBase> {}
+    IconBase = <IconBase> {}
     RotatedImageBase = <RotatedImageBase> {}
     VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
