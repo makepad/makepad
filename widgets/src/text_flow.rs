@@ -94,7 +94,7 @@ impl LiveHook for TextFlow{
         }
         nodes.skip_node(index)
     }
-}
+} 
 
 #[derive(Default)]
 struct AreaStack{
@@ -125,6 +125,11 @@ impl AreaStack{
             panic!()
         }
     }
+    
+    fn clear(&mut self){
+        self.stack_vec.clear();
+        self.array_len = 0;
+    }
 }
 
 
@@ -147,6 +152,12 @@ impl FontSizeStack{
             def
         }
     }
+    
+    fn clear(&mut self){
+        self.stack_vec.clear();
+        self.array_len = 0;
+    }
+    
     fn push(&mut self, v:f64){
         if self.array_len < self.stack_array.len(){
             self.stack_array[self.array_len] = v;
@@ -213,6 +224,11 @@ impl TextFlow{
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
+        self.font_size_stack.clear();
+        self.area_stack.clear();
+        self.bold_counter = 0;
+        self.italic_counter = 0;
+        self.fixed_counter = 0;
     }
     
     pub fn end(&mut self, cx: &mut Cx2d){
