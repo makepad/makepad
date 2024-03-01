@@ -1,4 +1,5 @@
 //use makepad_live_id::*;
+use std::str::Chars;
 
 #[derive(Debug)]
 pub struct MarkdownError{
@@ -12,75 +13,103 @@ pub struct MarkdownDoc{
     pub nodes: Vec<MarkdownNode>,
 }
 
- pub enum MarkdownNode{
- }
- 
+pub enum MarkdownNode{
+    BeginHead,
+    EndHead,
+    BeginList,
+    EndList,
+    BeginQuote,
+    EndQuote,
+    BeginCode,
+    EndCode,
+    BeginBold,
+    BeginItalic,
+    EndBold,
+    EndItalic,
+    Text(usize, usize)
+}
+
+struct Cursor<'a>{
+    iter: Chars<'a>,
+    chars:[char;3],
+    pos:[usize;3],
+}
 
  pub fn parse_markdown(body:&str, _errors:  &mut Option<Vec<MarkdownError>>)->MarkdownDoc{
      enum State{
          Begin(usize),
-         H1,
-         H2,
-         H3,
-         H4,
-         H5,
-         H6
+         H(usize, usize),
+         Star(usize),
+         Underscore(usize),
+         Bold(),
+         Text(usize),
      }
      
      let nodes = Vec::new();
      let mut state = State::Begin(0);
      let decoded = String::new();
      let _last_was_ws = false;
+    // let mut boldstack = Vec::new();
      
-     for (_i, c) in body.char_indices(){
+     let iter = body.char_indices();
+    /* for (_i, c) in body.char_indices(){
+         // alright so we do 3 characters at a time
+         ('*','*',c) if !c.is_Whitespace(){
+             // we emit * * and eat 2
+         }
+     }*/
+     /*   
+         // alright if we have ** we insert a bold
+         // however we have to check bold-pairing per-line
          state = match state{
-             State::Begin(start)=>{ 
+             State::Begin(start)=>{
                  // lets count #'s
                  if c == '#'{
-                     State::H1
+                     State::H(start, 1)
                  }
                  else{
-                    State::Begin(start)
+                    State::Text(start)
                 }
             }
-            State::H1=> if c == '#'{
-                State::H2
+            State::H(start, num)=> if c == '#'{
+                if num > 6{
+                    State::Text(start)
+                }
+                else{
+                    State::H(start, num+1)
+                }
+            }
+            State::Star(start)=>{
+                // for star we replace a last emitted star
+                if let Some(MarkDownNode::BeginItalic) = nodes.last(){
+                    *nodes.last_mut() = MarkDownNode::BeginBold
+                }
             }
             else{
-                State::Begin(0)
+                // alright so. lets emit a H
+                State::Text(start)
             }
-            State::H2=> if c == '#'{
-                State::H3
+            State::Text(start)=>{
+                if c == '\n'{ // we might end 
+                }
             }
-            else{
-                State::Begin(0)
-            }
-            State::H3=> if c == '#'{
-                State::H4
-            }
-            else{
-                State::Begin(0)
-            }
-            State::H4=> if c == '#'{
-                State::H5
-            }
-            else{
-                State::Begin(0)
-            }
-            State::H5=> if c == '#'{
-                State::H6
-            }
-            else{
-                State::Begin(0)
-            }
-            State::H6=> if c == '#'{
-                State::H6
-            }
-            else{
-                State::Begin(0)
-            }
-         }
-     }
+        }
+        state = match state{
+            State::Text(start)=>{
+                if c == '*'{
+                    nodes.push(MarkDownNode::BeginItalic);
+                    State::Star(start)
+                }
+                else if c == '_'{
+                    State::Underscore(start)
+                }
+                else{
+                    State::Text(start)
+                }
+            },
+            x=>x
+        };
+     }*/
      MarkdownDoc{
          nodes,
          decoded,
