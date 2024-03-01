@@ -859,7 +859,7 @@ live_design! {
     }
 
     Window = <WindowBase> {
-        pass: {clear_color: #f00}
+        pass: {clear_color: (THEME_COLOR_CLEAR)}
         flow: Down
         nav_control: <NavControl> {}
         caption_bar = <SolidView> {
