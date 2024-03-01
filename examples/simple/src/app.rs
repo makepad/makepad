@@ -17,7 +17,7 @@ live_design!{
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     //return #000
-                    return mix(#7, #3, self.pos.y);
+                    return mix(#f, #f, self.pos.y);
                 }
             }
             
@@ -41,23 +41,32 @@ live_design!{
                     },
                     text: "Counter: 0"
                 }
-                <MyHtml>{
+                <Html>{
                     font_size: 12,
                     flow: RightWrap,
                     width:Fill,
                     height:Fit,
                     padding: 5,
                     line_spacing: 10,
-                    Button = <Button> {
+                    Button = <TextInput> {
                         text: "Hello world"
                     }  
-                    body:"this is <br/><li>one</li><br/><li>two</li><br/><code>let x = 1.0;</code><b>BOLD text</b>&nbsp;<i>italic</i><br/><sep/>Next line normal text button: <Button>Hi</Button><br/><block_quote>blockquote<br/><block_quote>blockquote</block_quote></block_quote><i>Bold italic</i>"
+                    body:"this is <br/><li>one</li><br/><li>two</li><br/><code>let x = 1.0;</code><b>BOLD text</b>&nbsp;<i>italic</i><br/><sep/>Next line normal text button:<Button>Hi</Button><br/><block_quote>block<b>quote</b><br/><block_quote>blockquote</block_quote><br/>Next line <br/><sep/></block_quote><b><i>Bold italic</i><br/><sep/></br>"
+                }
+                <Markdown>{
+                    font_size: 12,
+                    flow: RightWrap,
+                    width:Fill,
+                    height:Fit,
+                    padding: 5,
+                    line_spacing: 10,
+                    body:"# Hi\nHello"
                 }
             }
         }
     }
-} 
-      
+}   
+        
 app_main!(App); 
  
 #[derive(Live, LiveHook)]

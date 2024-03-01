@@ -305,7 +305,6 @@ impl Cx {
             }
         } 
         else if let Some(drawable) = mode.is_drawable() {
-            
             let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
