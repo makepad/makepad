@@ -104,15 +104,18 @@ impl StackNavigationView {
         self.widget_match_event(cx, event, scope);
 
         // Clicking the "back" button on the mouse must also hide the active stack view.
-        let back_mouse_button_released = match event {
-            Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
-            _ => false,
-        };
-        if back_mouse_button_released {
-            self.hide_stack_view(cx);
-        }
+        if self.state == StackNavigationViewState::Active {
+            let back_mouse_button_released = match event {
+                Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
+                _ => false,
+            };
 
-        // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
+            // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
+
+            if back_mouse_button_released {
+                self.hide_stack_view(cx);
+            }
+        }
     }
 
     fn finish_closure_animation_if_done(&mut self, cx: &mut Cx) {
