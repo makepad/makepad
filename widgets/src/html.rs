@@ -117,7 +117,7 @@ impl Widget for Html {
         while !node.empty(){
             match Self::handle_open_tag(cx, tf, &mut node){
                 Some(_)=>{
-                    Self::handle_custom_widget(cx, scope, tf, &mut node, &mut auto_id);
+                    Self::handle_custom_widget(cx, scope, tf, &mut node, &mut auto_id); 
                 }
                 _=>()
             }
