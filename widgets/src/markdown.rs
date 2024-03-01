@@ -26,11 +26,11 @@ pub struct Markdown{
 // alright lets parse the HTML
 impl LiveHook for Markdown{
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
-        let mut errors = Some(Vec::new());
-        self.doc = parse_markdown(&*self.body, &mut errors);
-        if errors.as_ref().unwrap().len() > 0{
-            log!("HTML parser returned errors {:?}", errors)
-        }
+       //let mut errors = Some(Vec::new());
+        //self.doc = parse_markdown(&*self.body, &mut errors);
+        //if errors.as_ref().unwrap().len() > 0{
+        //    log!("HTML parser returned errors {:?}", errors)
+        //}
     }
 }
  
@@ -85,8 +85,8 @@ impl Widget for Markdown {
                 tf.draw_text(cx, text);
             }
             node = node.walk();
-        }
-        tf.end(cx);*/
+        }*/
+        tf.end(cx);
         DrawStep::done()
     }
      
