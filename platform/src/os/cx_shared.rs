@@ -1,8 +1,8 @@
 
 use {
+    std::time::{Instant},
     std::collections::{HashSet, HashMap},
     crate::{
-        makepad_error_log::*,
         cx::Cx,
         pass::{
             PassId,
@@ -15,6 +15,7 @@ use {
             KeyFocusEvent,
             NextFrameEvent,
         },
+        studio::{AppToStudio,EventSample},
     }
 };
 
@@ -110,9 +111,23 @@ impl Cx {
     
     pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        let mut event_handler = self.event_handler.take().unwrap();
-        event_handler(self, event);
-        self.event_handler = Some(event_handler);
+        if Cx::has_studio_web_socket(){
+            let start = Instant::now().duration_since(self.start_time);
+            let mut event_handler = self.event_handler.take().unwrap();
+            event_handler(self, event);
+            self.event_handler = Some(event_handler);
+            let end = Instant::now().duration_since(self.start_time);
+            Cx::send_studio_message(AppToStudio::EventSample(EventSample{
+                event_u32: event.to_u32(),
+                start: start.as_secs_f64(),
+                end: end.as_secs_f64()
+            }))
+        }
+        else{
+            let mut event_handler = self.event_handler.take().unwrap();
+            event_handler(self, event);
+            self.event_handler = Some(event_handler);
+        }
     }
     
     fn inner_key_focus_change(&mut self) {
@@ -136,7 +151,23 @@ impl Cx {
             }));
             self.inner_key_focus_change();
             if counter > 100 {
-                error!("Trigger feedback loop detected");
+                crate::error!("Trigger feedback loop detected");
+                break
+            }
+        }
+    }
+    
+    pub fn handle_actions(&mut self) {
+        // post op events like signals, triggers and key-focus
+        let mut counter = 0;
+        while self.new_actions.len() != 0 {
+            counter += 1;
+            let mut actions = Vec::new();
+            std::mem::swap(&mut self.new_actions, &mut actions);
+            self.inner_call_event_handler(&Event::Actions(actions));
+            self.inner_key_focus_change();
+            if counter > 100 {
+                crate::error!("Action feedback loop detected");
                 break
             }
         }
@@ -146,6 +177,7 @@ impl Cx {
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
         self.handle_triggers();
+        self.handle_actions();
     }
 
     // helpers
@@ -167,6 +199,9 @@ impl Cx {
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
+
+        self.performance_stats.process_frame_data(time);
+
         self.call_event_handler(&Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }
 }

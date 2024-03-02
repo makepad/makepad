@@ -3,60 +3,48 @@ use crate::{
     makepad_draw::*,
     view::*,
     widget::*,
+    WidgetMatchEvent,
+    WindowAction,
 };
 
 live_design!{
     SlidePanelBase = {{SlidePanel}} {}
 }
 
-
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct SlidePanel {
     #[deref] frame: View,
     #[animator] animator: Animator,
     #[live] closed: f64,
     #[live] side: SlideSide,
+    #[rust] screen_width: f64,
     #[rust] next_frame: NextFrame
 }
 
-impl LiveHook for SlidePanel {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, SlidePanel)
-    }
-}
-
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum SlidePanelAction {
     None,
 }
 
 impl Widget for SlidePanel {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.frame.handle_widget_event_with(cx, event, dispatch_action);
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        //let uid = self.widget_uid();
+        self.frame.handle_event(cx, event, scope);
+        self.widget_match_event(cx, event, scope);
+        // lets handle mousedown, setfocus
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.frame.redraw(cx);
+        }
+        
+        match event {
+            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
+                self.frame.redraw(cx);
+            }
+            _ => ()
+        }
     }
     
-    fn walk(&mut self, cx:&mut Cx) -> Walk {
-        self.frame.walk(cx)
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.frame.redraw(cx)
-    }
-    
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.frame.find_widgets(path, cached, results);
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> DrawStep {
         // ok lets set abs pos
         let rect = cx.peek_walk_turtle(walk);
         match self.side{
@@ -66,8 +54,22 @@ impl Widget for SlidePanel {
             SlideSide::Left=>{
                 walk.abs_pos = Some(dvec2(-rect.size.x * self.closed, 0.0));
             }
+            SlideSide::Right => {
+                walk.abs_pos = Some(dvec2(self.screen_width - rect.size.x + rect.size.x * self.closed, 0.0));
+            }
         }
-        self.frame.draw_walk_widget(cx, walk)
+        self.frame.draw_walk(cx, scope, walk)
+    }
+}
+
+impl WidgetMatchEvent for SlidePanel {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
+        for action in actions {
+            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
+                self.screen_width = ce.new_geom.inner_size.x;
+                self.redraw(cx);
+            }
+        }
     }
 }
 
@@ -75,26 +77,16 @@ impl Widget for SlidePanel {
 #[live_ignore]
 pub enum SlideSide{
     #[pick] Left,
+    Right,
     Top
 }
 
 impl SlidePanel {
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidePanelAction)) {
-        // lets handle mousedown, setfocus
-        if self.animator_handle_event(cx, event).must_redraw() {
-            self.frame.redraw(cx);
-        }
-        match event {
-            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
-                
-                self.frame.redraw(cx);
-            }
-            _ => ()
-        }
-    }
+
     pub fn open(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }
+    
     pub fn close(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx);
     }
@@ -103,10 +95,6 @@ impl SlidePanel {
         self.frame.redraw(cx);
     }
 }
-
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SlidePanelRef(WidgetRef);
 
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
@@ -129,10 +117,14 @@ impl SlidePanelRef {
             }
         }
     }
+    pub fn is_animating(&self, cx: &mut Cx) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.animator.is_track_animating(cx, id!(closed))
+        } else {
+            false
+        }
+    }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct SlidePanelSet(WidgetSet);
 
 impl SlidePanelSet {
     pub fn close(&self, cx: &mut Cx) {

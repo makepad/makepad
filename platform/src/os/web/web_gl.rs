@@ -1,6 +1,5 @@
 use {
     crate::{
-        makepad_error_log::*,
         makepad_shader_compiler::{
             generate_glsl,
         },
@@ -337,7 +336,7 @@ impl Cx {
                 );
                  
                 if cx_shader.mapping.flags.debug {
-                   log!("{}\n{}", vertex,pixel);
+                   crate::log!("{}\n{}", vertex,pixel);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {

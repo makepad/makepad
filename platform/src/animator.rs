@@ -13,15 +13,12 @@ use {
             LiveFieldKind,
             LiveModuleId,
             LiveType,
-            LiveId,
             LiveNode,
             LiveIdAsProp,
             LiveNodeSliceApi,  
             LiveNodeVecApi
          },
-        live_traits::{LiveNew},
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
-        makepad_error_log::*,
         makepad_live_id::*,
         makepad_derive_live::*,
         makepad_math::*,
@@ -56,7 +53,7 @@ pub trait AnimatorImpl {
     }
     fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
     fn animator_apply_state(&mut self, cx: &mut Cx);
-    fn animator_after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]);
+    fn animator_after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
     fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event) -> AnimatorAction;
 }
 
@@ -78,6 +75,7 @@ pub struct KeyFrame {
     #[live(LiveValue::None)]
     pub value: LiveValue,
 }
+impl LiveRegister for KeyFrame{}
 
 #[derive(Copy, Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Play {
@@ -189,6 +187,10 @@ impl Ease {
     pub fn map(&self, t: f64) -> f64 {
         match self {
             Self::ExpDecay {d1, d2, max} => { // there must be a closed form for this
+                if t > 0.999 {
+                    return 1.0;
+                }
+
                 // first we count the number of steps we'd need to decay
                 let mut di = *d1;
                 let mut dt = 1.0;
@@ -547,8 +549,8 @@ impl LiveNew for Animator {
     }
 }
 impl LiveApply for Animator {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
-        if let Some(file_id) = from.file_id() {
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
+        if let Some(file_id) = apply.from.file_id() {
             self.live_ptr = Some(cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, start_index));
         }
         if !nodes[start_index].value.is_structy_type() {
@@ -590,13 +592,8 @@ impl AnimatorAction {
 }
 impl Animator {
     
-    pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
-        if let Some(state) = self.state.take() {
-            state
-        }
-        else {
-            Vec::new()
-        }
+    pub fn swap_out_state(&mut self) -> Option<Vec<LiveNode>> {
+        self.state.take()
     }
     
     pub fn swap_in_state(&mut self, state: Vec<LiveNode>) {
@@ -692,7 +689,7 @@ impl Animator {
                     };
                     
                     let play = if let Some(play_index) = nodes.child_by_name(track_index, live_id!(play).as_field()) {
-                        Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
+                        Play::new_apply(cx, &mut ApplyFrom::New.into(), play_index, nodes)
                     }
                     else {
                         Play::new(cx)
@@ -720,7 +717,7 @@ impl Animator {
             else {panic!()};
             
             let default_ease = if let Some(ease_index) = nodes.child_by_path(0, &[live_id!(tracks).as_field(), track_id.as_field(), live_id!(ease).as_field()]) {
-                Ease::new_apply(cx, ApplyFrom::New, ease_index, nodes)
+                Ease::new_apply(cx, &mut ApplyFrom::New.into(), ease_index, nodes)
             }
             else {
                 Ease::Linear
@@ -750,7 +747,7 @@ impl Animator {
                     }
                 }
                 else { // try to deserialize a keyframe
-                    let mut kf = KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes);
+                    let mut kf = KeyFrame::new_apply(cx, &mut ApplyFrom::New.into(), node_index, nodes);
                     if nodes.child_by_name(node_index, live_id!(ease).as_field()).is_none() {
                         kf.ease = default_ease.clone();
                     }
@@ -925,11 +922,11 @@ impl Animator {
     pub fn cut_to(&mut self, cx: &mut Cx, state_pair: &[LiveId; 2], index: usize, nodes: &[LiveNode]) {
         
         if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
-            let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
+            let cursor = MouseCursor::new_apply(cx, &mut ApplyFrom::New.into(), index, nodes);
             cx.set_cursor(cursor);
         }
         // if we dont have a state object, lets create a template
-        let mut state = self.swap_out_state();
+        let mut state = self.swap_out_state().unwrap_or(Vec::new());
         // ok lets fetch the track
         let track = state_pair[0];
         
@@ -1040,11 +1037,11 @@ impl Animator {
     pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &[LiveId; 2], index: usize, nodes: &[LiveNode]) {
         
         if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
-            let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
+            let cursor = MouseCursor::new_apply(cx, &mut ApplyFrom::New.into(), index, nodes);
             cx.set_cursor(cursor);
         }
         
-        let mut state = self.swap_out_state();
+        let mut state = self.swap_out_state().unwrap_or(Vec::new());
         if state.len() == 0 { // call cut first
             //self.cut_to(cx, state_id, index, nodes);
             //return

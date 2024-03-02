@@ -9,7 +9,7 @@ live_design!{
     PageFlipBase = {{PageFlip}} {}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct PageFlip {
     #[rust] area: Area,
     #[walk] walk: Walk,
@@ -22,18 +22,15 @@ pub struct PageFlip {
 }
 
 impl LiveHook for PageFlip {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PageFlip)
-    }
     
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             self.pointers.clear();
         }
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        match from {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        match apply.from {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if !self.lazy_init{
                     for (page_id, ptr) in self.pointers.iter(){
@@ -49,16 +46,16 @@ impl LiveHook for PageFlip {
         
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.pointers.insert(id, live_ptr);
                     // find if we have the page and apply
                     if let Some(node) = self.pages.get_mut(&id) {
-                        node.apply(cx, from, index, nodes);
+                        node.apply(cx, apply, index, nodes);
                     }
                 }
                 else {
@@ -92,8 +89,15 @@ impl PageFlip {
     }
 }
 
-
-impl Widget for PageFlip {
+impl WidgetNode for PageFlip{
+    fn walk(&mut self, _cx:&mut Cx) -> Walk{
+        self.walk
+    }
+        
+    fn redraw(&mut self, cx: &mut Cx){
+        self.area.redraw(cx)
+    }
+        
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(page) = self.pages.get_mut(&path[0]) {
             if path.len() == 1{
@@ -107,27 +111,21 @@ impl Widget for PageFlip {
             page.find_widgets(path, cached, results);
         }
     }
+}        
+
+impl Widget for PageFlip {
     
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        
         if let Some(page) = self.pages.get_mut(&self.active_page) {
             let item_uid = page.widget_uid();
-            page.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
+            cx.group_widget_actions(uid, item_uid, |cx|{
+                page.handle_event(cx, event, scope)
             });
         }
     }
     
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if let Some(page) = self.page(cx, self.active_page) {
             if self.draw_state.begin_with(cx, &(), | cx, _ | {
                 page.walk(cx)
@@ -135,7 +133,7 @@ impl Widget for PageFlip {
                 self.begin(cx, walk);
             }
             if let Some(walk) = self.draw_state.get() {
-                page.draw_walk_widget(cx, walk) ?;
+                page.draw_walk(cx, scope, walk) ?;
             }
             self.end(cx);
         }
@@ -143,12 +141,9 @@ impl Widget for PageFlip {
             self.begin(cx, walk);
             self.end(cx);
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct PageFlipRef(WidgetRef);
 
 impl PageFlipRef {
     pub fn set_active_page(&self, page: LiveId) {
@@ -163,9 +158,6 @@ impl PageFlipRef {
         }
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct PageFlipSet(WidgetSet);
 
 impl PageFlipSet {
 }

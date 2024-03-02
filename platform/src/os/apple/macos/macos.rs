@@ -7,7 +7,6 @@ use {
         msg_send,
         sel,
         sel_impl,
-        runtime::ObjcId,
     },
     crate::{
         makepad_live_id::*,
@@ -26,15 +25,14 @@ use {
                     macos_window::MacosWindow
                 },
                 apple_classes::init_apple_classes_global,
-                ns_url_session::{make_http_request, web_socket_open},
+                url_session::{make_http_request},
             },
             metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,
-            apple_decoding::CxAppleDecoding,
             metal::{MetalCx, DrawPassMode},
         },
         pass::CxPassParent,
-        thread::Signal,
+        thread::SignalToUI,
         cx_stdin::PollTimers,
         window::WindowId,
         event::{
@@ -139,11 +137,10 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(cx: Rc<RefCell<Cx >>) {
-        init_apple_classes_global();
+        
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
-        
         
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
@@ -175,7 +172,8 @@ impl Cx {
         // lets set our signal poll timer
         // final bit of initflow
         get_macos_app_global().start_timer(0, 0.008, true);
-        cx.borrow_mut().call_event_handler(&Event::Construct);
+        
+        cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
         MacosApp::event_loop();
     }
@@ -234,7 +232,7 @@ impl Cx {
     ) -> EventFlow {
         
         if let  EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx){
-            self.call_event_handler(&Event::Destruct);
+            self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit
         }
         
@@ -259,7 +257,7 @@ impl Cx {
                     }
                     
                     // check signals
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
@@ -309,7 +307,7 @@ impl Cx {
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
                     
                     // redraw just this windows root draw list
-                    if re.old_geom.inner_size != re.new_geom.inner_size {
+                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor || re.old_geom.inner_size != re.new_geom.inner_size {
                         if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
                             self.redraw_pass_and_child_passes(main_pass_id);
                         }
@@ -327,7 +325,7 @@ impl Cx {
                 if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
                     metal_windows.remove(index);
                     if metal_windows.len() == 0 {
-                        self.call_event_handler(&Event::Destruct);
+                        self.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit
                     }
                 }
@@ -486,7 +484,7 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::ShowTextIME(area, pos) => {
-                    let pos = area.get_clipped_rect(self).pos + pos;
+                    let pos = area.clipped_rect(self).pos + pos;
                     metal_windows.iter_mut().for_each( | w | {
                         w.cocoa_window.set_ime_spot(pos);
                     });
@@ -519,7 +517,7 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                CxOsOp::WebSocketOpen {request_id, request} => {
+                /*CxOsOp::WebSocketOpen {request_id, request} => {
                     web_socket_open(request_id, request, self.os.network_response.sender.clone());
                 }
                 CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
@@ -527,11 +525,35 @@ impl Cx {
                 }
                 CxOsOp::WebSocketSendString {request_id: _, data: _} => {
                     todo!()
+                }*/
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::BeginVideoPlayback(_) => todo!(),
+                CxOsOp::PauseVideoPlayback(_) => todo!(),
+                CxOsOp::ResumeVideoPlayback(_) => todo!(),
+                CxOsOp::MuteVideoPlayback(_) => todo!(),
+                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
+                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
+                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
+
+                CxOsOp::SaveFileDialog(settings) => 
+                {
+                    get_macos_app_global().open_save_file_dialog(settings);
                 }
-                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
-                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
-                CxOsOp::CleanupVideoDecoding(_) => todo!(),
+                
+                CxOsOp::SelectFileDialog(settings) => 
+                {
+                    get_macos_app_global().open_select_file_dialog(settings);                   
+                }
+                
+                CxOsOp::SaveFolderDialog(settings) => 
+                {
+                    get_macos_app_global().open_save_folder_dialog(settings);
+                }
+                
+                CxOsOp::SelectFolderDialog(settings) => 
+                {
+                    get_macos_app_global().open_select_folder_dialog(settings);
+                }
             }
         }
         EventFlow::Poll
@@ -540,6 +562,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn pre_start() -> bool {
+        init_apple_classes_global();
         for arg in std::env::args() {
             if arg == "--metal-xpc" {
                 start_xpc_service();
@@ -565,6 +588,7 @@ impl CxOsApi for Cx {
     fn start_stdin_service(&mut self) {
         self.start_xpc_service()
     }
+    
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
@@ -583,7 +607,6 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
-    pub (crate) decoding: CxAppleDecoding,
     pub (crate) stdin_timers: PollTimers,
 
     pub metal_device: Option<ObjcId>,

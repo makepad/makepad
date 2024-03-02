@@ -3,24 +3,20 @@ use crate::makepad_live_id::*;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::BTreeMap;
 use std::str;
-use crate::event::Event;
 
 #[derive(Clone, Debug)]
-pub struct NetworkResponseEvent {
+pub struct NetworkResponseItem{
     pub request_id: LiveId,
     pub response: NetworkResponse,
 }
+
+pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 
 #[derive(Clone, Debug)]
 pub enum NetworkResponse{
     HttpRequestError(String),
     HttpResponse(HttpResponse),
-    HttpProgress{loaded:u32, total:u32},
-    WebSocketClose,
-    WebSocketOpen,
-    WebSocketError(String),
-    WebSocketString(String),
-    WebSocketBinary(Vec<u8>)
+    HttpProgress{loaded:u64, total:u64},
 }
 
 pub struct NetworkResponseIter<I> {
@@ -38,25 +34,9 @@ impl<I> Iterator for NetworkResponseIter<I> where I: Iterator {
     }
 }
 
-impl Event{
-    pub fn network_responses(&self) -> NetworkResponseIter<std::slice::Iter<'_, NetworkResponseEvent>>{
-        match self{
-            Event::NetworkResponses(responses)=>{
-                NetworkResponseIter{
-                    iter:Some(responses.iter())
-                }
-            }
-            _=>{
-                // return empty thing
-                NetworkResponseIter{iter:None}
-            }
-        } 
-    }
-}
-
 pub struct NetworkResponseChannel {
-    pub receiver: Receiver<NetworkResponseEvent>,
-    pub sender: Sender<NetworkResponseEvent>,
+    pub receiver: Receiver<NetworkResponseItem>,
+    pub sender: Sender<NetworkResponseItem>,
 }
 
 impl Default for NetworkResponseChannel {
@@ -76,6 +56,7 @@ pub struct HttpRequest {
     pub url: String,
     pub method: HttpMethod,
     pub headers: BTreeMap<String, Vec<String>>,
+    pub ignore_ssl_cert: bool,
     pub body: Option<Vec<u8>>,
 }
 
@@ -85,9 +66,14 @@ impl HttpRequest {
             metadata_id: LiveId(0),
             url,
             method,
+            ignore_ssl_cert: false,
             headers: BTreeMap::new(),
             body: None
         }
+    }
+    
+    pub fn set_ignore_ssl_cert(&mut self){
+        self.ignore_ssl_cert = true
     }
     
     pub fn set_metadata_id(&mut self, id: LiveId){

@@ -4,19 +4,19 @@ use {
         io::prelude::*,
         mem,
         ptr,
-        ffi::CStr,
+        ffi::{c_char, CStr},
     },
     self::super::gl_sys,
     crate::{
         makepad_live_id::*,
-        makepad_error_log::*,
         makepad_shader_compiler::generate_glsl,
-        cx::Cx,
+        cx::{Cx, OsType, OsType::Android},
         texture::{Texture, TextureFormat, TexturePixel, CxTexture},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
         draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
+        event::{Event, TextureHandleReadyEvent}
     },
 };
 
@@ -29,6 +29,8 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
     ) {
+        let mut to_dispatch = Vec::new();
+
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
         //self.views[view_id].set_clipping_uniforms();
@@ -192,6 +194,17 @@ impl Cx {
                         
                         if cxtexture.format.is_vec(){
                             cxtexture.update_vec_texture();
+                        } else if cxtexture.format.is_video() {
+                            let is_initial_setup = cxtexture.setup_video_texture();
+                            if is_initial_setup {
+                                let e = Event::TextureHandleReady(
+                                    TextureHandleReadyEvent {
+                                        texture_id,
+                                        handle: cxtexture.os.gl_texture.unwrap()
+                                    }
+                                );
+                                to_dispatch.push(e);
+                            }
                         }
                     }
                     for i in 0..sh.mapping.textures.len() {
@@ -204,10 +217,17 @@ impl Cx {
                         // get the loc
                         gl_sys::ActiveTexture(gl_sys::TEXTURE0 + i as u32);
                         if let Some(texture) = cxtexture.os.gl_texture {
-                            gl_sys::BindTexture(gl_sys::TEXTURE_2D, texture);
+                            // Video playback with SurfaceTexture requires TEXTURE_EXTERNAL_OES, for any other format we assume regular 2D textures
+                            match cxtexture.format {
+                                TextureFormat::VideoRGB => gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, texture),
+                                _ => gl_sys::BindTexture(gl_sys::TEXTURE_2D, texture)     
+                            }
                         }
                         else {
-                            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+                            match cxtexture.format {
+                                TextureFormat::VideoRGB => gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, 0),
+                                _ => gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0)     
+                            }
                         }
                         gl_sys::Uniform1i(shgl.textures[i].loc, i as i32);
                     }
@@ -225,6 +245,9 @@ impl Cx {
                 
             }
         }
+        for event in to_dispatch.iter() {
+            self.call_event_handler(&event);
+        }
     }
     
     pub fn set_default_depth_and_blend_mode() {
@@ -240,7 +263,7 @@ impl Cx {
     pub fn setup_render_pass(&mut self, pass_id: PassId,) -> Option<DVec2> {
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-        let pass_rect = self.get_pass_rect2(pass_id, dpi_factor).unwrap();
+        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].paint_dirty = false;
         
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
@@ -446,7 +469,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    log!("{}\n{}", vertex, pixel);
+                    crate::log!("{}\n{}", vertex, pixel);
                 }
                 
                 // lets see if we have the shader already
@@ -458,13 +481,23 @@ impl Cx {
                 }
                 
                 if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(&vertex, &pixel);
+                    let shp = CxOsDrawShader::new(&vertex, &pixel, &self.os_type);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
             }
         }
         self.draw_shaders.compile_set.clear();
+    }
+
+    pub fn maybe_warn_hardware_support(&self) {
+        // Temporary warning for Adreno failing at compiling shaders that use samplerExternalOES.
+        let gpu_renderer = get_gl_string(gl_sys::RENDERER);
+        if gpu_renderer.contains("Adreno") {
+            crate::log!("WARNING: This device is using {gpu_renderer} renderer.
+            OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
+            This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
+        }
     }
 }
 
@@ -713,10 +746,33 @@ impl GlShader{
 }
 
 impl CxOsDrawShader {
-    pub fn new(vertex: &str, pixel: &str) -> Self {
+    pub fn new(vertex: &str, pixel: &str, os_type: &OsType) -> Self {
+        // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
+        let available_extensions = get_gl_string(gl_sys::EXTENSIONS);
+        let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
+
+        let mut maybe_ext_tex_extension_import = String::new();
+        let mut maybe_ext_tex_extension_sampler = String::new();
+
+        // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
+        // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
+        let is_emulator = match os_type {
+            Android(params) => params.is_emulator,
+            _ => false,
+        };
+
+        // Some Android devices running Adreno GPUs suddenly stopped compiling shaders when passing the samplerExternalOES sampler to texture2D functions. 
+        // This seems like a driver bug (no confirmation from Qualcomm yet).
+        // Therefore we're disabling the external texture support for Adreno until this is fixed.
+        let is_vendor_adreno = get_gl_string(gl_sys::RENDERER).contains("Adreno"); 
+        if is_external_texture_supported && !is_vendor_adreno && !is_emulator {
+            maybe_ext_tex_extension_import = "#extension GL_OES_EGL_image_external : require\n".to_string();
+            maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
+        }
         
         let vertex = format!("
             #version 100
+            {}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
@@ -724,19 +780,21 @@ impl CxOsDrawShader {
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", vertex);
-        
+            {}\0", maybe_ext_tex_extension_import, vertex);
+
         let pixel = format!("
             #version 100
             #extension GL_OES_standard_derivatives : enable
+            {}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            {}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", pixel);
+            {}\0", maybe_ext_tex_extension_import, maybe_ext_tex_extension_sampler, pixel);
         
             // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
@@ -750,6 +808,14 @@ impl CxOsDrawShader {
         if let Some(gl_shader) = self.gl_shader.take(){
             gl_shader.free_resources();
         }
+    }
+}
+
+
+fn get_gl_string(key: gl_sys::types::GLenum) -> String {
+    unsafe {
+        let string_ptr = gl_sys::GetString(key) as *const c_char;
+        CStr::from_ptr(string_ptr).to_string_lossy().into_owned()
     }
 }
 
@@ -834,8 +900,8 @@ pub struct CxOsTexture {
 impl CxTexture {
     
     pub fn update_vec_texture(&mut self) {
-        if self.alloc_vec(){
-            //let alloc = self.alloc.as_ref().unwrap();
+        if self.alloc_vec() {
+            self.free_resources();
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -852,8 +918,8 @@ impl CxTexture {
             }                       
             match &self.format{
                 TextureFormat::VecBGRAu8_32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -868,7 +934,7 @@ impl CxTexture {
                 }
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level}=>unsafe{
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -885,8 +951,8 @@ impl CxTexture {
                     gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
                 },
                 TextureFormat::VecRGBAf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -900,8 +966,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
@@ -909,7 +975,7 @@ impl CxTexture {
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
-                        gl_sys::RED as i32,
+                        gl_sys::R8 as i32,
                         *width as i32,
                         *height as i32,
                         0,
@@ -919,8 +985,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRGu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
@@ -938,8 +1004,8 @@ impl CxTexture {
                     );
                 },
                 TextureFormat::VecRf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -958,6 +1024,38 @@ impl CxTexture {
                 gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
             }
         }
+    }
+
+    pub fn setup_video_texture(&mut self) -> bool {
+        while unsafe { gl_sys::GetError() } != 0 {}
+
+        if self.alloc_video() {
+            self.free_resources();
+            if self.os.gl_texture.is_none() { 
+                unsafe {
+                    let mut gl_texture = std::mem::MaybeUninit::uninit();
+                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    self.os.gl_texture = Some(gl_texture.assume_init());
+                }
+            }
+        }
+        if self.check_initial() {
+            unsafe{
+                gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
+        
+                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+
+                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+        
+                gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, 0);
+
+                assert_eq!(gl_sys::GetError(), 0, "UPDATE VIDEO TEXTURE ERROR {}", self.os.gl_texture.unwrap());
+            }
+            return true;
+        }
+        false
     }
     
     pub fn update_render_target(&mut self, width: usize, height: usize) {

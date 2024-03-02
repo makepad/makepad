@@ -5,8 +5,20 @@ use makepad_toml_parser::*;
 #[derive(Copy, Clone, Debug)]
 enum BuildTy{
     Binary,
+    BinaryBuildStd,
     Lib, 
     LinuxDirect
+}
+
+impl BuildTy{
+    fn nightly_only(&self)->bool{
+        match self{
+            Self::Binary=>false,
+            Self::BinaryBuildStd=>true,
+            Self::Lib=>false,
+            Self::LinuxDirect=>false,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -17,7 +29,7 @@ enum Platform{
     Embedded
 }
 
-const TOOLCHAINS:[(&'static str,BuildTy, Platform);13]=[
+const TOOLCHAINS:[(&'static str,BuildTy, Platform);16]=[
     ("aarch64-apple-darwin",BuildTy::Binary, Platform::Desktop),
     ("x86_64-pc-windows-msvc",BuildTy::Binary, Platform::Desktop),
     ("x86_64-unknown-linux-gnu",BuildTy::Binary, Platform::Desktop),
@@ -26,10 +38,13 @@ const TOOLCHAINS:[(&'static str,BuildTy, Platform);13]=[
     ("aarch64-linux-android",BuildTy::Lib, Platform::Mobile),
     ("aarch64-apple-ios",BuildTy::Binary, Platform::Mobile),
     ("x86_64-linux-android",BuildTy::Lib, Platform::Mobile),
+    ("aarch64-apple-tvos",BuildTy::BinaryBuildStd, Platform::Mobile),
+    ("aarch64-apple-tvos-sim",BuildTy::BinaryBuildStd, Platform::Mobile),
     //("arm-linux-androideabi",1),
     ("i686-linux-android",BuildTy::Lib, Platform::Mobile),
     ("aarch64-apple-ios-sim",BuildTy::Binary, Platform::Mobile),
     ("x86_64-apple-ios",BuildTy::Binary, Platform::Mobile),
+    ("x86_64-apple-tvos",BuildTy::BinaryBuildStd, Platform::Mobile),
     ("x86_64-apple-darwin",BuildTy::Binary, Platform::Desktop),
     ("x86_64-pc-windows-gnu",BuildTy::Binary, Platform::Desktop),
 ];
@@ -37,6 +52,7 @@ const TOOLCHAINS:[(&'static str,BuildTy, Platform);13]=[
 pub fn check_crate(build_crate:&str, args: &[String])->Result<(),String>{
     
     let crate_dir = get_crate_dir(build_crate).expect("Cant find crate dir");
+    
     // lets parse the toml
     let cargo_str = std::fs::read_to_string(&crate_dir.join("Cargo.toml")).expect("Cant find cargo.toml");
     let toml = makepad_toml_parser::parse_toml(&cargo_str).expect("Cant parse Cargo.toml");
@@ -64,11 +80,11 @@ pub fn check_crate(build_crate:&str, args: &[String])->Result<(),String>{
         }
     }
     let mut count = 0;
-    for (_toolchain, _ty, platform) in TOOLCHAINS{
+    for (_toolchain, ty, platform) in TOOLCHAINS{
         if !platform_filter.contains(&platform){
             continue;
         }
-        if nightly_only{
+        if nightly_only || ty.nightly_only(){
             count += 1;
         }
         else{
@@ -86,8 +102,8 @@ pub fn check_crate(build_crate:&str, args: &[String])->Result<(),String>{
         let toolchain = toolchain.to_string();
         let args = args.to_vec();
         let sender = sender.clone();
-        let thread = std::thread::spawn(move || {
-            if !nightly_only{
+        let thread = std::thread::spawn(move || { 
+            if !nightly_only && !ty.nightly_only(){
                 let result = check(&toolchain, "stable", ty, &args, index);
                 let _ = sender.send(("stable",toolchain.clone(),ty, result));
             }
@@ -183,24 +199,41 @@ fn check(toolchain:&str, branch:&str, ty:BuildTy, args: &[String], par:usize) ->
     }
     let target_dir = format!("--target-dir=target/check_all/check{}", par);
     args_out.push(&target_dir);
-    if let BuildTy::Lib = ty{
-        args_out.push("--lib");
-    }
-    if let BuildTy::LinuxDirect= ty{
-
-        if branch == "stable"{
-            return shell_env_cap_split(&[("MAKEPAD", "linux_direct")], &cwd, "rustup", &args_out);
-        }
-        else{
-            return shell_env_cap_split(&[("MAKEPAD", "lines,linux_direct")], &cwd, "rustup", &args_out);
-        }
-    }
-    else{
-        if branch == "stable"{
-            return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
-        }
-        else {
-            return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
+    match ty{
+        BuildTy::Binary=>{
+            if branch == "stable"{
+                return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
+            }
+            else {
+                return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
+            }                
+        },
+        BuildTy::BinaryBuildStd=>{
+            args_out.push("-Z");
+            args_out.push("build-std=std");
+            if branch == "stable"{
+                return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
+            }
+            else {
+                return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
+            }                            
+        },
+        BuildTy::Lib=>{
+            args_out.push("--lib");
+            if branch == "stable"{
+                return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
+            }
+            else {
+                return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
+            }    
+        }, 
+        BuildTy::LinuxDirect=>{
+            if branch == "stable"{
+                return shell_env_cap_split(&[("MAKEPAD", "linux_direct")], &cwd, "rustup", &args_out);
+            }
+            else{
+                return shell_env_cap_split(&[("MAKEPAD", "lines,linux_direct")], &cwd, "rustup", &args_out);
+            }         
         }
     }
 }
@@ -214,21 +247,40 @@ fn rustup_toolchain_install() -> Result<(), String> {
         "install",
         "nightly"
     ]) ?;
-    for (toolchain, _is_lib, _platform) in TOOLCHAINS{
-        shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
-            "target",
-            "add",
-            toolchain,
-            "--toolchain",
-            "nightly"
-        ]) ?;
-        shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
-            "target",
-            "add",
-            toolchain,
-            "--toolchain",
-            "stable"
-        ]) ?;
+    for (toolchain, ty, _platform) in TOOLCHAINS{
+        if let BuildTy::BinaryBuildStd = ty{
+            //TODO fix this better
+            let _= shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
+                "target",
+                "add",
+                toolchain,
+                "--toolchain",
+                "nightly"
+            ]);
+            let _= shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
+                "target",
+                "add",
+                toolchain,
+                "--toolchain",
+                "stable"
+            ]);
+        }
+        else{
+            shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
+                "target",
+                "add",
+                toolchain,
+                "--toolchain",
+                "nightly"
+            ]) ?;
+            shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
+                "target",
+                "add",
+                toolchain,
+                "--toolchain",
+                "stable"
+            ]) ?;
+        }
     }
     Ok(())
 }

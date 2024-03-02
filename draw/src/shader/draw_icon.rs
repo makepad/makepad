@@ -69,7 +69,7 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 #[repr(C)]
 pub struct DrawIcon {
     #[live(1.0)] pub brightness: f32,
@@ -95,11 +95,11 @@ pub struct DrawIcon {
 }
 
 impl LiveHook for DrawIcon{
-    fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]){
-        self.draw_vars.before_apply_init_shader(cx, apply_from, index, nodes, &self.geometry);
+    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]){
+        self.draw_vars.before_apply_init_shader(cx, apply, index, nodes, &self.geometry);
     }
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        self.draw_vars.after_apply_update_self(cx, apply_from, index, nodes, &self.geometry);
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
+        self.draw_vars.after_apply_update_self(cx, apply, index, nodes, &self.geometry);
     }
 }
 
@@ -132,6 +132,8 @@ impl DrawIcon {
         let icon_atlas_rc = cx.icon_atlas_rc.clone();
         let mut icon_atlas = icon_atlas_rc.0.borrow_mut();
         let icon_atlas = &mut*icon_atlas;
+       
+            
         if let Some((path_hash, bounds)) = icon_atlas.get_icon_bounds(cx, &self.svg_path, self.svg_file.as_ref()) {
             let width_is_fit = walk.width.is_fit();
             let height_is_fit = walk.height.is_fit();

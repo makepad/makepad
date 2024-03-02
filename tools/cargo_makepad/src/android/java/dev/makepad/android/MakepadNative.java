@@ -1,17 +1,22 @@
 package dev.makepad.android;
 
 import android.view.Surface;
+import android.graphics.SurfaceTexture;
 import android.view.MotionEvent;
 import java.nio.ByteBuffer;
 
 public class MakepadNative {
     // belongs to MakepadActivity class
     public native static void activityOnCreate(Object activity);
+    public native static void activityOnStart();
     public native static void activityOnResume();
     public native static void activityOnPause();
     public native static void activityOnStop();
     public native static void activityOnDestroy();
-    public static native void onAndroidParams(String cache_path, float dentify);
+    public native static void activityOnWindowFocusChanged(boolean has_focus);
+    public static native void onAndroidParams(String cache_path, float dentify, boolean isEmulator);
+
+    public native static void onBackPressed();
 
     // belongs to QuadSurface class
     public native static void surfaceOnSurfaceCreated(Surface surface);
@@ -26,13 +31,17 @@ public class MakepadNative {
     // networking
     public native static void onHttpResponse(long id, long metadata_id, int status_code, String headers, byte[] body);
     public native static void onHttpRequestError(long id, long metadata_id, String error);
+    public native static void onWebSocketMessage(byte[] message, long callback);
+    public native static void onWebSocketClosed(long callback);
+    public native static void onWebSocketError(String error, long callback);
+
 
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
 
-    // video decoding
-    public static native void onVideoDecodingInitialized(long videoId, int frameRate, int videoWidth, int videoHeight, String colorFormat, long duration);
-    public static native void onVideoStream(long videoId, ByteBuffer frameGroup);
-    public static native void onVideoChunkDecoded(long videoId);
+    // video playback
+    public static native void onVideoPlaybackPrepared(long videoId, int videoWidth, int videoHeight, long duration, VideoPlayer surfaceTexture);
+    public static native void onVideoPlaybackCompleted(long videoId);
+    public static native void onVideoPlayerReleased(long videoId);
     public static native void onVideoDecodingError(long videoId, String error);
 }

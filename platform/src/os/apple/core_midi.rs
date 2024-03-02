@@ -2,7 +2,7 @@ use {
     std::sync::{Arc, Mutex},
     std::sync::mpsc,
     crate::{
-        thread::Signal,
+        thread::SignalToUI,
         makepad_live_id::{LiveId},
         midi::*,
         os::apple::apple_sys::*,
@@ -80,7 +80,7 @@ pub struct CoreMidiPort {
 type MidiInputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
 
 pub struct CoreMidiAccess {
-    change_signal: Signal,
+    change_signal: SignalToUI,
     input_senders: MidiInputSenders,
     midi_in_port: MIDIPortRef,
     midi_out_port: MIDIPortRef,
@@ -89,7 +89,7 @@ pub struct CoreMidiAccess {
 
 impl CoreMidiAccess {
     
-    pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
+    pub fn new(change_signal:SignalToUI) -> Arc<Mutex<Self>> {
         let change_signal_clone = change_signal.clone();
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
             change_signal_clone.set();
@@ -120,7 +120,7 @@ impl CoreMidiAccess {
             }
             if senders.len()>0 {
                 // make sure our eventloop runs
-                Signal::set_ui_signal();
+                SignalToUI::set_ui_signal();
             }
         });
         

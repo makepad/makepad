@@ -11,7 +11,7 @@ pub enum ScrollAxis {
     #[pick] Horizontal,
     Vertical
 }
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBar {
     #[live] draw_bar: DrawScrollBar,
     #[live] pub bar_size: f64,
@@ -36,7 +36,7 @@ pub struct ScrollBar {
     #[rust] drag_point: Option<f64>, // the point in pixels where we are dragging
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawScrollBar {
     #[deref] draw_super: DrawQuad,
@@ -225,7 +225,7 @@ impl ScrollBar {
     
     pub fn handle_scroll_event(&mut self, cx: &mut Cx, event: &Event, scroll_area: Area, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if let Event::Scroll(e) = event {
-            if scroll_area.get_rect(cx).contains(e.abs) {
+            if scroll_area.rect(cx).contains(e.abs) {
                 if !match self.axis {
                     ScrollAxis::Horizontal => e.handled_x.get(),
                     ScrollAxis::Vertical => e.handled_y.get()

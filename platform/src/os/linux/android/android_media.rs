@@ -10,7 +10,7 @@ use {
     crate::{
         cx::Cx,
         event::Event,
-        thread::Signal,
+        thread::SignalToUI,
         audio::*,
         midi::*,
         video::*,
@@ -20,11 +20,11 @@ use {
 
 #[derive(Default)]
 pub struct CxAndroidMedia {
-    pub (crate) android_audio_change: Signal,
+    pub (crate) android_audio_change: SignalToUI,
     pub (crate) android_audio: Option<Arc<Mutex<AndroidAudioAccess >> >,
-    pub (crate) android_midi_change: Signal,
+    pub (crate) android_midi_change: SignalToUI,
     pub (crate) android_midi: Option<Arc<Mutex<AndroidMidiAccess >> >,
-    pub (crate) android_camera_change: Signal,
+    pub (crate) android_camera_change: SignalToUI,
     pub (crate) android_camera: Option<Arc<Mutex<AndroidCameraAccess >> >,
     
 }

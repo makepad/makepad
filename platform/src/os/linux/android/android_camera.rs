@@ -7,7 +7,7 @@ use {
     },
     crate::{
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         video::*,
     },
 };
@@ -209,7 +209,7 @@ pub struct AndroidCameraAccess {
 }
 
 impl AndroidCameraAccess {
-    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         unsafe {
             let manager = ACameraManager_create();
             

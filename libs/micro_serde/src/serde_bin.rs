@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     hash::Hash,
-    convert::TryInto,
     str,
 };
 
@@ -117,6 +116,23 @@ impl DeBin for u8 {
 impl SerBin for u8 {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         s.push(*self);
+    }
+}
+
+impl DeBin for i8 {
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<i8,DeBinErr> {
+        if *o + 1 > d.len(){
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:"u8".to_string()})
+        } 
+        let m = d[*o];
+        *o += 1;
+        Ok(m as i8)
+    }
+}
+
+impl SerBin for i8 {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        s.push(*self as u8);
     }
 }
 
@@ -374,7 +390,7 @@ impl SerBin for char {
         self.encode_utf8(&mut bytes).as_bytes().ser_bin(s);
     }
 }
-
+/*
 #[cfg(unix)]
 impl DeBin for PathBuf {
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
@@ -389,7 +405,7 @@ impl DeBin for OsString {
 
         Ok(OsString::from_vec(Vec::de_bin(o, d)?))
     }
-}
+}*/
 
 impl DeBin for char {
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {

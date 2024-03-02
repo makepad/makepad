@@ -1,5 +1,6 @@
 use std::{
-    path::{PathBuf},
+    collections::HashSet,
+    path::{Path, PathBuf},
 };
 use crate::makepad_shell::*;
 
@@ -26,12 +27,36 @@ pub fn get_crate_dir(build_crate: &str) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
     if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid", "-p", build_crate]) {
         #[cfg(target_os="windows")]
-        return Ok(output.trim_start_matches("file:///").split('#').next().unwrap().into());
+        {
+            let output = output.strip_prefix("file:///").unwrap_or(&output);
+            let output = output.strip_prefix("path+file:///").unwrap_or(output);
+            return Ok(output.split('#').next().unwrap().into());
+        }
         #[cfg(not(target_os="windows"))]
-        return Ok(output.trim_start_matches("file://").split('#').next().unwrap().into());
+        {  
+            let output = output.strip_prefix("file://").unwrap_or(&output);
+            let output = output.strip_prefix("path+file://").unwrap_or(output);
+            return Ok(output.split('#').next().unwrap().into());
+        }
     } else {
         Err(format!("Failed to get crate dir for: {}", build_crate))
     }
+}
+
+pub fn get_crate_resources(build_crate: &str) -> HashSet<(String, PathBuf)> {
+    let mut dependencies = HashSet::new();
+    let cwd = std::env::current_dir().unwrap();
+    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate]) {
+        for line in cargo_tree_output.lines().skip(1) {
+            if let Some((name, path)) = extract_dependency_info(line) {
+                let resources_path = Path::new(&path).join("resources");
+                if resources_path.is_dir() {
+                    dependencies.insert((name.replace('-', "_"), resources_path));
+                }
+            }
+        }
+    }
+    dependencies
 }
 
 pub fn get_build_crate_from_args(args: &[String]) -> Result<&str, String> {

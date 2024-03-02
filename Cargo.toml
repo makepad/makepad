@@ -1,9 +1,12 @@
 workspace.members = [
 #    "code_editor",
     "examples/fractal_zoom", 
+    "examples/ui_zoo", 
     "examples/news_feed", 
     "examples/web_cam", 
     "examples/ironfish",
+    "experiments/bigfish",
+    "experiments/teamtalk",
     "examples/simple",
     "examples/simple_shader",
     "examples/chatgpt",

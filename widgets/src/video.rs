@@ -1,43 +1,43 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_decoding::*,
-    widget::*, VideoColorFormat,
+    makepad_derive_widget::*, makepad_draw::*, makepad_platform::event::video_playback::*,
+    widget::*, image_cache::ImageCacheImpl,
 };
-use std::{
-    ops::Range,
-    sync::mpsc::channel,
-    sync::{Arc, Mutex},
-    thread,
-    time::{Duration, Instant},
-};
-
-const MAX_FRAMES_TO_DECODE: usize = 20;
-const FRAME_BUFFER_LOW_WATER_MARK: usize = MAX_FRAMES_TO_DECODE / 3;
-
-// Usage
-// is_looping - determines if the video should be played in a loop. defaults to false.
-// hold_to_pause - determines if the video should be paused when the user hold the pause button. defaults to false.
-// autoplay - determines if the video should start playback when the widget is created. defaults to false.
 
 live_design! {
     VideoBase = {{Video}} {}
 }
 
-// TODO:
+/// Currently only supported on Android
 
-// - Add audio playback
-// - Add support for SemiPlanar nv21, currently we assume that SemiPlanar is nv12
-// - Add function to restart playback manually when not looping.
+/// DSL Usage
+/// 
+/// `source` - determines the source for the video playback, can be either:
+///  - `Network { url: "https://www.someurl.com/video.mkv" }`. On Android it supports: HLS, DASH, RTMP, RTSP, and progressive HTTP downloads
+///  - `Filesystem { path: "/storage/.../DCIM/Camera/video.mp4" }`. On Android it requires read permissions that must be granted at runtime.
+///  - `Dependency { path: dep("crate://self/resources/video.mp4") }`. For in-memory videos loaded through LiveDependencies
+/// 
+/// `thumbnail_source` - determines the source for the thumbnail image, currently only supports LiveDependencies.
+/// 
+/// `is_looping` - determines if the video should be played in a loop. defaults to false.
+/// 
+/// `hold_to_pause` - determines if the video should be paused when the user hold the pause button. defaults to false.
+/// 
+/// `autoplay` - determines if the video should start playback when the widget is created. defaults to false.
 
-// - Optimizations:
-//      - determine frame chunk size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
-//      - we're allocating new vec and copying data from java into rust when decoding, if we need to we could have a shared memory buffer between them, but that
-//        introduces a lot of complexity.
+/// Not yet supported:
+/// UI
+///  - Playback controls
+///  - Progress/seek-to bar
 
+/// Widget API
+///  - Seek to timestamp
+///  - Option to restart playback manually when not looping.
+///  - Hotswap video source, `set_source(VideoDataSource)` only works if video is in Unprepared state.
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct Video {
     // Drawing
-    #[live]
+    #[redraw] #[live]
     draw_bg: DrawColor,
     #[walk]
     walk: Walk,
@@ -46,11 +46,18 @@ pub struct Video {
     #[live]
     scale: f64,
 
-    // Source and textures
+    // Textures
     #[live]
-    source: LiveDependency,
+    source: VideoDataSource,
     #[rust]
-    textures: [Option<Texture>; 3],
+    video_texture: Option<Texture>,
+    #[rust]
+    video_texture_handle: Option<u32>,
+    /// Requires [`show_thumbnail_before_playback`] to be `true`.
+    #[live]
+    thumbnail_source: Option<LiveDependency>,
+    #[rust]
+    thumbnail_texture: Option<Texture>,
 
     // Playback
     #[live(false)]
@@ -59,12 +66,21 @@ pub struct Video {
     hold_to_pause: bool,
     #[live(false)]
     autoplay: bool,
+    #[live(false)]
+    mute: bool,
     #[rust]
     playback_state: PlaybackState,
     #[rust]
-    pause_time: Option<Instant>,
+    should_prepare_playback: bool,
     #[rust]
-    total_pause_duration: Duration,
+    audio_state: AudioState,
+    /// Whether to show the provided thumbnail when the video has not yet started playing.
+    #[live(false)]
+    show_thumbnail_before_playback: bool,
+
+    // Actions
+    #[rust(false)]
+    should_dispatch_texture_updates: bool,
 
     // Original video metadata
     #[rust]
@@ -73,476 +89,365 @@ pub struct Video {
     video_height: usize,
     #[rust]
     total_duration: u128,
-    #[rust]
-    original_frame_rate: usize,
-    #[rust]
-    color_format: VideoColorFormat,
-
-    // Buffering
-    #[rust]
-    frames_buffer: SharedFrameBuffer,
-    #[rust]
-    tmp_recycled_vec: Vec<u8>,
-
-    // Frame
-    #[rust]
-    is_current_texture_preview: bool,
-    #[rust]
-    next_frame_ts: u128,
-    #[rust]
-    frame_ts_interval: f64,
-    #[rust]
-    start_time: Option<Instant>,
-    #[rust]
-    tick: Timer,
-
-    // Decoding
-    #[rust]
-    decoding_receiver: ToUIReceiver<Vec<u8>>,
-    #[rust]
-    decoding_state: DecodingState,
-    // #[rust]
-    // vec_pool: SharedVecPool,
-    #[rust]
-    available_to_fetch: bool,
 
     #[rust]
     id: LiveId,
 }
 
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct VideoRef(WidgetRef);
-
 impl VideoRef {
-    pub fn begin_decoding(&mut self, cx: &mut Cx) {
+    /// Prepares the video for playback. Does not start playback or update the video texture.
+    /// 
+    /// Once playback is prepared, [`begin_playback`] can be called to start the actual playback.
+    /// 
+    /// Alternatively, [`begin_playback`] (which uses [`prepare_playback`]) can be called if you want to start playback as soon as it's prepared.
+    pub fn prepare_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.initialize_decoding(cx);
+            inner.prepare_playback(cx);
         }
     }
 
-    // it will initialize decoding if not already initialized
-    pub fn show_preview(&mut self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.show_preview(cx);
-        }
-    }
-
-    // it will initialize decoding if not already initialized
-    pub fn begin_playback(&mut self, cx: &mut Cx) {
+    /// Starts the video playback. Calls `prepare_playback(cx)` if the video not already prepared.
+    pub fn begin_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.begin_playback(cx);
         }
     }
 
-    pub fn pause_playback(&self) {
+    /// Pauses the video playback. Ignores if the video is not currently playing.
+    pub fn pause_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.pause_playback();
+            inner.pause_playback(cx);
         }
     }
 
-    pub fn resume_playback(&self) {
+    /// Pauses the video playback. Ignores if the video is already playing.
+    pub fn resume_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.resume_playback();
+            inner.resume_playback(cx);
         }
     }
 
-    // it will finish playback and cleanup decoding
-    pub fn end_playback(&mut self, cx: &mut Cx) {
+    /// Mutes the video playback. Ignores if the video is not currently playing or already muted.
+    pub fn mute_playback(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.end_playback(cx);
+            inner.mute_playback(cx);
         }
     }
-}
 
-#[derive(Clone, Default, WidgetSet)]
-pub struct VideoSet(WidgetSet);
+    /// Unmutes the video playback. Ignores if the video is not currently muted or not playing.
+    pub fn unmute_playback(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.unmute_playback(cx);
+        }
+    }
 
-impl VideoSet {}
+    /// Stops playback and performs cleanup of all resources related to playback,
+    /// including data source, decoding threads, object references, etc.
+    /// 
+    /// In order to play the video again you must either call [`prepare_playback`] or [`begin_playback`].
+    pub fn stop_and_cleanup_resources(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.stop_and_cleanup_resources(cx);
+        }
+    }
 
-#[derive(Default, PartialEq)]
-enum DecodingState {
-    #[default]
-    NotStarted,
-    Initializing,
-    Initialized,
-    Decoding,
-    ChunkFinished,
+    /// Updates the source of the video data. Currently it only proceeds if the video is in Unprepared state.
+    pub fn set_source(&self, source: VideoDataSource) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source(source);
+        }
+    }
+
+    /// Determines if this video instance should dispatch [`VideoAction::TextureUpdated`] actions on each texture update.
+    /// This is disbaled by default because it can be quite nosiy when debugging actions.
+    pub fn should_dispatch_texture_updates(&self, should_dispatch: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.should_dispatch_texture_updates = should_dispatch;
+        }
+    }
+
+    pub fn set_thumbnail_texture(&self, cx: &mut Cx, texture: Option<Texture>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.thumbnail_texture = texture;
+            inner.load_thumbnail_image(cx);
+        }
+    }
+
+    pub fn is_unprepared(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Unprepared
+        }
+        false
+    }
+
+    pub fn is_preparing(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Preparing
+        }
+        false
+    }
+
+    pub fn is_prepared(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Prepared
+        }
+        false
+    }
+    
+    pub fn is_playing(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Playing
+        }
+        false
+    }
+
+    pub fn is_paused(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Paused
+        }
+        false
+    }
+
+    pub fn has_completed(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::Completed
+        }
+        false
+    }
+
+    pub fn is_cleaning_up(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.playback_state == PlaybackState::CleaningUp
+        }
+        false
+    }
+
+    pub fn is_muted(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.audio_state == AudioState::Muted
+        }
+        false
+    }
 }
 
 #[derive(Default, PartialEq, Debug)]
 enum PlaybackState {
     #[default]
-    NotStarted,
-    Previewing,
+    Unprepared,
+    Preparing,
+    Prepared,
     Playing,
     Paused,
-    Finished,
+    /// When playback reached end of stream, only observable when not looping.
+    Completed,
+    /// When the platform is called to stop playback and release all resources
+    /// including data source, object references, decoding threads, etc.
+    /// 
+    /// Once cleanup has completed, the video will go into `Unprepared` state.
+    CleaningUp,
+}
+
+#[derive(Default, PartialEq, Debug)]
+enum AudioState {
+    #[default]
+    Playing,
+    Muted,
 }
 
 impl LiveHook for Video {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Video);
-    }
-
+    #[allow(unused)]
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.id = LiveId::unique();
-        if self.autoplay {
-            self.begin_playback(cx);
+
+        #[cfg(target_os = "android")]
+        {
+            if self.video_texture.is_none() {
+                let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
+                self.video_texture = Some(new_texture);
+            }
+            let texture = self.video_texture.as_mut().unwrap();
+            self.draw_bg.draw_vars.set_texture(0, &texture);
+        }
+
+        #[cfg(not(target_os = "android"))]
+        error!("Video Widget is currently only supported on Android.");
+
+        match cx.os_type() {
+            OsType::Android(params) => {
+                if params.is_emulator {
+                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+                }
+            },
+            _ => {}
+        }
+        
+        self.should_prepare_playback = self.autoplay;
+    }
+
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        self.lazy_create_image_cache(cx);
+        self.thumbnail_texture = Some(Texture::new(cx));
+
+        let target_w = self.walk.width.fixed_or_zero();
+        let target_h = self.walk.height.fixed_or_zero();
+        self.draw_bg
+            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
+
+        if self.show_thumbnail_before_playback {
+            self.load_thumbnail_image(cx);
+            self.draw_bg
+            .set_uniform(cx, id!(show_thumbnail), &[1.0]);
         }
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum VideoAction {
     None,
+    PlaybackPrepared,
+    PlaybackBegan,
+    TextureUpdated,
+    PlaybackCompleted,
+    PlayerReset
 }
 
 impl Widget for Video {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_bg.redraw(cx);
-    }
 
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        self.walk
-    }
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+        if let Some(texture) = &self.thumbnail_texture {
+            self.draw_bg.draw_vars.set_texture(1, texture);
+        }
 
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_bg.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope){
         let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut |cx, action| {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+        match event{
+            Event::VideoPlaybackPrepared(event)=> if event.video_id == self.id {
+                self.handle_playback_prepared(cx, event);
+                cx.widget_action(uid, &scope.path, VideoAction::PlaybackPrepared);
+            }
+            Event::VideoTextureUpdated(event)=>if event.video_id == self.id {
+                self.redraw(cx);
+                if self.playback_state == PlaybackState::Prepared {
+                    self.playback_state = PlaybackState::Playing;
+                    cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
+                    self.draw_bg
+                    .set_uniform(cx, id!(show_thumbnail), &[0.0]);
+                }
+                if self.should_dispatch_texture_updates {
+                    cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
+                }
+            }
+            Event::VideoPlaybackCompleted(event) =>  if event.video_id == self.id {
+                if !self.is_looping {
+                    self.playback_state = PlaybackState::Completed;
+                    cx.widget_action(uid, &scope.path, VideoAction::PlaybackCompleted);
+                }
+            }
+            Event::VideoPlaybackResourcesReleased(event) => if event.video_id == self.id {
+                self.playback_state = PlaybackState::Unprepared;
+                cx.widget_action(uid, &scope.path, VideoAction::PlayerReset);
+            }
+            Event::TextureHandleReady(event) => {
+                if event.texture_id == self.video_texture.clone().unwrap().texture_id() {
+                    self.video_texture_handle = Some(event.handle);
+                    self.maybe_prepare_playback(cx);
+                }
+            }
+            _=>()
+        }
+        
+        self.handle_gestures(cx, event);
+        self.handle_activity_events(cx, event);
+        self.handle_errors(event);
+    }
+}
+
+impl ImageCacheImpl for Video {
+    fn get_texture(&self) -> &Option<Texture> {
+        &self.thumbnail_texture
+    }
+
+    fn set_texture(&mut self, texture: Option<Texture>) {
+        self.thumbnail_texture = texture;
     }
 }
 
 impl Video {
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, VideoAction),
-    ) {
-        if let Event::VideoDecodingInitialized(event) = event {
-            if event.video_id == self.id {
-                self.handle_decoding_initialized(cx, event);
+    fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
+            if self.video_texture_handle.is_none() {
+                // texture is not yet ready, this method will be called again on TextureHandleReady
+                return;
             }
-        }
 
-        if let Event::VideoChunkDecoded(video_id) = event {
-            if *video_id == self.id {
-                self.decoding_state = DecodingState::ChunkFinished;
-                self.available_to_fetch = true;
-            }
-        }
-
-        if self.tick.is_event(event).is_some() {
-            self.maybe_show_preview(cx);
-            self.maybe_advance_playback(cx);
-
-            if self.should_fetch() {
-                self.available_to_fetch = false;
-                cx.fetch_next_video_frames(self.id, MAX_FRAMES_TO_DECODE);
-            } else if self.should_request_decoding() {
-                let frames_to_decode = if self.playback_state == PlaybackState::Previewing {
-                    1
-                } else {
-                    MAX_FRAMES_TO_DECODE
-                };
-                cx.decode_next_video_chunk(self.id, frames_to_decode);
-                self.decoding_state = DecodingState::Decoding;
-            }
-        }
-
-        self.handle_gestures(cx, event);
-        self.handle_activity_events(event);
-        self.handle_errors(event);
-    }
-
-    fn initialize_decoding(&mut self, cx: &mut Cx) {
-        if self.decoding_state == DecodingState::NotStarted {
-            match cx.get_dependency(self.source.as_str()) {
-                Ok(data) => {
-                    cx.initialize_video_decoding(self.id, data);
-                    self.decoding_state = DecodingState::Initializing;
-                }
-                Err(e) => {
-                    error!(
-                        "initialize_decoding: resource not found {} {}",
-                        self.source.as_str(),
-                        e
-                    );
-                }
-            }
-        }
-    }
-
-    fn handle_decoding_initialized(&mut self, cx: &mut Cx, event: &VideoDecodingInitializedEvent) {
-        self.decoding_state = DecodingState::Initialized;
-        self.video_width = event.video_width as usize;
-        self.video_height = event.video_height as usize;
-        self.original_frame_rate = event.frame_rate;
-        self.total_duration = event.duration;
-        self.color_format = event.color_format;
-        self.frame_ts_interval = 1000000.0 / self.original_frame_rate as f64;
-
-        let is_plannar = if self.color_format == VideoColorFormat::YUV420Planar {
-            1.0
-        } else {
-            0.0
-        };
-        self.draw_bg.set_uniform(cx, id!(is_plannar), &[is_plannar]);
-        self.draw_bg
-            .set_uniform(cx, id!(video_height), &[self.video_height as f32]);
-        self.draw_bg
-            .set_uniform(cx, id!(video_width), &[self.video_width as f32]);
-
-        // Debug
-        // makepad_error_log::log!(
-        //     "Video id {} - decoding initialized: \n {}x{}px | {} FPS | Color format: {:?} | Timestamp interval: {:?}",
-        //     self.id.0,
-        //     self.video_width,
-        //     self.video_height,
-        //     self.original_frame_rate,
-        //     self.color_format,
-        //     self.frame_ts_interval
-        // );
-
-        cx.decode_next_video_chunk(self.id, MAX_FRAMES_TO_DECODE + MAX_FRAMES_TO_DECODE / 2);
-        self.decoding_state = DecodingState::Decoding;
-
-        self.begin_buffering_thread(cx);
-        self.tick = cx.start_interval(8.0);
-    }
-
-    fn begin_buffering_thread(&mut self, cx: &mut Cx) {
-        let video_sender = self.decoding_receiver.sender();
-        cx.video_decoding_input(self.id, move |data| {
-            let _ = video_sender.send(data);
-        });
-
-        let frames_buffer = Arc::clone(&self.frames_buffer);
-
-        let (_new_sender, new_receiver) = channel();
-        let old_receiver = std::mem::replace(&mut self.decoding_receiver.receiver, new_receiver);
-
-        thread::spawn(move || loop {
-            let mut frame_group = old_receiver.recv().unwrap();
-            let mut buffer = frames_buffer.lock().unwrap();
-            buffer.append(&mut frame_group);
-        });
-    }
-
-    fn maybe_show_preview(&mut self, cx: &mut Cx) {
-        if self.playback_state == PlaybackState::Previewing && !self.is_current_texture_preview {
-            let frame_metadata = self.parse_next_frame_metadata();
-            self.update_textures(cx, &frame_metadata);
-            self.is_current_texture_preview = true;
-
-            self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
-            self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
-            self.redraw(cx);
-        }
-    }
-
-    fn maybe_advance_playback(&mut self, cx: &mut Cx) {
-        if self.playback_state == PlaybackState::Playing {
-            let now = Instant::now();
-            let video_time_us = match self.start_time {
-                Some(start_time) => now.duration_since(start_time).as_micros(),
-                None => 0,
+            let source = match &self.source {
+                VideoDataSource::Dependency { path } => match cx.get_dependency(path.as_str()) {
+                    Ok(data) => VideoSource::InMemory(data),
+                    Err(e) => {
+                        error!(
+                            "Attempted to prepare playback: resource not found {} {}",
+                            path.as_str(),
+                            e
+                        );
+                        return;
+                    }
+                },
+                VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
+                VideoDataSource::Filesystem { path } => VideoSource::Filesystem(path.to_string()),
             };
 
-            if video_time_us >= self.next_frame_ts || self.start_time.is_none() {
-                if self.frames_buffer.lock().unwrap().is_empty() {
-                    return;
-                }
-
-                let frame_metadata = self.parse_next_frame_metadata();
-                self.update_textures(cx, &frame_metadata);
-
-                if self.start_time.is_none() {
-                    self.start_time = Some(now);
-                    self.draw_bg.set_uniform(cx, id!(is_last_frame), &[0.0]);
-                    self.draw_bg.set_uniform(cx, id!(texture_available), &[1.0]);
-                }
-                self.redraw(cx);
-
-                // if at the last frame, loop or stop
-                if frame_metadata.is_eos {
-                    self.next_frame_ts = 0;
-                    self.start_time = None;
-                    if !self.is_looping {
-                        self.draw_bg.set_uniform(cx, id!(is_last_frame), &[1.0]);
-                        self.playback_state = PlaybackState::Finished;
-                    }
-                } else {
-                    self.next_frame_ts =
-                        frame_metadata.timestamp + self.frame_ts_interval.ceil() as u128;
-                }
-            }
-        }
-    }
-
-    fn parse_next_frame_metadata(&self) -> FrameMetadata {
-        let mut frame_buffer = self.frames_buffer.lock().unwrap();
-        // | Timestamp (8B)  | Y Stride (4B) | U Stride (4B) | V Stride (4B) | isEoS (1B) | Pixel data length (4b) | Pixel Data |
-
-        if frame_buffer.len() < 25 {
-            panic!("Insufficient data to parse frame metadata");
-        }
-
-        // might have to update for different endianness depending of the platform
-        let timestamp = u64::from_be_bytes(frame_buffer[0..8].try_into().unwrap()) as u128;
-
-        let y_stride = u32::from_be_bytes(frame_buffer[8..12].try_into().unwrap()) as usize;
-        let u_stride = u32::from_be_bytes(frame_buffer[12..16].try_into().unwrap()) as usize;
-        let v_stride = u32::from_be_bytes(frame_buffer[16..20].try_into().unwrap()) as usize;
-
-        let is_eos = frame_buffer[20] != 0;
-
-        let frame_length = u32::from_be_bytes(frame_buffer[21..25].try_into().unwrap()) as usize;
-        let frame_range = 0..frame_length;
-
-        // Drain the metadata from the buffer
-        frame_buffer.drain(0..25);
-
-        FrameMetadata {
-            timestamp,
-            y_stride,
-            u_stride,
-            v_stride,
-            frame_range,
-            is_eos,
-        }
-    }
-
-    fn update_textures(&mut self, cx: &mut Cx, frame_metadata: &FrameMetadata) {
-        let range = &frame_metadata.frame_range;
-        let y_stride = frame_metadata.y_stride;
-        let u_stride = frame_metadata.u_stride;
-        let v_stride = frame_metadata.v_stride;
-
-        self.draw_bg
-            .set_uniform(cx, id!(y_stride), &[y_stride as f32]);
-        self.draw_bg
-            .set_uniform(cx, id!(u_stride), &[u_stride as f32]);
-        self.draw_bg
-            .set_uniform(cx, id!(v_stride), &[v_stride as f32]);
-
-        match self.color_format {
-            VideoColorFormat::YUV420Planar => {
-                // y
-                let y_plane_range = range.start..range.start + y_stride * self.video_height;
-                self.drain_frame_buffer(y_plane_range);
-                self.update_texture_r(cx, 0, self.video_width, self.video_height, y_stride);
-
-                // u
-                let u_plane_start = range.start;
-                let u_plane_range =
-                    u_plane_start..u_plane_start + u_stride * (self.video_height / 2);
-                self.drain_frame_buffer(u_plane_range);
-                self.update_texture_r(cx, 1, self.video_width / 2, self.video_height / 2, u_stride);
-
-                // v
-                let v_plane_start = u_plane_start;
-                let v_plane_range =
-                    v_plane_start..v_plane_start + v_stride * (self.video_height / 2);
-                self.drain_frame_buffer(v_plane_range);
-                self.update_texture_r(cx, 2, self.video_width / 2, self.video_height / 2, v_stride);
-            }
-            VideoColorFormat::YUV420SemiPlanar => {
-                // y
-                let y_plane_range = range.start..range.start + y_stride * self.video_height;
-                self.drain_frame_buffer(y_plane_range);
-                self.update_texture_r(cx, 0, self.video_width, self.video_height, y_stride);
-
-                // uv
-                let uv_plane_size = y_stride * self.video_height / 2;
-                let uv_plane_range = 0..uv_plane_size;
-                self.drain_frame_buffer(uv_plane_range);
-                self.update_texture_rg(cx, 1, self.video_width, self.video_height / 2, u_stride);
-            }
-            _ => todo!(),
-        }
-    }
-
-    fn drain_frame_buffer(&mut self, range: Range<usize>) {
-        let mut frame_buffer = self.frames_buffer.lock().unwrap();
-        self.tmp_recycled_vec.clear();
-        self.tmp_recycled_vec.extend(frame_buffer.drain(range));
-    }
-
-    fn update_texture_r(&mut self, cx: &mut Cx, slot: usize, width: usize, height: usize, stride: usize) {
-        if self.textures[slot].is_none() {
-            let new_texture = Texture::new(cx);
-            new_texture.set_format(
-                cx,
-                TextureFormat::VecRu8 {
-                    width,
-                    height,
-                    data: vec![],
-                    unpack_row_length: Some(stride),
-                },
+            cx.prepare_video_playback(
+                self.id,
+                source,
+                self.video_texture_handle.unwrap(),
+                self.autoplay,
+                self.is_looping,
             );
-            self.textures[slot] = Some(new_texture);
+
+            self.playback_state = PlaybackState::Preparing;
+            self.should_prepare_playback = false;
         }
-
-        let texture = self.textures[slot].as_mut().unwrap();
-        texture.swap_vec_u8(cx, &mut self.tmp_recycled_vec);
-
-        self.draw_bg.draw_vars.set_texture(slot, &texture);
     }
 
-    fn update_texture_rg(&mut self, cx: &mut Cx, slot: usize, width: usize, height: usize, stride: usize) {
-        if self.textures[slot].is_none() {
-            let new_texture = Texture::new(cx);
-            new_texture.set_format(
-                cx,
-                TextureFormat::VecRGu8 {
-                    width,
-                    height,
-                    data: vec![],
-                    unpack_row_length: Some(stride),
-                },
-            );
-            self.textures[slot] = Some(new_texture);
-        } 
+    fn handle_playback_prepared(&mut self, cx: &mut Cx, event: &VideoPlaybackPreparedEvent) {
+        self.playback_state = PlaybackState::Prepared;
+        self.video_width = event.video_width as usize;
+        self.video_height = event.video_height as usize;
+        self.total_duration = event.duration;
 
-        let texture = self.textures[slot].as_mut().unwrap();
-        texture.swap_vec_u8(cx, &mut self.tmp_recycled_vec);
+        self.draw_bg
+            .set_uniform(cx, id!(source_size), &[self.video_width as f32, self.video_height as f32]);
 
-        self.draw_bg.draw_vars.set_texture(slot, &texture);
+        if self.mute && self.audio_state != AudioState::Muted {
+            cx.mute_video_playback(self.id);
+        }
     }
 
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 if self.hold_to_pause {
-                    self.pause_playback();
+                    self.pause_playback(cx);
                 }
             }
             Hit::FingerUp(_fe) => {
                 if self.hold_to_pause {
-                    self.resume_playback();
+                    self.resume_playback(cx);
                 }
             }
+            
             _ => (),
         }
     }
 
-    fn handle_activity_events(&mut self, event: &Event) {
+    fn handle_activity_events(&mut self, cx: &mut Cx, event: &Event) {
         match event {
-            Event::Pause => self.pause_playback(),
-            Event::Resume => self.resume_playback(),
+            Event::Pause => self.pause_playback(cx),
+            Event::Resume => self.resume_playback(cx),
             _ => (),
         }
     }
@@ -558,79 +463,101 @@ impl Video {
         }
     }
 
-    fn show_preview(&mut self, cx: &mut Cx) {
-        if self.playback_state != PlaybackState::Previewing {
-            if self.decoding_state == DecodingState::NotStarted {
-                self.initialize_decoding(cx);
-            }
-            self.playback_state = PlaybackState::Previewing;
+    fn prepare_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Unprepared {
+            self.should_prepare_playback = true;
+            self.maybe_prepare_playback(cx);
         }
     }
 
     fn begin_playback(&mut self, cx: &mut Cx) {
-        if self.decoding_state == DecodingState::NotStarted {
-            self.initialize_decoding(cx);
+        if self.playback_state == PlaybackState::Unprepared {
+            self.should_prepare_playback = true;
+            self.autoplay = true;
+            self.maybe_prepare_playback(cx);
+        } else if self.playback_state == PlaybackState::Prepared {
+            cx.begin_video_playback(self.id);
         }
-        self.playback_state = PlaybackState::Playing;
     }
 
-    fn pause_playback(&mut self) {
+    fn pause_playback(&mut self, cx: &mut Cx) {
         if self.playback_state != PlaybackState::Paused {
-            self.pause_time = Some(Instant::now());
+            cx.pause_video_playback(self.id);
             self.playback_state = PlaybackState::Paused;
         }
     }
 
-    fn resume_playback(&mut self) {
-        if let Some(pause_time) = self.pause_time.take() {
-            let pause_duration = Instant::now().duration_since(pause_time);
-            self.total_pause_duration += pause_duration;
-            if let Some(start_time) = self.start_time.as_mut() {
-                *start_time += pause_duration;
+    fn resume_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Paused {
+            cx.resume_video_playback(self.id);
+            self.playback_state = PlaybackState::Playing;
+        }
+    }
+
+    fn mute_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared {
+            cx.mute_video_playback(self.id);
+            self.audio_state = AudioState::Muted;
+        }
+    }
+
+    fn unmute_playback(&mut self, cx: &mut Cx) {
+        if self.playback_state == PlaybackState::Playing || self.playback_state == PlaybackState::Paused || self.playback_state == PlaybackState::Prepared
+        && self.audio_state == AudioState::Muted {
+            cx.unmute_video_playback(self.id);
+            self.audio_state = AudioState::Playing;
+        }
+    }
+
+    fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
+        if self.playback_state != PlaybackState::Unprepared 
+            && self.playback_state != PlaybackState::Preparing
+            && self.playback_state != PlaybackState::CleaningUp {
+            cx.cleanup_video_playback_resources(self.id);
+            
+            self.playback_state = PlaybackState::CleaningUp;
+            self.autoplay = false;
+            self.should_prepare_playback = false;
+        }
+    }
+
+    fn set_source(&mut self, source: VideoDataSource) {
+        if self.playback_state == PlaybackState::Unprepared {
+            self.source = source;
+        } else {
+            error!(
+                "Attempted to set source while player {} state is: {:?}",
+                self.id.0,
+                self.playback_state
+            );
+        }
+    }
+
+    fn load_thumbnail_image(&mut self, cx: &mut Cx) {
+        if let Some(path) = self.thumbnail_source.clone() {
+            let path_str = path.as_str();
+
+            if path_str.len() > 0 {
+                let _ = self.load_image_dep_by_path(cx, path_str);
             }
         }
-        self.playback_state = PlaybackState::Playing;
-    }
-
-    fn end_playback(&mut self, cx: &mut Cx) {
-        self.playback_state = PlaybackState::Finished;
-        self.start_time = None;
-        self.next_frame_ts = 0;
-        self.cleanup_decoding(cx);
-    }
-
-    fn should_fetch(&self) -> bool {
-        self.available_to_fetch && self.is_buffer_running_low()
-    }
-
-    fn should_request_decoding(&self) -> bool {
-        match self.decoding_state {
-            DecodingState::ChunkFinished => self.is_buffer_running_low(),
-            _ => false,
-        }
-    }
-
-    fn is_buffer_running_low(&self) -> bool {
-        self.frames_buffer.lock().unwrap().len() < FRAME_BUFFER_LOW_WATER_MARK
-    }
-
-    fn cleanup_decoding(&mut self, cx: &mut Cx) {
-        if self.decoding_state != DecodingState::NotStarted {
-            cx.cleanup_video_decoding(self.id);
-            self.frames_buffer.lock().unwrap().clear();
-            self.decoding_state = DecodingState::NotStarted;
-        }
     }
 }
 
-#[derive(Debug)]
-struct FrameMetadata {
-    timestamp: u128,
-    y_stride: usize,
-    u_stride: usize,
-    v_stride: usize,
-    frame_range: Range<usize>,
-    is_eos: bool,
+/// The source of the video data.
+/// 
+/// [`Dependency`]: The path to a LiveDependency (an asset loaded with `dep("crate://..)`).
+/// 
+/// [`Network`]: The URL of a video file, it can be any regular HTTP download or HLS, DASH, RTMP, RTSP.
+/// 
+/// [`Filesystem`]: The path to a video file on the local filesystem. This requires runtime-approved permissions for reading storage.
+#[derive(Clone, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum VideoDataSource {
+    #[live {path: LiveDependency::default()}]
+    Dependency { path: LiveDependency },
+    #[pick {url: "".to_string()}]
+    Network { url: String },
+    #[live {path: "".to_string()}]
+    Filesystem { path: String },
 }
-
-type SharedFrameBuffer = Arc<Mutex<Vec<u8>>>;

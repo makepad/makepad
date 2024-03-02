@@ -50,7 +50,7 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawWave {
     #[deref] draw_super: DrawQuad,
     #[live] gain: f32,
@@ -58,10 +58,10 @@ struct DrawWave {
     #[live] vu_right: f32
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct DisplayAudio {
     #[walk] walk: Walk,
-    #[live] draw_wave: DrawWave,
+    #[redraw] #[live] draw_wave: DrawWave,
     #[rust(Texture::new(cx))] wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
     #[rust([0; 32])] active: [usize; 32],
@@ -70,31 +70,21 @@ pub struct DisplayAudio {
 
 
 impl Widget for DisplayAudio {
-    fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
-        });
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_wave.redraw(cx)
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
-        WidgetDraw::done()
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep { 
+        self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
+        self.draw_wave.vu_left = self.vu[0].0.powf(1.0/3.0)*1.2;
+        self.draw_wave.vu_right = self.vu[0].1.powf(1.0/3.0)*1.2;
+        self.vu[0].0 *= 0.95;
+        self.vu[0].1 *= 0.95;
+        self.draw_wave.draw_walk(cx, walk);
+        DrawStep::done()
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum DisplayAudioAction {
     None
 }
@@ -102,12 +92,9 @@ const WAVE_SIZE_X: usize = 1024;
 const WAVE_SIZE_Y: usize = 16;
 
 impl LiveHook for DisplayAudio {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, DisplayAudio)
-    }
-    
+
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.wave_texture.set_format(cx, TextureFormat::VecBGRAu8_32 {
+        self.wave_texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
             data: {
                 let mut data = Vec::new();
                 data.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);
@@ -160,24 +147,6 @@ impl DisplayAudio {
     }
 }
 
-impl DisplayAudio {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
-        self.draw_wave.vu_left = self.vu[0].0.powf(1.0/3.0)*1.2;
-        self.draw_wave.vu_right = self.vu[0].1.powf(1.0/3.0)*1.2;
-        self.vu[0].0 *= 0.95;
-        self.vu[0].1 *= 0.95;
-        self.draw_wave.draw_walk(cx, walk);
-    }
-    
-    pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, DisplayAudioAction),) {
-    }
-}
-
-// ImGUI convenience API for Piano
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct DisplayAudioRef(WidgetRef);
-
 impl DisplayAudioRef {
     pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer, gain:f32) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -188,10 +157,6 @@ impl DisplayAudioRef {
     pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
     }
 }
-
-// ImGUI convenience API for Piano
-#[derive(Clone, WidgetSet)]
-pub struct DisplayAudioSet(WidgetSet);
 
 impl DisplayAudioSet {
     pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer, gain:f32) {

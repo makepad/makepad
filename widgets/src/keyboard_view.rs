@@ -1,4 +1,5 @@
 use crate::{
+    makepad_derive_widget::*,
     makepad_draw::*,
     view::*,
     widget::*,
@@ -9,10 +10,10 @@ live_design!{
 }
 
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct KeyboardView {
     #[deref] view: View,
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[live] outer_layout: Layout,
     #[live] outer_walk: Walk,
     #[live] keyboard_walk: Walk,
@@ -31,16 +32,10 @@ enum AnimState{
     Closing{duration:f64, start_time:f64,  ease:Ease, height:f64}
 }
 
-impl LiveHook for KeyboardView {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, KeyboardView)
-    }
-}
-
 impl KeyboardView {
 
     fn compute_max_height(&self, height:f64, cx:&Cx)->f64{
-        let self_rect = self.area.get_rect(cx);
+        let self_rect = self.area.rect(cx);
         let ime_rect = cx.get_ime_area_rect();
         let av_height = self_rect.size.y - height;
         let ime_height = ime_rect.size.y + ime_rect.pos.y + self.keyboard_min_shift;
@@ -60,11 +55,8 @@ impl KeyboardView {
 }
 
 impl Widget for KeyboardView {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(e) = self.next_frame.is_event(event){
             match &self.anim_state{
                 AnimState::Opening{duration, start_time, ease, height}=>{
@@ -131,28 +123,21 @@ impl Widget for KeyboardView {
             }
             _=>()
         }
-        self.view.handle_widget_event_with(cx, event, dispatch_action);
+        self.view.handle_event(cx, event, scope);
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {
-        self.outer_walk
-    }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &(), |cx,_|{
             self.view.walk(cx)
         }){
             self.begin(cx, walk);
         }
         if let Some(walk) = self.draw_state.get() {
-            self.view.draw_walk_widget(cx, walk)?;
+            self.view.draw_walk(cx, scope, walk)?;
         }
         self.end(cx);
-        WidgetDraw::done()
-    }
-
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        self.view.find_widgets(path, cached, results);
+        DrawStep::done()
     }
 }
 

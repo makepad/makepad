@@ -1,9 +1,8 @@
 use makepad_widgets::*;
-
+ 
 live_design!{
     import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    
+    import makepad_widgets::theme_desktop_dark::*; 
     App = {{App}} {
 
         ui: <Window>{
@@ -19,7 +18,6 @@ live_design!{
             }
             
             body = <View>{
-                 
                 flow: Down,
                 spacing: 20,
                 align: {
@@ -33,49 +31,106 @@ live_design!{
                     width: 100, height: 30
                     text: "Click to count"
                 }
-                
                 label1 = <Label> {
                     draw_text: {
                         color: #f
                     },
                     text: "Counter: 0"
                 }
+                <Html>{
+                    font_size: 13,
+                    flow: RightWrap,
+                    width:Fill,
+                    height:Fit,
+                    padding: 5,
+                    line_spacing: 10,
+                    Button = <Button> {
+                        text: "Hello world"
+                    }
+                    html:"this is <b>BOLD text</b> <i>italic</i> <Button>Hi</Button><b><i>Bold italic</i></b>"
+                }
             }
         }
     }
 }
-
+  
 app_main!(App);
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
-}
+ }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App {
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
     }
 }
 
-impl App{
-    async fn _do_network_request(_cx:CxRef, _ui:WidgetRef, _url:&str)->String{
-        "".to_string()
-    }
-}
-
-impl AppMain for App{
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
-        }
-        let actions = self.ui.handle_widget_event(cx, event);
-  
+impl MatchEvent for App{
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
+            log!("BUTTON CLICKED {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
         }
     }
 }
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
+    }
+} 
+/*
+// This is our custom allocator!
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+pub struct TrackingHeapWrap{
+    count: AtomicU64,
+    total: AtomicU64,
+}
+
+impl TrackingHeapWrap {
+    // A const initializer that starts the count at 0.
+    pub const fn new() -> Self {
+        Self{
+            count: AtomicU64::new(0),
+            total: AtomicU64::new(0)
+        }
+    }
+    
+    // Returns the current count.
+    pub fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+    
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+}
+
+unsafe impl GlobalAlloc for TrackingHeapWrap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Pass everything to System.
+        self.count.fetch_add(1, Ordering::Relaxed); 
+        self.total.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+        
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.count.fetch_sub(1, Ordering::Relaxed); 
+        self.total.fetch_sub(layout.size() as u64, Ordering::Relaxed);
+        System.dealloc(ptr, layout)
+    }
+}
+
+// Register our custom allocator.
+#[global_allocator]
+static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();*/

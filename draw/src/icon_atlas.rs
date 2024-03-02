@@ -135,6 +135,11 @@ impl CxIconAtlas {
                     match cmd {
                         PathCommand::MoveTo(p) => {bound(p, &mut min, &mut max)},
                         PathCommand::LineTo(p) => {bound(p, &mut min, &mut max)},
+                        PathCommand::ArcTo(e, r, _, _, _) => {
+                            // TODO: this is pretty rough
+                            bound(&Point{x: e.x + r.x, y: e.y + r.y}, &mut min, &mut max);
+                            bound(&Point{x: e.x - r.x, y: e.y - r.y}, &mut min, &mut max);
+                        },
                         PathCommand::QuadraticTo(p1, p) => {
                             bound(p1, &mut min, &mut max);
                             bound(p, &mut min, &mut max);
@@ -195,10 +200,12 @@ impl CxIconAtlas {
                     if let Some(data) = find_path_str(&data){
                         return self.parse_and_cache_path(path_hash, data)
                     }
+                    println!("No SVG path tag found in svg file {}",path_str);
                     return None
                     
                 }
                 Err(_err)=>{
+                    println!("Error in SVG file {}: {}",path_str, _err);
                     return None
                 }
             }
@@ -334,8 +341,7 @@ pub struct CxDrawIconAtlas {
 impl CxDrawIconAtlas {
     pub fn new(cx: &mut Cx) -> Self {
         
-        let atlas_texture = Texture::new(cx);
-        atlas_texture.set_format(cx, TextureFormat::RenderBGRAu8{
+        let atlas_texture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8{
             size: TextureSize::Auto
         });
         //cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
@@ -426,6 +432,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         Hor(bool),
         Vert(bool),
         Line(bool),
+        Arc(bool),
         Cubic(bool),
         Quadratic(bool),
         Close
@@ -437,13 +444,14 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         cmd: Cmd,
         expect_nums: usize,
         chain: bool,
-        nums: [f64; 6],
+        nums: [f64; 7],
         num_count: usize,
         last_pt: Point,
         out: Vec<PathCommand>,
         num_state: Option<NumState>
     }
     
+    #[derive(Debug)]
     struct NumState {
         num: f64,
         mul: f64,
@@ -474,6 +482,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                 Cmd::Vert(_) => 1,
                 Cmd::Line(_) => 2,
                 Cmd::Cubic(_) => 6,
+                Cmd::Arc(_) => 7,
                 Cmd::Quadratic(_) => 4,
                 Cmd::Close => 0
             };
@@ -482,6 +491,9 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         }
         
         fn add_min(&mut self) -> Result<(), String> {
+            if self.num_state.is_some() {
+                self.finalize_num();
+            }
             if self.expect_nums == self.num_count {
                 self.finalize_cmd() ?;
             }
@@ -511,12 +523,16 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         fn add_dot(&mut self) -> Result<(), String> {
             if let Some(num_state) = &mut self.num_state {
                 if num_state.has_dot {
-                    return Err(format!("Unexpected ."));
+                    self.finalize_num();
+                    self.add_digit(0.0) ?;
+                    self.add_dot() ?;
+                    return Ok(());
                 }
                 num_state.has_dot = true;
             }
             else {
-                return Err(format!("Unexpected ."));
+                self.add_digit(0.0) ?;
+                self.add_dot() ?;
             }
             Ok(())
         }
@@ -585,28 +601,57 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                 Cmd::Cubic(abs) => {
                     if abs {
                         self.last_pt = Point {x: self.nums[4], y: self.nums[5]};
-                    }
-                    else {
+                        self.out.push(PathCommand::CubicTo(
+                            Point {x: self.nums[0], y: self.nums[1]},
+                            Point {x: self.nums[2], y: self.nums[3]},
+                            self.last_pt,
+                        ));
+                    } else {
+                        self.out.push(PathCommand::CubicTo(
+                            self.last_pt + Vector {x: self.nums[0], y: self.nums[1]},
+                            self.last_pt + Vector {x: self.nums[2], y: self.nums[3]},
+                            self.last_pt + Vector {x: self.nums[4], y: self.nums[5]},
+                        ));
                         self.last_pt += Vector {x: self.nums[4], y: self.nums[5]};
                     }
-                    self.out.push(PathCommand::CubicTo(
-                        Point {x: self.nums[0], y: self.nums[1]},
-                        Point {x: self.nums[2], y: self.nums[3]},
-                        
-                        self.last_pt,
-                    ))
+                },
+                Cmd::Arc(abs) => {
+                    if abs {
+                        self.last_pt = Point {x: self.nums[5], y: self.nums[6]};
+                        self.out.push(PathCommand::ArcTo(
+                            self.last_pt,
+                            Point {x: self.nums[0], y: self.nums[1]},
+                            self.nums[2],
+                            self.nums[3] != 0.0,
+                            self.nums[4] != 0.0,
+                        ));
+                    }
+                    else {
+                        self.out.push(PathCommand::ArcTo(
+                            self.last_pt + Vector {x: self.nums[5], y: self.nums[6]},
+                            Point {x: self.nums[0], y: self.nums[1]},
+                            self.nums[2],
+                            self.nums[3] != 0.0,
+                            self.nums[4] != 0.0,
+                        ));
+                        self.last_pt += Vector {x: self.nums[5], y: self.nums[6]};
+                    }
                 },
                 Cmd::Quadratic(abs) => {
                     if abs {
                         self.last_pt = Point {x: self.nums[2], y: self.nums[3]};
+                        self.out.push(PathCommand::QuadraticTo(
+                            Point {x: self.nums[0], y: self.nums[1]},
+                            self.last_pt
+                        ));
                     }
                     else {
+                        self.out.push(PathCommand::QuadraticTo(
+                            self.last_pt + Vector {x: self.nums[0], y: self.nums[1]},
+                            self.last_pt + Vector {x: self.nums[2], y: self.nums[3]},
+                        ));
                         self.last_pt += Vector {x: self.nums[2], y: self.nums[3]};
                     }
-                    self.out.push(PathCommand::QuadraticTo(
-                        Point {x: self.nums[0], y: self.nums[1]},
-                        self.last_pt
-                    ));
                 }
                 Cmd::Close => {
                     self.out.push(PathCommand::Close);
@@ -633,6 +678,8 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
             b'v' => state.next_cmd(Cmd::Vert(false)) ?,
             b'L' => state.next_cmd(Cmd::Line(true)) ?,
             b'l' => state.next_cmd(Cmd::Line(false)) ?,
+            b'A' => state.next_cmd(Cmd::Arc(true)) ?,
+            b'a' => state.next_cmd(Cmd::Arc(false)) ?,
             b'Z' | b'z' => state.next_cmd(Cmd::Close) ?,
             b'-' => state.add_min() ?,
             b'0'..=b'9' => state.add_digit((path[i] - b'0') as f64) ?,
@@ -647,4 +694,3 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
     
     Ok(state.out)
 }
-

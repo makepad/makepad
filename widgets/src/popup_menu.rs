@@ -2,7 +2,6 @@ use {
     crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
-        widget::*,
     },
 };
 
@@ -12,7 +11,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct PopupMenuItem {
     
     #[live] draw_bg: DrawQuad,
@@ -30,7 +29,7 @@ pub struct PopupMenuItem {
     #[live] selected: f32,
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 pub struct PopupMenu {
     #[live] draw_list: DrawList2d,
     #[live] menu_item: Option<LivePtr>,
@@ -47,10 +46,10 @@ pub struct PopupMenu {
 }
 
 impl LiveHook for PopupMenu {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(list_node).as_field()) {
             for (_, node) in self.menu_items.iter_mut() {
-                node.apply(cx, from, index, nodes);
+                node.apply(cx, apply, index, nodes);
             }
         }
         self.draw_list.redraw(cx);
@@ -64,7 +63,7 @@ pub enum PopupMenuItemAction {
     None
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum PopupMenuAction {
     WasSweeped(PopupMenuItemId),
     WasSelected(PopupMenuItemId),
@@ -136,7 +135,7 @@ impl PopupMenuItem {
 impl PopupMenu {
     
     pub fn menu_contains_pos(&self, cx: &mut Cx, pos: DVec2) -> bool {
-        self.draw_bg.area().get_clipped_rect(cx).contains(pos)
+        self.draw_bg.area().clipped_rect(cx).contains(pos)
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) {

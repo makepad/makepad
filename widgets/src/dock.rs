@@ -15,7 +15,7 @@ live_design!{
     DockBase = {{Dock}} {}
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawRoundCorner {
     #[deref] draw_super: DrawQuad,
@@ -39,7 +39,7 @@ impl DrawRoundCorner {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[walk] walk: Walk,
@@ -54,7 +54,6 @@ pub struct Dock {
     #[live] splitter: Option<LivePtr>,
     
     #[rust] needs_save: bool,
-    
     #[rust] area: Area,
     
     #[rust] tab_bars: ComponentMap<LiveId, TabBarWrap>,
@@ -66,6 +65,32 @@ pub struct Dock {
     #[rust] drop_state: Option<DropPosition>,
     #[rust] dock_item_iter_stack: Vec<(LiveId, usize)>,
 }
+
+impl WidgetNode for Dock{
+    fn walk(&mut self, _cx:&mut Cx) -> Walk{
+        self.walk
+    }
+    
+    fn redraw(&mut self, cx: &mut Cx){
+        self.area.redraw(cx)
+    }
+    
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        if let Some((_, widget)) = self.items.get_mut(&path[0]) {
+            if path.len()>1 {
+                widget.find_widgets(&path[1..], cached, results);
+            }
+            else {
+                results.push(widget.clone());
+            }
+        }
+        else {
+            for (_, widget) in self.items.values_mut() {
+                widget.find_widgets(path, cached, results);
+            }
+        }
+    }
+}        
 
 pub struct DockVisibleItemIterator<'a> {
     stack: &'a mut Vec<(LiveId, usize)>,
@@ -149,7 +174,7 @@ impl DrawStackItem {
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum DockAction {
     SplitPanelChanged {panel_id: LiveId, axis: SplitterAxis, align: SplitterAlign},
     TabWasPressed(LiveId),
@@ -261,14 +286,14 @@ pub enum DockItemStore{
 }
 
 impl LiveHook for Dock {
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     if nodes[index].value.is_enum() {
                         let mut dock_item = DockItem::new(cx);
-                        let index = dock_item.apply(cx, from, index, nodes);
+                        let index = dock_item.apply(cx, apply, index, nodes);
                         self.dock_items.insert(id, dock_item);
                         
                         return index;
@@ -279,7 +304,7 @@ impl LiveHook for Dock {
                         // lets apply this thing over all our childnodes with that template
                         for (kind, node) in self.items.values_mut() {
                             if *kind == id {
-                                node.apply(cx, from, index, nodes);
+                                node.apply(cx, apply, index, nodes);
                             }
                         }
                     }
@@ -294,15 +319,15 @@ impl LiveHook for Dock {
     }
     
     // alright lets update our tabs and splitters as well
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab_bar).as_field()) {
             for tab_bar in self.tab_bars.values_mut() {
-                tab_bar.tab_bar.apply(cx, from, index, nodes);
+                tab_bar.tab_bar.apply(cx, apply, index, nodes);
             }
         }
         if let Some(index) = nodes.child_by_name(index, live_id!(splitter).as_field()) {
             for splitter in self.splitters.values_mut() {
-                splitter.apply(cx, from, index, nodes);
+                splitter.apply(cx, apply, index, nodes);
             }
         }
     }
@@ -318,10 +343,6 @@ impl LiveHook for Dock {
         for (item_id, kind) in items {
             self.item_or_create(cx, item_id, kind);
         }
-    }
-    
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, Dock)
     }
 }
 
@@ -346,8 +367,8 @@ impl Dock {
         
         // lets draw the corners here
         for splitter in self.splitters.values() {
-            self.round_corner.draw_corners(cx, splitter.area_a().get_rect(cx));
-            self.round_corner.draw_corners(cx, splitter.area_b().get_rect(cx));
+            self.round_corner.draw_corners(cx, splitter.area_a().rect(cx));
+            self.round_corner.draw_corners(cx, splitter.area_b().rect(cx));
         }
         self.round_corner.draw_corners(cx, cx.turtle().rect());
         
@@ -855,43 +876,40 @@ impl Dock {
 
 
 impl Widget for Dock {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         // call handle on all tab bars, splitters,
         let uid = self.widget_uid();
         let dock_items = &mut self.dock_items;
         for (panel_id, splitter) in self.splitters.iter_mut() {
-            splitter
-                .handle_event_with(cx, event, &mut | cx, action | match action {
-                SplitterAction::Changed {axis, align} => {
-                    // lets move the splitter
-                    if let Some(DockItem::Splitter {axis: _axis, align: _align, ..}) = dock_items.get_mut(&panel_id) {
-                        *_axis = axis;
-                        *_align = align;
-                    }
-                    dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align}.into_action(uid));
-                },
-                _ => ()
-            });
+            for action in cx.capture_actions(|cx| splitter.handle_event(cx, event, scope)) {
+                // alright so here we need to redraw the left/right area.. how?
+                
+                match action.as_widget_action().cast() {
+                    SplitterAction::Changed {axis, align} => {
+                        // lets move the splitter
+                        if let Some(DockItem::Splitter {axis: _axis, align: _align, ..}) = dock_items.get_mut(&panel_id) {
+                            *_axis = axis;
+                            *_align = align;
+                        }
+                        cx.widget_action(uid, &scope.path, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
+                    },
+                    _ => ()
+                }
+            };
         }
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
             let contents_view = &mut tab_bar.contents_draw_list;
-            for action in tab_bar.tab_bar.handle_event(cx, event) {
-                match action {
-                    TabBarAction::ShouldTabStartDrag(item) => dispatch_action(
-                        cx,
-                        DockAction::ShouldTabStartDrag(item).into_action(uid),
-                    ),
+            for action in cx.capture_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope)) {
+                match action.as_widget_action().cast() {
+                    TabBarAction::ShouldTabStartDrag(item) => cx.widget_action(uid, &scope.path, DockAction::ShouldTabStartDrag(item)),
                     TabBarAction::TabWasPressed(tab_id) => {
                         self.needs_save = true;
                         if let Some(DockItem::Tabs {tabs, selected, ..}) = dock_items.get_mut(&panel_id) {
                             if let Some(sel) = tabs.iter().position( | v | *v == tab_id) {
                                 *selected = sel;
                                 contents_view.redraw(cx);
-                                dispatch_action(cx, DockAction::TabWasPressed(tab_id).into_action(uid))
+                                cx.widget_action(uid, &scope.path, DockAction::TabWasPressed(tab_id))
                             }
                             else {
                                 log!("Cannot find tab {}", tab_id.0);
@@ -899,13 +917,16 @@ impl Widget for Dock {
                         }
                     }
                     TabBarAction::TabCloseWasPressed(tab_id) => {
-                        dispatch_action(cx, DockAction::TabCloseWasPressed(tab_id).into_action(uid))
+                        cx.widget_action(uid, &scope.path, DockAction::TabCloseWasPressed(tab_id))
                     }
+                    TabBarAction::None=>()
                 }
             };
         }
-        for (_, item) in self.items.values_mut() {
-            item.handle_widget_event_with(cx, event, dispatch_action);
+        for (id,(_templ_id, item)) in self.items.iter_mut() {
+            scope.with_id(*id, |scope|{
+               item.handle_event(cx, event, scope);
+            });
         }
         
         if let Event::DragEnd = event {
@@ -921,7 +942,7 @@ impl Widget for Dock {
                 self.drop_target_draw_list.redraw(cx);
                 match f.state {
                     DragState::In | DragState::Over => {
-                        dispatch_action(cx, DockAction::Drag(f.clone()).into_action(uid))
+                        cx.widget_action(uid, &scope.path, DockAction::Drag(f.clone()))
                     }
                     DragState::Out => {}
                 }
@@ -929,32 +950,13 @@ impl Widget for Dock {
             DragHit::Drop(f) => {
                 self.drop_state = None;
                 self.drop_target_draw_list.redraw(cx);
-                dispatch_action(cx, DockAction::Drop(f.clone()).into_action(uid))
+                cx.widget_action(uid, &scope.path, DockAction::Drop(f.clone()))
             }
             _ => {}
         }
-        
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some((_, widget)) = self.items.get_mut(&path[0]) {
-            if path.len()>1 {
-                widget.find_widgets(&path[1..], cached, results);
-            }
-            else {
-                results.push(widget.clone());
-            }
-        }
-        else {
-            for (_, widget) in self.items.values_mut() {
-                widget.find_widgets(path, cached, results);
-            }
-        }
-    }
-    
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
             let id = live_id!(root);
             vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]
@@ -1008,7 +1010,8 @@ impl Widget for Dock {
                                 //full_rect: Rect::default(),
                             }
                         });
-                        tab_bar.tab_bar.begin(cx, Some(*selected));
+                        let walk = tab_bar.tab_bar.walk(cx);
+                        tab_bar.tab_bar.begin(cx, Some(*selected), walk);
                         stack.push(DrawStackItem::TabLabel {id, index: 0});
                     }
                     else {panic!()}
@@ -1042,7 +1045,9 @@ impl Widget for Dock {
                             let (_, entry) = self.items.get_or_insert(cx, id, | cx | {
                                 (*kind, WidgetRef::new_from_ptr(cx, Some(*ptr)))
                             });
-                            entry.draw_widget(cx) ?;
+                            scope.with_id(id, |scope|{
+                                entry.draw(cx, scope)
+                            })?;
                         }
                     }
                     stack.pop();
@@ -1066,16 +1071,11 @@ impl Widget for Dock {
         self.end(cx);
         self.draw_state.end();
         
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct DockRef(WidgetRef);
-
 impl DockRef {
-    
-    
     pub fn item(&self, entry_id: LiveId) -> WidgetRef {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(item) = dock.item(entry_id) {
@@ -1092,47 +1092,10 @@ impl DockRef {
         None
     }
     
-    
     pub fn close_tab(&self, cx: &mut Cx, tab_id: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.close_tab(cx, tab_id, false);
         }
-    }
-    
-    pub fn clicked_tab_close(&self, actions: &WidgetActions) -> Option<LiveId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::TabCloseWasPressed(tab_id) = item.action() {
-                return Some(tab_id)
-            }
-        }
-        None
-    }
-    
-    pub fn should_tab_start_drag(&self, actions: &WidgetActions) -> Option<LiveId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::ShouldTabStartDrag(tab_id) = item.action() {
-                return Some(tab_id)
-            }
-        }
-        None
-    }
-    
-    pub fn should_accept_drag(&self, actions: &WidgetActions) -> Option<DragHitEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::Drag(drag_event) = item.action() {
-                return Some(drag_event.clone())
-            }
-        }
-        None
-    }
-    
-    pub fn has_drop(&self, actions: &WidgetActions) -> Option<DropHitEvent> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::Drop(drag_event) = item.action() {
-                return Some(drag_event.clone())
-            }
-        }
-        None
     }
     
     // user wants to drag, set dh accordingly
@@ -1239,6 +1202,3 @@ impl DockRef {
         cx.start_dragging(vec![item]);
     }
 }
-
-#[derive(Clone, WidgetSet)]
-pub struct DockSet(WidgetSet);

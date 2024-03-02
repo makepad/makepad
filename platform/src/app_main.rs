@@ -5,17 +5,20 @@ use crate::cx::Cx;
 pub trait AppMain{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
 }
+
 #[macro_export]
 macro_rules!app_main {
     ( $ app: ident) => {
         #[cfg(not(any(target_arch = "wasm32", target_os="android")))]
         pub fn app_main() {
+            
             if Cx::pre_start(){
                 return
             }
+            
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
-                if let Event::Construct = event {
+                if let Event::Startup = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
                 if let Event::LiveEdit = event{
@@ -23,6 +26,8 @@ macro_rules!app_main {
                 }
                 <dyn AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }))));
+            
+            cx.borrow_mut().init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
             live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();
             Cx::event_loop(cx);
@@ -60,7 +65,7 @@ macro_rules!app_main {
             Cx::android_entry(activity, ||{
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
-                    if let Event::Construct = event {
+                    if let Event::Startup = event {
                         *app.borrow_mut() = Some($app::new_main(cx));
                     }
                     if let Event::LiveEdit = event{
@@ -68,6 +73,7 @@ macro_rules!app_main {
                     }
                     app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
                 })));
+                cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
                 live_design(&mut cx);
                 cx.init_cx_os();
                 cx
@@ -83,7 +89,7 @@ macro_rules!app_main {
             
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
-                if let Event::Construct = event {
+                if let Event::Startup = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
                 if let Event::LiveEdit = event{
@@ -91,7 +97,7 @@ macro_rules!app_main {
                 }
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             })));
-            
+            cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
             live_design(&mut cx);
             cx.init_cx_os();
             Box::into_raw(cx) as u32

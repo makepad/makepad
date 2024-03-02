@@ -75,22 +75,24 @@ impl AudioGraphNode for Node {
     }
 }
 
-impl LiveHook for Instrument {
-    fn before_live_design(cx:&mut Cx){
+impl LiveRegister for Instrument{
+    fn live_register(cx: &mut Cx){
         register_audio_component!(cx, Instrument)
     }
-    
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if from.is_from_doc() {
+}
+
+impl LiveHook for Instrument {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        if apply.from.is_from_doc() {
             self.step_order.push(nodes[index].id);
         }
         self.steps.get_or_insert(cx, nodes[index].id, | cx | {AudioComponentRef::new(cx)})
-            .apply(cx, from, index, nodes)
+            .apply(cx, apply, index, nodes)
     }
     
-    fn after_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         // so.. alright.. if we have a file_id we can gc the inputs
-        if from.is_from_doc() {
+        if apply.from.is_from_doc() {
             self.steps.retain_visible();
         }
     }

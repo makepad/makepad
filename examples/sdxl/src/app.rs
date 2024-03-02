@@ -1,892 +1,28 @@
-use crate::{makepad_live_id::*};
+use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
 use std::time::{Instant, Duration};
-use crate::database::*;
-use crate::comfyui::*;
-
+use crate::database::*; 
+use crate::comfyui::*; 
+ 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
-    
-    TEXT_BIG = 12.0
-    
-    COLOR_UP_0 = #xFFFFFF00
-    COLOR_DOWN_2 = #x00000022
-    FONT_SIZE_H2 = 10.0
-    
-    SSPACING_0 = 0.0
-    SSPACING_1 = 4.0
-    SSPACING_2 = (SSPACING_1 * 2)
-    SSPACING_3 = (SSPACING_1 * 3)
-    SSPACING_4 = (SSPACING_1 * 4)
-    
-    SPACING_0 = {top: (SSPACING_0), right: (SSPACING_0), bottom: (SSPACING_0), left: (SSPACING_0)}
-    SPACING_1 = {top: (SSPACING_1), right: (SSPACING_1), bottom: (SSPACING_1), left: (SSPACING_1)}
-    SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
-    SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
-    SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
-    
-    H2_TEXT_BOLD = {
-        font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
-    }
-    
-    H2_TEXT_REGULAR = {
-        font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
-    }
-    
-    TEXT_BOLD = {
-        font_size: 10.0,
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
-    }
-    
-    TEXT_MONO = {
-        font_size: 10.0,
-        font: {path: dep("crate://makepad-widgets/resources/LiberationMono-Regular.ttf")}
-    }
-    
-    COLOR_PANEL_BG = (COLOR_DOWN_2)
-    COLOR_TEXT_INPUT = (COLOR_DOWN_2)
-    COLOR_LABEL = #xFFF9
-    
-    
-    SdxlDropDown = <DropDown> {
-        width: Fit
-        padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
-        
-        draw_text: {
-            text_style: <H2_TEXT_REGULAR> {},
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        mix(
-                            (#xFFF8),
-                            (#xFFF8),
-                            self.focus
-                        ),
-                        (#xFFFF),
-                        self.hover
-                    ),
-                    (#x000A),
-                    self.pressed
-                )
-            }
-        }
-        
-        popup_menu: {
-            menu_item: {
-                indent_width: 10.0
-                width: Fill,
-                height: Fit
-                
-                
-                padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)}
-                
-                draw_bg: {
-                    color: #x48,
-                    color_selected: #x6
-                }
-            }
-        }
-        
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                self.get_bg(sdf);
-                // triangle
-                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 2.5;
-                
-                sdf.move_to(c.x - sz, c.y - sz);
-                sdf.line_to(c.x + sz, c.y - sz);
-                sdf.line_to(c.x, c.y + sz * 0.75);
-                sdf.close_path();
-                
-                sdf.fill(mix(#FFFA, #FFFF, self.hover));
-                
-                return sdf.result
-            }
-            
-            fn get_bg(self, inout sdf: Sdf2d) {
-                sdf.rect(
-                    0,
-                    0,
-                    self.rect_size.x,
-                    self.rect_size.y
-                )
-                sdf.fill((COLOR_UP_0))
-            }
-        }
-    }
-    
-    BarLabel = <Label> {
-        margin: {left: 10},
-        text: "Workflow",
-        draw_text: {
-            text_style: <TEXT_BOLD> {},
-            fn get_color(self) -> vec4 {
-                return (COLOR_LABEL)
-            }
-        }
-    }
-    
-    
-    
-    BarButton = <Button> {
-        padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
-        margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
-        text: "Cancel"
-        draw_text: {
-            text_style: <TEXT_BOLD> {},
-        }
-        draw_bg: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            uniform border_radius: 3.0
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 1.0;
-                let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
-                let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
-                let bot_gradient = mix(
-                    mix(body_transp, #5c, self.pressed),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
-                // the little drop shadow at the bottom
-                let shift_inward = self.border_radius + 4.0;
-                sdf.move_to(shift_inward, self.rect_size.y - self.border_radius);
-                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - self.border_radius);
-                sdf.stroke(
-                    mix(mix(#0006, #1f, self.hover), #0000, self.pressed),
-                    self.border_radius
-                )
-                
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.border_radius
-                )
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    1.0
-                )
-                
-                return sdf.result
-            }
-        }
-    }
-    
-    SettingsInput = <View> {
-        width: 150,
-        height: Fit,
-        margin: {top: 10},
-        label = <BarLabel> {
-            width: Fit,
-            margin: {left: 5},
-            align: {x: 1.0}
-        }
-        input = <TextInput> {
-            padding: 0
-            height: Fit,
-            width: 50,
-            margin: {top: 1, left: 2}
-            text: "1344"
-        }
-    }
-    
-    FillerH = <View> {
-        width: Fill,
-        height: Fit
-    }
-    
-    FillerV = <View> {
-        width: Fit,
-        height: Fill
-    }
-    
-    
-    DividerV = <View> {
-        flow: Down,
-        spacing: 0.0
-        margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
-        width: Fill,
-        height: Fit
-            <RectView> {
-            height: 2,
-            width: Fill,
-            margin: 0.0
-            flow: Down,
-            padding: 0.0
-            draw_bg: {color: #x00000033}
-        }
-        <RectView> {
-            height: 2,
-            width: Fill,
-            margin: 0.0
-            flow: Down,
-            padding: 0.0
-            draw_bg: {color: #xFFFFFF18}
-        }
-    }
-    
-    DividerH = <View> {
-        flow: Right,
-        spacing: 0.0
-        margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}
-        width: Fit,
-        height: Fill
-            <RectView> {
-            height: Fill,
-            width: 2,
-            margin: 0.0
-            flow: Down,
-            padding: 0.0
-            draw_bg: {color: #x00000033}
-        }
-        <RectView> {
-            height: Fill,
-            width: 2,
-            margin: 0.0
-            flow: Down,
-            padding: 0.0
-            draw_bg: {color: #xFFFFFF18}
-        }
-    }
-    
-    SdxlCheckBox = <CheckBox> {
-        padding: {top: (SSPACING_0), right: 0, bottom: (SSPACING_0), left: 23}
-        label_walk: {margin: {left: 20.0, top: 8, bottom: 8, right: 10}}
-        animator: {
-            selected = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_check: {selected: 0.0}}
-                }
-                on = {
-                    cursor: Arrow,
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_check: {selected: 1.0}}
-                }
-            }
-        }
-        draw_check: {
-            instance border_width: 1.0
-            instance border_color: #x06
-            instance border_color2: #xFFFFFF0A
-            size: 8.5;
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let sz = self.size;
-                let left = sz + 1.;
-                let c = vec2(left + sz, self.rect_size.y * 0.5);
-                sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                
-                sdf.stroke_keep(#xFFF2, 1.25)
-                
-                sdf.fill(#xFFF0)
-                let isz = sz * 0.65;
-                sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
-                sdf.subtract();
-                sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                sdf.blend(self.selected)
-                sdf.fill(#xFFF8);
-                return sdf.result
-            }
-        }
-        draw_text: {
-            text_style: <TEXT_BOLD> {},
-            fn get_color(self) -> vec4 {
-                return (COLOR_LABEL)
-            }
-        }
-        text: "Slideshow"
-    }
-    
-    ProgressCircle = <View> {
-        show_bg: true,
-        width: 24,
-        height: 24
-        draw_bg: {
-            instance progress: 0.0
-            instance active: 0.0
-            
-            fn circle_pie(inout sdf: Sdf2d, x: float, y: float, r: float, s: float) {
-                let c = sdf.pos - vec2(x, y);
-                let len = sqrt(c.x * c.x + c.y * c.y) - r;
-                let pi = 3.141592653589793;
-                let ang = (pi - atan(c.x, c.y)) / (2.0 * pi);
-                let ces = s * 0.5;
-                let ang2 = clamp((abs(ang - ces) - ces) * -r * r * sdf.scale_factor, 0.0, 1.0);
-                sdf.dist = len * ang2 / sdf.scale_factor;
-                sdf.old_shape = sdf.shape;
-                sdf.shape = min(sdf.shape, sdf.dist);
-            }
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.circle(
-                    self.rect_size.x * 0.5,
-                    self.rect_size.y * 0.5,
-                    self.rect_size.x * 0.4
-                );
-                sdf.fill(mix(#4, #575, self.active));
-                circle_pie(
-                    sdf,
-                    self.rect_size.x * 0.5,
-                    self.rect_size.y * 0.5,
-                    self.rect_size.x * 0.4,
-                    self.progress
-                );
-                sdf.fill(mix(#4, #8f8, self.active));
-                return sdf.result;
-            }
-        }
-    }
-    
-    PromptGroup = <RectView> {
-        <DividerV> {}
-        height: Fit,
-        width: Fill,
-        margin: {bottom: 10, top: 0}
-        flow: Down,
-        spacing: 0,
-        padding: 0
-        draw_bg: {
-            instance hover: 0.0
-            instance down: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let body = mix(mix(#53, #5c, self.hover), #33, self.down);
-                sdf.fill_keep(body)
-                return sdf.result
-            }
-        }
-        animator: {
-            hover = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.5}}
-                    ease: OutExp
-                    apply: {
-                        draw_bg: {hover: 0.0}
-                        prompt = {draw_text: {hover: 0.0}}
-                    }
-                }
-                on = {
-                    ease: OutExp
-                    from: {
-                        all: Forward {duration: 0.2}
-                    }
-                    apply: {
-                        draw_bg: {hover: 1.0}
-                        prompt = {draw_text: {hover: 1.0}}
-                    }
-                }
-            }
-            down = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.5}}
-                    ease: OutExp
-                    apply: {
-                        draw_bg: {down: 0.0}
-                        prompt = {draw_text: {down: 0.0}}
-                    }
-                }
-                on = {
-                    ease: OutExp
-                    from: {
-                        all: Forward {duration: 0.2}
-                    }
-                    apply: {
-                        draw_bg: {down: 1.0}
-                        prompt = {draw_text: {down: 1.0}}
-                    }
-                }
-            }
-        }
-        prompt = <Label> {
-            width: Fill
-            draw_text: {
-                text_style: <TEXT_BOLD> {},
-                instance hover: 0.0
-                instance down: 0.0
-                fn get_color(self) -> vec4 {
-                    return mix(mix(#xFFFA, #xFFFF, self.hover), #xFFF8, self.down);
-                }
-                wrap: Word,
-            }
-            text: ""
-        }
-    }
-    
-    ImageTile = <View> {
-        width: Fill,
-        height: Fit
-        cursor: Hand
-        animator: {
-            hover = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.5}}
-                    ease: OutExp
-                    apply: {
-                        img = {draw_bg: {hover: 0.0}}
-                    }
-                }
-                on = {
-                    ease: OutExp
-                    from: {
-                        all: Forward {duration: 0.3}
-                    }
-                    apply: {
-                        img = {draw_bg: {hover: 1.0}}
-                    }
-                }
-            }
-            down = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.5}}
-                    ease: OutExp
-                    apply: {
-                        img = {draw_bg: {down: 0.0}}
-                    }
-                }
-                on = {
-                    ease: OutExp
-                    from: {
-                        all: Forward {duration: 0.3}
-                    }
-                    apply: {
-                        img = {draw_bg: {down: 1.0}}
-                    }
-                }
-            }
-        }
-        
-        img = <Image> {
-            width: Fill,
-            height: Fill
-            min_width: 1920,
-            min_height: 1080,
-            fit: Horizontal,
-            draw_bg: {
-                instance hover: 0.0
-                instance down: 0.0
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 4.0)
-                    let max_scale = vec2(0.92);
-                    let scale = mix(vec2(1.0), max_scale, self.hover);
-                    let pan = mix(vec2(0.0), (vec2(1.0) - max_scale) * 0.5, self.hover);
-                    let color = self.get_color_scale_pan(scale, pan) + mix(vec4(0.0), vec4(0.1), self.down);
-                    sdf.fill_keep(color);
-                    sdf.stroke(
-                        mix(mix(#x0000, #x0006, self.hover), #xfff2, self.down),
-                        1.0
-                    )
-                    
-                    return sdf.result
-                }
-            }
-        }
-    }
-    
-    App = {{App}} {
+    import crate::app_ui::AppUI;
+    import crate::app_ui::AppWindow;
+    App = {{App}} { 
         ui: <MultiWindow> {
             <Window> {
                 window: {inner_size: vec2(2000, 1024)},
                 caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
                 hide_caption_on_fullscreen: true,
-                body = <View> {
-                    
-                    flow: Overlay,
-                    
-                    
-                    width: Fill,
-                    height: Fill
-                    
-                    
-                    dock = <Dock> {
-                        height: Fill,
-                        width: Fill
-                        
-                        root = Splitter {
-                            axis: Horizontal,
-                            align: FromA(300.0),
-                            a: image_library,
-                            b: split1
-                        }
-                        
-                        split1 = Splitter {
-                            axis: Vertical,
-                            align: FromB(200.0),
-                            a: image_view,
-                            b: input_panel
-                        }
-                        
-                        image_library = Tab {
-                            name: ""
-                            kind: ImageLibrary
-                        }
-                        
-                        input_panel = Tab {
-                            name: ""
-                            kind: InputPanel
-                        }
-                        
-                        image_view = Tab {
-                            name: ""
-                            kind: ImageView
-                        }
-                        
-                        ImageView = <RectView> {
-                            draw_bg: {color: #2}
-                            height: Fill,
-                            width: Fill
-                            flow: Down,
-                            align: {x: 0.5, y: 0.5}
-                            cursor: Hand,
-                            image = <Image> {
-                                fit: Smallest,
-                                width: Fill,
-                                height: Fill
-                            }
-                        }
-                        
-                        InputPanel = <RectView> {
-                            height: Fill,
-                            width: Fill
-                            flow: Down,
-                            padding: 0.0
-                            draw_bg: {color: (COLOR_PANEL_BG)}
-                            <View> {
-                                height: Fit,
-                                width: Fill
-                                align: {x: 0.0, y: 0.5}
-                                padding: 5
-                                
-                                    <BarLabel> {
-                                    text: "Workflow"
-                                }
-                                
-                                workflow_dropdown = <SdxlDropDown> {}
-                                
-                                <BarLabel> {
-                                    text: "Batch size"
-                                }
-                                batch_mode_dropdown = <SdxlDropDown> {
-                                    selected_item: 5
-                                    labels: ["1", "2", "3", "4", "5", "6", "10000"]
-                                }
-                                
-                                <BarLabel> {
-                                    text: "Seed"
-                                }
-                                seed_input = <TextInput> {
-                                    draw_text: {text_style: <TEXT_BOLD> {}}
-                                    height: Fit,
-                                    width: Fit,
-                                    margin: {bottom: 0, left: 0}
-                                }
-                                
-                                render_batch = <BarButton> {
-                                    text: "Batch"
-                                }
-                                render_single = <BarButton> {
-                                    text: "Single"
-                                }
-                                cancel_todo = <BarButton> {
-                                    text: "Cancel"
-                                }
-                                
-                                <DividerH> {}
-                                play_button = <BarButton> {
-                                    text: "Play"
-                                }
-                                slide_show_check_box = <SdxlCheckBox> {
-                                    text: "Slideshow"
-                                }
-                                
-                                slide_show_dropdown = <SdxlDropDown> {
-                                    selected_item: 5
-                                    margin: 0
-                                    labels: ["0", "1", "2", "3", "4", "5", "7", "10"]
-                                }
-                                
-                                <DividerH> {}
-                                
-                                
-                                <FillerH> {}
-                                cluster_dropdown = <SdxlDropDown> {
-                                    selected_item: 0
-                                    margin: 0
-                                    labels: ["All nodes", "Part 1", "Part 2"]
-                                }
-                                todo_label = <BarLabel> {
-                                    margin: {right: 5.0}
-                                    text: "Todo 0"
-                                }
-                                progress1 = <ProgressCircle> {}
-                                progress2 = <ProgressCircle> {}
-                                progress3 = <ProgressCircle> {}
-                                progress4 = <ProgressCircle> {}
-                                progress5 = <ProgressCircle> {}
-                                progress6 = <ProgressCircle> {
-                                    margin: {right: 5.0}
-                                }
-                                
-                            }
-                            <View> {
-                                positive = <TextInput> {
-                                    ascii_only: true,
-                                    width: Fill,
-                                    height: Fill,
-                                    margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
-                                    text: "Positive"
-                                    draw_text: {
-                                        text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
-                                    }
-                                    draw_bg: {
-                                        color: (COLOR_TEXT_INPUT)
-                                        border_width: 1.0
-                                        border_color: #x00000044
-                                    }
-                                }
-                                negative = <TextInput> {
-                                    ascii_only: true,
-                                    width: 200,
-                                    height: Fill,
-                                    margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
-                                    draw_text: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
-                                    text: "text, watermark, cartoon"
-                                    draw_bg: {
-                                        color: (COLOR_TEXT_INPUT)
-                                        border_width: 1.0
-                                        border_color: #x00000044
-                                    }
-                                }
-                                <View> {
-                                    width: Fill,
-                                    height: Fill
-                                    flow: Right
-                                        <View> {
-                                        width: 100,
-                                        height: Fit,
-                                        margin: {top: 10},
-                                        flow: Down
-                                        settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
-                                        settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
-                                        settings_steps = <SettingsInput> {label = {text: "steps:"}, input = {text: "20"}}
-                                        settings_scale = <SettingsInput> {label = {text: "scale:"}, input = {text: "0.5"}}
-                                        settings_total_steps = <SettingsInput> {label = {text: "total(0):"}, input = {text: "32"}}
-                                    }
-                                    <View> {
-                                        width: Fit,
-                                        height: Fit,
-                                        margin: {top: 10},
-                                        flow: Down
-                                        settings_base_cfg = <SettingsInput> {label = {text: "base_cfg:"}, input = {text: "8.5"}}
-                                        settings_refiner_cfg = <SettingsInput> {label = {text: "refiner_cfg:"}, input = {text: "9.5"}}
-                                        settings_pos_score = <SettingsInput> {label = {text: "pos_score:"}, input = {text: "6"}}
-                                        settings_neg_score = <SettingsInput> {label = {text: "neg_score:"}, input = {text: "2"}}
-                                    }
-                                    <View> {
-                                        width: Fit,
-                                        height: Fit,
-                                        margin: {top: 10},
-                                        flow: Down
-                                        settings_base_start_step = <SettingsInput> {label = {text: "base_start_step:"}, input = {text: "0"}}
-                                        settings_base_end_step = <SettingsInput> {label = {text: "base_end_step:"}, input = {text: "20"}}
-                                        settings_refiner_start_step = <SettingsInput> {label = {text: "refiner_start_step:"}, input = {text: "20"}}
-                                        settings_refiner_end_step = <SettingsInput> {label = {text: "refiner_end_step:"}, input = {text: "1000"}}
-                                    }
-                                    <View> {
-                                        width: Fit,
-                                        height: Fit,
-                                        margin: {top: 10},
-                                        flow: Down
-                                        settings_upscale_steps = <SettingsInput> {label = {text: "upscale_steps:"}, input = {text: "31"}}
-                                        settings_upscale_start_step = <SettingsInput> {label = {text: "upscale_start_step:"}, input = {text: "29"}}
-                                        settings_upscale_end_step = <SettingsInput> {label = {text: "upscale_end_step:"}, input = {text: "1000"}}
-                                    }
-                                    /*
-                                    <View> {
-                                        width: Fill, height: Fit, margin: {top: 10},
-                                        <BarLabel> {text: "base_cfg:"}
-                                        base_cfg_input = <SettingsInput> {text: "1344"}
-                                        <BarLabel> {text: "refiner_cfg:"}
-                                        refiner_cfg_input = <SettingsInput> {text: "768"}
-                                        <BarLabel> {text: "pos_score:"}
-                                        positive_score_input = <SettingsInput> {text: "6.0"}
-                                        <BarLabel> {text: "neg_score:"}
-                                        negative_score_input = <SettingsInput> {text: "2.0"}
-                                    }
-                                    <View> {
-                                        width: Fill, height: Fit, margin: {top: 10},
-                                        <BarLabel> {text: "base_start_step:"}
-                                        base_cfg_input = <SettingsInput> {text: "1344"}
-                                        <BarLabel> {text: "base_end_step:"}
-                                        refiner_cfg_input = <SettingsInput> {text: "768"}
-                                        <BarLabel> {text: "refiner_start_step:"}
-                                        positive_score_input = <SettingsInput> {text: "6.0"}
-                                        <BarLabel> {text: "refiner_end_step:"}
-                                        negative_score_input = <SettingsInput> {text: "2.0"}
-                                    }*/
-                                }
-                            }
-                        }
-                        
-                        ImageLibrary = <RectView> {
-                            draw_bg: {color: (COLOR_PANEL_BG)}
-                            height: Fill,
-                            width: Fill
-                            flow: Down
-                                <View> {
-                                height: Fit,
-                                width: Fill
-                                flow: Right,
-                                padding: {left: 10, right: 10, top: 10, bottom: 10},
-                                search = <TextInput> {
-                                    height: Fit,
-                                    width: Fill,
-                                    margin: {bottom: 0}
-                                    empty_message: "Search"
-                                    draw_bg: {
-                                        color: (COLOR_TEXT_INPUT)
-                                        border_width: 1.0
-                                        border_color: #x00000044
-                                    }
-                                    draw_text: {
-                                        text_style: {font_size: (TEXT_BIG)}
-                                        fn get_color(self) -> vec4 {
-                                            return
-                                            mix(
-                                                mix(
-                                                    mix(
-                                                        #xFFFFFF55,
-                                                        #xFFFFFF88,
-                                                        self.hover
-                                                    ),
-                                                    #xFFFFFFCC,
-                                                    self.focus
-                                                ),
-                                                #xFFFFFF66,
-                                                self.is_empty
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            image_list = <PortalList> {
-                                height: Fill,
-                                width: Fill,
-                                margin: {top: 0}
-                                flow: Down,
-                                padding: {top: 0, right: 10.0, bottom: 10.0, left: 10.0}
-                                
-                                PromptGroup = <PromptGroup> {}
-                                
-                                Empty = <View> {}
-                                
-                                ImageRow1 = <View> {
-                                    height: Fit,
-                                    width: Fill,
-                                    margin: {bottom: 10}
-                                    spacing: 20,
-                                    flow: Right
-                                    row1 = <ImageTile> {}
-                                }
-                                ImageRow2 = <View> {
-                                    height: Fit,
-                                    width: Fill,
-                                    margin: {bottom: 10}
-                                    spacing: 20,
-                                    flow: Right
-                                    row1 = <ImageTile> {}
-                                    row2 = <ImageTile> {}
-                                }
-                                ImageRow3 = <View> {
-                                    height: Fit,
-                                    width: Fill,
-                                    margin: {bottom: 10}
-                                    spacing: 20,
-                                    flow: Right
-                                    row1 = <ImageTile> {}
-                                    row2 = <ImageTile> {}
-                                    row3 = <ImageTile> {}
-                                }
-                            }
-                        }
-                    }
-                    
-                    big_image = <RectView> {
-                        visible: false,
-                        draw_bg: {draw_depth: 10.0}
-                        draw_bg: {color: #0}
-                        height: All,
-                        width: All,
-                        abs_pos: vec2(0.0, 0.0)
-                        flow: Overlay,
-                        align: {x: 0.5, y: 0.5}
-                        image1 = <Image> {
-                            draw_bg: {draw_depth: 11.0}
-                            fit: Smallest,
-                            width: Fill,
-                            height: Fill
-                        }
-                    }
-                }
+                body = <AppUI>{}
             }
             <Window> {
                 window: {inner_size: vec2(960, 540)},
-                body = {
-                    second_image = <RectView> {
-                        draw_bg: {color: #0}
-                        height: Fill,
-                        width: Fill
-                        flow: Overlay,
-                        align: {x: 0.5, y: 0.5}
-                        image1 = <Image> {
-                            fit: Smallest,
-                            width: Fill,
-                            height: Fill
-                        }
-                        prompt_frame = <View> {
-                            width: Fill,
-                            height: Fill
-                            align: {y: 1.0}
-                            padding: {left: 120, bottom: 40, right: 120}
-                            prompt = <Label> {
-                                width: Fill,
-                                height: Fit
-                                draw_text: {
-                                    wrap: Word
-                                    text_style: <TEXT_BOLD> {font_size: 20}
-                                    
-                                    color: #c
-                                },
-                                text: "HELLO WORLD"
-                            }
-                        }
-                    }
-                }
+                body = <AppWindow>{}
             }
         }
     }
@@ -897,22 +33,39 @@ app_main!(App);
 struct Machine {
     ip: String,
     id: LiveId,
-    running: Option<RunningPrompt>,
-    fetching: Option<RunningPrompt>
+    running: MachineRunning,
+    fetching: Option<(String,PromptState)>,
+    web_socket: Option<WebSocket>
+}
+#[derive(Debug)]
+enum MachineRunning{
+    Stopped,
+    UploadingImage{
+        photo_name: String,
+        prompt_state: PromptState,
+    },
+    RunningPrompt {
+        photo_name: String,
+        prompt_state: PromptState,
+    }
 }
 
-struct RunningPrompt {
-    _started: Instant,
-    steps_counter: usize,
-    prompt_state: PromptState,
+impl MachineRunning{
+    fn is_running(&self)->bool{
+        match self{
+            Self::Stopped=>false,
+            _=>true
+        }
+    } 
 }
 
 impl Machine {
     fn new(ip: &str, id: LiveId) -> Self {Self {
         ip: ip.to_string(),
         id,
-        running: None,
-        fetching: None
+        running: MachineRunning::Stopped,
+        fetching: None,
+        web_socket: None
     }}
 }
 
@@ -922,24 +75,24 @@ struct Workflow {
 impl Workflow {
     fn new(name: &str) -> Self {Self {name: name.to_string()}}
 }
-
-#[derive(Live)]
+ 
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-        Machine::new("DESKTOP-1:8188", id_lut!(m1)),
+        /*Machine::new("DESKTOP-1:8188", id_lut!(m1)),
         Machine::new("DESKTOP-2:8188", id_lut!(m2)),
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
-        Machine::new("DESKTOP-4:8188", id_lut!(m4)),
-        Machine::new("DESKTOP-7:8188", id_lut!(m5)),
-        Machine::new("DESKTOP-8:8188", id_lut!(m6))
+        Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
+        Machine::new("10.0.0.125:8188", id_lut!(m1)),
+       /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
-        Workflow::new("hd")
+        Workflow::new("turbo")
     ])] workflows: Vec<Workflow>,
     
-    #[rust] todo: Vec<PromptState>,
+    #[rust] todo: Vec<(bool, PromptState)>,
     
     #[rust(Database::new(cx))] db: Database,
     
@@ -947,76 +100,160 @@ pub struct App {
     #[rust(10000u64)] last_seed: u64,
     
     #[rust] current_image: Option<ImageId>,
-    
-    #[rust(Instant::now())] last_flip: Instant
+    #[rust] current_photo_name: Option<String>,
+    #[rust([Texture::new(cx)])] video_input: [Texture; 1],
+    #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
+    #[rust(cx.midi_input())] midi_input: MidiInput,
+    #[rust(true)] take_photo:bool,
+    #[rust(0.85)] dial1: f32,
+    #[rust(0.85)] dial2: f32
+    //#[rust(Instant::now())] last_flip: Instant
 }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App{
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-    }
-    
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.open_web_socket(cx);
-        let _ = self.db.load_database();
-        self.filtered.filter_db(&self.db, "", false);
-        let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
-        let dd = self.ui.drop_down(id!(workflow_dropdown));
-        dd.set_labels(workflows);
-        cx.start_interval(0.016);
-        self.update_seed_display(cx);
+        crate::app_ui::live_design(cx);
     }
 }
-
+     
 impl App {
-    fn send_prompt(&mut self, cx: &mut Cx, prompt_state: PromptState) {
+    pub fn start_video_inputs(&mut self, cx: &mut Cx) {
+        let video_sender = self.video_recv.sender();
+        cx.video_input(0, move | img | {
+            let _ = video_sender.send((0, img.to_buffer()));
+        });
+    }
+    
+    fn get_camera_frame_jpeg(&mut self,  cx: &mut Cx, width:usize, height: usize)->Vec<u8>{
+        let mut buf = Vec::new();
+        let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
+        let img_width = img_width * 2;
+        self.video_input[0].swap_vec_u32(cx, &mut buf);
+        // alright we have the buffer // now lets cut a 1344x768 out of the center
+        let mut out = Vec::new();
+        VideoPixelFormat::NV12.buffer_to_rgb_8(
+            &buf,
+            &mut out,
+            img_width,
+            img_height,
+            (img_width-width)/2,
+            (img_height-height) / 2,
+            width,
+            height
+        );
+        // lets fix the pixels
+        for y in 0..height{
+            for x in 0..width{
+                // lets grab rgb into a Vec4
+                let r = out[y*width*3 + x*3 + 0];
+                let g = out[y*width*3 + x*3 + 1];
+                let b = out[y*width*3 + x*3 + 2];
+                let c = Vec4{x:r as f32 / 255.0, y:g as f32 / 255.0,z:b as f32 / 255.0,w:1.0};
+                let d1 = (self.dial1-0.5)*2.0;
+                let d2 = (self.dial2*5.0).powf(2.0);
+                let shift = vec4(d1,d1,d1,0.0);
+                let scale = vec4(d2,d2,d2,1.0);
+                let c = (c - shift)*scale + shift;
+                //let c = Vec4::from_lerp(vec4(c.x,c.x,c.x,1.0), c, 1.0 - self.dial2);
+                out[y*width*3 + x*3 + 0] = (c.x * 255.0).min(255.0).max(0.0) as u8;
+                out[y*width*3 + x*3 + 1] = (c.y * 255.0).min(255.0).max(0.0) as u8;
+                out[y*width*3 + x*3 + 2] = (c.z * 255.0).min(255.0).max(0.0) as u8;
+            }
+        }
+        /*
+        let d1 = (self.dial1-0.5)*2.0;
+        let d2 = pow(self.dial2*10.0,2.0);
+        let shift = vec4(d1,d1,d1,0.0)
+        let scale = vec4(d2,d2,d2,1.0)
+        let c = (self.get_video_pixel(self.pos)-shift)*scale + shift;
+        return mix(vec4(c.x, c.x,c.x, 1.0), c, 1.0-self.dial2)
+        */
         
-        for machine in &mut self.machines {
-            if machine.running.is_some() {
+        self.video_input[0].swap_vec_u32(cx, &mut buf);
+        // lets encode it
+        let mut jpeg = Vec::new();
+        let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 100);
+        encoder.encode(&out, width as u16, height as u16, jpeg_encoder::ColorType::Rgb).unwrap();
+        jpeg
+    }
+    
+    fn get_free_machine(&self)->Option<LiveId>{
+        for machine in &self.machines {
+            if machine.running.is_running() {
                 continue
             }
-            let url = format!("http://{}/prompt", machine.ip);
-            let mut request = HttpRequest::new(url, HttpMethod::POST);
-            
-            request.set_header("Content-Type".to_string(), "application/json".to_string());
-            
-            let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.prompt.preset.workflow)).unwrap();
-            let ws = ws.replace("CLIENT_ID", "1234");
-            let ws = ws.replace("TEXT_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
-            let ws = ws.replace("KEYWORD_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
-            let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
-            let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
-            
-            let ws = ws.replace("1344", &format!("{}", prompt_state.prompt.preset.width));
-            let ws = ws.replace("768", &format!("{}", prompt_state.prompt.preset.height));
-            
-            let ws = ws.replace("\"steps\": 23", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
-            let ws = ws.replace("\"scale_by\": 0.7117466517857182", &format!("\"scale_by\": {}", prompt_state.prompt.preset.scale));
-            let ws = ws.replace("\"cfg\": 8.5", &format!("\"cfg\": {}", prompt_state.prompt.preset.base_cfg));
-            let ws = ws.replace("\"ascore\": 6", &format!("\"ascore\": {}", prompt_state.prompt.preset.positive_score));
-            let ws = ws.replace("\"ascore\": 2", &format!("\"ascore\": {}", prompt_state.prompt.preset.negative_score));
-            
-            let ws = ws.replace("\"start_at_step\": 0", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.base_start_step));
-            let ws = ws.replace("\"end_at_step\": 27", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.base_end_step));
-            let ws = ws.replace("\"start_at_step\": 27", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.refiner_start_step));
-            let ws = ws.replace("\"end_at_step\": 1000", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.refiner_end_step));
-            
-            let ws = ws.replace("\"steps\": 30", &format!("\"steps\": {}", prompt_state.prompt.preset.upscale_steps));
-            let ws = ws.replace("\"start_at_step\": 29", &format!("\"start_at_step\": {}", prompt_state.prompt.preset.upscale_start_step));
-            let ws = ws.replace("\"end_at_step\": 999", &format!("\"end_at_step\": {}", prompt_state.prompt.preset.upscale_end_step));
-            
-            request.set_metadata_id(machine.id);
-            request.set_body(ws.as_bytes().to_vec());
-            Self::update_progress(cx, &self.ui, machine.id, true, 0, 1);
-            cx.http_request(live_id!(prompt), request);
-            machine.running = Some(RunningPrompt {
-                steps_counter: 0,
-                prompt_state: prompt_state.clone(),
-                _started: Instant::now(),
-            });
-            return
+            return Some(machine.id)
         }
-        self.todo.insert(0, prompt_state);
+        None
+    }
+    
+    #[cfg(target_os = "windows")]
+    fn send_camera_to_machine(&mut self, _cx: &mut Cx, _machine_id: LiveId, _prompt_state: PromptState){
+    }
+        
+    #[cfg(not(target_os = "windows"))]
+    fn send_camera_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, prompt_state: PromptState){
+        let jpeg = self.get_camera_frame_jpeg(cx, prompt_state.prompt.preset.width as usize,prompt_state.prompt.preset.height as usize);
+        let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
+        let url = format!("http://{}/upload/image", machine.ip);
+        let mut request = HttpRequest::new(url, HttpMethod::POST);
+                        
+        request.set_header("Content-Type".to_string(), "multipart/form-data; boundary=Boundary".to_string());
+        let photo_name = format!("{}", LiveId::from_str(&format!("{:?}", Instant::now())).0);
+        // alright lets write things
+        let form_top = format!("--Boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n", photo_name);
+        let form_bottom = format!("\r\n--Boundary--");
+
+        request.set_metadata_id(machine.id);
+        let mut body = Vec::new();
+        body.extend_from_slice(form_top.as_bytes());
+        body.extend_from_slice(&jpeg); 
+        body.extend_from_slice(form_bottom.as_bytes());
+        //request.set_header("Content-Length".to_string(), format!("{}", body.len()));
+                 
+        request.set_body(body);
+        cx.http_request(live_id!(camera), request);
+        self.current_photo_name = Some(photo_name.clone());
+        
+        machine.running = MachineRunning::UploadingImage{
+            photo_name,
+            prompt_state: prompt_state.clone(),
+        };
+    }
+    
+    #[cfg(target_os = "windows")]
+    fn send_prompt_to_machine(&mut self, _cx: &mut Cx, _machine_id: LiveId, _photo_name:String, _prompt_state: PromptState) {
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    fn send_prompt_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, photo_name:String, prompt_state: PromptState) {
+        let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
+        let url = format!("http://{}/prompt", machine.ip);
+        let mut request = HttpRequest::new(url, HttpMethod::POST);
+             
+        request.set_header("Content-Type".to_string(), "application/json".to_string());
+
+        let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.prompt.preset.workflow)).unwrap();
+        let ws = ws.replace("CLIENT_ID", "1234");
+        let ws = ws.replace("POSITIVE_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
+        let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
+        let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
+        let ws = ws.replace("example.png", &format!("{}.jpg",photo_name));
+        let ws = ws.replace("\"steps\": 10", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
+        let ws = ws.replace("\"cfg\": 3", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
+        let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
+        
+        request.set_metadata_id(machine.id);
+        request.set_body(ws.as_bytes().to_vec());
+        Self::update_progress(cx, &self.ui, machine.id, true, 0, 1);
+            
+        cx.http_request(live_id!(prompt), request);
+            
+        machine.running = MachineRunning::RunningPrompt{
+            photo_name,
+            prompt_state: prompt_state.clone(),
+        };
     }
     
     fn clear_todo(&mut self, cx: &mut Cx) {
@@ -1037,6 +274,9 @@ impl App {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        for machine in &mut self.machines {
+            machine.running = MachineRunning::Stopped;
+        }
     }
     
     fn fetch_image(&self, cx: &mut Cx, machine_id: LiveId, image_name: &str) {
@@ -1047,22 +287,21 @@ impl App {
         cx.http_request(live_id!(image), request);
     }
     
-    fn open_web_socket(&self, cx: &mut Cx) {
-        for machine in &self.machines {
+    #[cfg(target_os = "windows")]
+    fn open_web_socket(&mut self) {
+    }
+    #[cfg(not(target_os = "windows"))]
+    fn open_web_socket(&mut self) {
+        for machine in &mut self.machines {
             let url = format!("ws://{}/ws?clientId={}", machine.ip, "1234");
             let request = HttpRequest::new(url, HttpMethod::GET);
-            cx.web_socket_open(machine.id, request);
+            machine.web_socket = Some(WebSocket::open(request));
         }
     }
     
-    fn update_progress(cx: &mut Cx, ui: &WidgetRef, machine: LiveId, active: bool, steps: usize, total: usize) {
+    fn update_progress(cx: &mut Cx, ui: &WidgetRef, machine: LiveId, active: bool, steps: usize, total: usize) { 
         let progress_id = match machine {
             live_id!(m1) => id!(progress1),
-            live_id!(m2) => id!(progress2),
-            live_id!(m3) => id!(progress3),
-            live_id!(m4) => id!(progress4),
-            live_id!(m5) => id!(progress5),
-            live_id!(m6) => id!(progress6),
             _ => panic!()
         };
         ui.view(progress_id).apply_over_and_redraw(cx, live!{
@@ -1116,7 +355,7 @@ impl App {
             if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos + 1 < self.filtered.flat.len() {
                     self.set_current_image(cx, self.filtered.flat[pos + 1].clone());
-                    self.last_flip = Instant::now();
+                    //self.last_flip = Instant::now();
                 }
             }
         }
@@ -1128,50 +367,33 @@ impl App {
             if let Some(pos) = self.filtered.flat.iter().position( | v | *v == *current_image) {
                 if pos > 0 {
                     self.set_current_image(cx, self.filtered.flat[pos - 1].clone());
-                    self.last_flip = Instant::now();
+                    //self.last_flip = Instant::now();
                 }
             }
         }
     }
     
-    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: u64, row: usize) {
+    fn set_current_image_by_item_id_and_row(&mut self, cx: &mut Cx, item_id: usize, row: usize) {
         self.ui.redraw(cx);
         if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
             self.set_current_image(cx, image_files[row.min(*image_count)].clone());
-            self.last_flip = Instant::now();
+            //self.last_flip = Instant::now();
         }
     }
     
     fn update_todo_display(&mut self, cx: &mut Cx) {
-        let mut todo = 0;
-        for machine in &self.machines {
-            if machine.running.is_some() {
-                todo += 1;
-            }
-        }
-        todo += self.todo.len();
+        let todo = self.todo.len();
         self.ui.label(id!(todo_label)).set_text_and_redraw(cx, &format!("Todo {}", todo));
     }
     
     fn save_preset(&self) -> PromptPreset {
-        PromptPreset {
+        PromptPreset { 
             workflow: self.ui.drop_down(id!(workflow_dropdown)).selected_label(),
             width: self.ui.text_input(id!(settings_width.input)).text().parse::<u32>().unwrap_or(1344),
             height: self.ui.text_input(id!(settings_height.input)).text().parse::<u32>().unwrap_or(768),
             steps: self.ui.text_input(id!(settings_steps.input)).text().parse::<u32>().unwrap_or(20),
-            base_cfg: self.ui.text_input(id!(settings_base_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
-            refiner_cfg: self.ui.text_input(id!(settings_refiner_cfg.input)).text().parse::<f64>().unwrap_or(8.5),
-            positive_score: self.ui.text_input(id!(settings_pos_score.input)).text().parse::<f64>().unwrap_or(6.0),
-            negative_score: self.ui.text_input(id!(settings_neg_score.input)).text().parse::<f64>().unwrap_or(2.0),
-            base_start_step: self.ui.text_input(id!(settings_base_start_step.input)).text().parse::<u32>().unwrap_or(0),
-            base_end_step: self.ui.text_input(id!(settings_base_end_step.input)).text().parse::<u32>().unwrap_or(20),
-            refiner_start_step: self.ui.text_input(id!(settings_refiner_start_step.input)).text().parse::<u32>().unwrap_or(20),
-            refiner_end_step: self.ui.text_input(id!(settings_refiner_end_step.input)).text().parse::<u32>().unwrap_or(1000),
-            upscale_start_step: self.ui.text_input(id!(settings_upscale_start_step.input)).text().parse::<u32>().unwrap_or(20),
-            upscale_end_step: self.ui.text_input(id!(settings_upscale_end_step.input)).text().parse::<u32>().unwrap_or(1000),
-            upscale_steps: self.ui.text_input(id!(settings_upscale_steps.input)).text().parse::<u32>().unwrap_or(31),
-            scale: self.ui.text_input(id!(settings_scale.input)).text().parse::<f64>().unwrap_or(0.5),
-            total_steps: self.ui.text_input(id!(settings_total_steps.input)).text().parse::<u32>().unwrap_or(20),
+            cfg: self.ui.text_input(id!(settings_cfg.input)).text().parse::<f64>().unwrap_or(1.8),
+            denoise: self.ui.text_input(id!(settings_denoise.input)).text().parse::<f64>().unwrap_or(1.0),
         }
     }
     
@@ -1180,143 +402,338 @@ impl App {
         self.ui.text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
         self.ui.text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
         self.ui.text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
-        self.ui.text_input(id!(settings_base_cfg.input)).set_text(&format!("{}", preset.base_cfg));
-        self.ui.text_input(id!(settings_refiner_cfg.input)).set_text(&format!("{}", preset.refiner_cfg));
-        self.ui.text_input(id!(settings_pos_score.input)).set_text(&format!("{}", preset.positive_score));
-        self.ui.text_input(id!(settings_neg_score.input)).set_text(&format!("{}", preset.negative_score));
-        self.ui.text_input(id!(settings_base_start_step.input)).set_text(&format!("{}", preset.base_start_step));
-        self.ui.text_input(id!(settings_base_end_step.input)).set_text(&format!("{}", preset.base_end_step));
-        self.ui.text_input(id!(settings_refiner_start_step.input)).set_text(&format!("{}", preset.refiner_start_step));
-        self.ui.text_input(id!(settings_refiner_end_step.input)).set_text(&format!("{}", preset.refiner_end_step));
-        self.ui.text_input(id!(settings_upscale_start_step.input)).set_text(&format!("{}", preset.upscale_start_step));
-        self.ui.text_input(id!(settings_upscale_end_step.input)).set_text(&format!("{}", preset.upscale_end_step));
-        self.ui.text_input(id!(settings_upscale_steps.input)).set_text(&format!("{}", preset.upscale_steps));
-        self.ui.text_input(id!(settings_scale.input)).set_text(&format!("{}", preset.scale));
-        self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", preset.total_steps));
+        self.ui.text_input(id!(settings_cfg.input)).set_text(&format!("{}", preset.cfg));
+        self.ui.text_input(id!(settings_denoise.input)).set_text(&format!("{}", preset.denoise));
     }
     
-    fn render(&mut self, cx: &mut Cx, batch_size: usize) {
+    fn render(&mut self, cx: &mut Cx, photo:bool) {
+        let randomise = self.ui.check_box(id!(random_check_box)).selected(cx);
+        self.take_photo = photo;
         let positive = self.ui.text_input(id!(positive)).text();
         let negative = self.ui.text_input(id!(negative)).text();
-        
-        //self.todo.clear();
-        if batch_size != 1 {
+        if randomise {
             self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
             self.update_seed_display(cx);
         }
-        for i in 0..batch_size {
-            self.send_prompt(cx, PromptState {
-                //total_steps: self.ui.get_text_input(id!(settings_total.input)).get_text().parse::<usize>().unwrap_or(32),
-                prompt: Prompt {
-                    positive: positive.clone(),
-                    negative: negative.clone(),
-                    preset: self.save_preset()
-                },
-                //workflow: workflow.clone(),
-                seed: self.last_seed as u64
-            });
-            if batch_size != 1 {
-                self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0 + i as u64;
-                self.update_seed_display(cx);
+        let prompt_state = PromptState {
+            //total_steps: self.ui.get_text_input(id!(settings_total.input)).get_text().parse::<usize>().unwrap_or(32),
+            prompt: Prompt {
+                positive: positive.clone(),
+                negative: negative.clone(),
+                preset: self.save_preset()
+            },
+            //workflow: workflow.clone(),
+            seed: self.last_seed as u64
+        };
+        if let Some(machine_id) = self.get_free_machine(){
+            if photo || self.current_photo_name.is_none(){
+                self.send_camera_to_machine(cx, machine_id, prompt_state);
             }
+            else{
+                self.send_prompt_to_machine(cx, machine_id, self.current_photo_name.clone().unwrap_or("".to_string()), prompt_state); 
+            }
+        }
+        else{
+            self.todo.insert(0, (photo, prompt_state));
         }
         // lets update the queuedisplay
         self.update_todo_display(cx);
     }
-    
-    fn set_slide_show(&mut self, cx: &mut Cx, check: bool) {
-        let check_box = self.ui.check_box(id!(slide_show_check_box));
-        check_box.set_selected(cx, check);
-        if check {
-            self.last_flip = Instant::now();
-        }
-    }
-    
-    fn handle_slide_show(&mut self, cx: &mut Cx) {
-        // lets get the slideshow values
-        if self.ui.check_box(id!(slide_show_check_box)).selected(cx) {
-            let time = self.ui.drop_down(id!(slide_show_dropdown)).selected_label().parse::<f64>().unwrap_or(0.0);
-            // ok lets check our last-change instant
-            if Instant::now() - self.last_flip > Duration::from_millis((time * 1000.0)as u64) {
-                self.select_prev_image(cx);
-            }
-        }
-    }
-    
+
     fn update_render_todo(&mut self, cx: &mut Cx) {
-        while self.machines.iter().find( | v | v.running.is_none()).is_some() && self.todo.len()>0 {
-            let prompt = self.todo.pop().unwrap();
-            self.send_prompt(cx, prompt);
+        
+        if self.todo.len() == 0 && self.ui.check_box(id!(auto_check_box)).selected(cx) {
+            self.render(cx, self.take_photo);
+            return
+        }
+        while self.todo.len()>0{
+            if let Some(machine) = self.machines.iter().find( | v | !v.running.is_running()) {
+                
+                let (photo, prompt_state) = self.todo.pop().unwrap();
+                if photo{
+                    self.send_camera_to_machine(cx, machine.id, prompt_state);
+                }
+                else{
+                    self.send_prompt_to_machine(cx, machine.id, self.current_photo_name.clone().unwrap_or("".to_string()), prompt_state); 
+                }
+            }
+            else{
+                break;
+            }
         }
         self.update_todo_display(cx);
     }
-    
-    fn play(&mut self, cx: &mut Cx) {
-        self.set_current_image_by_item_id_and_row(cx, 0, 0);
-        self.ui.portal_list(id!(image_list)).set_first_id_and_scroll(0, 0.0);
-        self.set_slide_show(cx, true);
+
+}
+
+impl MatchEvent for App {
+    fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
+        cx.use_midi_inputs(&ports.all_inputs());
     }
     
-    fn handle_network_response(&mut self, cx: &mut Cx, event: &Event) {
-        let image_list = self.ui.portal_list(id!(image_list));
-        for event in event.network_responses() {
-            match &event.response {
-                NetworkResponse::WebSocketString(s) => {
-                    if s.contains("execution_interrupted") {
-                        
-                    }
-                    else if s.contains("execution_error") { // i dont care to expand the json def for this one
-                        log!("Got execution error for {} {}", event.request_id, s);
-                    }
-                    else {
-                        match ComfyUIMessage::deserialize_json(&s) {
-                            Ok(data) => {
-                                if data._type == "status" {
-                                    if let Some(status) = data.data.status {
-                                        if status.exec_info.queue_remaining == 0 {
-                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
-                                                machine.running = None;
-                                                Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
+    fn handle_startup(&mut self, cx:&mut Cx){
+        self.open_web_socket();
+        let _ = self.db.load_database();
+        self.filtered.filter_db(&self.db, "", false);
+        let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
+        let dd = self.ui.drop_down(id!(workflow_dropdown));
+        dd.set_labels(workflows);
+        cx.start_interval(0.016);
+        self.update_seed_display(cx);
+        self.start_video_inputs(cx);
+    }
+    
+    fn handle_signal(&mut self, cx: &mut Cx){
+        for m in 0..self.machines.len(){
+            if let Some(socket) = self.machines[m].web_socket.as_mut(){
+                match socket.try_recv(){
+                    Ok(WebSocketMessage::String(s))=>{
+
+                        if s.contains("execution_interrupted") {
+                                                                                     
+                        }
+                        else if s.contains("execution_error") { // i dont care to expand the json def for this one
+                            log!("Got execution error for {} {}", self.machines[m].id, s);
+                        }
+                        else {
+                            match ComfyUIMessage::deserialize_json(&s) {
+                                Ok(data) => {
+                                    if data._type == "status" {
+                                        if let Some(status) = data.data.status {
+                                            if status.exec_info.queue_remaining == 0 {
+                                                /*if let MachineRunning::RunningPrompt{..} = &self.machines[m].running{
+                                                    self.machines[m].running = MachineRunning::Stopped;
+                                                    Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
+                                                                                                                                                                                                                
+                                                }*/
                                             }
-                                            self.update_render_todo(cx);
                                         }
                                     }
-                                }
-                                else if data._type == "executed" {
-                                    if let Some(output) = &data.data.output {
-                                        if let Some(image) = output.images.first() {
-                                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
-                                                if let Some(running) = machine.running.take() {
-                                                    self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
-                                                    machine.fetching = Some(running);
-                                                    Self::update_progress(cx, &self.ui, event.request_id, false, 0, 1);
-                                                    self.fetch_image(cx, event.request_id, &image.filename);
+                                    else if data._type == "executed" {
+                                        if let Some(output) = &data.data.output {
+                                            if let Some(image) = output.images.first() {
+                                                if let MachineRunning::RunningPrompt{prompt_state, photo_name} = &self.machines[m].running{
+                                                    self.machines[m].fetching = Some((photo_name.clone(), prompt_state.clone()));
+                                                    self.machines[m].running = MachineRunning::Stopped;
+                                                    //self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
+                                                    Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
+                                                    self.fetch_image(cx, self.machines[m].id, &image.filename);
+                                                    self.update_render_todo(cx);
                                                 }
-                                                self.update_render_todo(cx);
                                             }
                                         }
                                     }
-                                }
-                                else if data._type == "progress" {
-                                    // draw the progress bar / progress somewhere
-                                    if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == event.request_id}) {
-                                        if let Some(running) = &mut machine.running {
-                                            running.steps_counter += 1;
-                                            Self::update_progress(cx, &self.ui, event.request_id, true, running.steps_counter, running.prompt_state.prompt.preset.total_steps as usize);
-                                        }
+                                    else if data._type == "progress" {
+                                        // draw the progress bar / progress somewhere
+                                        //let id =self.machines[m].id;
+                                        //if let Some(running) = &mut self.machines[m].running {
+                                            //    running.steps_counter += 1;
+                                            //Self::update_progress(cx, &self.ui, id, true, running.steps_counter, //running.prompt_state.prompt.preset.total_steps as usize);
+                                            //}
+                                            //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
                                     }
-                                    //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
                                 }
-                            }
-                            Err(err) => {
-                                log!("Error parsing JSON {:?} {:?}", err, s);
+                                Err(err) => {
+                                    log!("Error parsing JSON {:?} {:?}", err, s);
+                                }
                             }
                         }
                     }
+                    _=>()
                 }
-                NetworkResponse::WebSocketBinary(bin) => {
-                    log!("Got Binary {}", bin.len());
+            }
+        }
+        
+        while let Some((_, data)) = self.midi_input.receive() {
+            match data.decode() {
+                MidiEvent::Note(n) if n.is_on=>{
+                    fn toggle_block(inp:&str, what:&str)->String{
+                        let mut out = inp.to_string();
+                        if let Some(start) = inp.find(&format!(" ({}",what)){
+                            if let Some(stop) = inp[start..].find(")"){
+                                out.replace_range(start..(stop+start+1),""); 
+                                return out;
+                            }
+                        }
+                        format!("{} ({}:1.0)", out, what)
+                    }
+                    let pad_table = [
+                        "esoteric", //1
+                        "hermetism",
+                        "ecological",
+                        "color explosions",
+                        "psychedelic colours",
+                        "parametric",
+                        "nature",
+                        "fractals",
+                    ];
+                    let note_table = [
+                        "mushrooms",
+                        "slime mold",
+                        "jewelry",
+                        "ouroboros",
+                        "space chicken",
+                        "books",
+                        "architecture",
+                        "underwater creatures",
+                        "consciousness",
+                        "amsterdam",
+                        "robert fludd",
+                        "dante's inferno",
+                        "western esotericism",
+                        "rembrandt",
+                        "rome",
+                        "sacred geometry",
+                        "athens",
+                        "classical egypt",
+                        "classical greece",
+                        "pythagoras",
+                        "cornelius drebbel",
+                        "cymatics",
+                        "spider web",
+                    ];
+                    let pads = [
+                        43,48,50,49,36,38,42,46
+                    ];
+                    let notes = [
+                        48,50,52,53,55,57,59,60,62,64,65,67,69,71,
+                        49,51,54,56,58,61,63,66,68,70,
+                    ];
+                    let shift = 48;
+                    
+                    if let Some(pos) = notes.iter().position(|v| *v- shift == n.note_number ){
+                        if pos < note_table.len(){
+                            let text = self.ui.text_input(id!(positive)).text();
+                            let text = toggle_block(&text, note_table[pos]);
+                            self.ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
+                        }
+                    }
+                    if let Some(pos) = pads.iter().position(|v| *v == n.note_number ){
+                        if pos < pad_table.len(){
+                            let text = self.ui.text_input(id!(positive)).text();
+                            let text = toggle_block(&text, pad_table[pos]);
+                            self.ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
+                        }
+                    }
+                    if n.note_number == 72 - shift{
+                       self.ui.widget(id!(positive)).set_text_and_redraw(cx, "");
+                    }
                 }
+                MidiEvent::ControlChange(cc) => {
+                    fn replace_number(inp:&str, id:usize, repl:&str)->String{
+                        let mut in_num = false;
+                        let mut found = None;
+                        let mut out = String::new();
+                        for c in inp.chars(){
+                            if c.is_numeric() || in_num && c == '.'{
+                                if !in_num{
+                                    if let Some(v) = found{
+                                        found = Some(v+1);
+                                    }
+                                    else{
+                                        found = Some(0);
+                                    }
+                                }
+                                in_num = true;
+                                if found.unwrap() != id{
+                                    out.push(c);
+                                }
+                            }
+                            else{
+                                if in_num{ // end of the number
+                                    if found.unwrap() == id{
+                                        for c in repl.chars(){
+                                            out.push(c);
+                                        }
+                                    }
+                                }
+                                out.push(c);
+                                in_num = false;
+                            }
+                        }
+                        if in_num{ // end of the number
+                            if found.unwrap() == id{
+                                for c in repl.chars(){
+                                    out.push(c);
+                                }
+                            }
+                        }
+                        out
+                    }
+                    
+                    fn weight(ui:&WidgetRef, id:usize, value:u8, cx:&mut Cx){
+                        let text = ui.text_input(id!(positive)).text();
+                        let number = format!("{:.2}", ((value as f32 / 127.0)*2.0));
+                        let text = replace_number(&text, id, &number);
+                        ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
+                    }
+                    
+                    match cc.param{
+                        20=>{
+                            self.ui.widget(id!(settings_denoise.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*0.8+0.2));
+                        }
+                        21=>{
+                            self.ui.widget(id!(settings_cfg.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*7.0+1.0));
+                        }
+                        22=>{
+                            self.ui.widget(id!(settings_steps.input)).set_text_and_redraw(cx, &format!("{}", ((cc.value as f32 / 127.0)*9.0+1.0).floor()));
+                        }
+                        24=>{
+                            weight(&self.ui, 0, cc.value, cx);
+                        }
+                        25=>{
+                            weight(&self.ui, 1, cc.value, cx);
+                        }
+                        26=>{
+                            weight(&self.ui, 2, cc.value, cx);
+                        }
+                        27=>{
+                            let val = cc.value as f32 / 127.0;
+                            self.dial2 = val;
+                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+                                draw_bg:{dial2:(val)}
+                            });
+                            //weight(&self.ui, 3, cc.value, cx);
+                        }
+                        23=>{
+                            let val = cc.value as f32 / 127.0;
+                            self.dial1 = val;
+                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+                                draw_bg:{dial1:(val)}
+                            });
+                            //weight(&self.ui, 4, cc.value, cx);
+                        }
+                        _=>()
+                    }
+                }
+                _=>()
+            }
+        }
+        while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
+            let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
+            if img_width != vfb.format.width / 2 || img_height != vfb.format.height {
+                self.video_input[id] = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32{
+                    data: vec![],
+                    width: vfb.format.width/2,
+                    height: vfb.format.height
+                });
+            }
+            if let Some(buf) = vfb.as_vec_u32() {
+                self.video_input[id].swap_vec_u32(cx, buf);
+            }
+            let image_size = [vfb.format.width as f32, vfb.format.height as f32];
+            let v = self.ui.image(id!(video_input0));
+            v.set_texture(Some(self.video_input[id].clone()));
+            v.set_uniform(cx, id!(image_size), &image_size);
+            v.set_uniform(cx, id!(is_rgb), &[0.0]);
+            v.redraw(cx);
+        }
+    }
+            
+    fn handle_network_responses(&mut self, cx: &mut Cx, event:&NetworkResponsesEvent) {
+        let image_list = self.ui.portal_list(id!(image_list));
+        for event in event{
+            match &event.response {
                 NetworkResponse::HttpResponse(res) => {
                     // alright we got an image back
                     match event.request_id {
@@ -1324,29 +741,41 @@ impl App {
                         }
                         live_id!(image) => if let Some(data) = res.get_body() {
                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
-                                if let Some(mut fetching) = machine.fetching.take() {
-                                    
+                                if let Some((image_name, prompt_state)) = machine.fetching.take() {
+                                                                                
                                     // lets write our image to disk properly
                                     //self.current_image = Some(
-                                    fetching.prompt_state.prompt.preset.total_steps = fetching.steps_counter as u32;
-                                    let image_id = self.db.add_png_and_prompt(fetching.prompt_state, data);
+                                        //fetching.prompt_state.prompt.preset.total_steps = fetching.steps_counter as u32;
+                                    let image_id = self.db.add_png_and_prompt(prompt_state, image_name, data);
                                     // scroll by one item
                                     let first_id = image_list.first_id();
                                     if first_id != 0 {
                                         image_list.set_first_id(first_id + 1);
                                     }
-                                    
+                                                                                    
                                     self.filtered.filter_db(&self.db, "", false);
-                                    
                                     if self.db.image_texture(&image_id).is_some() {
                                         self.ui.redraw(cx);
                                     }
-                                    
+                                    self.set_current_image(cx, image_id);
+                                    // lets select the first image 
                                 }
                             }
                         }
                         live_id!(clear_queue) => {}
                         live_id!(interrupt) => {}
+                        live_id!(camera) => {
+                            // move to next step
+                            if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
+                                if let MachineRunning::UploadingImage{photo_name, prompt_state} = &machine.running{
+                                                                                    
+                                    let photo_name = photo_name.clone();
+                                    let prompt_state = prompt_state.clone();
+                                    let machine_id = machine.id;
+                                    self.send_prompt_to_machine(cx, machine_id, photo_name, prompt_state)
+                                }
+                            }
+                        }
                         _ => panic!()
                     }
                 }
@@ -1356,202 +785,177 @@ impl App {
             }
         }
     }
-}
-
-impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+    
+    fn handle_draw_2d(&mut self, cx:&mut Cx2d){
+        if let Some(current_image) = &self.current_image {
+            let tex = self.db.image_texture(current_image);
+            if tex.is_some() {
+                self.ui.image(id!(image_view.image)).set_texture(tex.clone());
+                self.ui.image(id!(big_image.image1)).set_texture(tex.clone());
+                self.ui.image(id!(second_image.image1)).set_texture(tex);
+            }
+        }
+        
         let image_list = self.ui.portal_list(id!(image_list));
         
-        if self.db.handle_decoded_images(cx) {
-            self.ui.redraw(cx);
-        }
-        
-        if let Event::Timer(_te) = event {
-            self.handle_slide_show(cx);
-        }
-        if let Event::Draw(event) = event {
-            let cx = &mut Cx2d::new(cx, event);
-            
-            if let Some(current_image) = &self.current_image {
-                let tex = self.db.image_texture(current_image);
-                if tex.is_some() {
-                    self.ui.image(id!(image_view.image)).set_texture(tex.clone());
-                    self.ui.image(id!(big_image.image1)).set_texture(tex.clone());
-                    self.ui.image(id!(second_image.image1)).set_texture(tex);
-                }
-            }
-            
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                
-                if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
-                    // alright now we draw the items
-                    image_list.set_item_range(cx, 0, self.filtered.list.len() as u64);
-                    while let Some(item_id) = image_list.next_visible_item(cx) {
-                        if let Some(item) = self.filtered.list.get(item_id as usize) {
-                            match item {
-                                ImageListItem::Prompt {prompt_hash} => {
-                                    let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
-                                    let item = image_list.item(cx, item_id, live_id!(PromptGroup)).unwrap();
-                                    item.label(id!(prompt)).set_text(&group.prompt.positive);
-                                    item.draw_widget_all(cx);
+        while let Some(next) = self.ui.draw(cx, &mut Scope::empty()).step() {
+            if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
+                // alright now we draw the items
+                image_list.set_item_range(cx, 0, self.filtered.list.len());
+                                    
+                while let Some(item_id) = image_list.next_visible_item(cx) {
+                                            
+                    if let Some(item) = self.filtered.list.get(item_id as usize) {
+                        match item {
+                            ImageListItem::Prompt {prompt_hash} => {
+                                let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
+                                let item = image_list.item(cx, item_id, live_id!(PromptGroup)).unwrap();
+                                item.label(id!(prompt)).set_text(&group.prompt.positive);
+                                item.draw_all(cx, &mut Scope::empty());
+                            }
+                            ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
+                                let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
+                                let rows = item.view_set(ids!(row1, row2, row3));
+                                for (index, row) in rows.iter().enumerate() {
+                                    if index >= *image_count {break}
+                                    // alright we need to query our png cache for an image.
+                                    let tex = self.db.image_texture(&image_files[index]);
+                                    row.image(id!(img)).set_texture(tex);
                                 }
-                                ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
-                                    let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
-                                    let rows = item.view_set(ids!(row1, row2, row3));
-                                    for (index, row) in rows.iter().enumerate() {
-                                        if index >= *image_count {break}
-                                        // alright we need to query our png cache for an image.
-                                        let tex = self.db.image_texture(&image_files[index]);
-                                        row.image(id!(img)).set_texture(tex);
-                                    }
-                                    item.draw_widget_all(cx);
-                                }
+                                item.draw_all(cx, &mut Scope::empty());
                             }
                         }
                     }
                 }
             }
-            return
         }
-        
-        self.handle_network_response(cx, event);
-        
-        let actions = self.ui.handle_widget_event(cx, event);
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers, ..}) = event {
-            if modifiers.logo || modifiers.control {
+    }
+    
+    fn handle_key_down(&mut self, cx:&mut Cx, event:&KeyEvent){
+        match event{
+            KeyEvent {key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter, modifiers: _, ..}=>{
+                return
+                /*
                 self.clear_todo(cx);
-            }
-            if modifiers.shift {
-                self.render(cx, 1);
-            }
-            else {
-                let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
-                self.render(cx, batch_size);
-            }
-        }
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Backspace, modifiers, ..}) = event {
-            if modifiers.logo {
-                let prompt_hash = self.prompt_hash_from_current_image();
-                self.load_inputs_from_prompt_hash(cx, prompt_hash);
-                self.load_seed_from_current_image(cx);
-            }
-        }
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..}) = event {
-            if modifiers.control || modifiers.logo {
-                self.clear_todo(cx);
-            }
-        }
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyR, modifiers, ..}) = event {
-            if modifiers.control || modifiers.logo {
-                self.open_web_socket(cx);
-            }
-        }
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::KeyP, modifiers, ..}) = event {
-            if modifiers.control || modifiers.logo {
-                let prompt_frame = self.ui.view(id!(second_image.prompt_frame));
-                if prompt_frame.visible() {
-                    prompt_frame.set_visible_and_redraw(cx, false);
+                if modifiers.logo || modifiers.control {
+                    self.render(cx, true);
+                }
+                else if modifiers.shift {
+                    self.render(cx, false);
                 }
                 else {
-                    //cx.set_cursor(MouseCursor::Hidden);
-                    prompt_frame.set_visible_and_redraw(cx, true);
+                    self.render(cx, false);
+                }*/
+            }
+            KeyEvent {is_repeat: false, key_code: KeyCode::Backspace, modifiers, ..}=>{
+                if modifiers.logo {
+                    let prompt_hash = self.prompt_hash_from_current_image();
+                    self.load_inputs_from_prompt_hash(cx, prompt_hash);
+                    self.load_seed_from_current_image(cx);
                 }
             }
-        }
-        
-        
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..}) = event {
-            let big_image = self.ui.view(id!(big_image));
-            if big_image.visible() {
-                big_image.set_visible_and_redraw(cx, false);
+            KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..} =>{
+                if modifiers.control || modifiers.logo {
+                    self.clear_todo(cx);
+                }
             }
-            else {
-                //cx.set_cursor(MouseCursor::Hidden);
-                big_image.set_visible_and_redraw(cx, true);
+            KeyEvent {is_repeat: false, key_code: KeyCode::KeyR, modifiers, ..} => {
+                if modifiers.control || modifiers.logo {
+                    self.open_web_socket();
+                }
             }
-        }
-        
-        if self.ui.button(id!(play_button)).clicked(&actions) {
-            self.play(cx);
-        }
-        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) = event {
-            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
-                self.play(cx);
+            KeyEvent {is_repeat: false, key_code: KeyCode::KeyP, modifiers, ..} => {
+                if modifiers.control || modifiers.logo {
+                    let prompt_frame = self.ui.view(id!(second_image.prompt_frame));
+                    if prompt_frame.visible() {
+                        prompt_frame.set_visible_and_redraw(cx, false);
+                    }
+                    else {
+                        //cx.set_cursor(MouseCursor::Hidden);
+                        prompt_frame.set_visible_and_redraw(cx, true);
+                    }
+                }
             }
-        }
-        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..}) = event {
-            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
-                self.select_next_image(cx);
-                self.set_slide_show(cx, false);
+           KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..} => {
+                self.clear_todo(cx);
             }
-        }
-        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..}) = event {
-            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
-                self.select_prev_image(cx);
-                self.set_slide_show(cx, false);
+            /*        
+            Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) => {
+                if self.ui.view(id!(big_image)).visible() || modifiers.logo {
+                    self.play(cx);
+                }
+            }*/
+            KeyEvent {key_code: KeyCode::ArrowDown, modifiers, ..} => {
+                if self.ui.view(id!(big_image)).visible() || modifiers.logo {
+                    self.select_next_image(cx);
+                    //self.set_slide_show(cx, false);
+                }
             }
+            KeyEvent {key_code: KeyCode::ArrowUp, modifiers, ..} => {
+                if self.ui.view(id!(big_image)).visible() || modifiers.logo {
+                    self.select_prev_image(cx);
+                    //self.set_slide_show(cx, false);
+                }
+            }
+            _=>()
         }
-        
+    }
+    
+    fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
+        log!("HERE {:?}", devices);
+        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 30.0);
+        cx.use_video_input(&input);
+    }
+    
+    fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
+        let image_list = self.ui.portal_list(id!(image_list));
         if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.select_next_image(cx);
-                    self.set_slide_show(cx, false);
+                    //self.set_slide_show(cx, false);
                 }
                 KeyCode::ArrowUp => {
                     self.select_prev_image(cx);
-                    self.set_slide_show(cx, false);
+                    //self.set_slide_show(cx, false);
                 }
                 _ => ()
             }
         }
-        
-        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, modifiers, ..}) = event {
-            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
-                self.set_slide_show(cx, false);
-            }
+                    
+        if self.ui.button(id!(take_photo)).clicked(&actions) {
+            self.clear_todo(cx);
+            self.render(cx, true);
         }
-        if let Event::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, modifiers, ..}) = event {
-            if self.ui.view(id!(big_image)).visible() || modifiers.logo {
-                self.set_slide_show(cx, true);
-            }
-        }
-        
-        if self.ui.button(id!(render_batch)).clicked(&actions) {
-            let batch_size = self.ui.drop_down(id!(batch_mode_dropdown)).selected_label().parse::<usize>().unwrap();
-            self.render(cx, batch_size);
-        }
-        
+                    
         if self.ui.button(id!(render_single)).clicked(&actions) {
-            self.render(cx, 1);
+            self.clear_todo(cx);
+            self.render(cx, false);
         }
-        
-        if self.ui.button(id!(cancel_todo)).clicked(&actions) {
+                    
+                            
+        if self.ui.button(id!(clear_toodo)).clicked(&actions) {
             self.clear_todo(cx);
         }
-        
+                    
         if let Some(change) = self.ui.text_input(id!(search)).changed(&actions) {
             self.filtered.filter_db(&self.db, &change, false);
             self.ui.redraw(cx);
             image_list.set_first_id_and_scroll(0, 0.0);
         }
-        
-        if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
+                    
+        /*if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
             if e.tap_count >1 {
                 self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
             }
-        }
-        
-        if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
+        }*/
+                    
+        /*if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
             if e.tap_count >1 {
                 self.ui.view(id!(big_image)).set_visible_and_redraw(cx, false);
             }
-        }
-        
+        }*/
+                    
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
             let rows = item.view_set(ids!(row1, row2));
@@ -1575,5 +979,19 @@ impl AppMain for App {
                 }
             }
         }
+    }
+        
+}
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.match_event_with_draw_2d(cx, event).is_ok(){
+            return
+        }
+        
+        if self.db.handle_decoded_images(cx) {
+            self.ui.redraw(cx);
+        }
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

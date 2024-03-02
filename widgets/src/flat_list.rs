@@ -23,13 +23,13 @@ enum ScrollState {
     Pulldown {next_frame: NextFrame},
 }
 */
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum FlatListAction {
     Scroll,
     None
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct FlatList {
     //#[rust] area: Area,
     #[walk] walk: Walk,
@@ -46,7 +46,7 @@ pub struct FlatList {
     #[live(true)] drag_scrolling: bool,
     
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
-    #[live] scroll_bars: ScrollBars,
+    #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] capture_overload: bool,
     #[rust] draw_state: DrawStateWrap<()>,
     
@@ -56,22 +56,18 @@ pub struct FlatList {
     /*#[rust(ScrollState::Stopped)] scroll_state: ScrollState*/
 }
 
-
 impl LiveHook for FlatList {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, FlatList)
-    }
-    
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from {
+            
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             self.templates.clear();
         }
     }
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
@@ -79,7 +75,7 @@ impl LiveHook for FlatList {
                     // lets apply this thing over all our childnodes with that template
                     for (templ_id, node) in self.items.values_mut() {
                         if *templ_id == id {
-                            node.apply(cx, from, index, nodes);
+                            node.apply(cx, apply, index, nodes);
                         }
                     }
                 }
@@ -92,7 +88,7 @@ impl LiveHook for FlatList {
         nodes.skip_node(index)
     }
     
-    fn after_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         if let Flow::Down = self.layout.flow {
             self.vec_index = Vec2Index::Y
         }
@@ -140,13 +136,10 @@ impl FlatList {
 
 
 impl Widget for FlatList {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_bars.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+
         let uid = self.widget_uid();
-        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event(cx, event);
         /*
         let mut scroll_to = None;
         self.scroll_bars.handle_event_with(cx, event, &mut | _cx, action | {
@@ -155,12 +148,14 @@ impl Widget for FlatList {
                 scroll_to = Some((scroll_pos, scroll_pos+0.5 >= view_total - view_visible))
             }
         });
-*/
-        for (_,item) in self.items.values_mut() {
+        */
+        for (item_id,item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
-            item.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
-            });
+            scope.with_id(*item_id, |scope|{
+                cx.group_widget_actions(uid, item_uid, |cx|{
+                    item.handle_event(cx, event, scope)
+                });
+            })
         }
         /*
         match &mut self.scroll_state {
@@ -287,21 +282,16 @@ impl Widget for FlatList {
         }*/
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         self.end(cx);
         self.draw_state.end();
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
-
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct FlatListRef(WidgetRef);
 
 impl FlatListRef {
    
@@ -314,22 +304,24 @@ impl FlatListRef {
         }
     }
     
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(LiveId, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(LiveId, WidgetRef)> {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
         set
     }
     
-    fn items_with_actions_vec(&self, actions: &WidgetActions, set: &mut Vec<(LiveId, WidgetRef)>) {
+    fn items_with_actions_vec(&self, actions: &Actions, set: &mut Vec<(LiveId, WidgetRef)>) {
         let uid = self.widget_uid();
         for action in actions {
-            if action.container_uid == uid {
-                
-                if let Some(inner) = self.borrow() {
-                    for (item_id, (_,item)) in inner.items.iter() {
-                        
-                        if item.widget_uid() == action.item_uid {
-                            set.push((*item_id, item.clone()))
+            if let Some(action) = action.downcast_ref::<WidgetAction>(){
+                if let Some(group) = &action.group{
+                    if group.group_uid == uid{
+                        if let Some(inner) = self.borrow() {
+                            for (item_id, (_templ_id, item)) in inner.items.iter() {
+                                if group.item_uid == item.widget_uid(){
+                                    set.push((*item_id, item.clone()))
+                                }
+                            }
                         }
                     }
                 }
@@ -338,11 +330,8 @@ impl FlatListRef {
     }
 }
 
-#[derive(Clone, Default, WidgetSet)]
-pub struct FlatListSet(WidgetSet);
-
 impl FlatListSet {
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(LiveId, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> Vec<(LiveId, WidgetRef)> {
         let mut set = Vec::new();
         for list in self.iter() {
             list.items_with_actions_vec(actions, &mut set)

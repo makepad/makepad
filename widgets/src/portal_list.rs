@@ -26,14 +26,13 @@ enum ScrollState {
 #[derive(Clone)]
 enum ListDrawState {
     Begin,
-    Down {index: u64, pos: f64, viewport: Rect},
-    Up {index: u64, pos: f64, hit_bottom: bool, viewport: Rect},
-    DownAgain {index: u64, pos: f64, viewport: Rect},
+    Down {index: usize, pos: f64, viewport: Rect},
+    Up {index: usize, pos: f64, hit_bottom: bool, viewport: Rect},
+    DownAgain {index: usize, pos: f64, viewport: Rect},
     End {viewport: Rect}
 }
 
-
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum PortalListAction {
     Scroll,
     None
@@ -46,26 +45,24 @@ impl ListDrawState {
         }
     }
 }
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct PortalList {
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     
-    #[rust] range_start: u64,
-    #[rust(u64::MAX)] range_end: u64,
-    #[rust(0u64)] view_window: u64,
+    #[rust] range_start: usize,
+    #[rust(usize::MAX)] range_end: usize,
+    #[rust(0usize)] view_window: usize,
     #[live(0.2)] flick_scroll_minimum: f64,
     #[live(80.0)] flick_scroll_maximum: f64,
     #[live(0.005)] flick_scroll_scaling: f64,
     #[live(0.98)] flick_scroll_decay: f64,
-    #[live(0.2)] swipe_drag_duration: f64,
     #[live(100.0)] max_pull_down: f64,
     #[live(true)] align_top_when_empty: bool,
     #[live(false)] grab_key_focus: bool,
     #[live(true)] drag_scrolling: bool,
-    #[live(false)] allow_empty: bool,
-    #[rust] first_id: u64,
+    #[rust] first_id: usize,
     #[rust] first_scroll: f64,
     #[rust(Vec2Index::X)] vec_index: Vec2Index,
     #[live] scroll_bar: ScrollBar,
@@ -78,7 +75,7 @@ pub struct PortalList {
     #[rust(false)] tail_range: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
+    #[rust] items: ComponentMap<(usize, LiveId), WidgetRef>,
     //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
@@ -87,24 +84,20 @@ struct AlignItem {
     align_range: TurtleAlignRange,
     size: DVec2,
     shift: f64,
-    index: u64
+    index: usize
 }
 
 impl LiveHook for PortalList {
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, PortalList)
-    }
-    
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if let ApplyFrom::UpdateFromDoc {..} = from {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             self.templates.clear();
         }
     }
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
@@ -112,7 +105,7 @@ impl LiveHook for PortalList {
                     // lets apply this thing over all our childnodes with that template
                     for ((_, templ_id), node) in self.items.iter_mut() {
                         if *templ_id == id {
-                            node.apply(cx, from, index, nodes);
+                            node.apply(cx, apply, index, nodes);
                         }
                     }
                 }
@@ -125,7 +118,7 @@ impl LiveHook for PortalList {
         nodes.skip_node(index)
     }
     
-    fn after_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         if let Flow::Down = self.layout.flow {
             self.vec_index = Vec2Index::Y
         }
@@ -302,7 +295,7 @@ impl PortalList {
         cx.end_turtle_with_area(&mut self.area);
     }
     
-    pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<u64> {
+    pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
         if let Some(draw_state) = self.draw_state.get() {
             match draw_state {
@@ -324,7 +317,7 @@ impl PortalList {
                 }
                 ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
                     let is_down_again = draw_state.is_down_again();
-                    let did_draw = cx.turtle_has_align_items() || self.allow_empty;
+                    let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -379,7 +372,7 @@ impl PortalList {
                     return Some(index + 1)
                 }
                 ListDrawState::Up {index, pos, hit_bottom, viewport} => {
-                    let did_draw = cx.turtle_has_align_items() || self.allow_empty;
+                    let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
@@ -403,7 +396,7 @@ impl PortalList {
                                     viewport
                                 });
                                 cx.begin_turtle(Walk {
-                                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                    abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + total_height)),
                                     margin: Default::default(),
                                     width: Size::Fill,
                                     height: Size::Fit
@@ -442,17 +435,48 @@ impl PortalList {
         None
     }
     
-    pub fn item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    /// Creates a new widget from the given `template` or returns an existing widget,
+    /// if one already exists with the same `entry_id` and `template`.
+    ///
+    /// If you care whether the widget already existed or not, use [`PortalList::item_with_existed()`] instead.
+    ///
+    /// ## Return
+    /// * If a widget already existed for the given `entry_id`, this returns a reference to that widget.
+    /// * If a new widget was created successfully, this returns a reference to that new widget.
+    /// * If a widget didn't exist for the given `entry_id` but the `template` could not be found, this returns `None`.
+    pub fn item(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
+        self.item_with_existed(cx, entry_id, template)
+            .map(|(item, _)| item)
+    }
+
+    /// Creates a new widget from the given `template` or returns an existing widget,
+    /// if one already exists with the same `entry_id` and `template`.
+    ///
+    /// If you don't care whether the widget already existed or not, use [`PortalList::item()`] instead.
+    ///
+    /// ## Return
+    /// * If a widget already existed for the given `entry_id`, this returns a tuple of that widget and `true`.
+    /// * If a new widget was created successfully, this returns a tuple of that widget and `false`.
+    /// * If the given `template` wasn't found, this returns `None`.
+    pub fn item_with_existed(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
         if let Some(ptr) = self.templates.get(&template) {
+            let mut already_existed = true;
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+                already_existed = false;
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
-            return Some(entry.clone())
+            Some((entry.clone(), already_existed))
+        } else {
+            None
         }
-        None
+    }
+
+    /// Returns `true` if a widget already exists for the given `entry_id` and `template`.
+    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
+        self.items.contains_key(&(entry_id, template))
     }
     
-    pub fn set_item_range(&mut self, cx: &mut Cx, range_start: u64, range_end: u64) {
+    pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
         self.range_start = range_start;
         if self.range_end != range_end {
             self.range_end = range_end;
@@ -484,11 +508,8 @@ impl PortalList {
 
 
 impl Widget for PortalList {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
         let mut scroll_to = None;
@@ -508,17 +529,16 @@ impl Widget for PortalList {
                 self.tail_range = false;
             }
 
-            let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
-            self.first_id = scroll_to;
+            self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as usize;
             self.first_scroll = 0.0;
-            dispatch_action(cx, WidgetActionItem::new(PortalListAction::Scroll.into(), uid));
+            cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
             self.area.redraw(cx);
         }
         
         for item in self.items.values_mut() {
             let item_uid = item.widget_uid();
-            item.handle_widget_event_with(cx, event, &mut | cx, action | {
-                dispatch_action(cx, action.with_container(uid).with_item(item_uid))
+            cx.group_widget_actions(uid, item_uid, |cx|{
+                item.handle_event(cx, event, scope)
             });
         }
         
@@ -530,7 +550,7 @@ impl Widget for PortalList {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
                         self.delta_top_scroll(cx, delta, true);
-                        dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
+                        cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
                         self.scroll_state = ScrollState::Stopped;
@@ -547,7 +567,7 @@ impl Widget for PortalList {
                         }
                         else {
                             *next_frame = cx.new_next_frame();
-                            dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
+                            cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         }
                         self.area.redraw(cx);
                     }
@@ -572,7 +592,7 @@ impl Widget for PortalList {
                     self.detect_tail_in_draw = true;
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
-                    dispatch_action(cx, PortalListAction::Scroll.into_action(uid));
+                    cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 },
                 
@@ -713,40 +733,35 @@ impl Widget for PortalList {
         }
     }
     
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         // ok so if we are
         if let Some(_) = self.draw_state.get() {
             self.end(cx);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
-#[derive(Clone, Default, PartialEq, WidgetRef)]
-pub struct PortalListRef(WidgetRef);
-
 impl PortalListRef {
-    pub fn set_first_id_and_scroll(&self, id: u64, s: f64) {
+    pub fn set_first_id_and_scroll(&self, id: usize, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
             inner.first_scroll = s;
         }
     }
     
-    pub fn set_first_id(&self, id: u64) {
+    pub fn set_first_id(&self, id: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
         }
     }
     
-    pub fn first_id(&self) -> u64 {
+    pub fn first_id(&self) -> usize {
         if let Some(inner) = self.borrow() {
             inner.first_id
         }
@@ -761,31 +776,42 @@ impl PortalListRef {
         }
     }
     
-    pub fn item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.item(cx, entry_id, template)
-        }
-        else {
-            None
-        }
+    /// A convenience wrapper around [`PortalList::item()`].
+    pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
+        let mut inner = self.borrow_mut()?;
+        inner.item(cx, entry_id, template)
+    }
+
+    /// A convenience wrapper around [`PortalList::item_with_existed()`].
+    pub fn item_with_existed(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
+        let mut inner = self.borrow_mut()?;
+        inner.item_with_existed(cx, entry_id, template)
+    }
+
+    /// A convenience wrapper around [`PortalList::contains_item()`].
+    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
+        let Some(inner) = self.borrow() else { return false };
+        inner.contains_item(entry_id, template)
     }
     
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
         set
     }
     
-    fn items_with_actions_vec(&self, actions: &WidgetActions, set: &mut Vec<(u64, WidgetRef)>) {
+    fn items_with_actions_vec(&self, actions: &Actions, set: &mut ItemsWithActions) {
         let uid = self.widget_uid();
         for action in actions {
-            if action.container_uid == uid {
-                
-                if let Some(inner) = self.borrow() {
-                    for ((item_id, _), item) in inner.items.iter() {
-                        
-                        if item.widget_uid() == action.item_uid {
-                            set.push((*item_id, item.clone()))
+            if let Some(action) = action.as_widget_action(){
+                if let Some(group) = &action.group{
+                    if group.group_uid == uid{
+                        if let Some(inner) = self.borrow() {
+                            for ((item_id, _), item) in inner.items.iter() {
+                                if group.item_uid == item.widget_uid(){
+                                    set.push((*item_id, item.clone()))
+                                }
+                            }
                         }
                     }
                 }
@@ -794,18 +820,17 @@ impl PortalListRef {
     }
 }
 
-#[derive(Clone, Default, WidgetSet)]
-pub struct PortalListSet(WidgetSet);
+type ItemsWithActions = Vec<(usize, WidgetRef)>;
 
 impl PortalListSet {
-    pub fn set_first_id(&self, id: u64) {
+    pub fn set_first_id(&self, id: usize) {
         for list in self.iter() {
             list.set_first_id(id)
         }
     }
     
     
-    pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
+    pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
         let mut set = Vec::new();
         for list in self.iter() {
             list.items_with_actions_vec(actions, &mut set)

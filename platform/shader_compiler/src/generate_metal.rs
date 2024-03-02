@@ -60,11 +60,11 @@ impl<'a> DrawShaderGenerator<'a> {
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
             if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
-                writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::nearest,min_filter::nearest),pos);}}").unwrap();
+                writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
                 break;
             }
             if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
-                writeln!(self.string, "float4 sample2d_rt(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::nearest,min_filter::nearest),pos);}}").unwrap();
+                writeln!(self.string, "float4 sample2d_rt(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
                 break;
             }
         };
@@ -166,6 +166,7 @@ impl<'a> DrawShaderGenerator<'a> {
         for field in &self.draw_shader_def.fields {
             match field.kind {
                 DrawShaderFieldKind::Texture {..} => {
+                    assert_ne!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::TextureOES, "TextureOES is only available on Android");
                     assert_eq!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
                     write!(self.string, "    texture2d<float> ").unwrap();
                     write!(self.string, "{}", &DisplayDsIdent(field.ident)).unwrap();
@@ -591,7 +592,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Mat4);
                 write!(string, " {}{}", ref_prefix, ident).unwrap();
             }
-            Ty::Texture2D => panic!(), // TODO
+            Ty::Texture2D | Ty::TextureOES => panic!(), // TODO
             Ty::Array {ref elem_ty, len} => {
                 self.write_var_decl(string, sep, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
@@ -791,7 +792,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 TyLit::Mat2 => "float2x2",
                 TyLit::Mat3 => "float3x3",
                 TyLit::Mat4 => "float4x4",
-                TyLit::Texture2D => panic!(), // TODO
+                TyLit::Texture2D | TyLit::TextureOES => panic!(), // TODO
             }
         )
             .unwrap();

@@ -28,7 +28,7 @@ pub enum AudioGraphAction<'a> {
     VoiceOff {voice: usize}
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 pub struct AudioGraph {
     #[live] root: AudioComponentRef,
     #[rust] from_ui: FromUISender<FromUI>,
@@ -45,8 +45,8 @@ impl LiveHook for AudioGraph {
             let _ = self.from_ui.send(FromUI::NewRoot(graph_node));
         }
     }
-    fn skip_apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
-        if let ApplyFrom::UpdateFromDoc{..} = apply_from{
+    fn skip_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode])->Option<usize>{
+        if let ApplyFrom::UpdateFromDoc{..} = apply.from{
             return Some(nodes.skip_node(index))
         }
         None
@@ -63,7 +63,7 @@ impl AudioGraph {
     
     pub fn by_type<T: 'static + AudioComponent>(&mut self) -> Option<&mut T> {
         if let Some(child) = self.root.audio_query(&AudioQuery::TypeId(TypeId::of::<T>()), &mut None).into_found() {
-            return child.cast_mut::<T>()
+            return child.downcast_mut::<T>()
         }
         None
     }

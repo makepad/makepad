@@ -1,6 +1,5 @@
 use {
     crate::{
-        makepad_error_log::*,
         makepad_math::*,
         makepad_shader_compiler::{
             ShaderTy
@@ -9,9 +8,6 @@ use {
             LiveId,
         },
         draw_list::DrawListId,
-        makepad_math::{
-            Rect
-        },
         cx::Cx
     }
 };
@@ -138,7 +134,7 @@ impl Area {
     }
 
     // returns the final screen rect
-    pub fn get_clipped_rect(&self, cx: &Cx) -> Rect {
+    pub fn clipped_rect(&self, cx: &Cx) -> Rect {
         
         return match self {
             Area::Instance(inst) => {
@@ -194,7 +190,7 @@ impl Area {
         }
     }
     
-    pub fn get_rect(&self, cx: &Cx) -> Rect {
+    pub fn rect(&self, cx: &Cx) -> Rect {
         
         return match self {
             Area::Instance(inst) => {

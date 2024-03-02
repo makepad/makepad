@@ -7,17 +7,17 @@ use {
         makepad_live_id::*,
         cx::*,
         event::*,
-        thread::Signal,
+        thread::SignalToUI,
         os::{
             windows::{
                 windows_media::CxWindowsMedia,
-                windows_decoding::CxWindowsDecoding,
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
             },
             cx_native::EventFlow,
         },
+        makepad_math::*,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         window::CxWindowPool,
@@ -59,7 +59,7 @@ impl Cx {
             }
         }));
         get_win32_app_global().start_timer(0, 0.008, true);
-        cx.borrow_mut().call_event_handler(&Event::Construct);
+        cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
         get_win32_app_global().start_signal_poll();
         Win32App::event_loop();
@@ -79,7 +79,7 @@ impl Cx {
         match &event{
             Win32Event::Timer(time) =>{
                 if time.timer_id == 0{
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
@@ -118,9 +118,14 @@ impl Cx {
                     window.stop_resize();
                 }
             }
-            Win32Event::WindowGeomChange(re) => { // do this here because mac
+            Win32Event::WindowGeomChange(mut re) => { // do this here because mac
                
                 if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                    if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
+                        re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
+                        re.new_geom.dpi_factor = dpi_override;
+                    }
+                                        
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
                     // redraw just this windows root draw list
@@ -143,7 +148,7 @@ impl Cx {
                 if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                     d3d11_windows.remove(index);
                     if d3d11_windows.len() == 0 {
-                        self.call_event_handler(&Event::Destruct);
+                        self.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit
                     }
                 }
@@ -235,7 +240,7 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(e))
             }
             Win32Event::Signal => {
-                if Signal::check_and_clear_ui_signal() {
+                if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_media_signals();
                     self.call_event_handler(&Event::Signal);
                 }
@@ -362,21 +367,20 @@ impl Cx {
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
                 CxOsOp::HttpRequest {request_id: _, request: _} => {
-                    //todo!()
+                    todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
-                CxOsOp::WebSocketOpen {request_id: _, request: _,} => {
-                    //todo!()
-                }
-                CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
-                    //todo!()
-                }
-                CxOsOp::WebSocketSendString {request_id: _, data: _} => {
-                    //todo!()
-                },
-                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
-                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::FetchNextVideoFrames(_, _) => todo!(),
-                CxOsOp::CleanupVideoDecoding(_) => todo!(),
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::BeginVideoPlayback(_) => todo!(),
+                CxOsOp::PauseVideoPlayback(_) => todo!(),
+                CxOsOp::ResumeVideoPlayback(_) => todo!(),
+                CxOsOp::MuteVideoPlayback(_) => todo!(),
+                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
+                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
+                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
+                CxOsOp::SaveFileDialog(_) =>  todo!(),
+                CxOsOp::SelectFileDialog(_) =>  todo!(),
+                CxOsOp::SaveFolderDialog(_) =>  todo!(),
+                CxOsOp::SelectFolderDialog(_) =>  todo!(),
             }
         }
         ret
@@ -402,6 +406,5 @@ impl CxOsApi for Cx {
 pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
-    pub (crate) decoding: CxWindowsDecoding,
     pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }

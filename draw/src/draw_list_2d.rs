@@ -36,7 +36,7 @@ impl LiveNew for DrawList2d {
 }
 impl LiveApply for DrawList2d {
     //fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
             cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
@@ -50,7 +50,7 @@ impl LiveApply for DrawList2d {
                 break;
             }
             match nodes[index].id {
-                live_id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                live_id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);

@@ -4,7 +4,6 @@ use {
     std::cell::RefCell,
     self::super::{
         web_media::CxWebMedia,
-        web_decoding::CxWebDecoding,
         from_wasm::*,
         to_wasm::*,
     },
@@ -12,13 +11,13 @@ use {
         makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
-        thread::Signal,
+        thread::SignalToUI,
         window::{
             CxWindowPool
         },
         event::{
             ToWasmMsgEvent,
-            NetworkResponseEvent,
+            NetworkResponseItem,
             HttpResponse,
             NetworkResponse,
             Event,
@@ -64,6 +63,7 @@ impl Cx {
                     );
                     self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
+                    
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {
                         deps.push(path.to_string());
@@ -86,7 +86,7 @@ impl Cx {
                     self.os.window_geom = tw.window_info.into();
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
                     
-                    self.call_event_handler(&Event::Construct);
+                    self.call_event_handler(&Event::Startup);
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 },
                 
@@ -222,7 +222,7 @@ impl Cx {
 
                 live_id!(ToWasmHTTPResponse) => {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpResponse(HttpResponse::new(
                             LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
@@ -235,7 +235,7 @@ impl Cx {
 
                 live_id!(ToWasmHttpRequestError) => {
                     let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpRequestError(tw.error)
                     });
@@ -243,20 +243,20 @@ impl Cx {
 
                 live_id!(ToWasmHttpResponseProgress) => {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
+                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
                     });
                 }
 
                 live_id!(ToWasmHttpUploadProgress) => {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseEvent{
+                    network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded, total:tw.total}
+                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
                     });
                 }
-                
+                /*
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseEvent{
@@ -293,7 +293,7 @@ impl Cx {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
-                }
+                }*/
                 live_id!(ToWasmLiveFileChange)=>{
                     let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
                     // live file change. lets do it.
@@ -395,9 +395,6 @@ impl Cx {
     fn handle_platform_ops(&mut self) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::FetchNextVideoFrames(_, _)=>{
-                    
-                }
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     self.os.from_wasm(FromWasmSetDocumentTitle {
@@ -431,7 +428,7 @@ impl Cx {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 },
                 CxOsOp::ShowTextIME(area, pos) => {
-                    let pos = area.get_clipped_rect(self).pos + pos;
+                    let pos = area.clipped_rect(self).pos + pos;
                     self.os.from_wasm(FromWasmShowTextIME {x: pos.x, y: pos.y});
                 },
                 CxOsOp::HideTextIME => {
@@ -471,6 +468,7 @@ impl Cx {
                         body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
                     });
                 },
+                /*
                 CxOsOp::WebSocketOpen{request_id, request}=>{
                     let headers = request.get_headers_string();
                     self.os.from_wasm(FromWasmWebSocketOpen {
@@ -495,10 +493,19 @@ impl Cx {
                         request_id_hi: request_id.hi(),
                         data
                     });
-                },
-                CxOsOp::InitializeVideoDecoding(_, _,) => todo!(),
-                CxOsOp::DecodeNextVideoChunk(_, _) => todo!(),
-                CxOsOp::CleanupVideoDecoding(_) => todo!(),
+                },*/
+                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
+                CxOsOp::BeginVideoPlayback(_) => todo!(),
+                CxOsOp::PauseVideoPlayback(_) => todo!(),
+                CxOsOp::ResumeVideoPlayback(_) => todo!(),
+                CxOsOp::MuteVideoPlayback(_) => todo!(),
+                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
+                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
+                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
+                CxOsOp::SaveFileDialog(_) => todo!(),
+                CxOsOp::SelectFileDialog(_) => todo!(),
+                CxOsOp::SaveFolderDialog(_) => todo!(),
+                CxOsOp::SelectFolderDialog(_) => todo!(),    
             }
         }
     }
@@ -536,11 +543,11 @@ impl CxOsApi for Cx {
             ToWasmHttpRequestError::to_js_code(),
             ToWasmHttpResponseProgress::to_js_code(),
             ToWasmHttpUploadProgress::to_js_code(),
-            ToWasmWebSocketOpen::to_js_code(),
+            /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
             ToWasmWebSocketString::to_js_code(),
-            ToWasmWebSocketBinary::to_js_code(),
+            ToWasmWebSocketBinary::to_js_code(),*/
             ToWasmSignal::to_js_code(),
             ToWasmMidiInputData::to_js_code(),
             ToWasmMidiPortList::to_js_code(),
@@ -562,9 +569,9 @@ impl CxOsApi for Cx {
             FromWasmHideTextIME::to_js_code(),
             FromWasmCreateThread::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
-            FromWasmWebSocketOpen::to_js_code(),
+            /*FromWasmWebSocketOpen::to_js_code(),
             FromWasmWebSocketSendString::to_js_code(),
-            FromWasmWebSocketSendBinary::to_js_code(),
+            FromWasmWebSocketSendBinary::to_js_code(),*/
             FromWasmXrStartPresenting::to_js_code(),
             FromWasmXrStopPresenting::to_js_code(),
             
@@ -645,7 +652,6 @@ pub struct CxOs {
     pub (crate) from_wasm_js: Vec<String>,
     
     pub (crate) media: CxWebMedia,
-    pub (crate) decoding: CxWebDecoding
 }
 
 impl CxOs {
@@ -689,7 +695,7 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
 #[export_name = "wasm_check_signal"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_check_signal() -> u32 {
-    if Signal::check_and_clear_ui_signal(){
+    if SignalToUI::check_and_clear_ui_signal(){
         1
     }
     else{

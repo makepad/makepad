@@ -1,7 +1,6 @@
 use {
     crate::{
         id_pool::*,
-        makepad_error_log::*,
         cx::Cx,
         os::CxOsTexture,
     },
@@ -21,11 +20,22 @@ impl Texture {
 
 #[derive(Default)]
 pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
+
 impl CxTexturePool {
-    pub fn alloc(&mut self) -> Texture {
-        let id = self.0.alloc();
-        self.0.pool[id.id].alloc = None;
-        Texture(Rc::new(id))
+    pub fn alloc(&mut self, requested_format: TextureFormat) -> Texture {
+        let is_video = requested_format.is_video();
+        let cx_texture = CxTexture {
+            format: requested_format,
+            alloc: None,
+            ..Default::default()
+        };
+
+        let new_id = self.0.alloc_with_reuse_filter(|item| {
+            // check for compatibility, not using `is_compatible_with` to avoid passing the whole format and cloning vec contents
+            is_video == item.item.format.is_video()
+        }, cx_texture);
+
+        Texture(Rc::new(new_id))
     }
 }
 
@@ -81,6 +91,8 @@ pub enum TextureFormat {
     RenderRGBAf16{size:TextureSize},
     RenderRGBAf32{size:TextureSize},
     SharedBGRAu8{width:usize, height:usize, id:crate::cx_stdin::PresentableImageId},
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    VideoRGB,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +110,7 @@ pub enum TextureCategory{
     Render{initial:bool},
     DepthBuffer{initial:bool},
     Shared{initial:bool},
+    Video{initial:bool},
 }
 
 impl PartialEq for TextureCategory{
@@ -107,6 +120,7 @@ impl PartialEq for TextureCategory{
             Self::Render{..} => if let Self::Render{..} = other{true} else {false},
             Self::Shared{..} => if let Self::Shared{..} = other{true} else {false},
             Self::DepthBuffer{..} => if let Self::DepthBuffer{..} = other{true} else {false},           
+            Self::Video{..} => if let Self::Video{..} = other{true} else {false},           
         }
     }
 }
@@ -121,6 +135,8 @@ pub(crate) enum TexturePixel{
     RGu8,
     Rf32,
     D32,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    VideoRGB
 }
 
 impl CxTexture{
@@ -172,7 +188,9 @@ impl CxTexture{
             match &mut alloc.category{
                 TextureCategory::Render{initial} |
                 TextureCategory::DepthBuffer{initial} |
-                TextureCategory::Shared{initial}=>{
+                TextureCategory::Shared{initial} |
+                TextureCategory::Video { initial }
+                =>{
                     let u = *initial;
                     *initial = false;
                     return u
@@ -223,6 +241,18 @@ impl CxTexture{
         }
         false
     }
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[allow(unused)]
+    pub(crate) fn alloc_video(&mut self)->bool{
+        if let Some(alloc) = self.format.as_video_alloc(){
+            if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc{
+                self.alloc = Some(alloc);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl TextureFormat{
@@ -259,7 +289,15 @@ impl TextureFormat{
             _=>false
         }
     }
-    
+
+    pub fn is_video(&self) -> bool {
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        if let Self::VideoRGB = self {
+            return true;
+        }
+        false
+    }
+
     pub fn vec_width_height(&self)->Option<(usize,usize)>{
         match self{
             Self::VecBGRAu8_32{width, height, .. }=>Some((*width,*height)),
@@ -361,6 +399,22 @@ impl TextureFormat{
             _=>None
         }
     }
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[allow(unused)]
+    pub(crate) fn as_video_alloc(&self)->Option<TextureAlloc>{
+        match self{
+            Self::VideoRGB => {
+                Some(TextureAlloc{
+                    width: 0,
+                    height: 0,
+                    pixel:TexturePixel::VideoRGB,
+                    category: TextureCategory::Video{initial:true}
+                })
+            },
+            _ => None
+        }
+    }
     
     #[allow(unused)]
     pub(crate) fn as_shared_alloc(&self)->Option<TextureAlloc>{
@@ -376,6 +430,15 @@ impl TextureFormat{
             _=>None
         }
     }
+
+    #[allow(unused)]
+    fn is_compatible_with(&self, other: &Self) -> bool {
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            return !(self.is_video() ^ other.is_video());
+        }
+        true
+    }
 }
 
 impl Default for TextureFormat {
@@ -386,13 +449,12 @@ impl Default for TextureFormat {
 
 impl Texture {
     pub fn new(cx: &mut Cx) -> Self {
-        let texture = cx.textures.alloc();
-        texture
+        cx.null_texture()
     }
-    
-    pub fn set_format(&self, cx: &mut Cx, format: TextureFormat) {
-        let cxtexture = &mut cx.textures[self.texture_id()];
-        cxtexture.format = format;
+
+    pub fn new_with_format(cx: &mut Cx, format: TextureFormat) -> Self {
+        let texture = cx.textures.alloc(format);
+        texture
     }
     
     pub fn get_format<'a>(&self, cx: &'a mut Cx) -> &'a mut TextureFormat {
@@ -447,5 +509,5 @@ impl Texture {
 pub struct CxTexture {
     pub (crate) format: TextureFormat,
     pub (crate) alloc: Option<TextureAlloc>,
-    pub os: CxOsTexture
+    pub os: CxOsTexture,
 }

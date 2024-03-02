@@ -4,22 +4,21 @@ use {
         io::prelude::*,
         io::BufReader,
         path::Path,
-        io::Write,
         fs,
         process::Command,
     },
     crate::{
         makepad_live_id::*,
         makepad_math::*,
-        makepad_error_log::*,
         makepad_micro_serde::*,
         makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
         texture::{Texture, TextureFormat},
-        thread::Signal,
+        thread::SignalToUI,
         os::{
+            url_session::{make_http_request},
             apple_sys::*,
             metal_xpc::{
                 xpc_service_proxy,
@@ -110,7 +109,7 @@ impl Cx {
                         }
                         Err(err) => {
                             // we should output a log string
-                            error!("Cant parse stdin-JSON {} {:?}", line, err)
+                            crate::error!("Cant parse stdin-JSON {} {:?}", line, err)
                         }
                     }
                 }
@@ -121,7 +120,7 @@ impl Cx {
 
         let mut swapchain = None;
 
-        self.call_event_handler(&Event::Construct);
+        self.call_event_handler(&Event::Startup);
         let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
 
         while let Ok(msg) =  json_msg_rx.recv(){
@@ -138,6 +137,9 @@ impl Cx {
                 }
                 HostToStdin::KeyUp(e) => {
                     self.call_event_handler(&Event::KeyUp(e));
+                }
+                HostToStdin::TextInput(e) => {
+                    self.call_event_handler(&Event::TextInput(e));
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(
@@ -189,13 +191,12 @@ impl Cx {
                         // this is still pretty bad at 100ms if the service is still starting up
                         // we should 
                         if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
-                            let texture = Texture::new(self);
                             let format = TextureFormat::SharedBGRAu8 {
                                 id: presentable_image.id,
                                 width: swapchain.alloc_width as usize,
                                 height: swapchain.alloc_height as usize,
                             };
-                            texture.set_format(self, format);
+                            let texture = Texture::new_with_format(self, format);
                             if self.textures[texture.texture_id()].update_from_shared_handle(
                                 metal_cx,
                                 fb.as_id(),
@@ -207,7 +208,7 @@ impl Cx {
                     }
 
                     // check signals
-                    if Signal::check_and_clear_ui_signal() {
+                    if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
@@ -352,6 +353,9 @@ impl Cx {
                 },
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.stdin_timers.timers.remove(&timer_id);
+                },
+                CxOsOp::HttpRequest {request_id, request} => {
+                    make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
                 _ => ()
                 /*

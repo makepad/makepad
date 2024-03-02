@@ -21,7 +21,7 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawBgQuad {
     #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
@@ -33,7 +33,7 @@ struct DrawBgQuad {
     #[live] opened: f32,
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawNameText {
     #[deref] draw_super: DrawText,
     #[live] is_even: f32,
@@ -45,7 +45,7 @@ struct DrawNameText {
     #[live] opened: f32,
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawIconQuad {
     #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
@@ -57,7 +57,7 @@ struct DrawIconQuad {
     #[live] opened: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct FileTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
@@ -81,9 +81,9 @@ pub struct FileTreeNode {
     #[live] selected: f32,
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct FileTree {
-    #[live] scroll_bars: ScrollBars,
+    #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
     #[live] folder_node: Option<LivePtr>,
     #[walk] walk: Walk,
@@ -107,21 +107,17 @@ pub struct FileTree {
 }
 
 impl LiveHook for FileTree {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, FileTree)
-    }
-
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
             if let Some(index) = nodes.child_by_name(index, id.as_field()) {
-                tree_node.apply(cx, from, index, nodes);
+                tree_node.apply(cx, apply, index, nodes);
             }
         }
         self.scroll_bars.redraw(cx);
     }
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum FileTreeAction {
     None,
     FileClicked(FileNodeId),
@@ -130,7 +126,6 @@ pub enum FileTreeAction {
 }
 
 pub enum FileTreeNodeAction {
-    None,
     WasClicked,
     Opening,
     Closing,
@@ -198,11 +193,12 @@ impl FileTreeNode {
         self.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
     }
     
-    pub fn handle_event_with(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
+        node_id: FileNodeId,
+        actions: &mut Vec<(FileNodeId, FileTreeNodeAction)>,
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -216,7 +212,7 @@ impl FileTreeNode {
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
-                    dispatch_action(cx, FileTreeNodeAction::ShouldStartDrag);
+                    actions.push((node_id, FileTreeNodeAction::ShouldStartDrag));
                 }
             }
             Hit::FingerDown(_) => {
@@ -224,21 +220,19 @@ impl FileTreeNode {
                 if self.is_folder {
                     if self.animator_in_state(cx, id!(open.on)) {
                         self.animator_play(cx, id!(open.off));
-                        dispatch_action(cx, FileTreeNodeAction::Closing);
+                        actions.push((node_id, FileTreeNodeAction::Closing));
                     }
                     else {
                         self.animator_play(cx, id!(open.on));
-                        dispatch_action(cx, FileTreeNodeAction::Opening);
+                        actions.push((node_id, FileTreeNodeAction::Opening));
                     }
-                    
                 }
-                dispatch_action(cx, FileTreeNodeAction::WasClicked);
+                actions.push((node_id, FileTreeNodeAction::WasClicked));
             }
             _ => {}
         }
     }
 }
-
 
 impl FileTree {
     
@@ -308,7 +302,7 @@ impl FileTree {
             
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
             self.stack.push(tree_node.opened as f64 * scale);
-            if tree_node.opened == 0.0 {
+            if tree_node.opened <= 0.001 {
                 self.end_folder();
                 return Err(());
             }
@@ -390,33 +384,31 @@ impl FileTree {
 
         cx.start_dragging(items);
     }
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
-        let mut a = Vec::new();
-        self.handle_event_with(cx, event, &mut | _, v | a.push(v));
-        a
-    }
-    
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeAction),
-    ) {
-        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
+}
+
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct FileNodeId(pub LiveId);
+
+impl Widget for FileTree {
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
         
+        self.scroll_bars.handle_event(cx, event);
+                
         match event {
             Event::DragEnd => self.dragging_node_id = None,
             _ => ()
         }
         
-        let mut actions = Vec::new();
+        let mut node_actions = Vec::new();
+                
         for (node_id, (node, _)) in self.tree_nodes.iter_mut() {
-            node.handle_event_with(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event(cx, event, *node_id, &mut node_actions);
         }
-        
-        for (node_id, action) in actions {
-            match action {
+                
+        for (node_id, node_action) in node_actions {
+            match node_action {
                 FileTreeNodeAction::Opening => {
                     self.open_nodes.insert(node_id);
                 }
@@ -432,21 +424,20 @@ impl FileTree {
                     }
                     self.selected_node_id = Some(node_id);
                     if self.is_folder(node_id){
-                        dispatch_action(cx, FileTreeAction::FolderClicked(node_id));
+                        cx.widget_action(uid, &scope.path, FileTreeAction::FolderClicked(node_id));
                     }
                     else{
-                        dispatch_action(cx, FileTreeAction::FileClicked(node_id));
+                        cx.widget_action(uid, &scope.path, FileTreeAction::FileClicked(node_id));
                     }
                 }
                 FileTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
-                        dispatch_action(cx, FileTreeAction::ShouldFileStartDrag(node_id));
+                        cx.widget_action(uid, &scope.path, FileTreeAction::ShouldFileStartDrag(node_id));
                     }
                 }
-                _ => ()
             }
         }
-        
+                
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocus(_) => {
                 if let Some(node_id) = self.selected_node_id {
@@ -461,54 +452,33 @@ impl FileTree {
             _ => ()
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct FileNodeId(pub LiveId);
-
-impl Widget for FileTree {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_bars.redraw(cx);
-    }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope,walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
-            return WidgetDraw::hook_above()
+            return DrawStep::make_step()
         }
         if let Some(()) = self.draw_state.get() {
             self.end(cx);
             self.draw_state.end();
         }
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, WidgetRef)]
-pub struct FileTreeRef(WidgetRef);
-
 impl FileTreeRef{
-    pub fn should_file_start_drag(&self, actions: &WidgetActions) -> Option<FileNodeId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FileTreeAction::ShouldFileStartDrag(file_id) = item.action() {
+    pub fn should_file_start_drag(&self, actions: &Actions) -> Option<FileNodeId> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FileTreeAction::ShouldFileStartDrag(file_id) = item.cast() {
                 return Some(file_id)
             }
         }
         None
     }
     
-    pub fn file_clicked(&self, actions: &WidgetActions) -> Option<FileNodeId> {
-        if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let FileTreeAction::FileClicked(file_id) = item.action() {
+    pub fn file_clicked(&self, actions: &Actions) -> Option<FileNodeId> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FileTreeAction::FileClicked(file_id) = item.cast() {
                 return Some(file_id)
             }
         }
@@ -520,6 +490,3 @@ impl FileTreeRef{
         cx.start_dragging(vec![item]);
     }
 }
-
-#[derive(Clone, Default, WidgetSet)]
-pub struct FileTreeSet(WidgetSet);

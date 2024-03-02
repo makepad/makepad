@@ -13,7 +13,6 @@ live_design!{
     import crate::file_tree::FileTreeNodeBase;
     import crate::fold_button::FoldButtonBase;
     import crate::fold_header::FoldHeaderBase;
-    import crate::hook_widget::HookWidgetBase;
     import crate::image::ImageBase;
     import crate::rotated_image::RotatedImageBase;
     import crate::video::VideoBase;
@@ -40,12 +39,16 @@ live_design!{
     import crate::text_input::TextInputBase;
     import crate::scroll_shadow::DrawScrollShadowBase;
     import crate::page_flip::PageFlipBase;
+    import crate::stack_navigation::StackNavigationViewBase;
+    import crate::stack_navigation::StackNavigationBase;
+    import crate::expandable_panel::ExpandablePanelBase;
     import crate::keyboard_view::KeyboardViewBase;
     import crate::window_menu::WindowMenuBase;
+    import crate::html::HtmlBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
-    
+
     SlidePanel = <SlidePanelBase>{
         animator: {
             closed = {
@@ -101,13 +104,8 @@ live_design!{
     }
     
     RotatedImage = <RotatedImageBase> {
-        
         width: Fit
         height: Fit
-        // This is important to avoid clipping the image, specially when it is rotated.
-        // In any case, it can be override by the app developer.
-        clip_x: false,
-        clip_y: false
         
         draw_bg: {
             texture image: texture2d
@@ -206,61 +204,69 @@ live_design!{
     }
 
     Video = <VideoBase> {
+        width: 100, height: 100
+
         draw_bg: {
             shape: Solid,
             fill: Image
-            texture y_texture: texture2d
-            texture u_texture: texture2d
-            texture v_texture: texture2d
+            texture video_texture: textureOES
+            texture thumbnail_texture: texture2d
+            uniform show_thumbnail: 0.0
+
+            instance opacity: 1.0
             instance image_scale: vec2(1.0, 1.0)
-            instance image_pan: vec2(0.0, 0.0)
+            instance image_pan: vec2(0.5, 0.5)
 
-            uniform image_alpha: 1.0
-            uniform texture_available: 0.0
-            uniform is_last_frame: 0.0
-            uniform is_plannar: 0.0 
-            uniform video_width: 0.0
-            uniform video_height: 0.0
+            uniform source_size: vec2(1.0, 1.0)
+            uniform target_size: vec2(-1.0, -1.0)
 
-            uniform y_stride: 0.0;
-            uniform u_stride: 0.0;
-            uniform v_stride: 0.0;
-        
-            fn yuv_to_rgb(self, y: float, u: float, v: float) -> vec4 {
-                let c = y - 16.0;
-                let d = u - 128.0;
-                let e = v - 128.0;
-        
-                let r = clamp((298.0 * c + 409.0 * e + 128.0) / 65536.0, 0.0, 1.0);
-                let g = clamp((298.0 * c - 100.0 * d - 208.0 * e + 128.0) / 65536.0, 0.0, 1.0);
-                let b = clamp((298.0 * c + 516.0 * d + 128.0) / 65536.0, 0.0, 1.0);
-        
-                return vec4(r, g, b, 1.0);
-            }
-
-            fn get_color(self) -> vec4 {
-                if (self.is_plannar > 0.5) {
-                    let y = sample2d(self.y_texture, self.pos).r;
-                    let u = sample2d(self.u_texture, self.pos).r;
-                    let v = sample2d(self.v_texture, self.pos).r;
-                    return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
-                } else {
-                    let uv_coord = self.pos / 2.0;
-                    let y = sample2d(self.y_texture, self.pos).r;
-                    let uv = sample2d(self.u_texture, uv_coord).rg;
-                    let u = uv.r;
-                    let v = uv.g;
-                    return self.yuv_to_rgb(y * 255.0, u * 255.0, v * 255.0);
-                }    
-            }
-    
-            fn pixel(self) -> vec4 {
-                if (self.texture_available < 0.5) {
-                    return vec4(0.0, 0.0, 0.0, 1.0);
+            fn get_color_scale_pan(self) -> vec4 {
+                // Early return for default scaling and panning,
+                // used when walk size is not specified or non-fixed.
+                if self.target_size.x <= 0.0 && self.target_size.y <= 0.0 {
+                    if self.show_thumbnail > 0.0 {
+                        return sample2d(self.thumbnail_texture, self.pos).xyzw;
+                    } else {
+                        return sample2dOES(self.video_texture, self.pos);
+                    }  
                 }
-    
-                let color = self.get_color();
-                return color * vec4(1.0, 1.0, 1.0, self.image_alpha);
+
+                let scale = self.image_scale;
+                let pan = self.image_pan;
+                let source_aspect_ratio = self.source_size.x / self.source_size.y;
+                let target_aspect_ratio = self.target_size.x / self.target_size.y;
+
+                // Adjust scale based on aspect ratio difference
+                if (source_aspect_ratio != target_aspect_ratio) {
+                    if (source_aspect_ratio > target_aspect_ratio) {
+                        scale.x = target_aspect_ratio / source_aspect_ratio;
+                        scale.y = 1.0;
+                    } else {
+                        scale.x = 1.0;
+                        scale.y = source_aspect_ratio / target_aspect_ratio;
+                    }
+                }
+
+                // Calculate the range for panning
+                let pan_range_x = max(0.0, (1.0 - scale.x));
+                let pan_range_y = max(0.0, (1.0 - scale.y));
+
+                // Adjust the user pan values to be within the pan range
+                let adjusted_pan_x = pan_range_x * pan.x;
+                let adjusted_pan_y = pan_range_y * pan.y;
+                let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y);
+                let adjusted_pos = (self.pos * scale) + adjusted_pan;
+
+                if self.show_thumbnail > 0.5 {
+                    return sample2d(self.thumbnail_texture, adjusted_pos).xyzw;
+                } else {
+                    return sample2dOES(self.video_texture, adjusted_pos);
+                }      
+            }
+
+            fn pixel(self) -> vec4 {
+                let color = self.get_color_scale_pan();
+                return Pal::premul(vec4(color.xyz, color.w * self.opacity));
             }
         }
     }
@@ -268,14 +274,6 @@ live_design!{
     MultiWindow = <MultiWindowBase> {}
     View = <ViewBase> {}
 
-    HookWidget = <HookWidgetBase> {
-        width: Fit,
-        height: Fit,
-        margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
-        align: {x: 0.5, y: 0.5}
-        padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
-    }
-    
     SolidView = <ViewBase> {show_bg: true, draw_bg: {
         fn get_color(self) -> vec4 {
             return self.color
@@ -467,11 +465,11 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            if self.radius.x > 0.0 {
+            if self.radius > 0.0 {
                 sdf.circle(
                     self.rect_size.x * 0.5,
                     self.rect_size.y * 0.5,
-                    self.radius.x
+                    self.radius
                 )
             }
             else {
@@ -579,11 +577,96 @@ live_design!{
             }
         }
     }
+
+    CachedRoundedView = <ViewBase> {
+                
+        optimize: Texture,
+        draw_bg: {
+            instance border_width: 0.0
+            instance border_color: #0000
+            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+            instance radius: 2.5
+            
+            texture image: texture2d
+            uniform marked: float,
+            varying scale: vec2
+            varying shift: vec2
+                        
+            fn get_border_color(self) -> vec4 {
+                return self.border_color
+            }
+                    
+            fn vertex(self) -> vec4 {
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
+            
+            fn pixel(self) -> vec4 {
+                
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.inset.x + self.border_width,
+                    self.inset.y + self.border_width,
+                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                    max(1.0, self.radius)
+                )
+                let color = sample2d_rt(self.image, self.pos * self.scale + self.shift);
+                sdf.fill_keep_premul(color);
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_width)
+                }
+                return sdf.result;
+            }
+        }
+    }
+
+    ExpandablePanel = <ExpandablePanelBase> {
+        flow: Overlay,
+        width: Fill,
+        height: Fill,
+
+        initial_offset: 400.0;
+
+        body = <View> {}
+
+        panel = <View> {
+            flow: Down,
+            width: Fill,
+            height: Fit,
+
+            show_bg: true,
+            draw_bg: {
+                color: #FFF
+            }
+
+            align: { x: 0.5, y: 0 }
+            padding: 20,
+            spacing: 10,
+
+            scroll_handler = <RoundedView> {
+                width: 40,
+                height: 6,
+
+                show_bg: true,
+                draw_bg: {
+                    color: #333
+                    radius: 2.
+                }
+            }
+        }
+    }
+    
     MultiWindow = <MultiWindowBase>{}
     PageFlip = <PageFlipBase>{}
     KeyboardView = <KeyboardViewBase>{}
     // todo fix this by allowing reexporting imports
     // for now this works too
+    HtmlBase = <HtmlBase>{}
     KeyboardViewBase = <KeyboardViewBase>{}
     PageFlipBase = <PageFlipBase>{}
     ViewBase = <ViewBase>{}
@@ -598,7 +681,6 @@ live_design!{
     FileTreeNodeBase = <FileTreeNodeBase> {}
     FoldButtonBase = <FoldButtonBase> {}
     FoldHeaderBase = <FoldHeaderBase> {}
-    HookWidgetBase = <HookWidgetBase> {}
     ImageBase = <ImageBase> {}
     RotatedImageBase = <RotatedImageBase> {}
     VideoBase = <VideoBase> {}
@@ -622,4 +704,7 @@ live_design!{
     TextInputBase = <TextInputBase>{}
     DrawScrollShadowBase = <DrawScrollShadowBase>{}
     WindowMenuBase = <WindowMenuBase>{}
+    StackNavigationViewBase = <StackNavigationViewBase>{}
+    StackNavigationBase = <StackNavigationBase>{}
+    ExpandablePanelBase = <ExpandablePanelBase>{}
 }

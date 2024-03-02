@@ -133,6 +133,7 @@ live_design!{
         flow: Right,
         padding: 10.0,
         spacing: 10.0
+        
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
         
         <View> {
@@ -199,7 +200,6 @@ live_design!{
             flow: Right,
             padding: 10.0,
             spacing: 10.0
-            
             profile = <View> {
                 width: Fit,
                 height: Fit,
@@ -291,13 +291,19 @@ live_design!{
         }
     }
     
-    
+    NewsFeed ={{NewsFeed}}{
+        list = <PortalList>{
+            TopSpace = <View> {height: 80}
+            Post = <Post> {}
+            PostImage = <PostImage> {}
+            BottomSpace = <View> {height: 100}
+        }
+    }
+            
     App = {{App}} {
         ui: <Window> {
-            window: {inner_size: vec2(428, 926), dpi_override: 2},
+            window: {inner_size: vec2(428, 926), dpi_override:1.0},
             show_bg: true
-            
-            
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return (COLOR_BG);
@@ -312,23 +318,11 @@ live_design!{
                     y: 0.0
                 },
                 
-                
-                news_feed = <PortalList> {
-                    height: Fill,
-                    width: Fill
-                    flow: Down
-                    TopSpace = <View> {height: 80}
-                    Post = <Post> {}
-                    PostImage = <PostImage> {}
-                    BottomSpace = <View> {height: 100}
-                }
+                news_feed = <NewsFeed>{}
                 
                 <View> {
-                    height: Fill,
-                    width: Fill
                     flow: Down
-                    
-                        <Header> {}
+                    <Header> {}
                     <FillerY> {}
                     <Menu> {}
                 }
@@ -339,61 +333,68 @@ live_design!{
 
 app_main!(App);
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
+struct NewsFeed{ 
+    #[deref] view:View
+}
+
+impl Widget for NewsFeed{
+    fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+        while let Some(item) =  self.view.draw_walk(cx, scope, walk).step(){
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, 10);
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let template = match item_id {
+                        0 => live_id!(TopSpace),
+                        x if x % 5 == 0 => live_id!(PostImage),
+                        _ => live_id!(Post)
+                    };
+                    let item = list.item(cx, item_id, template).unwrap();
+                    let text = match item_id % 4 {
+                        1 => format!("Hello! {}", item_id),
+                        2 => format!("Hello GOSIM\n With lines {}", item_id),
+                        3 => format!("Random numbers {}", item_id),
+                        _ => format!("Text body 4 id {}", item_id),
+                    };
+                    item.label(id!(content.text)).set_text(&text);
+                    item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
+                    item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
+                    item.draw_all(cx, &mut Scope::empty());
+                }
+            }
+        }
+        DrawStep::done()
+    }
+    fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope){
+        self.view.handle_event(cx, event, scope)
+    }
+}
+
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
 }
 
-impl LiveHook for App {
-    fn before_live_design(cx: &mut Cx) {
+impl LiveRegister for App {
+    fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        /*unsafe{  
-            let d:*mut f32 = 0 as *mut f32;
-            *d = 0.0;
-        }
-        println!("GOT HERE!")*/
     } 
+}
+
+impl MatchEvent for App {
+    fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
+        let news_feeds = self.ui.portal_list_set(ids!(news_feed.list));
+        for (item_id, item) in news_feeds.items_with_actions(&actions) {
+            if item.button(id!(likes)).clicked(&actions) {
+                log!("hello {}", item_id);
+            }
+        }
+    }
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let news_feeds = self.ui.portal_list_set(ids!(news_feed));
-        if let Event::Draw(event) = event {
-            let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
-
-                    list.set_item_range(cx, 0, 1000);
-                    
-                    while let Some(item_id) = list.next_visible_item(cx) {
-                        let template = match item_id {
-                            0 => live_id!(TopSpace),
-                            x if x % 5 == 0 => live_id!(PostImage),
-                            _ => live_id!(Post)
-                        };
-                        let item = list.item(cx, item_id, template).unwrap();
-                        let text = match item_id % 4 {
-                            1 => format!("Hello! {}", item_id),
-                            2 => format!("Hello GOSIM\n With lines {}", item_id),
-                            3 => format!("Random numbers {}", item_id),
-                            _ => format!("Text body 4 id {}", item_id),
-                        };
-                        item.label(id!(content.text)).set_text(&text);
-                        item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
-                        item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
-                        item.draw_widget_all(cx);
-                    }
-                }
-            }
-            return
-        }
-        
-        let actions = self.ui.handle_widget_event(cx, event);
-        
-        for (item_id, item) in news_feeds.items_with_actions(&actions) {
-            if item.button(id!(likes)).clicked(&actions) {
-                log!("hel {}", item_id);
-            }
-        }
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

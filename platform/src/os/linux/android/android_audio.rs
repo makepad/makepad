@@ -9,9 +9,8 @@ use {
         android_jni::*,
     },
     crate::{
-        makepad_error_log::*,
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         audio::*,
     }
 }; 
@@ -33,7 +32,7 @@ struct AndroidAudioOutput {
 struct AndroidAudioStreamData {
     device_id: AudioDeviceId,
     is_in_error_state: Arc<AtomicBool>,
-    change_signal: Signal,
+    change_signal: SignalToUI,
     audio_buffer: AudioBuffer,
     actual_channel_count: usize,
     channel_count: usize
@@ -56,7 +55,7 @@ struct AndroidAudioDeviceDesc {
 }
 
 pub struct AndroidAudioAccess {
-    change_signal: Signal,
+    change_signal: SignalToUI,
     pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     audio_inputs: Vec<AndroidAudioInput >,
@@ -105,7 +104,7 @@ macro_rules!aaudio_error {
 }
 
 impl AndroidAudioStreamData {
-    fn new(desc: &AndroidAudioDeviceDesc, change_signal: Signal) -> Self {
+    fn new(desc: &AndroidAudioDeviceDesc, change_signal: SignalToUI) -> Self {
         AndroidAudioStreamData {
             actual_channel_count: desc.desc.channel_count,
             device_id: desc.desc.device_id,
@@ -124,7 +123,7 @@ impl AndroidAudioStreamData {
     unsafe fn verify_channel_count(&mut self, stream: *mut AAudioStream) {
         self.actual_channel_count = AAudioStream_getChannelCount(stream) as usize;
         if self.actual_channel_count != self.channel_count {
-            log!("Android audio device channel count does not match, todo add handling here");
+            crate::log!("Android audio device channel count does not match, todo add handling here");
         }
     }
     
@@ -158,7 +157,7 @@ impl AndroidAudioStreamData {
 }
 
 impl AndroidAudioOutput {
-    unsafe fn new(desc: &AndroidAudioDeviceDesc, change_signal: Signal, output_fn: Arc<Mutex<Option<AudioOutputFn >> >) -> Result<Self,
+    unsafe fn new(desc: &AndroidAudioDeviceDesc, change_signal: SignalToUI, output_fn: Arc<Mutex<Option<AudioOutputFn >> >) -> Result<Self,
     AndroidAudioError> {
         let builder = AndroidAudioStreamData::setup_builder(desc) ?;
         AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
@@ -226,7 +225,7 @@ impl AndroidAudioOutput {
 
 
 impl AndroidAudioInput {
-    unsafe fn new(desc: &AndroidAudioDeviceDesc, change_signal: Signal, input_fn: Arc<Mutex<Option<AudioInputFn >> >) -> Result<Self,
+    unsafe fn new(desc: &AndroidAudioDeviceDesc, change_signal: SignalToUI, input_fn: Arc<Mutex<Option<AudioInputFn >> >) -> Result<Self,
     AndroidAudioError> {
         let builder = AndroidAudioStreamData::setup_builder(&desc) ?;
         
@@ -289,7 +288,7 @@ impl AndroidAudioInput {
 }
 
 impl AndroidAudioAccess {
-    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         change_signal.set();
         // alright Soooo. lets just enumerate the damn audio devices.
         
@@ -443,7 +442,7 @@ impl AndroidAudioAccess {
                     self.audio_inputs.push(new_input);
                 }
                 Err(e) => {
-                    log!("AAaudio error {}", e.0);
+                    crate::log!("AAaudio error {}", e.0);
                     self.failed_devices.insert(device_desc.desc.device_id);
                     self.change_signal.set();
                 }
@@ -483,7 +482,7 @@ impl AndroidAudioAccess {
                     self.audio_outputs.push(new_output);
                 }
                 Err(e) => {
-                    log!("AAaudio error {}", e.0);
+                    crate::log!("AAaudio error {}", e.0);
                     self.failed_devices.insert(device_desc.desc.device_id);
                     self.change_signal.set();
                 }

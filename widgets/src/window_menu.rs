@@ -32,28 +32,30 @@ pub enum WindowMenuItem {
     Line
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct WindowMenu{
     #[walk] walk: Walk,
+    #[redraw] #[rust] area: Area,
     #[layout] layout: Layout,
     #[rust] menu_items: HashMap<LiveId, WindowMenuItem>,
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, DefaultNone)]
 pub enum WindowMenuAction {
     Command(LiveId),
     None
 }
 
+    
 impl LiveHook for WindowMenu {
-    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from {
+        match apply.from {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     if nodes[index].value.is_enum() {
                         let mut dock_item = WindowMenuItem::new(cx);
-                        let index = dock_item.apply(cx, from, index, nodes);
+                        let index = dock_item.apply(cx, apply, index, nodes);
                         self.menu_items.insert(id, dock_item);
                         return index;
                     }
@@ -113,17 +115,12 @@ impl LiveHook for WindowMenu {
         }
     }
     
-    fn before_live_design(cx: &mut Cx) {
-        register_widget!(cx, WindowMenu);
-    }
 }
 
 
 impl Widget for WindowMenu {
-    fn redraw(&mut self, _cx: &mut Cx) {
-    }
     
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut Scope) {
         match event{
             Event::MacosMenuCommand(item)=>{
                 if *item == live_id!(quit){
@@ -134,18 +131,10 @@ impl Widget for WindowMenu {
         }
     }
     
-    fn walk(&mut self, _cx: &mut Cx) -> Walk {
-        return Walk::fixed(0.0,0.0);
-    }
-    
-    fn draw_walk_widget(&mut self, _cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
-        WidgetDraw::done()
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
     }
 }
-
-
-#[derive(Clone, Debug, PartialEq, WidgetRef)]
-pub struct WindowMenuRef(WidgetRef);
 
 impl WindowMenuRef {
     pub fn command(&self) -> Option<LiveId> {

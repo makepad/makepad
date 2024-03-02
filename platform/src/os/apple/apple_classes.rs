@@ -14,7 +14,8 @@ use {
         },
         os::{
             apple::apple_sys::*,
-            ns_url_session::define_web_socket_delegate,
+            url_session::define_web_socket_delegate,
+            url_session::define_url_session_delegate,
             av_capture::define_av_video_callback_delegate,
             audio_unit::define_key_value_observing_delegate,
             apple_util::{
@@ -71,6 +72,7 @@ pub struct AppleClasses {
     pub key_value_observing_delegate: *const Class,
     pub video_callback_delegate: *const Class,
     pub web_socket_delegate: *const Class,
+    pub url_session_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
@@ -83,6 +85,7 @@ impl AppleClasses {
         ];
         Self {
             web_socket_delegate: define_web_socket_delegate(),
+            url_session_delegate: define_url_session_delegate(),
             video_callback_delegate: define_av_video_callback_delegate(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
             const_attributes_for_marked_text: unsafe {msg_send![

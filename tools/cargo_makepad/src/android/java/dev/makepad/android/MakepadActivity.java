@@ -8,9 +8,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
-import android.os.Handler;
-import android.os.HandlerThread;
-import android.os.Looper;
 
 import java.util.HashMap;
 import java.util.ArrayList;
@@ -49,6 +46,7 @@ import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 
 import android.graphics.Color;
@@ -131,7 +129,7 @@ class MakepadSurface
     @Override
     public boolean onTouch(View view, MotionEvent event) {
         MakepadNative.surfaceOnTouch(event);
-        return true;    
+        return true;
     }
 
      @Override
@@ -165,7 +163,7 @@ class MakepadSurface
             int metaState = event.getMetaState();
             MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
-        
+
         if (event.getAction() == KeyEvent.ACTION_UP || event.getAction() == KeyEvent.ACTION_MULTIPLE) {
             int character = event.getUnicodeChar();
             if (character == 0) {
@@ -178,6 +176,14 @@ class MakepadSurface
             if (character != 0) {
                 MakepadNative.surfaceOnCharacter(character);
             }
+        }
+
+        // if ((keyCode == KeyEvent.KEYCODE_BACK)) {
+        //     Log.d("Makepad", "KEYCODE_BACK");
+        // }
+
+        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP) || (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            return super.onKeyUp(keyCode, event);
         }
 
         return true;
@@ -222,19 +228,21 @@ class ResizingLayout
     }
 }
 
-public class MakepadActivity extends Activity implements 
+public class MakepadActivity extends Activity implements
 MidiManager.OnDeviceOpenedListener{
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
     Handler mHandler;
 
-    // video decoding
-    Handler mDecoderHandler;
-    HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
-    private HashMap<Long, BlockingQueue<ByteBuffer>> mVideoFrameQueues = new HashMap<>();
-    private static final int VIDEO_CHUNK_BUFFER_POOL_SIZE = 5; 
-    private LinkedList<ByteBuffer> mVideoChunkBufferPool = new LinkedList<>();
+    // video playback
+    Handler mVideoPlaybackHandler;
+    HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
+
+    // networking
+    Handler mWebSocketsHandler;
+    private HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
+    private HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
 
     static {
         System.loadLibrary("makepad");
@@ -254,17 +262,31 @@ MidiManager.OnDeviceOpenedListener{
 
         MakepadNative.activityOnCreate(this);
 
-        HandlerThread decoderThreadHandler = new HandlerThread("VideoDecoderThread");
+        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
         decoderThreadHandler.start(); // TODO: only start this if its needed.
-        mDecoderHandler = new Handler(decoderThreadHandler.getLooper());
-        mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
+        mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
+        mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
+
+        HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
+        webSocketsThreadHandler.start();
+        mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
+        boolean isEmulator = this.isEmulator();
 
-        MakepadNative.onAndroidParams(cache_path, density);
+        MakepadNative.onAndroidParams(cache_path, density, isEmulator);
+
+        // Set volume keys to control music stream, we might want make this flexible for app devs
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         //% MAIN_ACTIVITY_ON_CREATE
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        MakepadNative.activityOnStart();
     }
 
     @Override
@@ -274,15 +296,12 @@ MidiManager.OnDeviceOpenedListener{
 
         //% MAIN_ACTIVITY_ON_RESUME
     }
-
     @Override
-    @SuppressWarnings("deprecation")
-    public void onBackPressed() {
-        Log.w("SAPP", "onBackPressed");
+    protected void onPause() {
+        super.onPause();
+        MakepadNative.activityOnPause();
 
-        // TODO: here is the place to handle request_quit/order_quit/cancel_quit
-
-        super.onBackPressed();
+        //% MAIN_ACTIVITY_ON_PAUSE
     }
 
     @Override
@@ -294,16 +313,22 @@ MidiManager.OnDeviceOpenedListener{
     @Override
     protected void onDestroy() {
         super.onDestroy();
-
         MakepadNative.activityOnDestroy();
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
-        MakepadNative.activityOnPause();
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        Log.w("SAPP", "onBackPressed");
+        super.onBackPressed();
+        // TODO: here is the place to handle request_quit/order_quit/cancel_quit
+        MakepadNative.onBackPressed();
+    }
 
-        //% MAIN_ACTIVITY_ON_PAUSE
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        MakepadNative.activityOnWindowFocusChanged(hasFocus);
     }
 
     @Override
@@ -349,7 +374,7 @@ MidiManager.OnDeviceOpenedListener{
                     imm.showSoftInput(view, 0);
                 } else {
                     InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-                    imm.hideSoftInputFromWindow(view.getWindowToken(),0); 
+                    imm.hideSoftInputFromWindow(view.getWindowToken(),0);
                 }
             }
         });
@@ -372,9 +397,42 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
+    public void openWebSocket(long id, String url, long callback) {
+        MakepadWebSocket webSocket = new MakepadWebSocket(id, url, callback);
+        mActiveWebsockets.put(id, webSocket);
+        webSocket.connect();
+
+        if (webSocket.isConnected()) {
+            MakepadWebSocketReader reader = new MakepadWebSocketReader(this, webSocket);
+            mWebSocketsHandler.post(reader);
+            mActiveWebsocketsReaders.put(id, reader);
+        }
+    }
+
+    public void sendWebSocketMessage(long id, byte[] message) {
+        MakepadWebSocket webSocket = mActiveWebsockets.get(id);
+        if (webSocket != null) {
+            webSocket.sendMessage(message);
+        }
+    }
+
+    public void closeWebSocket(long id) {
+        MakepadWebSocketReader reader = mActiveWebsocketsReaders.get(id);
+        if (reader != null) {
+            mWebSocketsHandler.removeCallbacks(reader);
+        }
+        mActiveWebsocketsReaders.remove(id);
+        mActiveWebsockets.remove(id);
+    }
+
+    public void webSocketConnectionDone(long id, long callback) {
+        mActiveWebsockets.remove(id);
+        MakepadNative.onWebSocketClosed(callback);
+    }
+
     public String[] getAudioDevices(long flag){
         try{
-          
+
             AudioManager am = (AudioManager)this.getSystemService(Context.AUDIO_SERVICE);
             AudioDeviceInfo[] devices = null;
             ArrayList<String> out = new ArrayList<String>();
@@ -388,9 +446,9 @@ MidiManager.OnDeviceOpenedListener{
                 int[] channel_counts = device.getChannelCounts();
                 for(int cc: channel_counts){
                     out.add(String.format(
-                        "%d$$%d$$%d$$%s", 
-                        device.getId(), 
-                        device.getType(), 
+                        "%d$$%d$$%d$$%s",
+                        device.getId(),
+                        device.getType(),
                         cc,
                         device.getProductName().toString()
                     ));
@@ -399,7 +457,7 @@ MidiManager.OnDeviceOpenedListener{
             return out.toArray(new String[0]);
         }
         catch(Exception e){
-            Log.e("Makepad", "exception: " + e.getMessage());             
+            Log.e("Makepad", "exception: " + e.getMessage());
             Log.e("Makepad", "exception: " + e.toString());
             return null;
         }
@@ -408,9 +466,9 @@ MidiManager.OnDeviceOpenedListener{
     @SuppressWarnings("deprecation")
     public void openAllMidiDevices(long delay){
         Runnable runnable = () -> {
-            try{                                
+            try{
                 BluetoothManager bm = (BluetoothManager) this.getSystemService(Context.BLUETOOTH_SERVICE);
-                BluetoothAdapter ba = bm.getAdapter();   
+                BluetoothAdapter ba = bm.getAdapter();
                 Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
                 ArrayList<String> bt_names = new ArrayList<String>();
                 MidiManager mm = (MidiManager)this.getSystemService(Context.MIDI_SERVICE);
@@ -437,7 +495,7 @@ MidiManager.OnDeviceOpenedListener{
                 }
             }
             catch(Exception e){
-                Log.e("Makepad", "exception: " + e.getMessage());             
+                Log.e("Makepad", "exception: " + e.getMessage());
                 Log.e("Makepad", "exception: " + e.toString());
             }
         };
@@ -460,85 +518,71 @@ MidiManager.OnDeviceOpenedListener{
         }
     }
 
-    public void initializeVideoDecoding(long videoId, byte[] videoData) {
-        BlockingQueue<ByteBuffer> videoFrameQueue = new LinkedBlockingQueue<>();
-        mVideoFrameQueues.put(videoId, videoFrameQueue);
+    public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
+        VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
+        VideoPlayer.setSource(source);
+        VideoPlayer.setExternalTextureHandle(externalTextureHandle);
+        VideoPlayer.setAutoplay(autoplay);
+        VideoPlayer.setShouldLoop(shouldLoop);
+        VideoPlayerRunnable runnable = new VideoPlayerRunnable(VideoPlayer);
 
-        VideoDecoder videoDecoder = new VideoDecoder(this, videoId, videoFrameQueue);
-        VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, videoDecoder);
-
-        mDecoderRunnables.put(videoId, runnable);
-        mDecoderHandler.post(runnable);
+        mVideoPlayerRunnables.put(videoId, runnable);
+        mVideoPlaybackHandler.post(runnable);
     }
 
-    public void decodeNextVideoChunk(long videoId, int maxFramesToDecode) {
-        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+    public void beginVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
-            runnable.setMaxFramesToDecode(maxFramesToDecode);
-            mDecoderHandler.post(runnable);
-        }
-    } 
-
-    public void fetchNextVideoFrames(long videoId, int numberFrames) {
-        BlockingQueue<ByteBuffer> videoFrameQueue = mVideoFrameQueues.get(videoId);
-        if (videoFrameQueue != null) {
-            int totalBytes = 0;
-            Iterator<ByteBuffer> iterator = videoFrameQueue.iterator();
-            int frameCount = 0;
-            while (iterator.hasNext() && frameCount < numberFrames) {
-                totalBytes += iterator.next().remaining();
-                frameCount++;
-            }
-
-            VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
-            ByteBuffer frameGroup = acquireBuffer(totalBytes);
-
-            for (int i = 0; i < frameCount; i++) {
-                ByteBuffer frame = videoFrameQueue.poll();
-                if (frame != null) {
-                    frameGroup.put(frame);
-                    if (runnable != null) {
-                        runnable.releaseBuffer(frame);
-                    }
-                }
-            }
-
-            frameGroup.flip();
-            runOnUiThread(() -> MakepadNative.onVideoStream(videoId, frameGroup));
-            releaseBuffer(frameGroup);
+            runnable.beginPlayback();
         }
     }
 
-    public void cleanupVideoDecoding(long videoId) {
-        VideoDecoderRunnable runnable = mDecoderRunnables.remove(videoId);
+    public void pauseVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
-            runnable.cleanup();
-        }
-        mVideoFrameQueues.remove(videoId);
-    }
-
-    private ByteBuffer acquireBuffer(int size) {
-        synchronized(mVideoChunkBufferPool) {
-            if (!mVideoChunkBufferPool.isEmpty()) {
-                ByteBuffer buffer = mVideoChunkBufferPool.poll();
-                if (buffer.capacity() == size) {
-                    return buffer;
-                } else {
-                    return ByteBuffer.allocateDirect(size);
-                }
-            } else {
-                return ByteBuffer.allocateDirect(size);
-            }
+            runnable.pausePlayback();
         }
     }
 
-    private void releaseBuffer(ByteBuffer buffer) {
-        synchronized(mVideoChunkBufferPool) {
-            if (mVideoChunkBufferPool.size() < VIDEO_CHUNK_BUFFER_POOL_SIZE) {
-                buffer.clear();
-                mVideoChunkBufferPool.offer(buffer);
-            }
+    public void resumeVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.resumePlayback();
         }
+    }
+
+    public void muteVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.mute();
+        }
+    }
+
+    public void unmuteVideoPlayback(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.unmute();
+        }
+    }
+
+    public void cleanupVideoPlaybackResources(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
+        if(runnable != null) {
+            runnable.cleanupVideoPlaybackResources();
+            runnable = null;
+        }
+    }
+
+    public boolean isEmulator() {
+        // hints that the app is running on emulator
+        return Build.MODEL.startsWith("sdk")
+            || "google_sdk".equals(Build.MODEL)
+            || Build.MODEL.contains("Emulator")
+            || Build.MODEL.contains("Android SDK")
+            || Build.MODEL.toLowerCase().contains("droid4x")
+            || Build.FINGERPRINT.startsWith("generic")
+            || Build.PRODUCT == "sdk"
+            || Build.PRODUCT == "google_sdk"
+            || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
     }
 }
-

@@ -2,7 +2,7 @@ use {
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         video::*,
         apple_classes::get_apple_class_global,
         os::apple::apple_util::*,
@@ -135,7 +135,7 @@ impl AvCaptureSession {
 }
 
 impl AvCaptureAccess {
-    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self >> {
         
         Self::observe_device_changes(change_signal.clone());
         
@@ -200,8 +200,9 @@ impl AvCaptureAccess {
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInUltraWideCamera")];
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInTelephotoCamera")];
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInTrueDepthCamera")];
-            let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeExternalUnknown")];
-            
+            let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeExternal")];
+            let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeContinuityCamera")];
+                        
             let session: ObjcId = msg_send![
                 class!(AVCaptureDeviceDiscoverySession),
                 discoverySessionWithDeviceTypes: types
@@ -296,7 +297,7 @@ impl AvCaptureAccess {
         out
     }
     
-    pub fn observe_device_changes(change_signal: Signal) {
+    pub fn observe_device_changes(change_signal: SignalToUI) {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
         let block = objc_block!(move | _note: ObjcId | {
             change_signal.set();

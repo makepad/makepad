@@ -9,6 +9,10 @@ mod live_prims;
 mod cx;
 mod cx_api;
 
+#[macro_use]
+pub mod log;
+pub mod action;
+
 pub mod live_traits;
 pub mod live_cx;
 pub mod live_atomic;
@@ -17,6 +21,7 @@ pub mod thread;
 pub mod audio;
 pub mod midi;
 pub mod video;
+pub mod scope;
 
 mod draw_matrix;
 mod draw_shader; 
@@ -36,11 +41,16 @@ mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
+mod performance_stats;
+pub mod studio;
+
+pub mod web_socket;
 
 pub mod audio_stream;
 
+pub mod file_dialogs;
+
 mod media_api;
-mod decoding_api;
 
 #[macro_use]
 mod app_main;
@@ -48,7 +58,7 @@ mod app_main;
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
@@ -64,10 +74,9 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
-    makepad_shader_compiler::makepad_error_log,
     //makepad_image_formats::image,
     makepad_derive_live::*,
-    makepad_error_log::*,
+    log::*,
     makepad_math::*,
     makepad_live_id::*,
     app_main::AppMain,
@@ -115,9 +124,9 @@ pub use {
     },
     crate::{
         os::*,
-        decoding_api::CxDecodingApi,
         cx_api::CxOsApi,
         media_api::CxMediaApi,
+        scope::*,
         draw_list::{
             CxDrawItem,
             CxRectArea,
@@ -140,13 +149,14 @@ pub use {
         audio::*,
         thread::*,
         video::*,
+        web_socket::{WebSocket,WebSocketMessage},
         event::{
             VirtualKeyboardEvent,
             HttpRequest,
             HttpResponse,
             HttpMethod,
             NetworkResponse,
-            NetworkResponseEvent,
+            NetworkResponsesEvent,
             Margin,
             KeyCode,
             Event,
@@ -191,7 +201,13 @@ pub use {
             HitOptions,
             DragHitEvent,
             DropHitEvent,
-            VideoColorFormat,
+        },
+        action::{
+            Action,
+            Actions,
+            ActionsBuf, 
+            ActionCast,
+            ActionTrait
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,
@@ -218,12 +234,14 @@ pub use {
         live_traits::{
             LiveHookDeref,
             LiveBody,
+            LiveRegister,
             LiveNew,
             LiveApply,
             LiveHook,
             LiveApplyValue,
             LiveRead,
             ToLiveValue,
+            Apply,
             ApplyFrom,
         },
         animator::{

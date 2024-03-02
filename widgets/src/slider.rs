@@ -21,8 +21,7 @@ pub enum SliderType {
     Rotary = shader_enum(3),
 }
 
-
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
@@ -30,9 +29,9 @@ pub struct DrawSlider {
     #[live] slider_type: SliderType
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook, Widget)]
 pub struct Slider {
-    #[live] draw_slider: DrawSlider,
+    #[redraw] #[live] draw_slider: DrawSlider,
     
     #[walk] walk: Walk,
     
@@ -58,13 +57,7 @@ pub struct Slider {
     #[rust] pub dragging: Option<f64>,
 }
 
-impl LiveHook for Slider{
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx,Slider)
-    }
-}
-
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum SliderAction {
     StartSlide,
     TextSlide(f64),
@@ -73,13 +66,12 @@ pub enum SliderAction {
     None
 }
 
-
 impl Slider {
     
     fn to_external(&self) -> f64 {
         let val = self.value * (self.max - self.min) + self.min;
         if self.step != 0.0{
-            return (val * self.step).floor() / self.step
+            return (val / self.step).floor()* self.step
         }
         else{
             val
@@ -92,10 +84,51 @@ impl Slider {
         old != self.value
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
+    pub fn update_text_input(&mut self) {
+        let e = self.to_external();
+        self.text_input.text = match self.precision{
+            0=>format!("{:.0}",e),
+            1=>format!("{:.1}",e),
+            2=>format!("{:.2}",e),
+            3=>format!("{:.3}",e),
+            4=>format!("{:.4}",e),
+            5=>format!("{:.5}",e),
+            6=>format!("{:.6}",e),
+            7=>format!("{:.7}",e),
+            _=>format!("{}",e)
+        };
+        self.text_input.select_all();
+    }
+    
+    pub fn update_text_input_and_redraw(&mut self, cx: &mut Cx) {
+        self.update_text_input();
+        self.text_input.redraw(cx);
+    }
+    
+    pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.draw_slider.slide_pos = self.value as f32;
+        self.draw_slider.begin(cx, walk, self.layout);
+        
+        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
+            //, (self.value*100.0) as usize);
+            let walk = self.text_input.walk(cx);
+            self.text_input.draw_walk_text_input(cx, walk);
+            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
+        }
+        
+        self.draw_slider.end(cx);
+    }
+}
+
+
+impl Widget for Slider {
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
+        let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-        for action in self.text_input.handle_event(cx, event) {
-            match action {
+        
+        for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
+            match action.as_widget_action().cast() {
                 TextInputAction::KeyFocus => {
                     self.animator_play(cx, id!(focus.on));
                 }
@@ -106,11 +139,11 @@ impl Slider {
                     if let Ok(v) = value.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
-                    self.update_text_input(cx);
-                    dispatch_action(cx, SliderAction::TextSlide(self.to_external()));
+                    self.update_text_input_and_redraw(cx);
+                    cx.widget_action(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
                 }
                 TextInputAction::Escape => {
-                    self.update_text_input(cx);
+                    self.update_text_input_and_redraw(cx);
                 }
                 _ => ()
             }
@@ -129,10 +162,10 @@ impl Slider {
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
-                
+                                
                 self.animator_play(cx, id!(drag.on));
                 self.dragging = Some(self.value);
-                dispatch_action(cx, SliderAction::StartSlide);
+                cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
                 self.text_input.read_only = false;
@@ -146,7 +179,7 @@ impl Slider {
                     self.animator_play(cx, id!(hover.off));
                 }
                 self.dragging = None;
-                dispatch_action(cx, SliderAction::EndSlide);
+                cx.widget_action(uid, &scope.path, SliderAction::EndSlide);
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
@@ -154,68 +187,21 @@ impl Slider {
                     self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
-                    self.update_text_input(cx);
-                    dispatch_action(cx, SliderAction::Slide(self.to_external()));
+                    self.update_text_input_and_redraw(cx);
+                    cx.widget_action(uid, &scope.path, SliderAction::Slide(self.to_external()));
                 }
             }
             _ => ()
         }
     }
     
-    pub fn update_text_input(&mut self, cx: &mut Cx) {
-        let e = self.to_external();
-        self.text_input.text = match self.precision{
-            0=>format!("{:.0}",e),
-            1=>format!("{:.1}",e),
-            2=>format!("{:.2}",e),
-            3=>format!("{:.3}",e),
-            4=>format!("{:.4}",e),
-            5=>format!("{:.5}",e),
-            6=>format!("{:.6}",e),
-            7=>format!("{:.7}",e),
-            _=>format!("{}",e)
-        };
-        self.text_input.select_all();
-        self.text_input.redraw(cx)
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
+        self.draw_walk_slider(cx, walk);
+        DrawStep::done()
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.value as f32;
-        self.draw_slider.begin(cx, walk, self.layout);
-        
-        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
-            //, (self.value*100.0) as usize);
-            let walk = self.text_input.walk(cx);
-            self.text_input.draw_walk(cx, walk);
-            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
-        }
-        
-        self.draw_slider.end(cx);
-    }
-}
-
-
-impl Widget for Slider {
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.draw_slider.redraw(cx);
-    }
-    
-    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
-    }
-    
-    fn walk(&mut self, _cx:&mut Cx) -> Walk {self.walk}
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
-        WidgetDraw::done()
-    }
-    
-    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
-        match actions.single_action(self.widget_uid()) {
+    fn widget_to_data(&self, _cx: &mut Cx, actions:&Actions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+        match actions.find_widget_action_cast(self.widget_uid()) {
             SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                 nodes.write_field_value(path, LiveValue::Float64(v as f64));
                 true
@@ -230,11 +216,34 @@ impl Widget for Slider {
                 if self.set_internal(value) {
                     self.redraw(cx)
                 }
-                self.update_text_input(cx);
+                self.update_text_input_and_redraw(cx);
             }
         }
     }
+    
+    fn text(&self) -> String {
+        format!("{}", self.to_external())
+    }
+        
+    fn set_text(&mut self, v: &str) {
+        if let Ok(v) = v.parse::<f64>(){
+            self.set_internal(v);
+            self.update_text_input()
+        }
+    }
+        
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SliderRef(WidgetRef);
+impl SliderRef{
+    pub fn slided(&self, actions:&Actions)->Option<f64>{
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast(){
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
+                    return Some(v)
+                }
+                _=>()
+            }
+        }
+        None
+    }
+}

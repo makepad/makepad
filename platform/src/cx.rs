@@ -7,6 +7,7 @@ use {
         },
         any::{Any, TypeId},
         rc::Rc,
+        time::Instant,
         rc::Weak,
         cell::RefCell,
     },
@@ -20,6 +21,7 @@ use {
         draw_matrix::CxDrawMatrixPool,
         os::{CxOs},
         debug::Debug,
+        performance_stats::PerformanceStats,
         event::{
             DrawEvent,
             CxFingers,
@@ -29,11 +31,13 @@ use {
             CxKeyboard,
             NextFrame,
         },
+        action::ActionsBuf,
         cx_api::CxOsOp,
         area::Area,
         gpu_info::GpuInfo,
         window::CxWindowPool,
         draw_list::CxDrawListPool,
+        web_socket::WebSocket,
         pass::CxPassPool,
         texture::{CxTexturePool,TextureFormat,Texture},
         geometry::{
@@ -44,8 +48,8 @@ use {
     }
 };
 
-pub use makepad_shader_compiler::makepad_derive_live::*;
-pub use makepad_shader_compiler::makepad_math::*;
+//pub use makepad_shader_compiler::makepad_derive_live::*;
+//pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
     pub (crate) os_type: OsType,
@@ -61,7 +65,7 @@ pub struct Cx {
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
-    
+    pub (crate) start_time: Instant,
     pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
     pub draw_shaders: CxDrawShaders,
@@ -83,6 +87,8 @@ pub struct Cx {
     pub (crate) platform_ops: Vec<CxOsOp>,
     
     pub (crate) new_next_frames: HashSet<NextFrame>,
+    
+    pub (crate) new_actions: ActionsBuf,
     
     pub (crate) dependencies: HashMap<String, CxDependency>,
     
@@ -108,10 +114,16 @@ pub struct Cx {
     #[allow(dead_code)]
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
+    
+    pub(crate) studio_web_socket: Option<WebSocket>,
+    
+    pub performance_stats: PerformanceStats,
+
+
 }
 
 #[derive(Clone)]
-pub struct CxRef(pub Rc<RefCell<Cx>>); //TODO: I probably shouldn't remove the (crate)
+pub struct CxRef(pub Rc<RefCell<Cx>>);
 
 pub struct CxDependency {
     pub data: Option<Result<Rc<Vec<u8>>, String >>
@@ -119,7 +131,8 @@ pub struct CxDependency {
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,
-    pub density: f64
+    pub density: f64,
+    pub is_emulator: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -189,13 +202,11 @@ impl Cx {
         //crate::makepad_error_log::set_panic_hook();
         // the null texture
         let mut textures = CxTexturePool::default();
-        let null_texture = textures.alloc();
-        let texture = &mut textures[null_texture.texture_id()];
-        texture.format = TextureFormat::VecBGRAu8_32 {
+        let null_texture = textures.alloc(TextureFormat::VecBGRAu8_32 {
             width: 4,
             height: 4,
             data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        };
+        });
         
         let (executor, spawner) = executor::new_executor_and_spawner();
         let (send, recv) = std::sync::mpsc::channel();
@@ -218,6 +229,9 @@ impl Cx {
             draw_shaders: Default::default(),
             
             new_draw_event: Default::default(),
+            new_actions: Default::default(),
+            
+            start_time: Instant::now(),
             
             redraw_id: 1,
             event_id: 1,
@@ -230,7 +244,7 @@ impl Cx {
             drag_drop: Default::default(),
             ime_area: Default::default(),
             platform_ops: Default::default(),
-            
+            studio_web_socket: None,
             
             new_next_frames: Default::default(),
             
@@ -256,7 +270,8 @@ impl Cx {
             executor: Some(executor),
             spawner,
 
-            self_ref: None
+            self_ref: None,
+            performance_stats: Default::default(),
         }
     }
 }

@@ -53,7 +53,7 @@ live_design!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveRegister)]
 #[repr(C)]
 pub struct DrawQuad {
     #[rust] pub many_instances: Option<ManyInstances>,
@@ -66,11 +66,11 @@ pub struct DrawQuad {
 }
 
 impl LiveHook for DrawQuad{
-    fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]){
-        self.draw_vars.before_apply_init_shader(cx, apply_from, index, nodes, &self.geometry);
+    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]){
+        self.draw_vars.before_apply_init_shader(cx, apply, index, nodes, &self.geometry);
     }
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        self.draw_vars.after_apply_update_self(cx, apply_from, index, nodes, &self.geometry);
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
+        self.draw_vars.after_apply_update_self(cx, apply, index, nodes, &self.geometry);
     }
 }
 

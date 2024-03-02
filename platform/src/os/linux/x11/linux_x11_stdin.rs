@@ -7,14 +7,13 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::*,
-        makepad_error_log::*,
         makepad_micro_serde::*,
         makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
         texture::{Texture, TextureFormat},
-        thread::Signal,
+        thread::SignalToUI,
         os::cx_stdin::{aux_chan, HostToStdin, PresentableDraw, StdinToHost, Swapchain, PollTimer},
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
         cx_api::CxOsOp,
@@ -98,7 +97,7 @@ impl Cx {
                         }
                         Err(err) => {
                             // we should output a log string
-                            error!("Cant parse stdin-JSON {} {:?}", line, err)
+                            crate::error!("Cant parse stdin-JSON {} {:?}", line, err)
                         }
                     }
                 }
@@ -110,7 +109,7 @@ impl Cx {
         let mut swapchain = None;
         let mut present_index = 0;
 
-        self.call_event_handler(&Event::Construct);
+        self.call_event_handler(&Event::Startup);
 
         while let Ok(msg) = json_msg_rx.recv(){
             match msg {
@@ -126,6 +125,9 @@ impl Cx {
                 }
                 HostToStdin::KeyUp(e) => {
                     self.call_event_handler(&Event::KeyUp(e));
+                }
+                HostToStdin::TextInput(e) => {
+                    self.call_event_handler(&Event::TextInput(e));
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(
@@ -160,7 +162,7 @@ impl Cx {
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     let new_swapchain = new_swapchain.images_map(|pi| {
-                        let new_texture = Texture::new(self);
+                        let mut new_texture = Texture::new(self);
                         match pi.recv_fds_from_aux_chan(&aux_chan_client_endpoint) {
                             Ok(pi) => {
                                 // update texture
@@ -169,7 +171,7 @@ impl Cx {
                                     width: new_swapchain.alloc_width as usize,
                                     height: new_swapchain.alloc_height as usize,
                                 };
-                                new_texture.set_format(self, desc);
+                                new_texture = Texture::new_with_format(self, desc);
                                 self.textures[new_texture.texture_id()]
                                 .update_from_shared_dma_buf_image(
                                     self.os.opengl_cx.as_ref().unwrap(),
@@ -177,7 +179,7 @@ impl Cx {
                                 );
                             }
                             Err(err) => {
-                                error!("failed to receive new swapchain on auxiliary channel: {err:?}");
+                                crate::error!("failed to receive new swapchain on auxiliary channel: {err:?}");
                             }
                         }
                         new_texture
@@ -195,7 +197,7 @@ impl Cx {
 
                     // poll the service for updates
                     // check signals
-                    if Signal::check_and_clear_ui_signal(){
+                    if SignalToUI::check_and_clear_ui_signal(){
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }

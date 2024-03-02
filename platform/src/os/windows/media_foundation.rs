@@ -2,7 +2,7 @@ use {
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
-        thread::Signal,
+        thread::SignalToUI,
         video::*,
         os::windows::win32_app::TRUE,
         windows::{
@@ -16,8 +16,6 @@ use {
             },
             Win32::System::Com::{
                 CLSCTX_ALL,
-                COINIT_MULTITHREADED,
-                CoInitializeEx, 
                 CoTaskMemFree,
                 CoCreateInstance,
             },
@@ -108,9 +106,9 @@ pub struct MediaFoundationAccess {
 } 
 
 impl MediaFoundationAccess {
-    pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal:SignalToUI) -> Arc<Mutex<Self >> {
         unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
+            //CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             let change_listener: IMMNotificationClient = MediaFoundationChangeListener { change_signal: change_signal.clone() }.into();
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
@@ -367,7 +365,7 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
 
 
 struct MediaFoundationChangeListener {
-    change_signal: Signal
+    change_signal: SignalToUI
 }
 
 implement_com!{

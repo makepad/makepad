@@ -2,7 +2,7 @@
 pub use makepad_platform;
 pub use makepad_platform::*;
 pub use makepad_vector;
-
+pub mod match_event;
 pub mod overlay;
 pub mod cx_2d;
 pub mod draw_list_2d;
@@ -15,6 +15,7 @@ pub mod icon_atlas;
 mod owned_font_face;
  
 pub use crate::{
+    match_event::MatchEvent, 
     font_atlas::Font,
     turtle::{
         Layout,
@@ -49,6 +50,7 @@ pub use crate::{
         //draw_shape::{DrawShape, Shape, Fill},
         draw_icon::DrawIcon,
         draw_quad::DrawQuad,
+        draw_line::DrawLine,
         draw_text::DrawText,
         draw_color::DrawColor,
     },
@@ -63,6 +65,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::shader::draw_color::live_design(cx);
     crate::shader::draw_icon::live_design(cx);
     crate::shader::draw_text::live_design(cx);
+    crate::shader::draw_line::live_design(cx);
     crate::geometry::geometry_gen::live_design(cx);
     crate::shader::std::live_design(cx);
     crate::shader::draw_trapezoid::live_design(cx);

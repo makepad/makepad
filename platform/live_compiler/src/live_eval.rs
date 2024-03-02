@@ -72,6 +72,10 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             *index += 1;
             LiveEval::Float64(*v)
         }
+        LiveValue::Uint64(v) => {
+            *index += 1;
+            LiveEval::Int64(*v as i64)
+        }
         LiveValue::Int64(v) => {
             *index += 1;
             LiveEval::Int64(*v)
@@ -114,6 +118,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             fn value_to_live_value(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<LiveEval, LiveError> {
                 Ok(match &nodes[index].value {
                     LiveValue::Float64(val) => LiveEval::Float64(*val),
+                    LiveValue::Uint64(val) => LiveEval::Int64(*val as i64),
                     LiveValue::Int64(val) => LiveEval::Int64(*val),
                     LiveValue::Bool(val) => LiveEval::Bool(*val),
                     LiveValue::Vec2(val) => LiveEval::Vec2(*val),
@@ -203,6 +208,28 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                                 va.z + (vb.z - va.z) * vb.w,
                                 va.w
                             )))
+                        }
+                    }
+                }
+                live_id!(hsvmod) if *args == 4 => {
+                    let orig = live_eval(live_registry, start, index, nodes)?;
+                    let hmod = live_eval(live_registry, start, index, nodes)?;
+                    let smod = live_eval(live_registry, start, index, nodes)?;
+                    let vmod = live_eval(live_registry, start, index, nodes)?;
+                    if let LiveEval::Vec4(vorig) = orig {
+                        if let LiveEval::Float64(hm) = hmod {
+                            if let LiveEval::Float64(sm) = smod {
+                                if let LiveEval::Float64(vm) = vmod {
+
+                                    let mut hsv = vorig.to_hsva();
+                                    hsv.x = (hsv.x + (hm as f32)/360.0 + 360.0).rem_euclid(360.);
+                                    hsv.z = hsv.z + vm as f32;
+                                    hsv.y = hsv.y + sm as f32;
+                                
+                                    // ok so how do we blend this eh.
+                                    return Ok(LiveEval::Vec4(Vec4::from_hsva(hsv)))
+                                }
+                            }
                         }
                     }
                 }
@@ -473,7 +500,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                         LiveEval::Int64(vb) => LiveEval::Vec2(va / vb as f32),
                         LiveEval::Float64(vb) => LiveEval::Vec2(va / vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
-                    }
+                    } 
                     LiveEval::Vec3(va) => match b {
                         LiveEval::Vec3(vb) => LiveEval::Vec3(va / vb),
                         LiveEval::Int64(vb) => LiveEval::Vec3(va / vb as f32),

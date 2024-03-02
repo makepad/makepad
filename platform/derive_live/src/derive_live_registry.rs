@@ -18,7 +18,7 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             let trait_name = struct_name.replace("Registry","");
 
             tb.add("impl LiveComponentRegistry for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn type_id(&self) -> LiveType {LiveType::of::<").ident(&struct_name).add(">()}");
+            tb.add("    fn ref_cast_type_id(&self) -> LiveType {LiveType::of::<").ident(&struct_name).add(">()}");
             
             tb.add("    fn component_type(&self) -> LiveId {live_id!(").ident(&trait_name).add(")}");
             tb.add("    fn get_module_set(&self, set: &mut std::collections::BTreeSet<LiveModuleId>){");
@@ -38,7 +38,7 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("            let mut ret = fac.new(cx);");
             tb.add("            let live_ptr = cx.live_registry.borrow().module_id_and_name_to_ptr(info.module_id, info.name).unwrap();");
             tb.add("            cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{");
-            tb.add("                ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)");
+            tb.add("                ret.apply(cx, &mut ApplyFrom::NewFromDoc {file_id}.into(), index, nodes)");
             tb.add("            });");
            tb.add("             ret");
             tb.add("        })");

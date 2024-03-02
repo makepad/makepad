@@ -116,7 +116,7 @@ live_design!{
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawKey {
     #[deref] draw_super: DrawQuad,
     #[live] is_black: f32,
@@ -125,15 +125,15 @@ struct DrawKey {
     #[live] hover: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, LiveRegister)]
 pub struct PianoKey {
     #[live] draw_key: DrawKey,
     #[animator] animator: Animator,
 }
 
-#[derive(Live)]
+#[derive(Live, Widget)]
 pub struct Piano {
-    #[rust] area: Area,
+    #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[live] piano_key: Option<LivePtr>,
     
@@ -154,28 +154,24 @@ pub struct Piano {
 }
 
 impl LiveHook for Piano {
-    fn before_live_design(cx:&mut Cx){
-        register_widget!(cx, Piano)
-    }
-    
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
             if let Some(index) = nodes.child_by_name(index, live_id!(piano_key).as_field()) {
-                piano_key.apply(cx, from, index, nodes);
+                piano_key.apply(cx, apply, index, nodes);
             }
         }
         self.area.redraw(cx);
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone,  Debug)]
 pub struct PianoNote {
     pub is_on: bool,
     pub note_number: u8,
     pub velocity: u8
 }
 
-#[derive(Clone, WidgetAction)]
+#[derive(Clone, Debug, DefaultNone)]
 pub enum PianoAction {
     Note(PianoNote),
     None
@@ -201,12 +197,13 @@ impl PianoKey {
         self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
-    pub fn handle_event_with(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         sweep_area: Area,
-        dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
+        key_id: PianoKeyId,
+        actions: &mut Vec<(PianoKeyId, PianoKeyAction)>
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_key.area().redraw(cx);
@@ -222,7 +219,7 @@ impl PianoKey {
             Hit::FingerDown(_) => {
                 self.animator_play(cx, id!(hover.on));
                 self.animator_play(cx, id!(pressed.on));
-                dispatch_action(cx, PianoKeyAction::Pressed(127));
+                actions.push((key_id, PianoKeyAction::Pressed(127)));
             }
             Hit::FingerUp(e) => {
                 if !e.is_sweep && e.device.has_hovers(){
@@ -232,7 +229,7 @@ impl PianoKey {
                     self.animator_play(cx, id!(hover.off));
                 }
                 self.animator_play(cx, id!(pressed.off));
-                dispatch_action(cx, PianoKeyAction::Up);
+                actions.push((key_id, PianoKeyAction::Up));
             }
             _ => {}
         }
@@ -240,15 +237,149 @@ impl PianoKey {
 }
 
 impl Piano {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, Layout::default());
+       
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        cx.set_key_focus(self.area);
+    }
+    
+    pub fn set_note(&mut self, cx: &mut Cx, is_on: bool, note_number: u8) {
+        let id = LiveId(note_number as u64).into();
+        if let Some(key) = self.black_keys.get_mut(&id) {
+            key.set_is_pressed(cx, is_on, Animate::No)
+        }
+        if let Some(key) = self.white_keys.get_mut(&id) {
+            key.set_is_pressed(cx, is_on, Animate::No)
+        }
+    }
+    
+}
 
+impl Widget for Piano{
+   fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+       
+       let uid = self.widget_uid();
+       let mut key_actions = Vec::new();
+       
+        for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
+           piano_key.handle_event(cx, event, self.area, *key_id, &mut key_actions);
+       }
+               
+       for (node_id, action) in key_actions {
+           match action {
+               PianoKeyAction::Pressed(velocity) => {
+                   self.set_key_focus(cx);
+                   cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
+                       is_on: true,
+                       note_number: node_id.0.0 as u8,
+                       velocity
+                   }));
+               }
+               PianoKeyAction::Up => {
+                   cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
+                       is_on: false,
+                       note_number: node_id.0.0 as u8,
+                       velocity: 127
+                   }));
+               }
+           }
+       }
+               
+       // handle sweeping the notes
+               
+       fn key_map(kk: KeyCode) -> Option<u8> {
+           match kk {
+               KeyCode::KeyA => Some(0),
+               KeyCode::KeyW => Some(1),
+               KeyCode::KeyS => Some(2),
+               KeyCode::KeyE => Some(3),
+               KeyCode::KeyD => Some(4),
+               KeyCode::KeyF => Some(5),
+               KeyCode::KeyT => Some(6),
+               KeyCode::KeyG => Some(7),
+               KeyCode::KeyY => Some(8),
+               KeyCode::KeyH => Some(9),
+               KeyCode::KeyU => Some(10),
+               KeyCode::KeyJ => Some(11),
+               KeyCode::KeyK => Some(12),
+               KeyCode::KeyO => Some(13),
+               KeyCode::KeyL => Some(14),
+               KeyCode::KeyP => Some(15),
+               KeyCode::Semicolon => Some(16),
+               KeyCode::Quote => Some(17),
+               _ => None
+           }
+       }
+               
+       match event {
+           Event::KeyDown(ke) => if !ke.is_repeat {
+               if let Some(nn) = key_map(ke.key_code) {
+                   let note_number = nn + self.keyboard_octave * 12;
+                   self.keyboard_keys_down[nn as usize] = note_number;
+                   self.set_note(cx, true, note_number);
+                   cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
+                       is_on: true,
+                       note_number,
+                       velocity: self.keyboard_velocity
+                   }));
+               }
+               else {match ke.key_code {
+                   KeyCode::KeyZ => {
+                       self.keyboard_octave -= 1;
+                       self.keyboard_octave = self.keyboard_octave.max(1);
+                   }
+                   KeyCode::KeyX => {
+                       self.keyboard_octave += 1;
+                       self.keyboard_octave = self.keyboard_octave.min(7);
+                   }
+                   KeyCode::KeyC => {
+                       self.keyboard_velocity -= 16;
+                       self.keyboard_velocity = self.keyboard_velocity.max(16);
+                   }
+                   KeyCode::KeyV => {
+                       self.keyboard_velocity += 16;
+                       self.keyboard_velocity = self.keyboard_velocity.min(127);
+                   }
+                   _ => ()
+               }}
+           },
+           Event::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
+               let note_number = self.keyboard_keys_down[nn as usize];
+               self.keyboard_keys_down[nn as usize] = 0;
+               self.set_note(cx, false, note_number);
+               cx.widget_action(uid, &scope.path, PianoAction::Note(PianoNote {
+                   is_on: false,
+                   note_number,
+                   velocity: self.keyboard_velocity
+               }));
+           },
+           _ => ()
+       }
+               
+       match event.hits(cx, self.area) {
+           Hit::KeyFocus(_) => {
+               for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
+                   piano_key.set_is_focussed(cx, true, Animate::Yes)
+               }
+           }
+           Hit::KeyFocusLost(_) => {
+               for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
+                   piano_key.set_is_focussed(cx, true, Animate::No)
+               }
+           }
+           _ => ()
+       }
+   }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        
+        cx.begin_turtle(walk, Layout::default());
+        
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
         let mut pos = start_pos;
-        
+                
         let midi_a0 = 21;
         let midi_c8 = 108+24;
-        
+                
         fn black_key_shift(key: u32) -> Option<f64> {
             match key % 12 {
                 0 => None, // C
@@ -266,7 +397,7 @@ impl Piano {
                 _ => None
             }
         }
-        
+                
         let white_size:DVec2 = self.white_size.into();//dvec2(20.0, 100.0);
         let black_size:DVec2 = self.black_size.into();//vec2(15.0, 62.0);
         let piano_key = self.piano_key;
@@ -303,181 +434,23 @@ impl Piano {
         cx.end_turtle_with_area(&mut self.area);
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();
-    }
-       
-    pub fn set_key_focus(&self, cx: &mut Cx) {
-        cx.set_key_focus(self.area);
-    }
-    
-    pub fn set_note(&mut self, cx: &mut Cx, is_on: bool, note_number: u8) {
-        let id = LiveId(note_number as u64).into();
-        if let Some(key) = self.black_keys.get_mut(&id) {
-            key.set_is_pressed(cx, is_on, Animate::No)
-        }
-        if let Some(key) = self.white_keys.get_mut(&id) {
-            key.set_is_pressed(cx, is_on, Animate::No)
-        }
-    }
-    
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, PianoAction),
-    ) {
-        let mut actions = Vec::new();
-        for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
-            piano_key.handle_event_with(cx, event, self.area,  &mut | _, action | {
-                actions.push((*key_id, action))
-            });
-        }
         
-        for (node_id, action) in actions {
-            match action {
-                PianoKeyAction::Pressed(velocity) => {
-                    self.set_key_focus(cx);
-                    dispatch_action(cx, PianoAction::Note(PianoNote {
-                        is_on: true,
-                        note_number: node_id.0.0 as u8,
-                        velocity
-                    }));
-                }
-                PianoKeyAction::Up => {
-                    dispatch_action(cx, PianoAction::Note(PianoNote {
-                        is_on: false,
-                        note_number: node_id.0.0 as u8,
-                        velocity: 127
-                    }));
-                }
-            }
-        }
-        
-        // handle sweeping the notes
-        
-        fn key_map(kk: KeyCode) -> Option<u8> {
-            match kk {
-                KeyCode::KeyA => Some(0),
-                KeyCode::KeyW => Some(1),
-                KeyCode::KeyS => Some(2),
-                KeyCode::KeyE => Some(3),
-                KeyCode::KeyD => Some(4),
-                KeyCode::KeyF => Some(5),
-                KeyCode::KeyT => Some(6),
-                KeyCode::KeyG => Some(7),
-                KeyCode::KeyY => Some(8),
-                KeyCode::KeyH => Some(9),
-                KeyCode::KeyU => Some(10),
-                KeyCode::KeyJ => Some(11),
-                KeyCode::KeyK => Some(12),
-                KeyCode::KeyO => Some(13),
-                KeyCode::KeyL => Some(14),
-                KeyCode::KeyP => Some(15),
-                KeyCode::Semicolon => Some(16),
-                KeyCode::Quote => Some(17),
-                _ => None
-            }
-        }
-        
-        match event {
-            Event::KeyDown(ke) => if !ke.is_repeat {
-                if let Some(nn) = key_map(ke.key_code) {
-                    let note_number = nn + self.keyboard_octave * 12;
-                    self.keyboard_keys_down[nn as usize] = note_number;
-                    self.set_note(cx, true, note_number);
-                    dispatch_action(cx, PianoAction::Note(PianoNote {
-                        is_on: true,
-                        note_number,
-                        velocity: self.keyboard_velocity
-                    }));
-                }
-                else {match ke.key_code {
-                    KeyCode::KeyZ => {
-                        self.keyboard_octave -= 1;
-                        self.keyboard_octave = self.keyboard_octave.max(1);
-                    }
-                    KeyCode::KeyX => {
-                        self.keyboard_octave += 1;
-                        self.keyboard_octave = self.keyboard_octave.min(7);
-                    }
-                    KeyCode::KeyC => {
-                        self.keyboard_velocity -= 16;
-                        self.keyboard_velocity = self.keyboard_velocity.max(16);
-                    }
-                    KeyCode::KeyV => {
-                        self.keyboard_velocity += 16;
-                        self.keyboard_velocity = self.keyboard_velocity.min(127);
-                    }
-                    _ => ()
-                }}
-            },
-            Event::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
-                let note_number = self.keyboard_keys_down[nn as usize];
-                self.keyboard_keys_down[nn as usize] = 0;
-                self.set_note(cx, false, note_number);
-                dispatch_action(cx, PianoAction::Note(PianoNote {
-                    is_on: false,
-                    note_number,
-                    velocity: self.keyboard_velocity
-                }));
-            },
-            _ => ()
-        }
-        
-        match event.hits(cx, self.area) {
-            Hit::KeyFocus(_) => {
-                for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
-                    piano_key.set_is_focussed(cx, true, Animate::Yes)
-                }
-            }
-            Hit::KeyFocusLost(_) => {
-                for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
-                    piano_key.set_is_focussed(cx, true, Animate::No)
-                }
-            }
-            _ => ()
-        }
-    }
-}
-
-impl Widget for Piano{
-   fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-        let uid = self.widget_uid();
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
-        });
-    }
-
-    fn walk(&mut self, _cx:&mut Cx)->Walk{self.walk}
-    
-    fn redraw(&mut self, cx:&mut Cx){
-        self.area.redraw(cx)
-    }
-    
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        let _ = self.draw_walk(cx, walk);
-        WidgetDraw::done()
+        DrawStep::done()
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PianoKeyId(pub LiveId);
 
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct PianoRef(WidgetRef);
-
 impl PianoRef {
-    pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
+    pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
         for action in actions {
-            if action.widget_uid == self.widget_uid() {
-                if let PianoAction::Note(note) = action.action() {
+            match action.as_widget_action().widget_uid_eq(self.widget_uid()).cast() {
+                PianoAction::Note(note) => {
                     notes.push(note)
                 }
+                PianoAction::None=>()
             }
         }
         notes
@@ -496,18 +469,16 @@ impl PianoRef {
     }
 }
 
-#[derive(Clone, WidgetSet)]
-pub struct PianoSet(WidgetSet);
-
 impl PianoSet {
-    pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
+    pub fn notes_played(&self, actions:&Actions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
         for item in self.iter() {
              for action in actions {
-                if action.widget_uid == item.widget_uid() {
-                    if let PianoAction::Note(note) = action.action() {
+                 match action.as_widget_action().widget_uid_eq(item.widget_uid()).cast() {
+                    PianoAction::Note(note) =>{
                         notes.push(note)
                     }
+                    PianoAction::None=>()
                 }
             }
         }

@@ -16,7 +16,6 @@ use {
             /*LiveTokenId,*/
             LiveFileId,
         },
-        makepad_error_log::*,
         makepad_live_compiler::LiveTypeInfo,
         /*makepad_math::*,*/
         cx::Cx,
@@ -126,6 +125,13 @@ impl Cx {
     }
     
     pub fn apply_error_cant_find_target(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], id: LiveId) {
+        // Hacky workaround to notify users, since the widget is not supported outside of android it doens't get registered
+        #[cfg(not(target_os = "android"))]
+        if id == crate::live_id!(video) {
+            self.apply_error(origin, index, nodes, format!("Video Player widget is currently only supported on Android"));
+            return;
+        }
+    
         self.apply_error(origin, index, nodes, format!("property: {} target class not found", id))
     }
     
@@ -158,14 +164,14 @@ impl Cx {
             line_nr_error_once();
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-                crate::makepad_error_log::log_with_type(
+                crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
-                    &err.message,
-                    LogType::Error
+                    err.message,
+                    crate::log::LogLevel::Error
                 );
             }
             else {
@@ -229,17 +235,18 @@ impl Cx {
             let mut errs = Vec::new();
             live_registry.process_file_changes(all_changes, &mut errs);
             for err in errs {
+                
                 // alright we need to output the correct error
                 if std::env::args().find(|v| v == "--message-format=json").is_some(){
                     let err = live_registry.live_error_to_live_file_error(err);
-                    crate::makepad_error_log::log_with_type(
+                    crate::log::log_with_level(
                         &err.file,
                         err.span.start.line,
                         err.span.start.column,
                         err.span.end.line,
                         err.span.end.column,
-                        &err.message,
-                        LogType::Error
+                        err.message,
+                        crate::log::LogLevel::Error
                     );
                     continue
                 }
@@ -262,17 +269,18 @@ impl Cx {
             log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
         }*/
         live_registry.expand_all_documents(&mut errs);
+                
         for err in errs {
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-                crate::makepad_error_log::log_with_type(
+               crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
-                    &err.message,
-                    LogType::Error
+                    err.message,
+                    crate::log::LogLevel::Error
                 );
                 continue
             }
@@ -312,14 +320,14 @@ impl Cx {
             #[cfg(not(lines))]
             line_nr_error_once();
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
-                crate::makepad_error_log::log_with_type(
+                crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
                     err.span.end.line,
                     err.span.end.column,
-                    &err.message,
-                    LogType::Error
+                    err.message,
+                    crate::log::LogLevel::Error
                 );
             }
             else{

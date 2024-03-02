@@ -2,13 +2,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use crate::makepad_math::{Rect, Vec4, DVec2};
 use crate::cx::Cx;
-use crate::makepad_error_log::*;
+use crate::area::Area;
 use crate::draw_list::DrawListId;
 use std::fmt::Write;
 
 #[derive(Clone, Default)]
 pub struct DebugInner {
-    pub rects: Vec<(Rect, Vec4)>,
+    pub areas: Vec<(Area, DVec2, DVec2, Vec4)>,
+    pub rects: Vec<(Rect,  Vec4)>,
     pub points: Vec<(DVec2, Vec4)>,
     pub labels: Vec<(DVec2, Vec4, String)>,
     pub marker: u64,
@@ -18,10 +19,7 @@ pub struct DebugInner {
 pub struct Debug(Rc<RefCell<DebugInner >>);
 
 impl Debug {
-    const R: Vec4 = Vec4 {x: 1.0, y: 0.0, z: 0.0, w: 1.0};
-    const G: Vec4 = Vec4 {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
-    const B: Vec4 = Vec4 {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
-    
+
     pub fn marker(&self)->u64{
         let inner = self.0.borrow();
         inner.marker
@@ -32,35 +30,34 @@ impl Debug {
         inner.marker = v
     }
     
-    pub fn point(&self, color: Vec4, p: DVec2) {
+    pub fn point(&self, p: DVec2, color: Vec4) {
         let mut inner = self.0.borrow_mut();
         inner.points.push((p, color));
     }
     
-    pub fn point_r(&self, p: DVec2) {self.point(Self::R, p)}
-    pub fn point_g(&self, p: DVec2) {self.point(Self::G, p)}
-    pub fn point_b(&self, p: DVec2) {self.point(Self::B, p)}
-
-    pub fn label(&self, color: Vec4, p: DVec2, label:String) {
+    pub fn label(&self, p: DVec2, color: Vec4, label:String) {
         let mut inner = self.0.borrow_mut();
         inner.labels.push((p, color,label));
     }
     
-    pub fn label_r(&self, p: DVec2, label:String) {self.label(Self::R, p, label)}
-    pub fn label_g(&self, p: DVec2, label:String) {self.label(Self::G, p, label)}
-    pub fn label_b(&self, p: DVec2, label:String) {self.label(Self::B, p, label)}
-
-    pub fn rect(&self, color: Vec4, p: Rect) {
+    pub fn rect(&self, p: Rect, color: Vec4) {
         let mut inner = self.0.borrow_mut();
         inner.rects.push((p, color));
     }
-    pub fn rect_r(&self, r: Rect) {self.rect(Self::R, r)}
-    pub fn rect_g(&self, r: Rect) {self.rect(Self::G, r)}
-    pub fn rect_b(&self, r: Rect) {self.rect(Self::B, r)}
     
+    pub fn area(&self, area:Area, color: Vec4) {
+        let mut inner = self.0.borrow_mut();
+        inner.areas.push((area, DVec2::default(),DVec2::default(), color));
+    }
+    
+    pub fn area_offset(&self, area:Area, tl:DVec2, br:DVec2, color: Vec4) {
+        let mut inner = self.0.borrow_mut();
+        inner.areas.push((area,tl,br,color));
+    }
+            
     pub fn has_data(&self)->bool{
         let inner = self.0.borrow();
-        !inner.points.is_empty() || !inner.rects.is_empty() || !inner.labels.is_empty()
+        !inner.points.is_empty() || !inner.rects.is_empty() || !inner.labels.is_empty() || !inner.areas.is_empty()
     }
     
     pub fn take_rects(&self)->Vec<(Rect, Vec4)>{
@@ -81,6 +78,13 @@ impl Debug {
         let mut inner = self.0.borrow_mut();
         let mut swap = Vec::new();
         std::mem::swap(&mut swap, &mut inner.labels);
+        swap
+    }
+    
+    pub fn take_areas(&self)->Vec<(Area, DVec2, DVec2, Vec4)>{
+        let mut inner = self.0.borrow_mut();
+        let mut swap = Vec::new();
+        std::mem::swap(&mut swap, &mut inner.areas);
         swap
     }
 }

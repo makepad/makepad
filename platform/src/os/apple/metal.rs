@@ -1,7 +1,6 @@
 use {
     makepad_objc_sys::{
         msg_send,
-        runtime::YES,
         sel,
         class,
         sel_impl,
@@ -14,7 +13,6 @@ use {
         },
         makepad_math::*,
         makepad_live_id::*,
-        makepad_error_log::*,
         os::{
             apple::apple_sys::*,
             apple::apple_util::{
@@ -26,6 +24,7 @@ use {
         draw_list::DrawListId,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth, PassId},
+        studio::{AppToStudio, GPUSample},
         texture::{
             CxTexture,
             Texture,
@@ -33,6 +32,7 @@ use {
             TextureFormat,
         },
     },
+    std::time::{Instant},
     std::sync::{
         Arc,
         Condvar,
@@ -41,7 +41,10 @@ use {
 };
 
 #[cfg(target_os = "macos")]
-use crate::metal_xpc::store_xpc_service_texture;
+use crate::{
+    metal_xpc::store_xpc_service_texture
+};
+
 
 impl Cx {
     
@@ -138,7 +141,7 @@ impl Cx {
                         atIndex: 0
                     ]}
                 }
-                else {error!("Drawing error: vertex_buffer None")}
+                else {crate::error!("Drawing error: vertex_buffer None")}
                 
                 if let Some(inner) = draw_item.os.instance_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
@@ -148,7 +151,7 @@ impl Cx {
                         atIndex: 1
                     ]}
                 }
-                else {error!("Drawing error: instance_buffer None")}
+                else {crate::error!("Drawing error: instance_buffer None")}
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
@@ -242,7 +245,7 @@ impl Cx {
                         instanceCount: instances
                     ]};
                 }
-                else {error!("Drawing error: index_buffer None")}
+                else {crate::error!("Drawing error: index_buffer None")}
                 
                 gpu_read_guards.push(draw_item.os.instance_buffer.get().gpu_read());
                 gpu_read_guards.push(geometry.os.vertex_buffer.get().gpu_read());
@@ -261,7 +264,7 @@ impl Cx {
             draw_list_id
         }
         else{
-            error!("Draw pass has no draw list!");
+            crate::error!("Draw pass has no draw list!");
             return
         };
         
@@ -341,7 +344,7 @@ impl Cx {
                     ]};
                 }
                 else {
-                    error!("draw_pass_to_texture invalid render target");
+                    crate::error!("draw_pass_to_texture invalid render target");
                 }
                 
                 unsafe {msg_send![color_attachment, setStoreAction: MTLStoreAction::Store]}
@@ -389,7 +392,7 @@ impl Cx {
                 unsafe {msg_send![depth_attachment, setTexture: texture.as_id()]}
             }
             else {
-                error!("draw_pass_to_texture invalid render target");
+                crate::error!("draw_pass_to_texture invalid render target");
             }
             let () = unsafe {msg_send![depth_attachment, setStoreAction: MTLStoreAction::Store]};
             
@@ -482,20 +485,29 @@ impl Cx {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
-        
+        let start_time = self.start_time;
         let () = unsafe {msg_send![
             command_buffer,
-            addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
+            addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
+                let start:f64 = unsafe {msg_send![command_buffer, GPUStartTime]};
+                let end:f64 = unsafe {msg_send![command_buffer, GPUEndTime]};
                 if let Some(_stdin_frame) = stdin_frame {
                     #[cfg(target_os = "macos")]
                     Self::stdin_send_draw_complete(_stdin_frame);
                 }
+                // lets send off our gpu time
+                let duration = end - start;
+                let start = Instant::now().duration_since(start_time).as_secs_f64() - duration;
+                let end = start + duration;
+                Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
+                    start, end
+                }));
+                
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
     } 
-    
     
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
         for draw_shader_ptr in &self.draw_shaders.compile_set {
@@ -509,7 +521,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    log!("{}", gen.mtlsl);
+                    crate::log!("{}", gen.mtlsl);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
@@ -545,7 +557,7 @@ impl Cx {
         }
     }
     
-    #[cfg(target_os="ios")]
+    #[cfg(any(target_os="ios", target_os="tvos"))]
     pub fn share_texture_for_presentable_image(
         &mut self,
         _texture: &Texture,
@@ -648,7 +660,7 @@ impl CxOsDrawShader {
                 for (index, line) in shader.mtlsl.split("\n").enumerate() {
                     out.push_str(&format!("{}: {}\n", index + 1, line));
                 }
-                error!("{}", out);
+                crate::error!("{}", out);
                 panic!("{}", string);
             }
         });
@@ -803,7 +815,7 @@ struct MetalBufferInner {
 pub struct CxOsTexture {
     texture: Option<RcObjcId>
 }
-fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)->MTLPixelFormat{
+fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)-> MTLPixelFormat {
      match pix{
          TexturePixel::BGRAu8 => MTLPixelFormat::BGRA8Unorm,
          TexturePixel::RGBAf16 => MTLPixelFormat::RGBA16Float,
@@ -820,8 +832,7 @@ impl CxTexture {
         &mut self,
         metal_cx: &MetalCx,
     ) {
-        // ok lets see if we need to alloc
-        if self.alloc_vec(){
+        if self.alloc_vec() {
             let alloc = self.alloc.as_ref().unwrap();
             
             let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
@@ -1048,11 +1059,11 @@ pub fn get_default_metal_device() -> Option<ObjcId> {
 }
 
 pub fn get_all_metal_devices() -> Vec<ObjcId> {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     unsafe {
         vec![MTLCreateSystemDefaultDevice()]
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "macos")]
     unsafe {
         let array = MTLCopyAllDevices();
         let count: u64 = msg_send![array, count];

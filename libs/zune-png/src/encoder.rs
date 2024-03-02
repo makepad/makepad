@@ -5,8 +5,6 @@
  */
 
 use alloc::vec;
-use alloc::vec::Vec;
-
 use makepad_zune_core::bytestream::ZByteWriter;
 use makepad_zune_core::options::EncoderOptions;
 use makepad_zune_inflate::DeflateEncoder;
@@ -185,8 +183,8 @@ impl<'a> PngEncoder<'a> {
 
 #[test]
 fn test_simple_write() {
-    use zune_core::bit_depth::BitDepth;
-    use zune_core::colorspace::ColorSpace;
+    use makepad_zune_core::bit_depth::BitDepth;
+    use makepad_zune_core::colorspace::ColorSpace;
 
     use crate::PngDecoder;
 

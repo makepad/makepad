@@ -1,15 +1,6 @@
-use {
-    std::{
-        collections::{VecDeque},
-        time::Instant,
-        mem,
-        os::raw::{c_int},
-        ptr,
-    },
-    self::super::{
-        libc_sys,
-    },
-};
+use std::{collections::VecDeque, mem, os::raw::c_int, ptr, time::Instant};
+
+use self::super::libc_sys;
 
 
 #[derive(Clone, Copy)]
@@ -47,31 +38,26 @@ impl SelectTimers {
         // If there are any timers, we set the timeout for select to the `delta_timeout`
         // of the first timer that should be fired. Otherwise, we set the timeout to
         // None, so that select will block indefinitely.
-        let timeout = if let Some(timer) = self.timers.front() { 
-            Some(libc_sys::timeval {
+        let mut timeout = self.timers.front().map(|timer| 
+            libc_sys::timeval {
                 // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
                 tv_sec: timer.delta_timeout.trunc() as libc_sys::time_t,
                 // `tv_usec` is in microseconds, so take the fractional part of
                 // `delta_timeout` 1000000.0.
-                tv_usec: (timer.delta_timeout.fract() * 1000000.0) as libc_sys::time_t,
-            })
-        }  
-        else { 
-            None
-        };
+                tv_usec: (timer.delta_timeout.fract() * 1000_000.0) as libc_sys::time_t,
+            });
         let _nfds = unsafe {libc_sys::select(
             fd+1,
             fds.as_mut_ptr(),
             ptr::null_mut(),
             ptr::null_mut(),
-            if let Some(mut timeout) = timeout {&mut timeout} else {ptr::null_mut()}
+            timeout.as_mut().map(|t| t as *mut _).unwrap_or(ptr::null_mut())
         )};  
-       // println!("RETURNED!");
     }
     
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+        (time_now.duration_since(self.time_start)).as_secs_f64() 
     }
     
     pub fn update_timers(&mut self, out: &mut Vec<u64>) {

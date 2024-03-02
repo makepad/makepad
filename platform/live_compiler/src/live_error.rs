@@ -58,7 +58,7 @@ impl fmt::Display for LiveFileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{}: {}:{} - {}\n   origin: {}",
+            "{}:{}:{} - {}\n   origin: {}",
             self.file,
             self.span.start.line+1,
             self.span.start.column+1,

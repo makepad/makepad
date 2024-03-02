@@ -162,6 +162,7 @@ pub struct ToWasmRedrawAll {}
 
 #[derive(ToWasm, Clone, Debug)]
 pub struct WTouchPoint {
+    pub time: f64,
     pub state: u32, // 0 stable, 1 start, 2 end, 3 move
     pub x: f64,
     pub y: f64,
@@ -182,6 +183,7 @@ impl From<WTouchPoint> for TouchPoint {
                 2=>TouchState::Move,
                 _=>TouchState::Stop,
             },
+            time: v.time, 
             uid: v.uid as u64,
             force: v.force,
             radius: dvec2(v.radius_x, v.radius_y),
@@ -638,7 +640,7 @@ pub struct ToWasmHttpUploadProgress {
     pub loaded: u32,
     pub total: u32
 }
-
+/*
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
     pub request_id_lo: u32,
@@ -671,7 +673,7 @@ pub struct ToWasmWebSocketBinary {
     pub request_id_hi: u32,
     pub data: WasmDataU8
 }
-
+*/
 #[derive(ToWasm)]
 pub struct ToWasmMidiInputData {
     pub uid: String,
