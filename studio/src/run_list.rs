@@ -59,8 +59,8 @@ live_design!{
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         
                         // PAUSE
-                        sdf.box(sz * 0.25, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
-                        sdf.box(sz * 1.75, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(sz * 0.5, sz * 2.0, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(sz * 1.75, sz * 2.0, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
 
                         sdf.fill(mix(#fff0, mix(#A, #F, self.hover), self.selected));
 
@@ -91,9 +91,55 @@ live_design!{
             width: Fill
             flow: Down
             Target = <BuildItem> {
+                align: { x: 0.0, y: 0.5}
                 padding: {top: 0, bottom: 0}
-                //label = <Label> {width: Fill, margin:{left:35}, padding:0, draw_text: {wrap: Word}}
+                // label = <Label> {width: Fill, margin:{left:35}, padding:0, draw_text: {wrap: Word}}
                 check = <RunButton> { margin: {left: 21} }
+
+                <Image> {
+                    width: 20., height: 20.
+                    svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                }
+                platform = <Button> {
+                    width: 10., height: Fit,
+                    margin: { right: 5.0}
+                    align: { x: 0.5, y: 0.5 },
+                    padding: 0.0
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                        fn get_color(self) -> vec4 { return #FFF3 }
+                    }
+                    icon_walk: {
+                        width: 10., height: Fit
+                    }
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            return sdf.result
+                        }
+                    }
+                    text: ""
+                }
+                mode = <Button> {
+                    width: 10., height: Fit,
+                    margin: { right: 15.0}
+                    align: { x: 0.5, y: 0.5 },
+                    padding: 0.0
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                        fn get_color(self) -> vec4 { return #FFF3 }
+                    }
+                    icon_walk: {
+                        width: 10., height: Fit
+                    }
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            return sdf.result
+                        }
+                    }
+                    text: ""
+                }
             }
             Binary = <BuildItem> {
                 padding: {top: 0, bottom: 0}

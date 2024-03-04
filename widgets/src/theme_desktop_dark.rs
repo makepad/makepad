@@ -4,43 +4,60 @@ live_design! {
     import makepad_draw::shader::std::*;
     import crate::base::*;
 
+    SPACE_FACTOR = 10.0 // Increase for a less dense layout
+    SPACE_0 = 0.0
+    SPACE_1 = (0.5 * (SPACE_FACTOR))
+    SPACE_2 = (1 * (SPACE_FACTOR))
+    SPACE_3 = (2 * (SPACE_FACTOR))
+
+    MSPACE_0 = {top: (SPACE_0), right: (SPACE_0), bottom: (SPACE_0), left: (SPACE_0)}
+    MSPACE_1 = {top: (SPACE_1), right: (SPACE_1), bottom: (SPACE_1), left: (SPACE_1)}
+    MSPACE_H_1 = {top: (SPACE_0), right: (SPACE_1), bottom: (SPACE_0), left: (SPACE_1)}
+    MSPACE_V_1 = {top: (SPACE_1), right: (SPACE_0), bottom: (SPACE_1), left: (SPACE_0)}
+    MSPACE_2 = {top: (SPACE_2), right: (SPACE_2), bottom: (SPACE_2), left: (SPACE_2)}
+    MSPACE_H_2 = {top: (SPACE_0), right: (SPACE_2), bottom: (SPACE_0), left: (SPACE_2)}
+    MSPACE_V_2 = {top: (SPACE_2), right: (SPACE_0), bottom: (SPACE_2), left: (SPACE_0)}
+
+    THEME_FONT_SIZE_BASE = 9.5
+    THEME_FONT_SIZE_CODE = 9.0
+
     THEME_FONT_LABEL = {
-        font_size: 9.4,
+        font_size: (THEME_FONT_SIZE_BASE),
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
     
     THEME_FONT_BOLD = {
-        font_size: 9.4,
+        font_size: (THEME_FONT_SIZE_BASE),
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf")
         }
     }
     
     THEME_FONT_ITALIC = {
-        font_size: 9.4,
+        font_size: (THEME_FONT_SIZE_BASE),
         font: {
             path: dep("crate://self/resources/IBMPlexSans-Italic.ttf")
         }
     }
     
     THEME_FONT_BOLD_ITALIC = {
-        font_size: 9.4,
+        font_size: (THEME_FONT_SIZE_BASE),
         font: {
             path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
         }
     }
     
     THEME_FONT_DATA = {
-        font_size: 9.4,
+        font_size: (THEME_FONT_SIZE_BASE),
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
 
     THEME_FONT_META = {
-        font_size: 9.4,
+        font_size: (THEME_FONT_SIZE_BASE),
         top_drop: 1.2,
         font: {
             path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
@@ -52,122 +69,121 @@ live_design! {
             path: dep("crate://self/resources/LiberationMono-Regular.ttf")
         }
         brightness: 1.1
-        font_size: 9.0
+        font_size: (THEME_FONT_SIZE_CODE)
         line_spacing: 2.0
         top_drop: 1.3
     }
 
-    const THEME_DATA_ITEM_HEIGHT = 23.0
-    const THEME_DATA_ICON_WIDTH = 16.0
-    const THEME_DATA_ICON_HEIGHT = 24.0
+    THEME_DATA_ITEM_HEIGHT = 23.0
+    THEME_DATA_ICON_WIDTH = 16.0
+    THEME_DATA_ICON_HEIGHT = 24.0
     // ABSOLUTE DEFS
 
-    const THEME_BRIGHTNESS = #x40
-    const THEME_COLOR_HIGHLIGHT = #42
-    const THEME_COLOR_HIGH = #C00
-    const THEME_COLOR_MID = #FA0
-    const THEME_COLOR_LOW = #8A0
+    THEME_BRIGHTNESS = #x40
+    THEME_COLOR_HIGHLIGHT = #42
+    THEME_COLOR_HIGH = #C00
+    THEME_COLOR_MID = #FA0
+    THEME_COLOR_LOW = #8A0
 
     // RELATIVE =DEFS
     //    42, =78, 117
-    const THEME_COLOR_WHITE = #FFF
-    const THEME_COLOR_UP_80 = #FFFFFFCC
-    const THEME_COLOR_UP_50 = #FFFFFF80
-    const THEME_COLOR_UP_25 = #FFFFFF40
-    const THEME_COLOR_UP_15 = #FFFFFF26
-    const THEME_COLOR_UP_10 = #FFFFFF1A
-    const THEME_COLOR_UP_4 = #FFFFFF0A
-    const THEME_COLOR_DOWN_7 = #00000013
-    const THEME_COLOR_DOWN_10 = #00000030
-    const THEME_COLOR_DOWN_20 = #00000040
-    const THEME_COLOR_DOWN_50 = #00000080
-    const THEME_COLOR_BLACK = #000
+    THEME_COLOR_WHITE = #FFF
+    THEME_COLOR_UP_80 = #FFFFFFCC
+    THEME_COLOR_UP_50 = #FFFFFF80
+    THEME_COLOR_UP_25 = #FFFFFF40
+    THEME_COLOR_UP_15 = #FFFFFF26
+    THEME_COLOR_UP_10 = #FFFFFF1A
+    THEME_COLOR_UP_4 = #FFFFFF0A
+    THEME_COLOR_DOWN_7 = #00000013
+    THEME_COLOR_DOWN_10 = #00000030
+    THEME_COLOR_DOWN_20 = #00000040
+    THEME_COLOR_DOWN_50 = #00000080
+    THEME_COLOR_BLACK = #000
 
     // CORE BACKGROUND COLORS
 
-    const THEME_COLOR_BG_APP = (THEME_BRIGHTNESS)
+    THEME_COLOR_BG_APP = (THEME_BRIGHTNESS)
+    THEME_COLOR_CLEAR = (THEME_COLOR_BG_APP)
 
-    const THEME_COLOR_BG_HEADER = (blend(
+    THEME_COLOR_BG_HEADER = (blend(
         THEME_COLOR_BG_APP,
         THEME_COLOR_DOWN_10
     ))
 
-    const THEME_COLOR_CLEAR = (THEME_COLOR_BG_APP)
-
-    const THEME_COLOR_BG_EDITOR = (blend(
+    THEME_COLOR_BG_EDITOR = (blend(
         THEME_COLOR_BG_HEADER,
         THEME_COLOR_DOWN_10
     ))
 
-    const THEME_COLOR_BG_ODD = (blend(
+    THEME_COLOR_BG_ODD = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_DOWN_7
     ))
 
-    const THEME_COLOR_BG_SELECTED = (THEME_COLOR_HIGHLIGHT)
+    THEME_COLOR_BG_SELECTED = (THEME_COLOR_HIGHLIGHT)
 
-    const THEME_COLOR_BG_UNFOCUSSED = (blend(
+    THEME_COLOR_BG_UNFOCUSSED = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_UP_10
     ))
 
-    const THEME_COLOR_EDITOR_SELECTED = (THEME_COLOR_BG_SELECTED)
-    const THEME_COLOR_EDITOR_SELECTED_UNFOCUSSED = (THEME_COLOR_BG_SELECTED_UNFOCUSSED)
+    THEME_COLOR_EDITOR_SELECTED = (THEME_COLOR_BG_SELECTED)
+    THEME_COLOR_EDITOR_SELECTED_UNFOCUSSED = (THEME_COLOR_BG_SELECTED_UNFOCUSSED)
 
-    const THEME_COLOR_BG_CURSOR = (blend(
+    THEME_COLOR_BG_CURSOR = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_UP_4
     ))
 
-    const THEME_COLOR_FG_CURSOR = (blend(
+    THEME_COLOR_FG_CURSOR = (blend(
         THEME_COLOR_BG_EDITOR,
         THEME_COLOR_UP_50
     ))
 
     // TEXT / ICON COLORS
 
-    const THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_UP_50)
-    const THEME_COLOR_TEXT_HOVER = (THEME_COLOR_UP_80)
-    const THEME_COLOR_TEXT_META = (THEME_COLOR_UP_25)
-    const THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_UP_80)
+    THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_UP_50)
+    THEME_COLOR_TEXT_HOVER = (THEME_COLOR_UP_80)
+    THEME_COLOR_TEXT_META = (THEME_COLOR_UP_25)
+    THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_UP_80)
 
     // SPLITTER AND SCROLLBAR
 
-    const THEME_COLOR_SCROLL_BAR_DEFAULT = (THEME_COLOR_UP_10)
+    THEME_COLOR_SCROLL_BAR_DEFAULT = (THEME_COLOR_UP_10)
 
-    const THEME_COLOR_CONTROL_HOVER = (blend(
+    THEME_COLOR_CONTROL_HOVER = (blend(
         THEME_COLOR_BG_HEADER,
         THEME_COLOR_UP_50
     ))
 
-    const THEME_COLOR_CONTROL_PRESSED = (blend(
+    THEME_COLOR_CONTROL_PRESSED = (blend(
         THEME_COLOR_BG_HEADER,
         THEME_COLOR_UP_25
     ))
 
     // ICON COLORS
 
-    const THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
-    const THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
-    const THEME_COLOR_WARNING = (THEME_COLOR_MID),
-    const THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
-    const THEME_COLOR_DRAG_QUAD = (THEME_COLOR_UP_50)
-    const THEME_COLOR_PANIC = #f0f
+    THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
+    THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
+    THEME_COLOR_WARNING = (THEME_COLOR_MID),
+    THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
+    THEME_COLOR_DRAG_QUAD = (THEME_COLOR_UP_50)
+    THEME_COLOR_PANIC = #f0f
 
-    const THEME_TAB_HEIGHT = 26.0,
-    const THEME_SPLITTER_HORIZONTAL = 16.0,
-    const THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
-    const THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
-    const THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
-    const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
-    const THEME_SPLITTER_SIZE = 5.0
+    THEME_TAB_HEIGHT = 26.0,
+    THEME_SPLITTER_HORIZONTAL = 16.0,
+    THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
+    THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
+    THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
+    THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
+    THEME_SPLITTER_SIZE = 5.0
  
     Html = <HtmlBase>{
-        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
-        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
-        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
-        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
-        block_layout:{padding:{left:15,top:10,right:10,bottom:10}},
+        draw_normal: {text_style: <THEME_FONT_LABEL>{}}
+        draw_italic: {text_style: <THEME_FONT_ITALIC>{}}
+        draw_bold: {text_style: <THEME_FONT_BOLD>{}}
+        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC>{}}
+        block_layout:{padding: {left:15,top:10,right:10,bottom:10} },
         block_walk:{width:Fill}
         draw_block:{
             fn pixel(self) -> vec4 {
@@ -291,9 +307,6 @@ live_design! {
     }
 
     // Button
-
-
-
     Button = <ButtonBase> {
         width: Fit,
         height: Fit,
@@ -425,9 +438,6 @@ live_design! {
 
 
     // Checkbox
-
-
-
      CheckBox = <CheckBoxBase> {
 
         width: Fit,
@@ -1076,7 +1086,7 @@ live_design! {
     }
 
 
-    const BORDER_SIZE: 6.0
+    BORDER_SIZE: 6.0
     Dock = <DockBase> {
         round_corner: {
             draw_depth: 6.0
@@ -1441,12 +1451,7 @@ live_design! {
         icon_walk: {
             width: Fixed((THEME_DATA_ICON_WIDTH - 2)),
             height: Fixed((THEME_DATA_ICON_HEIGHT)),
-            margin: {
-                left: 0
-                top: 0
-                right: 2
-                bottom: 0
-            },
+            margin: { left: 0, top: 0, right: 2, bottom: 0 },
         }
 
         animator: {
@@ -1690,8 +1695,8 @@ live_design! {
     LinkLabel = <LinkLabelBase> {
         width: Fit,
         height: Fit,
-        margin: 0
-        padding: 0
+        margin: 0,
+        padding: 0,
         align: {x: 0., y: 0.}
 
         label_walk: {
@@ -1791,7 +1796,6 @@ live_design! {
     RadioButton = <RadioButtonBase> {
 
         draw_radio: {
-
             uniform size: 7.0;
             uniform color_active: #00000000
             uniform color_inactive: #x99EEFF
@@ -1830,14 +1834,14 @@ live_design! {
             instance focus: 0.0
             instance selected: 0.0
 
-            uniform color_unselected: #x00000088
-            uniform color_unselected_hover: #x000000CC
-            uniform color_selected: #xFFFFFF66
+            uniform color_unselected: #xFFFFFF66
+            uniform color_unselected_hover: #xFFFFFFAA
+            uniform color_selected: #xFFFFFFFF
 
             color: #9
             text_style: {
                 font: {
-                    //path: d"resources/ibmplexsans-semibold.ttf"
+                    // path: d"resources/ibmplexsans-semibold.ttf"
                 }
                 font_size: 9.5
             }
@@ -1875,7 +1879,7 @@ live_design! {
         height: Fit
 
         label_walk: {
-            margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}
+            margin: {top: 4.5, bottom: 4.5, left: 20, right: 10}
             width: Fit,
             height: Fit,
         }
@@ -1983,6 +1987,9 @@ live_design! {
     ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 
     TextInput = <TextInputBase> {
+        width: Fit,
+        height: Fit,
+        padding: <MSPACE_2> {}
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
@@ -2081,17 +2088,7 @@ live_design! {
         },
         clip_x: false,
         clip_y: false,
-        padding: {left: 10, top: 11, right: 10, bottom: 10}
         label_align: {y: 0.}
-        //margin: {top: 5, right: 5}
-        width: Fit,
-        height: Fit,
-
-        /*label_walk: {
-            width: Fit,
-            height: Fit,
-            //margin: 0//{left: 5.0, right: 5.0, top: 0.0, bottom: 2.0},
-        }*/
 
         animator: {
             hover = {
@@ -2150,7 +2147,7 @@ live_design! {
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let slider_bg_color = mix(#38, #30, self.focus);
+                let slider_bg_color = mix(#28, #20, self.focus);
                 let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
                 let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
                 let nubbg_color = mix(#eee0, #8, self.drag);
@@ -2183,19 +2180,14 @@ live_design! {
             }
         }
 
-        draw_text: {
-            color: #9
-        }
+        draw_text: { color: #FFFFFFFF }
 
         label_walk: {
+            width: Fill, height: Fill
             margin: {left: 4.0, top: 3.0}
-            width: Fill,
-            height: Fill
         }
 
-        label_align: {
-            y: 0.0
-        }
+        label_align: { y: 0.0 }
 
         precision: 2,
 
@@ -2212,7 +2204,7 @@ live_design! {
                 radius: 2.0
             },
 
-            padding: 0,
+            padding: 0.,
             label_align: {y: 0.},
             margin: {top: 3, right: 3}
         }
@@ -2265,7 +2257,6 @@ live_design! {
             }
         }
     }
-
 
     SlideBody = <Label> {
         margin:{top:20}
