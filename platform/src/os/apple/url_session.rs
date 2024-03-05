@@ -140,7 +140,7 @@ impl OsWebSocket{
                 _=>panic!()
             };
                         
-            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler:handler];
+            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler: &handler];
             Ok(())
         } 
     }
