@@ -193,7 +193,7 @@ pub struct HtmlDoc{
  
  pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>)->HtmlDoc{
      enum State{
-         Text(usize),
+         Text(usize, usize),
          ElementName(usize),
          ElementClose(usize),
          ElementAttrs,
@@ -249,25 +249,25 @@ pub struct HtmlDoc{
      }
      
      let mut nodes = Vec::new();
-     let mut state = State::Text(0);
+     let mut state = State::Text(0, 0);
      let mut decoded = String::new();
      let mut in_entity = None;
      let mut last_was_ws = false;
      for (i, c) in body.char_indices(){
          state = match state{
-             State::Text(start)=>{ 
+             State::Text(start, dec_start)=>{ 
                  if c == '<'{
                      if start != i{
                          if let Some(start) = in_entity{
                               if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
                          }
-                         nodes.push(HtmlNode::Text{start, end:decoded.len()});
+                         nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
                      }
                      State::ElementName(i+1)
                  }
                  else{
                      process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors);
-                     State::Text(start)
+                     State::Text(start, dec_start)
                  }
              }
              State::ElementName(start)=>{
@@ -280,7 +280,7 @@ pub struct HtmlDoc{
                  else if c.is_whitespace(){
                      if start == i{
                           if let Some(errors) = errors{errors.push(HtmlError{message:"Found whitespace at beginning of tag".into(), position:i})};
-                         State::Text(i+1)
+                         State::Text(i+1, decoded.len())
                      }
                      else{
                         nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
@@ -293,7 +293,7 @@ pub struct HtmlDoc{
                  }
                  else if c == '>'{
                      nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
-                     State::Text(decoded.len())
+                     State::Text(i+1, decoded.len())
                  }
                  else{
                      State::ElementName(start)
@@ -302,7 +302,7 @@ pub struct HtmlDoc{
              State::ElementClose(start)=>{
                  if c == '>'{
                      nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
-                     State::Text(decoded.len())
+                     State::Text(i+1, decoded.len())
                  }
                  else if c.is_whitespace(){
                      nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
@@ -314,11 +314,11 @@ pub struct HtmlDoc{
              }
              State::ElementCloseScanSpaces=>{
                  if c == '>'{
-                     State::Text(i+1)
+                     State::Text(i+1, decoded.len())
                  }
                  else if !c.is_whitespace(){
                       if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected character after whitespace whilst looking for closing tag >".into(), position:i})};
-                     State::Text(i+1)
+                     State::Text(i+1, decoded.len())
                  }
                  else{
                      State::ElementCloseScanSpaces
@@ -331,7 +331,7 @@ pub struct HtmlDoc{
                  // look backwards to the OpenTag
                  let begin = nodes.iter().rev().find_map(|v| if let HtmlNode::OpenTag{lc,nc} = v{Some((lc,nc))}else{None}).unwrap();
                  nodes.push(HtmlNode::CloseTag{lc:*begin.0,nc:*begin.1});
-                 State::Text(decoded.len())
+                 State::Text(i+1, decoded.len())
              }
              State::ElementAttrs=>{
                  if c == '/'{
@@ -339,7 +339,7 @@ pub struct HtmlDoc{
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     State::Text(i+1)
+                     State::Text(i+1, decoded.len())
                  }
                  else if !c.is_whitespace(){
                      State::AttribName(i)
@@ -361,7 +361,7 @@ pub struct HtmlDoc{
                  }
                  else if c == '>'{
                      nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_lc(&body[start..i]),start:0,end:0});
-                     State::Text(decoded.len())
+                     State::Text(i+1, decoded.len())
                  }
                  else{
                      State::AttribName(start)
@@ -374,7 +374,7 @@ pub struct HtmlDoc{
                  }
                  else if c == '>'{
                      nodes.push(HtmlNode::Attribute{lc,nc,start:0,end:0});
-                     State::Text(i+1)
+                     State::Text(i+1, decoded.len())
                  }
                  else if c == '='{
                      State::AttribValueStart(lc,nc)
@@ -437,7 +437,7 @@ pub struct HtmlDoc{
                  }
                  else if c == '>'{
                      nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
-                     State::Text(i+1)
+                     State::Text(i+1, decoded.len())
                  }
                  else if c.is_whitespace(){
                      nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
@@ -478,7 +478,7 @@ pub struct HtmlDoc{
              },
              State::CommentEnd=>{
                  if c == '>'{
-                     State::Text(i+1)
+                     State::Text(i+1, decoded.len())
                  }
                  else{
                      State::CommentBody
@@ -489,9 +489,9 @@ pub struct HtmlDoc{
      if let Some(start) = in_entity{
           if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
      }
-     if let State::Text(start) = state{
+     if let State::Text(start, dec_start) = state{
          if start != body.len(){
-             nodes.push(HtmlNode::Text{start, end:decoded.len()});
+             nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
          }
      }
      else{ // if we didnt end in text state something is wrong
