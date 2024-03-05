@@ -415,12 +415,6 @@ live_design!{
                     }
 
                     <ZooHeader>{
-                        title = {text:"DesktopButton"}
-                        <ZooDesc>{text:"Desktop Button?"}
-                        <ZooGroup> { <DesktopButton>{ } }
-                    }
-
-                    <ZooHeader>{
                         title = {text:"DropDown"}
                         <ZooDesc>{text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
                         <ZooGroup>{
@@ -453,12 +447,6 @@ live_design!{
                         title = {text:"DemoFileTree"}
                         <ZooDesc>{text:"DemoFileTree?"}
                         <ZooGroup> { <DemoFileTree>{ file_tree:{ height: 400 } } }
-                    }
-
-                    <ZooHeader>{
-                        title = {text:"StackViewHeader"}
-                        <ZooDesc>{text:"StackViewHeader?"}
-                        <ZooGroup> {<StackViewHeader>{}}
                     }
 
                     <ZooHeader>{
@@ -523,28 +511,16 @@ live_design!{
                     // <ZooHeader>{
                     //     title = {text:"Color Picker"}
                     //     <ZooDesc>{text:"Color Picker?"}
-                    //     <ZooGroup> {}
+                    //     <ZooGroup> { <ColorPicker> {} }
                     // }
                 
                     // TODO: SHOW
-                    // <ZooHeader> {
+                    // <ZooHeader>{
                     //     title = {text:"Dock"}
                     //     <ZooDesc>{text:"Dock"}
                     //     <ZooGroup> { <Dock> { width: Fill, height: 100.} }
                     // }
 
-                    // <ZooHeader>{
-                    //     title = {text:"Designer"}
-                    //     <ZooDesc>{text:"Designer"}
-                    //     <ZooGroup> { <Designer> { width: Fill, height: 100.} }
-                    // }
-
-                    // <ZooHeader>{
-                    //     title = {text:"Expandable Panel"}
-                    //     <ZooDesc>{text:"Expandable Panel"}
-                    //     <ZooGroup> { <ExpandablePanel> { width: Fill, height: 100.} }
-                    // }
-                    
                     // <ZooHeader>{
                     //     title = {text:"Expandable Panel"}
                     //     <ZooDesc>{text:"Expandable Panel"}
@@ -571,13 +547,6 @@ live_design!{
                     //     <ZooGroup> { <Html> { width: Fill, height: 100.} }
                     // }
 
-                    // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"KeyboardView"}
-                    //     <ZooDesc>{text:"KeyboardView?"}
-                    //     <ZooGroup> {<KeyboardView>{}}
-                    // }
-
                     <ZooHeader>{
                         title = {text:"Link Label"}
                         <ZooDesc>{text:"Link Label"}
@@ -596,13 +565,6 @@ live_design!{
                     //     title = {text:"Nav Controls"}
                     //     <ZooDesc>{text:"Nav Controls"}
                     //     <ZooGroup> { <NavControls> { width: Fill, height: 100.} }
-                    // }
-
-                    // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"Performance View"}
-                    //     <ZooDesc>{text:"Performance View"}
-                    //     <ZooGroup> { <PerformanceView> { width: Fill, height: 100.} }
                     // }
 
                     // TODO: SHOW
@@ -639,18 +601,6 @@ live_design!{
                     //     <ZooDesc>{text:"Portal List"}
                     //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
                     // }
-
-                    <ZooHeader>{
-                        title = {text:"Rotated Image"}
-                        <ZooDesc>{text:"Rotated Image"}
-                        <ZooGroup> {
-                            <RotatedImage>
-                            {
-                                width: 100., height: 100.
-                                source: dep("crate://self/resources/ducky.png" ),
-                            }
-                        }
-                    }
 
                     <ZooHeader>{
                         title = {text:"Slides View"}
@@ -713,12 +663,6 @@ live_design!{
                     //         }
                     //     }
                     // }
-
-                    <ZooHeader>{
-                        title = {text:"Text Input"}
-                        <ZooDesc>{text:"Text Input"}
-                        <ZooGroup> { <TextInput> { width: Fill, height: Fit} }
-                    }
 
                     // TODO: SHOW
                     // <ZooHeader>{

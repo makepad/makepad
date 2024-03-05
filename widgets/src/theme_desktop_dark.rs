@@ -1876,7 +1876,7 @@ live_design! {
         }
 
         width: Fit,
-        height: Fit
+        height: Fit,
 
         label_walk: {
             margin: {top: 4.5, bottom: 4.5, left: 20, right: 10}
