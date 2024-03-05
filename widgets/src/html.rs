@@ -54,10 +54,12 @@ impl Html{
     pub fn handle_open_tag(cx: &mut Cx2d, tf:&mut TextFlow, node:&mut HtmlWalker)->Option<LiveId>{
         match node.open_tag_lc(){
             some_id!(a)=>{
+                log!("{:?}", node.find_attr_lc(live_id!(href)));
+                log!("{:?}", node.find_text());
                 *node = node.jump_to_close();
             }
             some_id!(h1)=>{
-                tf.push_scale(1.5)
+                tf.push_size_abs_scale(1.5)
             },
             some_id!(code)=>{
                 tf.push_fixed();
