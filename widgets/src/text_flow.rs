@@ -271,15 +271,23 @@ impl TextFlow{
         self.font_size_stack.push(size);
     }
     
-    pub fn push_scale(&mut self, scale: f64){
+    pub fn pop_size(&mut self){
+        self.font_size_stack.pop();
+    }
+    
+    pub fn push_size_rel_scale(&mut self, scale: f64){
         self.font_size_stack.push(
             self.font_size_stack.value(self.font_size) * scale
         );
     }
     
-    pub fn pop_size(&mut self){
-        self.font_size_stack.pop();
+    pub fn push_size_abs_scale(&mut self, scale: f64){
+        self.font_size_stack.push(
+            self.font_size * scale
+        );
     }
+    
+
     
     pub fn begin_code(&mut self, cx:&mut Cx2d){
         // alright we are going to push a block with a layout and a walk
