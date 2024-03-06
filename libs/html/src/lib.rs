@@ -236,8 +236,8 @@ pub struct HtmlDoc{
          }
          else{
              if c.is_whitespace(){
-                 if !*last_was_ws{
-                     decoded.push(c);
+                 if !*last_was_ws && c != '\n'{
+                     decoded.push(' ');
                  }
                  *last_was_ws = true;
              }

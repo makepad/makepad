@@ -226,7 +226,7 @@ impl InitialState {
     fn line_comment(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
         cursor.skip(2);
-        while cursor.skip_if( | ch | ch != '\0') {}
+        while cursor.skip_if( | ch | ch != '\n' && ch != '\0') {}
         (State::Initial(InitialState), FullToken::Comment)
     }
     
@@ -500,7 +500,7 @@ impl BlockCommentTailState {
 /// The state of the tokenizer when it is in the middle of a double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DoubleQuotedStringTailState;
-
+  
 impl DoubleQuotedStringTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         let mut s = String::new();
