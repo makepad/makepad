@@ -253,7 +253,7 @@ struct XmlParser<'a> {
 enum XmlResult {
     OpenTag(String),
     CloseTag(String),
-    SelfCloseTag(String),
+    SelfCloseTag,
     Data(String),
 }
 
@@ -304,7 +304,7 @@ impl<'a> XmlParser<'a> {
                         self.pos += 1;
                         if is_close {
                             if self_closing {
-                                return Ok(XmlResult::SelfCloseTag(name))
+                                return Ok(XmlResult::SelfCloseTag)
                             }
                             else {
                                 return Ok(XmlResult::CloseTag(name))
@@ -356,7 +356,7 @@ impl ProvisionData {
             while let Ok(xml) = xml_parser.next() {
                 //println!("{:?}", xml);
                 match xml {
-                    XmlResult::SelfCloseTag(_) => {}
+                    XmlResult::SelfCloseTag => {}
                     XmlResult::OpenTag(tag) => {
                         stack.push(tag);
                     }

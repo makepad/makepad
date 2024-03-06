@@ -16,8 +16,8 @@ live_design!{
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    //return #000
-                    return mix(#f, #f, self.pos.y);
+                    // test
+                    return mix(#7, #3, self.pos.y);
                 }
             }
             
@@ -36,7 +36,7 @@ live_design!{
                     text: "Click to count"
                 }
                 label1 = <Label> {
-                    draw_text: {
+                    draw_text: {d
                         color: #f
                     },
                     text: "Counter: 0"
@@ -49,9 +49,22 @@ live_design!{
                     padding: 5,
                     line_spacing: 10,
                     Button = <TextInput> {
-                        text: "Hello world"
+                        text: "Helloworld"
                     }  
-                    body:"this is <br/><li>one</li><br/><li>two</li><br/><code>let x = 1.0;</code><b>BOLD text</b>&nbsp;<i>italic</i><br/><sep/>Next line normal text button:<Button>Hi</Button><br/><block_quote>block<b>quote</b><br/><block_quote>blockquote</block_quote><br/>Next line <br/><sep/></block_quote><b><i>Bold italic</i><br/><sep/></br>"
+                    body:"
+                    this is realtime <br/>
+                    <li>one</li><br/>
+                    <li>two</li><br/>
+                    <code>let x = 1.0;</code>
+                    <b>BOLD text</b>&nbsp;<i>italic</i><br/>
+                    <sep/>
+                    Next line normal text button:<Button>Hi</Button><br/>
+                    <block_quote>block<b>quote</b><br/><block_quote>blockquote</block_quote><br/>
+                    Next line <br/>
+                    <sep/>
+                    </block_quote><b><i>Bold italic</i><br/>
+                    <sep/></br>
+                    "
                 }
                 <Markdown>{
                     font_size: 12,
@@ -60,13 +73,25 @@ live_design!{
                     height:Fit,
                     padding: 5,
                     line_spacing: 10,
-                    body:"# Hi\nHello"
+                    body:"
+                    # H1 **Bold** *italic*
+                    ## Heading2
+                    Normal
+                    Next line
+                                        
+                    Normal newline
+                    `inline code` text after
+                    ```
+let x = 10
+                    ```
+                    *italic* **Bold** normal _italic_ __bold__ ***Bolditalic*** normal
+                    "
                 }
             }
         }
     }
-}   
-        
+}  
+             
 app_main!(App); 
  
 #[derive(Live, LiveHook)]
