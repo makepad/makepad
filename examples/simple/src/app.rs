@@ -75,23 +75,25 @@ live_design!{
                     line_spacing: 10,
                     body:"
                     # H1 **Bold** *italic*
-                    ## Heading2
+                    ## H2
                     Normal
                     Next line
+                    single newline becomes space
                                         
-                    Normal newline
+                    Double newline
                     `inline code` text after
                     ```
 let x = 10
                     ```
                     *italic* **Bold** normal _italic_ __bold__ ***Bolditalic*** normal
+                    123
                     "
                 }
             }
         }
     }
 }  
-             
+              
 app_main!(App); 
  
 #[derive(Live, LiveHook)]
