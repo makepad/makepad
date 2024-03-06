@@ -23,7 +23,8 @@ pub enum FlowBlockType {
     #[pick] Quote = shader_enum(1),
     Sep = shader_enum(2),
     Code = shader_enum(3),
-    ListItem = shader_enum(4),
+    InlineCode = shader_enum(4),
+    ListItem = shader_enum(5),
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -63,7 +64,9 @@ pub struct TextFlow {
     #[live] sep_walk: Walk, 
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
-    
+    #[live] inline_code_layout: Layout,
+    #[live] inline_code_walk: Walk,
+        
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] items: ComponentMap<(LiveId,LiveId), WidgetRef>,
@@ -297,6 +300,18 @@ impl TextFlow{
     }
     
     pub fn end_code(&mut self, cx:&mut Cx2d){
+        self.draw_block.draw_vars.area = self.area_stack.pop();
+        self.draw_block.end(cx);
+    }
+    
+    pub fn begin_inline_code(&mut self, cx:&mut Cx2d){
+        // alright we are going to push a block with a layout and a walk
+        self.draw_block.block_type = FlowBlockType::InlineCode;
+        self.draw_block.begin(cx, self.inline_code_walk, self.inline_code_layout);
+        self.area_stack.push(self.draw_block.draw_vars.area);
+    }
+        
+    pub fn end_inline_code(&mut self, cx:&mut Cx2d){
         self.draw_block.draw_vars.area = self.area_stack.pop();
         self.draw_block.end(cx);
     }

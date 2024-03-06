@@ -249,9 +249,12 @@ live_design! {
         draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
         draw_fixed: {text_style:<THEME_FONT_CODE>{}}
                 
-        code_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
+        code_layout:{flow: RightWrap,align:{x:0.0,y:0.0}, padding:{left:10,top:10,right:10,bottom:10}},
         code_walk:{height:Fit,width:Fill}
-                
+        
+        inline_code_layout:{flow: RightWrap,  padding:{left:3,top:2,right:3,bottom:2}},
+        inline_code_walk:{height:Fit,width:Fit,margin:{top:-4}} 
+                        
         quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
         quote_walk:{height:Fit,width:Fill}
                 
@@ -295,6 +298,17 @@ live_design! {
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#7);
+                        return sdf.result;
+                    }
+                    FlowBlockType::InlineCode => {
                         sdf.box(
                             1.,
                             1.,
