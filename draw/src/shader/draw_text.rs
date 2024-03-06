@@ -787,7 +787,7 @@ impl DrawText {
             let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             if last_y.is_none() {last_y = Some(y)}
             let advance = advance.buffer[index + 0] as f64;
-            if i > 0 && y > last_y.unwrap() && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
+            if i > 0 && (y - last_y.unwrap()) > 0.001 && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
                 return Some(i - 1)
             }
             if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64 {
