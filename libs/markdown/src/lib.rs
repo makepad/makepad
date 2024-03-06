@@ -199,7 +199,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                 }
                 ['`',_,_] =>{ // inline code block
                     let mut scan = cursor.clone();
-                    scan.skip(3);
+                    scan.skip(1);
                     let start = decoded.len();
                     while scan.chars[0] != '`' && !scan.at_end(){
                         if scan.chars[0] == '\n' && scan.last_char == '\n'{
