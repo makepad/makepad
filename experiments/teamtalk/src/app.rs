@@ -345,7 +345,7 @@ impl App {
         let wind_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let wind_send_addr = "10.0.0.202:44443";
         let platform_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let platform_send_addr = "10.0.0.126:51010";
+        let platform_send_addr = "10.0.0.128:51010";
                 
         // open up port udp X and forward packets to both wind + platform
         let forca_recv = UdpSocket::bind("0.0.0.0:51010").unwrap();
@@ -360,7 +360,6 @@ impl App {
                 // ok so speed is 20.0 at 40mph
                 // max fan is 127.0
                 // lets say 100mph = 60 = 127.
-                log!("{}", speed);
                 let buf = [(speed*2.2).min(255.0) as u8,];
                 let _ = wind_socket.send_to(&buf, wind_send_addr);
                 let _ = platform_socket.send_to(&buffer[0..length], platform_send_addr);
@@ -443,9 +442,6 @@ impl App {
         let mut midi_input = cx.midi_input();
         let mut hue_sender = self.hue_light_change.sender();
         
-        let rc_car_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let rc_car_send_addr = "10.0.0.201:44441";
-        
         std::thread::spawn(move || {
             let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
                         
@@ -516,7 +512,6 @@ impl App {
                 } 
                 // lets poll midi
                 while let Some((_port,data)) = midi_input.receive(){
-                    log!("{:?}", data);   
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => {
                             let v = cc.value as f32 / 127.0;
