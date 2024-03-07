@@ -201,20 +201,20 @@ impl CxIconAtlas {
 
                     let mut errors = Some(Vec::new());
                     let svg_string = std::str::from_utf8(&data).unwrap();
-                    let mut doc = parse_html(svg_string, &mut errors);
+                    let  doc = parse_html(svg_string, &mut errors);
 
                     if errors.as_ref().unwrap().len()>0{
                         log!("SVG parser returned errors {:?}", errors)
                     }
                     let mut node = doc.walk();
-                    let mut auto_id = 0;
+                    
                     while !node.empty(){
                         match node.open_tag_lc() 
                         {
                             some_id!(g)=>{
+                                // do something with clipping/transform groups here.
                             }                            
                             some_id!(path)=>{
-                                println!("found path! {:?}", node.find_attr_lc(live_id!(d)));      
                                 self.parse_and_cache_path(path_hash, node.find_attr_lc(live_id!(d)).unwrap().as_bytes());   
                                                         }         
                                                             
@@ -224,40 +224,14 @@ impl CxIconAtlas {
                         {
                             some_id!(g)=>
                             {
-                                println!("SVG close group.");
+                                
                             }
                             _=>()
                         }
                         node = node.walk();
                     }
                     
-                    /* 
-                    fn find_path_str(data:&[u8],mut start:usize)->Option<&[u8]>{
-                        let pat: &[u8] = "path d=\"".as_bytes();
-                        'outer:for i in 0..data.len(){
-                            for j in 0..pat.len(){
-                                if data[i+j] != pat[j]{
-                                    continue 'outer;
-                                }
-                            }
-                            for k in i+pat.len()..data.len(){
-                                if data[k] == '\"' as u8{
-                                    return Some(&data[i+pat.len()..k])
-                                }
-                            }
-                            return None
-                        }
-                        None
-                    }
-                    let mut paths:Vec<Vec<u8>> = vec![];
-                    let mut startpoint:usize = 0;
-                    if  Some(data) = find_path_str(&data,start)
-                    {
-                        paths.push(data..into())
-                    }
-                        return self.parse_and_cache_path(path_hash, data);
-                    //}
-                    */
+                   
                     if let Some(path) = self.paths.get(&path_hash) {
                         let mut bounds:Rect = path[0].bounds;             
                         for i in 1..path.len(){
