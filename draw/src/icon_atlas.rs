@@ -494,6 +494,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         nums: [f64; 7],
         num_count: usize,
         last_pt: Point,
+        first_pt: Point,
         out: Vec<PathCommand>,
         num_state: Option<NumState>
     }
@@ -610,12 +611,14 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
             match self.cmd {
                 Cmd::Unknown => (),
                 Cmd::Move(abs) => {
+                    
                     if abs {
                         self.last_pt = Point {x: self.nums[0], y: self.nums[1]};
                     }
                     else {
                         self.last_pt += Vector {x: self.nums[0], y: self.nums[1]};
                     }
+                    self.first_pt = self.last_pt;
                     self.out.push(PathCommand::MoveTo(self.last_pt));
                 },
                 Cmd::Hor(abs) => {
@@ -701,6 +704,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                     }
                 }
                 Cmd::Close => {
+                    self.last_pt = self.first_pt;
                     self.out.push(PathCommand::Close);
                 }
             }
@@ -711,6 +715,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
     }
     
     let mut state = ParseState::default();
+    
     for i in 0..path.len() {
         match path[i] {
             b'M' => state.next_cmd(Cmd::Move(true)) ?,
