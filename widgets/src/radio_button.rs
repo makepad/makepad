@@ -34,6 +34,7 @@ pub enum RadioType {
 }
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
 pub enum MediaType {
     Image,
     #[pick] Icon,
