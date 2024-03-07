@@ -140,7 +140,7 @@ impl OsWebSocket{
                 _=>panic!()
             };
                         
-            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler:handler];
+            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler: &handler];
             Ok(())
         } 
     }
@@ -189,7 +189,7 @@ impl OsWebSocket{
                     }
                     set_message_receive_handler(data_task.clone(), rx_sender.clone())
                 });
-                let () = msg_send![*Arc::as_ptr(&data_task2), receiveMessageWithCompletionHandler: handler];
+                let () = msg_send![*Arc::as_ptr(&data_task2), receiveMessageWithCompletionHandler: &handler];
             }
             let () = msg_send![data_task, setDelegate: web_socket_delegate_instance];
             let data_task = Arc::new(data_task);
