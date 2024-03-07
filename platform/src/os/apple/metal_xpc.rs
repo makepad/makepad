@@ -1,20 +1,13 @@
 
 use {
-    std::collections::HashMap,
-    std::sync::Mutex,
     crate::{
         //makepad_error_log::*,
-        makepad_objc_sys::objc_block,
-        makepad_objc_sys::objc_block_invoke,
-        os::{
+        apple_util::nsstring_to_string, makepad_objc_sys::{objc_block, objc_block_invoke}, os::{
             apple::apple_sys::*,
-            apple_util::{
-                //nsstring_to_string,
-                str_to_nsstring,
-            },
+            apple_util::str_to_nsstring,
             cx_stdin::PresentableImageId,
-        },
-    }
+        }
+    }, std::{collections::HashMap, sync::Mutex}
 };
 
 static mut METAL_XPC_CLASSES: *const MetalXPCClasses = 0 as *const _;
@@ -71,13 +64,11 @@ pub fn xpc_service_proxy() -> RcObjcId {
         ];
         let () = msg_send![connection, setRemoteObjectInterface: iface];
         let () = msg_send![connection, resume];
-        /*
-        let _error_handler = objc_block!(move | error: ObjcId | {
+        let error_handler = objc_block!(move | error: ObjcId | {
             let desc: ObjcId = msg_send![error, localizedDescription];
-            log!("xpc_service_proxy got error: {}", nsstring_to_string(desc));
+            crate::log!("xpc_service_proxy got error: {}", nsstring_to_string(desc));
         });
-        */
-        let proxy: ObjcId = msg_send![connection, remoteObjectProxyWithErrorHandler: nil];
+        let proxy: ObjcId = msg_send![connection, remoteObjectProxyWithErrorHandler: &error_handler];
         RcObjcId::from_unowned(NonNull::new(proxy).unwrap())
     }
 }
