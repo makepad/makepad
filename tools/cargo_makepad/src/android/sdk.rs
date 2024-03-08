@@ -222,13 +222,13 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
     match host_os {
         HostOs::WindowsX64 => {
             unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
-                ("android-33-ext4/android.jar", false),
+                (&copy_map("", PLATFORMS_DIR, &format!("{API_LEVEL}/android.jar")), false),
             ]) ?;
             unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_WINDOWS, &[
-                ("android-13/aapt.exe", false),
-                ("android-13/zipalign.exe", false),
-                ("android-13/lib/apksigner.jar", false),
-                ("android-13/lib/d8.jar", false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "aapt.exe"), false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "zipalign.exe"), false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "lib/apksigner.jar"), false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "lib/d8.jar"), false),
             ]) ?;
             unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_WINDOWS, &[
                 ("platform-tools/adb.exe", false),
@@ -432,14 +432,14 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
         }
         HostOs::LinuxX64 => {
             unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
-                ("android-33-ext4/android.jar", false),
+                (&copy_map("", PLATFORMS_DIR, &format!("{API_LEVEL}/android.jar")), false),
             ]) ?;
             unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_LINUX, &[
-                ("android-13/aapt", true),
-                ("android-13/lib64/libc++.so", true),
-                ("android-13/zipalign", true),
-                ("android-13/lib/apksigner.jar", false),
-                ("android-13/lib/d8.jar", false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "aapt"), true),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "lib64/libc++.so"), true),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "zipalign"), true),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "lib/apksigner.jar"), false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "lib/d8.jar"), false),
             ]) ?;
             unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_LINUX, &[
                 ("platform-tools/adb", true),
