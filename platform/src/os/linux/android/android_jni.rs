@@ -27,6 +27,26 @@ pub unsafe extern "C" fn JNI_OnLoad(
     jni_sys::JNI_VERSION_1_6 as _
 }
 
+/// Returns a raw pointer to the JavaVM instance initialized by the JNI layer.
+///
+/// If the JavaVM instance has not been initialized, this returns a null pointer.
+pub fn get_java_vm() -> *mut jni_sys::JavaVM {
+    unsafe { VM }
+}
+
+/// Returns a raw pointer to the main Makepad Activity instance.
+///
+/// Note that the caller should not cache or re-use the returned activity pointer,
+/// but should instead re-call this function whenever the activity instance is needed.
+/// This is because the activity instance may be destroyed and recreated behind the scenes
+/// upon certain system actions, e.g., when the device is rotated,
+/// the app is put into split screen, resized/moved, etc.
+///
+/// If the Activity instance has not been initialized, this returns a null pointer.
+pub fn get_activity() -> jni_sys::jobject {
+    unsafe { ACTIVITY }
+}
+
 #[derive(Debug)]
 pub enum TouchPhase{
     Moved,
