@@ -56,6 +56,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
         <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
         <uses-permission android:name="android.permission.CAMERA"/>
         <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+        <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     </manifest>
     "#)
 }
@@ -109,6 +110,13 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
             &[
                 // Set the linker env var to the path of the target-specific `clang` binary.
                 (&android_target.linker_env_var(), full_clang_path.to_str().unwrap()),
+
+                // We set standard Android-related env vars to allow other crates
+                ("ANDROID_HOME",          sdk_dir.to_str().unwrap()),
+                ("ANDROID_SDK_ROOT",      sdk_dir.to_str().unwrap()),
+                ("ANDROID_SDK_VERSION",   super::sdk::SDK_VERSION),
+                ("ANDROID_API_LEVEL",     super::sdk::API_LEVEL),
+                ("JAVA_HOME",             sdk_dir.join("openjdk").to_str().unwrap()),
 
                 // We set these three env vars to allow native library C/C++ builds to succeed with no additional app-side config.
                 // The naming conventions of these env variable keys are established by the `cc` Rust crate.
