@@ -276,7 +276,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
             unzip(4, src_dir, sdk_dir, URL_NDK_33_WINDOWS, &ndk_extract) ?;
             // patch the .cmd file to stop complaining
             {
-                let cmd_file_path = sdk_dir.join("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd");
+                let cmd_file_path = sdk_dir.join(format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd"));
 
                 // Open the file for reading
                 let mut ndk_cmd = OpenOptions::new()
