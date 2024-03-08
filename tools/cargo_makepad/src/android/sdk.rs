@@ -12,6 +12,16 @@ use crate::{
     makepad_shell::*,
 };
 
+pub const SDK_VERSION: &str = "33.0.1";
+pub const API_LEVEL: &str = "android-33-ext4";
+pub const BUILD_TOOLS_DIR: &str = "build-tools";
+pub const PLATFORMS_DIR: &str = "platforms";
+
+pub const _NDK_VERSION_MAJOR: &str = "25";
+pub const _NDK_VERSION_MINOR: &str = "2";
+pub const _NDK_VERSION_BUILD: &str = "9519653";
+pub const NDK_VERSION_FULL:  &str = "25.2.9519653";
+
 const URL_PLATFORM_33: &str = "https://dl.google.com/android/repository/platform-33-ext4_r01.zip";
 
 const URL_BUILD_TOOLS_33_MACOS: &str = "https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip";
@@ -25,11 +35,6 @@ const URL_PLATFORM_TOOLS_33_WINDOWS: &str = "https://dl.google.com/android/repos
 const URL_NDK_33_MACOS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg";
 const URL_NDK_33_LINUX: &str = "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip";
 const URL_NDK_33_WINDOWS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip";
-
-pub const _NDK_VERSION_MAJOR: &str = "25";
-pub const _NDK_VERSION_MINOR: &str = "2";
-pub const _NDK_VERSION_BUILD: &str = "9519653";
-pub const NDK_VERSION_FULL:  &str = "25.2.9519653";
 
 const URL_OPENJDK_17_0_2_WINDOWS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_windows-x64_bin.zip";
 const URL_OPENJDK_17_0_2_MACOS_AARCH64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-aarch64_bin.tar.gz";
@@ -204,7 +209,14 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
     }
     
     fn copy_map(base_in: &str, base_out: &str, file: &str) -> String {
-        format!("{base_in}/{file}|{base_out}/{file}")
+        // allow an empty path to be properly passed in for either base.
+        fn separator(base: &str) -> &str {
+            if base.is_empty() { "" } else { "/" }
+        }
+        
+        let sep_in = separator(base_in);
+        let sep_out = separator(base_out);
+        format!("{base_in}{sep_in}{file}|{base_out}{sep_out}{file}")
     }
     
     match host_os {
@@ -318,13 +330,13 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
         }
         HostOs::MacosX64 | HostOs::MacosAarch64 => {
             unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
-                ("android-33-ext4/android.jar", false),
+                (&copy_map("", PLATFORMS_DIR, &format!("{API_LEVEL}/android.jar")), false),
             ]) ?;
             unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_MACOS, &[
-                ("android-13/aapt", true),
-                ("android-13/zipalign", true),
-                ("android-13/lib/apksigner.jar", false),
-                ("android-13/lib/d8.jar", false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "aapt"), true),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "zipalign"), true),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "lib/apksigner.jar"), false),
+                (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{SDK_VERSION}"), "lib/d8.jar"), false),
             ]) ?;
             unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_MACOS, &[
                 ("platform-tools/adb", true),
