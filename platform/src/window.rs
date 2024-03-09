@@ -112,6 +112,10 @@ impl LiveApply for WindowHandle {
                     //log!("DPI OVERRIDE {}", v);
                     cx.windows[self.window_id()].dpi_override = Some(v);
                 }
+                live_id!(topmost) => {
+                    let v:bool = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    self.set_topmost(cx, v);
+                }
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
