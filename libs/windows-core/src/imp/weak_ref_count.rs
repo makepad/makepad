@@ -126,7 +126,7 @@ impl TearOff {
     unsafe extern "system" fn StrongQueryInterface(ptr: *mut std::ffi::c_void, iid: &crate::GUID, interface: *mut *const std::ffi::c_void) -> crate::HRESULT {
         let this = Self::from_strong_ptr(ptr);
 
-        // Only directly respond to queries for the the tear-off's strong interface. This is
+        // Only directly respond to queries for the tear-off's strong interface. This is
         // effectively a self-query.
         if iid == &IWeakReferenceSource::IID {
             *interface = ptr;
