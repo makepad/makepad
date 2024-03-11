@@ -449,7 +449,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
             
             if full_ndk {
                 // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
-                // and then move it into the proper `NDK_OUT` directory location (well, its parent dir).
+                // and then copy that directory it into the proper `NDK_OUT` directory location.
                 let cwd = std::env::current_dir().unwrap();
                 let url_file_name = url_file_name(URL_NDK_33_LINUX);
                 println!("4/5: Unzipping: {} (full NDK)", url_file_name);
@@ -469,10 +469,11 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
                 ).unwrap();
                 shell(
                     &cwd,
-                    "mv",
+                    "cp",
                     &[
-                        "--verbose",
                         "--force",
+                        "--recursive",
+                        "--preserve",
                         src_dir.join(NDK_IN).to_str().unwrap(),
                         ndk_out_path.parent().unwrap().to_str().unwrap(),
                     ]
