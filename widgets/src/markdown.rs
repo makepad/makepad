@@ -61,9 +61,19 @@ impl Widget for Markdown {
                 },
                 MarkdownNode::EndItem=>{
                 },
-                MarkdownNode::Link{name_start:_, name_end:_, url_start:_, url_end:_}=>{
+                MarkdownNode::Link{start, url_start, end}=>{
+                    tf.draw_text(cx, "Link[name:");
+                    tf.draw_text(cx, &self.doc.decoded[*start..*url_start]);
+                    tf.draw_text(cx, ", url:");
+                    tf.draw_text(cx, &self.doc.decoded[*url_start..*end]);
+                    tf.draw_text(cx, " ]");
                 },
-                MarkdownNode::Image{name_start:_, name_end:_, url_start:_, url_end:_}=>{
+                MarkdownNode::Image{start, url_start, end}=>{
+                    tf.draw_text(cx, "Image[name:");
+                    tf.draw_text(cx, &self.doc.decoded[*start..*url_start]);
+                    tf.draw_text(cx, ", url:");
+                    tf.draw_text(cx, &self.doc.decoded[*url_start..*end]);
+                    tf.draw_text(cx, " ]");
                 },
                 MarkdownNode::BeginQuote=>{
                     cx.turtle_new_line();
