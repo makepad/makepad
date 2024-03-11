@@ -48,25 +48,25 @@ impl Widget for Markdown {
                     tf.pop_size();
                     cx.turtle_new_line();
                 },
-                MarkdownNode::BeginNormal=>{
-                    
-                },
-                MarkdownNode::EndNormal=>{
+                MarkdownNode::NewLine=>{
                     cx.turtle_new_line();
                 },
-                MarkdownNode::BeginItem{count:_}=>{
+                MarkdownNode::BeginNormal=>{
+                    cx.turtle_new_line();
+                },
+                MarkdownNode::EndNormal=>{
                     
+                },
+                MarkdownNode::BeginItem{count:_}=>{
                 },
                 MarkdownNode::EndItem=>{
-                    
                 },
                 MarkdownNode::Link{name_start:_, name_end:_, url_start:_, url_end:_}=>{
-                    
                 },
                 MarkdownNode::Image{name_start:_, name_end:_, url_start:_, url_end:_}=>{
-                    
                 },
                 MarkdownNode::BeginQuote=>{
+                    cx.turtle_new_line();
                     tf.begin_quote(cx);
                 },
                 MarkdownNode::EndQuote=>{
@@ -81,13 +81,13 @@ impl Widget for Markdown {
                     tf.end_inline_code(cx);                 
                 },
                 MarkdownNode::BeginCode=>{
+                    cx.turtle_new_line();
                     tf.push_fixed();
                     tf.begin_code(cx);     
                 },
                 MarkdownNode::EndCode=>{
                     tf.pop_fixed();
                     tf.end_code(cx);
-                    cx.turtle_new_line();
                 },
                 MarkdownNode::BeginBold=>{
                     tf.push_bold();

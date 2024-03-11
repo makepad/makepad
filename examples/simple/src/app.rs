@@ -23,7 +23,7 @@ live_design!{
             
             body = <View>{
                 flow: Down,
-                spacing: 20,
+                spacing:10,
                 align: {
                     x: 0.5,
                     y: 0.5
@@ -52,7 +52,7 @@ live_design!{
                         text: "Helloworld"
                     }  
                     body:"
-                    this is realtime <br/>
+                    Normal HTML text hello world <br/>
                     <li>one</li><br/>
                     <li>two</li><br/>
                     <code>let x = 1.0;</code>
@@ -74,16 +74,24 @@ live_design!{
                     padding: 5,
                     line_spacing: 10,
                     body:"
-                    # H1 **Bold** *italic*
-                    ## H2
+                    # MD H1 
+                    ## H2 **Bold** *italic*
+                    > block
+                    > next
+                    >> hi
+                    normal
                     Normal
                     Next line
                     single newline becomes space
-                                        
+                    *hello*hello world
+                    
+                        inline code
+                        more inline code
                     Double newline
                     `inline code` text after
                     ```
-let x = 10
+                    let x = 10
+                    let y = 10
                     ```
                     *italic* **Bold** normal _italic_ __bold__ ***Bolditalic*** normal
                     123
