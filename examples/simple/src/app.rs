@@ -79,7 +79,8 @@ live_design!{
                     > block
                     > next
                     >> hi
-                    normal
+                    continuation
+                    
                     Normal
                     Next line
                     single newline becomes space
