@@ -156,12 +156,29 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             state = State::Root{spaces:0};
                         }
                         Kind::Quote(blocks)=>{
+                            let last_is_space = cursor.last_char == ' ';
                             cursor.next();
-                            // alright so. now what
-                            for _ in 0..*blocks{
-                                nodes.push(MarkdownNode::EndQuote);
+                            let mut spaces = 0;
+                            while cursor.chars[0] == ' '{
+                                cursor.next();
+                                spaces += 1;
                             }
-                            state = State::Root{spaces:0};
+                            if cursor.chars[0] == '\n' {
+                                cursor.next();
+                                for _ in 0..*blocks{
+                                    nodes.push(MarkdownNode::EndQuote);
+                                }
+                                state = State::Root{spaces:0};
+                            }
+                            else if cursor.chars[0] == '>'{
+                                for _ in 0..*blocks{
+                                    nodes.push(MarkdownNode::EndQuote);
+                                }
+                                state = State::Root{spaces};
+                            }
+                            else if !last_is_space{
+                                push_char(&mut nodes, &mut decoded, ' ');
+                            }
                         }
                         Kind::Normal=>{
                             let last_is_space = cursor.last_char == ' ';
