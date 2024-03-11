@@ -81,6 +81,8 @@ live_design!{
                     >> hi
                     continuation
                     
+                    [link](https://image)
+                    ![image](https://link)
                     Normal
                     Next line
                     single newline becomes space
